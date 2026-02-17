@@ -39,6 +39,7 @@ class SyneAgent:
         self.conversations: Optional[ConversationManager] = None
         self.subagents: Optional[SubAgentManager] = None
         self._running = False
+        self._pending_sudo_command: Optional[str] = None
 
     async def start(self):
         """Start the agent — initialize DB, provider, memory, tools."""
@@ -530,6 +531,30 @@ class SyneAgent:
             lines.append(f"- {run['run_id'][:8]}: {run['task'][:60]}")
         return "\n".join(lines)
 
+    def _get_active_conversation(self):
+        """Get the conversation that is currently processing a message."""
+        if not self.conversations:
+            return None
+        # Return the most recently active conversation
+        for conv in self.conversations._active.values():
+            if hasattr(conv, '_processing') and conv._processing:
+                return conv
+        # Fallback: return any active conversation
+        active = list(self.conversations._active.values())
+        return active[-1] if active else None
+
+    def _sudo_confirmed_recently(self, conv) -> bool:
+        """Check if user explicitly confirmed sudo in recent messages."""
+        if not hasattr(conv, '_message_cache') or not conv._message_cache:
+            return False
+        # Check last 3 user messages for confirmation
+        user_msgs = [m for m in conv._message_cache[-6:] if m.role == "user"]
+        for msg in reversed(user_msgs[-3:]):
+            content = (msg.content or "").strip().lower()
+            if content in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
+                return True
+        return False
+
     async def _tool_exec(self, command: str, timeout: int = 30, workdir: str = "") -> str:
         """Tool handler: execute shell command."""
         import asyncio
@@ -544,6 +569,42 @@ class SyneAgent:
         if not safe:
             logger.warning(f"Blocked dangerous command: {command[:100]}")
             return f"Error: {reason}"
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECURITY: Sudo Guard
+        # sudo commands require:
+        #   1. Owner access level
+        #   2. Direct message (NOT group chat)
+        #   3. Explicit user confirmation in the same conversation
+        # The LLM should ask the user first; if it calls sudo directly,
+        # this guard blocks it and returns a message to ask the user.
+        # ═══════════════════════════════════════════════════════════════
+        command_stripped = command.strip()
+        is_sudo = command_stripped.startswith("sudo ") or "| sudo " in command_stripped or "&& sudo " in command_stripped
+
+        if is_sudo:
+            # Check which conversation is calling this
+            active_conv = self._get_active_conversation()
+            is_group = active_conv.is_group if active_conv else False
+            access_level = active_conv.user.get("access_level", "public") if active_conv else "public"
+
+            if access_level != "owner":
+                logger.warning(f"Sudo blocked: non-owner attempted sudo: {command[:100]}")
+                return "Error: sudo commands are only allowed for the owner."
+
+            if is_group:
+                logger.warning(f"Sudo blocked in group: {command[:100]}")
+                return "Error: sudo commands are not allowed in group chats. Please use a direct message."
+
+            # Check if user explicitly confirmed in recent messages
+            if active_conv and not self._sudo_confirmed_recently(active_conv):
+                logger.info(f"Sudo requires confirmation: {command[:100]}")
+                self._pending_sudo_command = command
+                return (
+                    "⚠️ This command requires sudo (root access). "
+                    "Please confirm you want to run this command by replying 'ya' or 'yes'.\n\n"
+                    f"Command: `{command}`"
+                )
 
         timeout_max = await get_config("exec.timeout_max", 300)
         output_max = await get_config("exec.output_max_chars", 4000)

@@ -47,6 +47,7 @@ class Conversation:
         self.is_group = is_group
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
+        self._processing: bool = False
 
     async def load_history(self, limit: int = 50) -> list[ChatMessage]:
         """Load recent message history from database."""
@@ -145,6 +146,7 @@ class Conversation:
         # Reset media collector for this turn
         self._pending_media: list[str] = []
         self._message_metadata = message_metadata
+        self._processing = True
 
         # Save user message
         await self.save_message("user", user_message)
@@ -233,6 +235,7 @@ class Conversation:
                 # Reload history after compaction
                 await self.load_history()
 
+        self._processing = False
         return final_response
 
     async def _handle_tool_calls(
