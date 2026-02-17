@@ -622,9 +622,8 @@ ruff check .
 - [x] Anti-hallucination memory
 - [x] Conflict resolution (3-zone)
 - [x] Ability system
-- [ ] Self-modification
-- [ ] Discord channel
-- [ ] WhatsApp channel
+- [x] Self-modification (abilities only — Syne can create/edit abilities but never touch core)
+- [ ] Multi-model support (OpenAI, Anthropic, local models via configurable providers)
 - [ ] Ability marketplace
 
 ---
