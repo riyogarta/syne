@@ -1,80 +1,112 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+"""Screenshot Ability — captures website screenshots via Playwright Chromium."""
 
-# ABILITY DEFINITION
-# name: screenshot
-# description: "Capture a screenshot of a website."
-# parameters:
-#   - name: url
-#     type: string
-#     description: "The URL of the website to capture (e.g., https://example.com)."
-#     required: true
-#   - name: full_page
-#     type: boolean
-#     description: "Capture the full scrollable page."
-#     required: false
-#     default: false
-# ---
+import hashlib
+import logging
+import os
+from pathlib import Path
 
-import argparse
-import sys
-from playwright.sync_api import sync_playwright, Error
+from .base import Ability
 
-def take_screenshot(url, output_path, full_page=False):
-    """
-    Takes a screenshot of a URL using Playwright.
-    """
-    try:
-        with sync_playwright() as p:
-            # Using chromium as it's the most common
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            # Increase timeout to 60 seconds for slower pages
-            page.goto(url, wait_until='networkidle', timeout=60000)
-            
-            page.screenshot(
-                path=output_path,
-                full_page=full_page,
-                type='png' # Force PNG for simplicity
-            )
-            browser.close()
-            return output_path
-    except Error as e:
-        # Provide a more specific error message if possible
-        print(f"Playwright Error: Could not take screenshot of {url}. Reason: {e}", file=sys.stderr)
-        # Check for a common error when running headless
-        if "browser has been closed" in str(e) or "Target page, context or browser has been closed" in str(e):
-             print("\nHint: This might be due to missing system dependencies for the headless browser. Please check the logs.", file=sys.stderr)
-        return None
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
-        return None
+logger = logging.getLogger("syne.abilities.screenshot")
 
-if __name__ == "__main__":
-    # This part is executed when the ability is called by Syne's runner
-    parser = argparse.ArgumentParser(description="Take a screenshot of a website.")
-    parser.add_argument("--url", required=True, help="The URL to screenshot.")
-    parser.add_argument("--output", required=True, help="Path to save the screenshot.")
-    parser.add_argument("--full_page", action="store_true", help="Capture the full page.")
-    
-    args = parser.parse_args()
 
-    # Ensure URL has a scheme
-    if not args.url.startswith(('http://', 'https://')):
-        url = 'http://' + args.url
-    else:
-        url = args.url
+class ScreenshotAbility(Ability):
+    """Capture a screenshot of a website using Playwright's Chromium browser."""
 
-    result_path = take_screenshot(
-        url=url,
-        output_path=args.output,
-        full_page=args.full_page
-    )
+    name = "screenshot"
+    description = "Capture a screenshot of a website"
+    version = "1.0"
 
-    if result_path:
-        # Syne expects the output path on stdout for success
-        print(result_path)
-        sys.exit(0)
-    else:
-        # Errors were printed to stderr, so just exit with a failure code
-        sys.exit(1)
+    async def execute(self, params: dict, context: dict) -> dict:
+        """Take a screenshot of the given URL.
+
+        Args:
+            params: Must contain 'url'. Optional: 'full_page' (bool, default False),
+                    'width' (int, default 1280), 'height' (int, default 800).
+            context: Execution context (not used for this ability).
+
+        Returns:
+            dict with success, result, media keys
+        """
+        url = params.get("url", "").strip()
+        if not url:
+            return {"success": False, "error": "URL is required"}
+
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+
+        full_page = params.get("full_page", False)
+        width = int(params.get("width", 1280))
+        height = int(params.get("height", 800))
+
+        # Output directory
+        output_dir = Path.home() / ".syne" / "screenshots"
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        filename = hashlib.md5(url.encode()).hexdigest() + ".png"
+        output_path = str(output_dir / filename)
+
+        try:
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+
+                if not full_page:
+                    await page.set_viewport_size({"width": width, "height": height})
+
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                # Brief wait for JS rendering
+                await page.wait_for_timeout(2000)
+
+                await page.screenshot(path=output_path, full_page=full_page)
+                await browser.close()
+
+            logger.info(f"Screenshot saved: {output_path} ({url})")
+            return {
+                "success": True,
+                "result": f"Screenshot of {url} saved.",
+                "media": output_path,
+            }
+
+        except ImportError:
+            return {
+                "success": False,
+                "error": "Playwright is not installed. Run: pip install playwright && playwright install chromium",
+            }
+        except Exception as e:
+            logger.error(f"Screenshot failed for {url}: {e}")
+            return {"success": False, "error": f"Screenshot failed: {str(e)}"}
+
+    def get_schema(self) -> dict:
+        """Return OpenAI-compatible function schema."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "screenshot",
+                "description": self.description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The URL of the website to capture (e.g., https://example.com)",
+                        },
+                        "full_page": {
+                            "type": "boolean",
+                            "description": "Capture the full scrollable page (default: false)",
+                        },
+                        "width": {
+                            "type": "integer",
+                            "description": "Browser viewport width in pixels (default: 1280)",
+                        },
+                        "height": {
+                            "type": "integer",
+                            "description": "Browser viewport height in pixels (default: 800)",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
+        }
