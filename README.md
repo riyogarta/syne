@@ -420,6 +420,8 @@ Syne automatically evaluates every conversation turn using the LLM and stores wh
 2. **Conflict resolution** — new facts are checked against existing memories
 3. **Importance scoring** — trivial messages are filtered out
 
+> ⚠️ **Cost warning:** Enabling `auto_capture` adds **one extra LLM call per message** (for evaluation) plus **one embedding call per stored memory**. On free-tier OAuth this means faster rate-limit exhaustion. On paid providers this increases cost per turn. Keep it OFF if cost or rate limits are a concern.
+
 ### What Gets Stored (when auto_capture is ON)?
 
 ✅ **STORE:**
