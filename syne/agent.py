@@ -9,8 +9,9 @@ from .db.models import get_config, get_or_create_user
 from .llm.provider import LLMProvider
 from .llm.google import GoogleProvider
 from .llm.openai import OpenAIProvider
-from .llm.together import TogetherProvider
-from .llm.hybrid import HybridProvider
+# Together AI and Hybrid providers available for alternative configurations
+# from .llm.together import TogetherProvider
+# from .llm.hybrid import HybridProvider
 from .auth.google_oauth import get_credentials
 from .memory.engine import MemoryEngine
 from .tools.registry import ToolRegistry
@@ -119,36 +120,14 @@ class SyneAgent:
         if provider_name == "google":
             # OAuth is the default — auto-detects OpenClaw creds or uses saved creds
             creds = await get_credentials()
-            chat_provider = GoogleProvider(
+            provider = GoogleProvider(
                 credentials=creds,
                 chat_model=chat_model,
+                embedding_model=embedding_model,
             )
-
-            # Embedding: Google CCA doesn't support embedding API
-            # Use Together AI (very cheap) if available, otherwise error
-            import os
-            together_key = os.environ.get("TOGETHER_API_KEY")
-            if not together_key:
-                import json
-                try:
-                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
-                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
-                except Exception:
-                    pass
-
-            if together_key:
-                # Together has its own embedding models — don't use Google's model name
-                embed_provider = TogetherProvider(
-                    api_key=together_key,
-                    embedding_model="BAAI/bge-base-en-v1.5",
-                )
-                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            else:
-                logger.warning(
-                    "No embedding provider available. Memory search will not work. "
-                    "Set TOGETHER_API_KEY for embeddings."
-                )
-                return chat_provider
+            # Google handles both chat (via CCA) and embedding (via Gemini API)
+            # No external embedding provider needed
+            return provider
 
         elif provider_name == "openai":
             if not self.settings.openai_api_key:

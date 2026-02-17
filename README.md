@@ -17,7 +17,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Unlimited memory** — Semantic search over millions of memories using pgvector
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **Near-zero cost** — Chat uses Google Gemini via OAuth (free, rate-limited). Embedding via Together AI (~$0.008/1M tokens). Typical monthly cost < $1
+- **Free by default** — Chat and embedding use Google Gemini via OAuth (free, rate-limited). Optional abilities (image generation) may use paid APIs
 - **PostgreSQL-native** — Everything in the database, no file-based config drift
 
 ---
@@ -504,12 +504,12 @@ All data lives in PostgreSQL:
 
 | Component | Cost |
 |-----------|------|
-| Gemini 2.5 Pro (chat) | **$0** — free via CCA OAuth |
-| Together AI (embedding) | **~$0.008/1M tokens** |
-| Together AI (image gen) | **~$0.003/image** |
+| Gemini 2.5 Pro (chat) | **$0** — free via OAuth |
+| Gemini (embedding) | **$0** — free via OAuth |
+| Together AI (image gen) | **~$0.003/image** (optional ability) |
 | PostgreSQL | **$0** — self-hosted |
 | Telegram Bot | **$0** |
-| **Typical monthly** | **< $1** |
+| **Typical monthly** | **$0** (core only) |
 
 ---
 
