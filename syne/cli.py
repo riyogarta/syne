@@ -300,9 +300,12 @@ def db_reset():
         async with pool.acquire() as conn:
             await conn.execute("""
                 DROP TABLE IF EXISTS messages CASCADE;
+                DROP TABLE IF EXISTS subagent_runs CASCADE;
                 DROP TABLE IF EXISTS sessions CASCADE;
                 DROP TABLE IF EXISTS memory CASCADE;
+                DROP TABLE IF EXISTS abilities CASCADE;
                 DROP TABLE IF EXISTS capabilities CASCADE;
+                DROP TABLE IF EXISTS groups CASCADE;
                 DROP TABLE IF EXISTS users CASCADE;
                 DROP TABLE IF EXISTS rules CASCADE;
                 DROP TABLE IF EXISTS soul CASCADE;
