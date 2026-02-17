@@ -46,7 +46,7 @@ class TelegramChannel:
         # Command handlers
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
-        self.app.add_handler(CommandHandler("v", self._cmd_version))
+        self.app.add_handler(CommandHandler("version", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
@@ -78,7 +78,7 @@ class TelegramChannel:
         await self.app.bot.set_my_commands([
             BotCommand("start", "Welcome message"),
             BotCommand("help", "Available commands"),
-            BotCommand("v", "Version info"),
+            BotCommand("version", "Version info"),
             BotCommand("status", "Agent status"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("compact", "Compact conversation history"),
@@ -386,7 +386,7 @@ class TelegramChannel:
 
 /start — Welcome message
 /help — This help message
-/v — Version info
+/version — Version info
 /status — Show agent status
 /memory — Show memory stats
 /compact — Compact conversation history
