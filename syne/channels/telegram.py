@@ -49,6 +49,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
+        self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
 
         # Message handler — catch all text messages
@@ -373,6 +374,7 @@ class TelegramChannel:
 /help — This help message
 /status — Show agent status
 /memory — Show memory stats
+/compact — Compact conversation history
 /forget — Clear conversation history
 /identity — Show agent identity
 
@@ -417,6 +419,76 @@ Tools: {len(self.agent.tools.list_tools('owner'))}"""
             lines.append(f"• {row['category']}: {row['c']}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /compact command — summarize old messages to free context."""
+        from ..compaction import compact_session, get_session_stats
+        from ..db.connection import get_connection
+
+        chat_id = str(update.effective_chat.id)
+        user = update.effective_user
+
+        # Only owner can compact
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can compact sessions.")
+            return
+
+        # Find active session
+        async with get_connection() as conn:
+            row = await conn.fetchrow("""
+                SELECT id FROM sessions
+                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, chat_id)
+
+        if not row:
+            await update.message.reply_text("No active session to compact.")
+            return
+
+        session_id = row["id"]
+
+        # Get pre-compact stats
+        stats = await get_session_stats(session_id)
+        if stats["message_count"] <= 25:
+            await update.message.reply_text(
+                f"📊 Session only has {stats['message_count']} messages ({stats['total_chars']:,} chars). "
+                f"Not enough to compact."
+            )
+            return
+
+        await update.message.reply_text(
+            f"🔄 Compacting session...\n"
+            f"Messages: {stats['message_count']} | Chars: {stats['total_chars']:,}"
+        )
+
+        try:
+            result = await compact_session(
+                session_id=session_id,
+                provider=self.agent.provider,
+                keep_recent=20,
+            )
+
+            if result:
+                # Clear cached conversation so it reloads
+                key = f"telegram:{chat_id}"
+                if key in self.agent.conversations._active:
+                    await self.agent.conversations._active[key].load_history()
+
+                await update.message.reply_text(
+                    f"✅ **Compaction complete**\n\n"
+                    f"Messages: {result['messages_before']} → {result['messages_after']}\n"
+                    f"Chars: {result['chars_before']:,} → {result['chars_after']:,}\n"
+                    f"Summarized: {result['messages_summarized']} messages → {result['summary_length']:,} char summary",
+                    parse_mode="Markdown",
+                )
+            else:
+                await update.message.reply_text("Nothing to compact.")
+
+        except Exception as e:
+            logger.error(f"Compaction failed: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Compaction failed: {str(e)[:200]}")
 
     async def _cmd_forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /forget command — archive current session."""

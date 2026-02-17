@@ -217,11 +217,14 @@ class Conversation:
             threshold=0.75,
         ):
             logger.info(f"Context at 75%+, triggering compaction for session {self.session_id}")
-            summary = await auto_compact_check(
+            result = await auto_compact_check(
                 session_id=self.session_id,
                 provider=self.provider,
             )
-            if summary:
+            if result:
+                logger.info(
+                    f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
+                )
                 # Reload history after compaction
                 await self.load_history()
 
