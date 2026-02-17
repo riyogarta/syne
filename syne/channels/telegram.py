@@ -46,6 +46,7 @@ class TelegramChannel:
         # Command handlers
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
+        self.app.add_handler(CommandHandler("v", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
@@ -77,6 +78,7 @@ class TelegramChannel:
         await self.app.bot.set_my_commands([
             BotCommand("start", "Welcome message"),
             BotCommand("help", "Available commands"),
+            BotCommand("v", "Version info"),
             BotCommand("status", "Agent status"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("compact", "Compact conversation history"),
@@ -384,6 +386,7 @@ class TelegramChannel:
 
 /start — Welcome message
 /help — This help message
+/v — Version info
 /status — Show agent status
 /memory — Show memory stats
 /compact — Compact conversation history
@@ -393,6 +396,19 @@ class TelegramChannel:
 Or just send me a message!"""
 
         await update.message.reply_text(help_text, parse_mode="Markdown")
+
+    async def _cmd_version(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /v command — show version."""
+        from .. import __version__
+        from ..db.models import get_identity
+
+        identity = await get_identity()
+        name = identity.get("name", "Syne")
+
+        await update.message.reply_text(
+            f"🧬 **{name}** v{__version__}",
+            parse_mode="Markdown",
+        )
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /status command — comprehensive agent status."""
