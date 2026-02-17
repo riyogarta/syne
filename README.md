@@ -201,8 +201,8 @@ All configuration lives in the `config` table. You can change any setting by tal
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `memory.auto_capture` | `true` | Auto-evaluate incoming messages for memory storage |
-| `memory.auto_evaluate` | `true` | Use LLM to evaluate what's worth storing |
+| `memory.auto_capture` | `false` | Auto-evaluate incoming messages for memory storage |
+| `memory.auto_evaluate` | `true` | Use LLM to judge what's worth storing (only when auto_capture is ON) |
 | `memory.recall_limit` | `10` | Max memories to recall per query |
 | `memory.max_importance` | `1.0` | Maximum importance score (0.0–1.0) |
 
@@ -406,7 +406,21 @@ When storing a new memory, similarity to existing memories determines the action
 | 0.70–0.84 | **Update** existing | "I moved to Bandung" updates "lives in Jakarta" |
 | ≥ 0.85 | **Skip** duplicate | "I live in Jakarta" (already stored) |
 
-### What Gets Stored?
+### How Memory Storage Works
+
+Syne has two memory storage modes, controlled by `memory.auto_capture`:
+
+**`auto_capture = false` (default):**
+Memory is only stored when the user explicitly asks — e.g. "remember this", "save that", "note that down". This gives the user full control over what enters long-term memory.
+
+**`auto_capture = true`:**
+Syne automatically evaluates every conversation turn using the LLM and stores what it considers important. The evaluator uses a 3-layer anti-hallucination defense:
+
+1. **Only user-confirmed statements** — assistant suggestions are never stored
+2. **Conflict resolution** — new facts are checked against existing memories
+3. **Importance scoring** — trivial messages are filtered out
+
+### What Gets Stored (when auto_capture is ON)?
 
 ✅ **STORE:**
 - Personal facts (name, job, family)
