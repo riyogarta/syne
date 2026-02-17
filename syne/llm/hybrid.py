@@ -33,8 +33,9 @@ class HybridProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
-        return await self._chat.chat(messages, model, temperature, max_tokens, tools)
+        return await self._chat.chat(messages, model, temperature, max_tokens, tools, thinking_budget)
 
     async def embed(
         self,

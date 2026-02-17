@@ -40,6 +40,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         """Send a chat completion request."""
         ...

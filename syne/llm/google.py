@@ -179,6 +179,7 @@ class GoogleProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         max_retries = 3
@@ -186,9 +187,9 @@ class GoogleProvider(LLMProvider):
         for attempt in range(max_retries):
             try:
                 if self._use_cca:
-                    return await self._chat_cca(messages, model, temperature, max_tokens, tools)
+                    return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
                 else:
-                    return await self._chat_api(messages, model, temperature, max_tokens, tools)
+                    return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt < max_retries - 1:
                     wait = (2 ** attempt) * 2  # 2s, 4s, 8s
@@ -204,6 +205,7 @@ class GoogleProvider(LLMProvider):
         temperature: float,
         max_tokens: Optional[int],
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         """Chat via Cloud Code Assist (OAuth, free)."""
         token = await self.credentials.get_token()
@@ -217,6 +219,14 @@ class GoogleProvider(LLMProvider):
         gen_config = {"temperature": temperature}
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
+
+        # Thinking config for Gemini 2.5 Pro
+        if thinking_budget is not None:
+            if thinking_budget == 0:
+                gen_config["thinkingConfig"] = {"thinkingBudget": 0}
+            else:
+                gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+
         inner["generationConfig"] = gen_config
 
         # Add tools if provided
@@ -351,6 +361,7 @@ class GoogleProvider(LLMProvider):
         temperature: float,
         max_tokens: Optional[int],
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         """Chat via standard Gemini API (API key, paid)."""
         system_text, contents = self._format_messages(messages)
@@ -363,6 +374,8 @@ class GoogleProvider(LLMProvider):
             body["systemInstruction"] = {"parts": [{"text": system_text}]}
         if max_tokens:
             body["generationConfig"]["maxOutputTokens"] = max_tokens
+        if thinking_budget is not None:
+            body["generationConfig"]["thinkingConfig"] = {"thinkingBudget": thinking_budget}
 
         # Add tools if provided
         if tools:

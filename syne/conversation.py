@@ -45,6 +45,7 @@ class Conversation:
         self.user = user
         self.system_prompt = system_prompt
         self.is_group = is_group
+        self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
 
     async def load_history(self, limit: int = 50) -> list[ChatMessage]:
@@ -181,6 +182,7 @@ class Conversation:
         response = await self.provider.chat(
             messages=context,
             tools=tool_schemas if tool_schemas else None,
+            thinking_budget=self.thinking_budget,
         )
 
         # Handle tool calls
@@ -290,6 +292,7 @@ class Conversation:
             # Get next response — may contain more tool calls
             current = await self.provider.chat(
                 messages=context,
+                thinking_budget=self.thinking_budget,
                 tools=tool_schemas if tool_schemas else None,
             )
 

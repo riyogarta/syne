@@ -51,6 +51,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
+        self.app.add_handler(CommandHandler("think", self._cmd_think))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
 
         # Message handler — catch all text messages
@@ -82,6 +83,7 @@ class TelegramChannel:
             BotCommand("status", "Agent status"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("compact", "Compact conversation history"),
+            BotCommand("think", "Set thinking level"),
             BotCommand("forget", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
         ])
@@ -390,6 +392,7 @@ class TelegramChannel:
 /status — Show agent status
 /memory — Show memory stats
 /compact — Compact conversation history
+/think — Set thinking level (off/low/medium/high/max)
 /forget — Clear conversation history
 /identity — Show agent identity
 
@@ -597,6 +600,83 @@ Or just send me a message!"""
         self.agent.conversations._active.pop(key, None)
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
+
+    async def _cmd_think(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /think command — set thinking budget for current session.
+        
+        Usage:
+            /think off     — disable thinking (budget = 0)
+            /think low     — 1024 tokens
+            /think medium  — 4096 tokens
+            /think high    — 8192 tokens
+            /think max     — 24576 tokens
+            /think         — show current setting
+        """
+        chat_id = str(update.effective_chat.id)
+        user = update.effective_user
+
+        # Only owner can change thinking
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can change thinking settings.")
+            return
+
+        # Parse argument
+        args = update.message.text.split(maxsplit=1)
+        level = args[1].strip().lower() if len(args) > 1 else None
+
+        LEVELS = {
+            "off": 0,
+            "low": 1024,
+            "medium": 4096,
+            "high": 8192,
+            "max": 24576,
+        }
+
+        # Get current conversation
+        key = f"telegram:{chat_id}"
+        conv = self.agent.conversations._active.get(key)
+
+        if level is None:
+            # Show current setting
+            current = "off"
+            if conv and conv.thinking_budget is not None:
+                for name, val in LEVELS.items():
+                    if conv.thinking_budget == val:
+                        current = name
+                        break
+                else:
+                    current = f"{conv.thinking_budget} tokens"
+            elif conv and conv.thinking_budget is None:
+                current = "default (model decides)"
+
+            await update.message.reply_text(
+                f"🧠 **Thinking:** {current}\n\n"
+                f"Usage: `/think off|low|medium|high|max`",
+                parse_mode="Markdown",
+            )
+            return
+
+        if level not in LEVELS:
+            await update.message.reply_text(
+                f"❌ Unknown level: `{level}`\n"
+                f"Use: `off`, `low`, `medium`, `high`, `max`",
+                parse_mode="Markdown",
+            )
+            return
+
+        budget = LEVELS[level]
+
+        # Apply to current conversation
+        if conv:
+            conv.thinking_budget = budget if budget > 0 else 0
+
+        emoji = "💭" if budget > 0 else "🔇"
+        await update.message.reply_text(
+            f"{emoji} Thinking set to **{level}**" + (f" ({budget} tokens)" if budget > 0 else ""),
+            parse_mode="Markdown",
+        )
 
     async def _cmd_identity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /identity command."""
