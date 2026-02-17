@@ -559,40 +559,25 @@ All data lives in PostgreSQL:
 
 ### Why Together AI for Embedding?
 
-Syne uses Google Gemini for chat (free via CCA OAuth). The natural question is: **why not also use Gemini for embeddings?**
+Syne uses Google Gemini for chat — free via OAuth. But **the free OAuth only covers chat, not embedding**. The embedding API requires a separate paid API key. This means Syne needs a different provider for embeddings.
 
-**Short answer:** Google's CCA OAuth endpoint returns **403 Forbidden** on the embedding API. We tested this directly — it doesn't work.
+Three providers can do embeddings:
 
-**The technical explanation:**
-- Syne uses Cloud Code Assist (CCA) OAuth for free Gemini access
-- CCA wraps the Gemini API through `cloudcode-pa.googleapis.com`
-- This wrapper exposes `generateContent` (chat) but **blocks** `embedContent` (embedding)
-- The standard Gemini API at `generativelanguage.googleapis.com` requires a **paid API key** for embedding
-- So: free OAuth = chat only. Embedding needs a different provider.
+| Provider | Model | Cost | Why / Why not |
+|----------|-------|------|---------------|
+| **Together AI** | `BAAI/bge-base-en-v1.5` | **~$0.008/1M tokens** | ✅ Cheapest. Open-source model, multilingual. $5 free signup credit (~625M tokens). **Default choice.** |
+| Google API Key | `text-embedding-004` | ~$0.006/1M tokens | Slightly cheaper per token, but requires a paid Google API key (separate from the free OAuth used for chat). Extra billing setup. |
+| OpenAI | `text-embedding-3-small` | $0.02/1M tokens | Good quality, but 2.5× more expensive than Together AI. Requires OpenAI API key. |
+| OpenAI | `text-embedding-3-large` | $0.13/1M tokens | Best quality, but 16× more expensive. Overkill for personal use. |
 
-**Why Together AI specifically?**
-- `BAAI/bge-base-en-v1.5` is open-source and multilingual
-- 768 dimensions — good balance of quality vs storage
-- **~$0.008 per million tokens** — the cheapest embedding provider we found
-- Together AI signup gives $5 free credit (enough for ~625M tokens)
+**Together AI wins on simplicity**: sign up, get $5 free credit, done. No Google billing setup, no OpenAI subscription. For typical personal use (a few hundred memories), the $5 credit lasts months.
 
-**Alternative: OpenAI embedding**
-
-If you prefer OpenAI, you can switch the embedding provider:
+**Want to switch?** Just tell Syne:
 
 ```
 You:  Switch embedding to OpenAI text-embedding-3-small
 Syne: Done — provider.embedding_model updated. ✅
 ```
-
-| Provider | Model | Cost | Dimensions |
-|----------|-------|------|------------|
-| Together AI | `BAAI/bge-base-en-v1.5` | ~$0.008/1M tokens | 768 |
-| OpenAI | `text-embedding-3-small` | $0.02/1M tokens | 1536 |
-| OpenAI | `text-embedding-3-large` | $0.13/1M tokens | 3072 |
-| Google API Key | `text-embedding-004` | $0.006/1M tokens | 768 |
-
-> ⚠️ Google API Key embedding is the cheapest, but requires a **paid** API key from AI Studio — it's not free like CCA OAuth chat. Together AI is the default because it requires no Google billing setup.
 
 ---
 
