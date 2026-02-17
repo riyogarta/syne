@@ -17,7 +17,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Unlimited memory** — Semantic search over millions of memories using pgvector
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **Free by default** — Chat and embedding use Google Gemini via OAuth (free, rate-limited). Optional abilities (image generation) may use paid APIs
+- **Near-zero cost** — Chat uses Google Gemini via OAuth (free). Embedding via Together AI (~$0.008/1M tokens). Typical monthly cost < $1
 - **PostgreSQL-native** — Everything in the database, no file-based config drift
 
 ---
@@ -502,14 +502,14 @@ All data lives in PostgreSQL:
 
 ## Cost
 
-| Component | Cost |
-|-----------|------|
-| Gemini 2.5 Pro (chat) | **$0** — free via OAuth |
-| Gemini (embedding) | **$0** — free via OAuth |
-| Together AI (image gen) | **~$0.003/image** (optional ability) |
-| PostgreSQL | **$0** — self-hosted |
-| Telegram Bot | **$0** |
-| **Typical monthly** | **$0** (core only) |
+| Component | Cost | Why |
+|-----------|------|-----|
+| Gemini 2.5 Pro (chat) | **$0** — free via OAuth | Google CCA OAuth = free, rate-limited |
+| Together AI (embedding) | **~$0.008/1M tokens** | Google OAuth can't access embedding API (403). Together AI's `BAAI/bge-base-en-v1.5` is the cheapest alternative |
+| Together AI (image gen) | **~$0.003/image** | Optional ability, not required |
+| PostgreSQL | **$0** — self-hosted | Bundled via Docker |
+| Telegram Bot | **$0** | Telegram Bot API is free |
+| **Typical monthly** | **< $1** | Embedding is the only paid component for core usage |
 
 ---
 
