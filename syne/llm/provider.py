@@ -19,6 +19,7 @@ class ChatResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     tool_calls: Optional[list] = None
+    thinking: Optional[str] = None  # Model's reasoning/thinking text (if returned)
 
 
 @dataclass

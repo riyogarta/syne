@@ -3,11 +3,12 @@
 import logging
 import re
 from typing import Optional, Tuple
-from telegram import Update, Bot
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -52,6 +53,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("think", self._cmd_think))
+        self.app.add_handler(CommandHandler("reasoning", self._cmd_reasoning))
+        self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
 
         # Message handler — catch all text messages
@@ -65,6 +68,9 @@ class TelegramChannel:
             filters.PHOTO,
             self._handle_photo,
         ))
+
+        # Callback query handler (inline button clicks)
+        self.app.add_handler(CallbackQueryHandler(self._handle_callback))
 
         # Error handler
         self.app.add_error_handler(self._handle_error)
@@ -84,6 +90,8 @@ class TelegramChannel:
             BotCommand("memory", "Memory statistics"),
             BotCommand("compact", "Compact conversation history"),
             BotCommand("think", "Set thinking level"),
+            BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
+            BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("forget", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
         ])
@@ -159,6 +167,16 @@ class TelegramChannel:
             )
 
             if response:
+                # Check if reasoning visibility is ON — prepend thinking if available
+                reasoning_visible = await get_config("session.reasoning_visible", False)
+                if reasoning_visible:
+                    key = f"telegram:{chat.id}"
+                    conv = self.agent.conversations._active.get(key)
+                    thinking = getattr(conv, '_last_thinking', None) if conv else None
+                    if thinking:
+                        thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
+                        response = thinking_block + response
+
                 await self._send_response_with_media(chat.id, response, context)
 
         except Exception as e:
@@ -393,6 +411,8 @@ class TelegramChannel:
 /memory — Show memory stats
 /compact — Compact conversation history
 /think — Set thinking level (off/low/medium/high/max)
+/reasoning — Toggle reasoning visibility (on/off)
+/autocapture — Toggle auto memory capture (on/off)
 /forget — Clear conversation history
 /identity — Show agent identity
 
@@ -451,6 +471,8 @@ Or just send me a message!"""
         # Models
         chat_model = await get_config("provider.chat_model", "unknown")
         auto_capture = await get_config("memory.auto_capture", False)
+        thinking_budget = await get_config("session.thinking_budget", None)
+        reasoning_visible = await get_config("session.reasoning_visible", False)
 
         # Provider info
         provider_name = self.agent.provider.name
@@ -486,6 +508,7 @@ Or just send me a message!"""
             f"👥 Users: {user_count['c']} | Groups: {group_count['c']}",
             f"💬 Active sessions: {session_count['c']}",
             f"🔧 Tools: {tool_count} | Abilities: {abilities}",
+            f"💭 Thinking: {self._format_thinking_level(thinking_budget)} | Reasoning: {'ON' if reasoning_visible else 'OFF'}",
             f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
         ]
 
@@ -601,18 +624,17 @@ Or just send me a message!"""
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
 
+    # Shared thinking level definitions
+    THINK_LEVELS = {
+        "off": 0,
+        "low": 1024,
+        "medium": 4096,
+        "high": 8192,
+        "max": 24576,
+    }
+
     async def _cmd_think(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /think command — set thinking budget for current session.
-        
-        Usage:
-            /think off     — disable thinking (budget = 0)
-            /think low     — 1024 tokens
-            /think medium  — 4096 tokens
-            /think high    — 8192 tokens
-            /think max     — 24576 tokens
-            /think         — show current setting
-        """
-        chat_id = str(update.effective_chat.id)
+        """Handle /think command — show inline buttons or set directly."""
         user = update.effective_user
 
         # Only owner can change thinking
@@ -626,57 +648,124 @@ Or just send me a message!"""
         args = update.message.text.split(maxsplit=1)
         level = args[1].strip().lower() if len(args) > 1 else None
 
-        LEVELS = {
-            "off": 0,
-            "low": 1024,
-            "medium": 4096,
-            "high": 8192,
-            "max": 24576,
-        }
-
-        # Get current conversation
-        key = f"telegram:{chat_id}"
-        conv = self.agent.conversations._active.get(key)
-
         if level is None:
-            # Show current setting
-            current = "off"
-            if conv and conv.thinking_budget is not None:
-                for name, val in LEVELS.items():
-                    if conv.thinking_budget == val:
-                        current = name
-                        break
-                else:
-                    current = f"{conv.thinking_budget} tokens"
-            elif conv and conv.thinking_budget is None:
-                current = "default (model decides)"
+            # Show current + inline buttons
+            saved = await get_config("session.thinking_budget", None)
+            current = self._budget_to_level(saved)
+
+            buttons = []
+            for name in self.THINK_LEVELS:
+                label = f"✅ {name}" if name == current else name
+                buttons.append(InlineKeyboardButton(label, callback_data=f"think:{name}"))
+            # 3 buttons per row
+            keyboard = [buttons[:3], buttons[3:]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
             await update.message.reply_text(
-                f"🧠 **Thinking:** {current}\n\n"
-                f"Usage: `/think off|low|medium|high|max`",
+                f"💭 **Thinking:** {current}",
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+            )
+            return
+
+        if level not in self.THINK_LEVELS:
+            await update.message.reply_text(
+                f"❌ Unknown level: `{level}`\nUse: `off`, `low`, `medium`, `high`, `max`",
                 parse_mode="Markdown",
             )
             return
 
-        if level not in LEVELS:
-            await update.message.reply_text(
-                f"❌ Unknown level: `{level}`\n"
-                f"Use: `off`, `low`, `medium`, `high`, `max`",
-                parse_mode="Markdown",
-            )
-            return
-
-        budget = LEVELS[level]
-
-        # Apply to current conversation
-        if conv:
-            conv.thinking_budget = budget if budget > 0 else 0
-
+        await self._apply_thinking(level)
+        budget = self.THINK_LEVELS[level]
         emoji = "💭" if budget > 0 else "🔇"
         await update.message.reply_text(
             f"{emoji} Thinking set to **{level}**" + (f" ({budget} tokens)" if budget > 0 else ""),
             parse_mode="Markdown",
         )
+
+    async def _cmd_reasoning(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /reasoning command — toggle with inline buttons."""
+        user = update.effective_user
+
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can change reasoning settings.")
+            return
+
+        args = update.message.text.split(maxsplit=1)
+        toggle = args[1].strip().lower() if len(args) > 1 else None
+
+        if toggle is None:
+            current = await get_config("session.reasoning_visible", False)
+            state = "ON" if current else "OFF"
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="reasoning:on"),
+                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="reasoning:off"),
+            ]
+            await update.message.reply_text(
+                f"🔍 **Reasoning visibility:** {state}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+            return
+
+        if toggle not in ("on", "off"):
+            await update.message.reply_text(f"❌ Use: `on` or `off`", parse_mode="Markdown")
+            return
+
+        visible = toggle == "on"
+        await set_config("session.reasoning_visible", visible)
+        emoji = "🔍" if visible else "🔇"
+        await update.message.reply_text(
+            f"{emoji} Reasoning visibility set to **{toggle.upper()}**",
+            parse_mode="Markdown",
+        )
+
+    async def _cmd_autocapture(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /autocapture command — toggle with inline buttons."""
+        user = update.effective_user
+
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can change auto-capture settings.")
+            return
+
+        args = update.message.text.split(maxsplit=1)
+        toggle = args[1].strip().lower() if len(args) > 1 else None
+
+        if toggle is None:
+            current = await get_config("memory.auto_capture", False)
+            state = "ON" if current else "OFF"
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="autocapture:on"),
+                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="autocapture:off"),
+            ]
+            await update.message.reply_text(
+                f"📝 **Auto-capture:** {state}\n"
+                f"⚠️ ON = extra LLM + embedding per message",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+            return
+
+        if toggle not in ("on", "off"):
+            await update.message.reply_text(f"❌ Use: `on` or `off`", parse_mode="Markdown")
+            return
+
+        enabled = toggle == "on"
+        await set_config("memory.auto_capture", enabled)
+        if enabled:
+            await update.message.reply_text(
+                "📝 Auto-capture **ON** ⚠️\nExtra LLM + embedding calls per message.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "📝 Auto-capture **OFF**\nMemory only stored on explicit request.",
+                parse_mode="Markdown",
+            )
 
     async def _cmd_identity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /identity command."""
@@ -690,6 +779,95 @@ Or just send me a message!"""
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     # ── Helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _format_thinking_level(budget) -> str:
+        """Format thinking budget as human-readable level."""
+        if budget is None:
+            return "default"
+        budget = int(budget)
+        levels = {0: "off", 1024: "low", 4096: "medium", 8192: "high", 24576: "max"}
+        return levels.get(budget, f"{budget} tokens")
+
+    def _budget_to_level(self, budget) -> str:
+        """Convert budget value to level name."""
+        if budget is None:
+            return "default"
+        budget = int(budget)
+        for name, val in self.THINK_LEVELS.items():
+            if budget == val:
+                return name
+        return f"{budget} tokens"
+
+    async def _apply_thinking(self, level: str):
+        """Apply thinking level to DB and all active conversations."""
+        budget = self.THINK_LEVELS[level]
+        await set_config("session.thinking_budget", budget)
+        for k, c in self.agent.conversations._active.items():
+            c.thinking_budget = budget
+
+    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle inline button callbacks."""
+        query = update.callback_query
+        await query.answer()
+
+        data = query.data or ""
+        user = query.from_user
+
+        # Auth check — owner only
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await query.edit_message_text("⚠️ Owner only.")
+            return
+
+        if data.startswith("think:"):
+            level = data.split(":", 1)[1]
+            if level in self.THINK_LEVELS:
+                await self._apply_thinking(level)
+                budget = self.THINK_LEVELS[level]
+                # Rebuild buttons with new checkmark
+                buttons = []
+                for name in self.THINK_LEVELS:
+                    label = f"✅ {name}" if name == level else name
+                    buttons.append(InlineKeyboardButton(label, callback_data=f"think:{name}"))
+                keyboard = [buttons[:3], buttons[3:]]
+                emoji = "💭" if budget > 0 else "🔇"
+                await query.edit_message_text(
+                    f"{emoji} **Thinking:** {level}" + (f" ({budget} tokens)" if budget > 0 else ""),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+        elif data.startswith("reasoning:"):
+            toggle = data.split(":", 1)[1]
+            visible = toggle == "on"
+            await set_config("session.reasoning_visible", visible)
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if visible else ''}ON", callback_data="reasoning:on"),
+                InlineKeyboardButton(f"{'✅ ' if not visible else ''}OFF", callback_data="reasoning:off"),
+            ]
+            emoji = "🔍" if visible else "🔇"
+            await query.edit_message_text(
+                f"{emoji} **Reasoning visibility:** {'ON' if visible else 'OFF'}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+
+        elif data.startswith("autocapture:"):
+            toggle = data.split(":", 1)[1]
+            enabled = toggle == "on"
+            await set_config("memory.auto_capture", enabled)
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if enabled else ''}ON", callback_data="autocapture:on"),
+                InlineKeyboardButton(f"{'✅ ' if not enabled else ''}OFF", callback_data="autocapture:off"),
+            ]
+            msg = "📝 **Auto-capture:** ON ⚠️" if enabled else "📝 **Auto-capture:** OFF"
+            await query.edit_message_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
 
     def _get_display_name(self, user) -> str:
         """Get a display name for a Telegram user."""

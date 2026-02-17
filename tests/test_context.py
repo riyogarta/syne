@@ -1,7 +1,8 @@
-"""Tests for context window management."""
+"""Tests for context window management and session config."""
 
 import pytest
 from syne.context import ContextManager, estimate_tokens, ChatMessage
+from syne.channels.telegram import TelegramChannel
 
 
 class TestTokenEstimation:
@@ -71,3 +72,113 @@ class TestContextManager:
         assert "max_tokens" in usage
         assert "usage_percent" in usage
         assert usage["message_count"] == 2
+
+
+class TestThinkingBudget:
+    """Tests for /think command levels and formatting."""
+
+    LEVELS = {
+        "off": 0,
+        "low": 1024,
+        "medium": 4096,
+        "high": 8192,
+        "max": 24576,
+    }
+
+    def test_all_levels_defined(self):
+        assert self.LEVELS["off"] == 0
+        assert self.LEVELS["low"] == 1024
+        assert self.LEVELS["medium"] == 4096
+        assert self.LEVELS["high"] == 8192
+        assert self.LEVELS["max"] == 24576
+
+    def test_format_thinking_off(self):
+        assert TelegramChannel._format_thinking_level(0) == "off"
+
+    def test_format_thinking_low(self):
+        assert TelegramChannel._format_thinking_level(1024) == "low"
+
+    def test_format_thinking_medium(self):
+        assert TelegramChannel._format_thinking_level(4096) == "medium"
+
+    def test_format_thinking_high(self):
+        assert TelegramChannel._format_thinking_level(8192) == "high"
+
+    def test_format_thinking_max(self):
+        assert TelegramChannel._format_thinking_level(24576) == "max"
+
+    def test_format_thinking_default(self):
+        assert TelegramChannel._format_thinking_level(None) == "default"
+
+    def test_format_thinking_custom(self):
+        assert TelegramChannel._format_thinking_level(2048) == "2048 tokens"
+
+    def test_format_thinking_string_budget(self):
+        """DB may return string — should handle int conversion."""
+        assert TelegramChannel._format_thinking_level("4096") == "medium"
+
+    def test_conversation_default_thinking(self):
+        """New conversation should have thinking_budget = None (model default)."""
+        from syne.conversation import Conversation
+        from unittest.mock import MagicMock
+        conv = Conversation(
+            provider=MagicMock(),
+            memory=MagicMock(),
+            tools=MagicMock(),
+            context_mgr=MagicMock(),
+            session_id=1,
+            user={"id": 1, "access_level": "owner"},
+            system_prompt="test",
+        )
+        assert conv.thinking_budget is None
+
+
+class TestReasoningVisibility:
+    """Tests for /reasoning command."""
+
+    def test_chat_response_has_thinking_field(self):
+        from syne.llm.provider import ChatResponse
+        resp = ChatResponse(content="hello", model="test", thinking="I think...")
+        assert resp.thinking == "I think..."
+
+    def test_chat_response_thinking_default_none(self):
+        from syne.llm.provider import ChatResponse
+        resp = ChatResponse(content="hello", model="test")
+        assert resp.thinking is None
+
+    def test_parse_gemini_thinking_parts(self):
+        """Gemini returns thinking in parts with thought=True."""
+        from syne.llm.google import GoogleProvider
+        # Simulate a Gemini response with thinking parts
+        data = {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"text": "Let me analyze...", "thought": True},
+                        {"text": "Here is my answer."},
+                    ]
+                }
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 20},
+        }
+        # Use the static-ish _parse_cca_response
+        provider = GoogleProvider.__new__(GoogleProvider)
+        result = provider._parse_cca_response(data, "gemini-2.5-pro")
+        assert result.content == "Here is my answer."
+        assert result.thinking == "Let me analyze..."
+
+    def test_parse_gemini_no_thinking(self):
+        """Regular response without thinking parts."""
+        from syne.llm.google import GoogleProvider
+        data = {
+            "candidates": [{
+                "content": {
+                    "parts": [{"text": "Simple answer."}]
+                }
+            }],
+            "usageMetadata": {},
+        }
+        provider = GoogleProvider.__new__(GoogleProvider)
+        result = provider._parse_cca_response(data, "gemini-2.5-pro")
+        assert result.content == "Simple answer."
+        assert result.thinking is None

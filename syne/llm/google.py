@@ -274,6 +274,7 @@ class GoogleProvider(LLMProvider):
         model = body["model"]
 
         text_parts = []
+        thinking_parts = []
         tool_calls = []
         input_tokens = 0
         output_tokens = 0
@@ -289,10 +290,12 @@ class GoogleProvider(LLMProvider):
                         continue
                     try:
                         chunk = json.loads(data_str)
-                        # Extract text and function calls from candidates
+                        # Extract text, thinking, and function calls from candidates
                         for candidate in chunk.get("candidates", []):
                             for part in candidate.get("content", {}).get("parts", []):
-                                if "text" in part:
+                                if part.get("thought") and "text" in part:
+                                    thinking_parts.append(part["text"])
+                                elif "text" in part:
                                     text_parts.append(part["text"])
                                 elif "functionCall" in part:
                                     fc = part["functionCall"]
@@ -317,6 +320,7 @@ class GoogleProvider(LLMProvider):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             tool_calls=tool_calls if tool_calls else None,
+            thinking="".join(thinking_parts) if thinking_parts else None,
         )
 
     def _parse_cca_response(self, data: dict, model: str) -> ChatResponse:
@@ -328,12 +332,17 @@ class GoogleProvider(LLMProvider):
         candidate = data.get("candidates", [{}])[0]
         parts = candidate.get("content", {}).get("parts", [])
 
-        # Extract text parts
+        # Extract text parts, thinking parts, and tool calls
         text_parts = []
+        thinking_parts = []
         tool_calls = []
 
         for part in parts:
-            if "text" in part:
+            if part.get("thought"):
+                # Gemini 2.5 thinking part
+                if "text" in part:
+                    thinking_parts.append(part["text"])
+            elif "text" in part:
                 text_parts.append(part["text"])
             elif "functionCall" in part:
                 fc = part["functionCall"]
@@ -352,6 +361,7 @@ class GoogleProvider(LLMProvider):
             input_tokens=usage.get("promptTokenCount", 0),
             output_tokens=usage.get("candidatesTokenCount", 0),
             tool_calls=tool_calls if tool_calls else None,
+            thinking="".join(thinking_parts) if thinking_parts else None,
         )
 
     async def _chat_api(
@@ -393,12 +403,15 @@ class GoogleProvider(LLMProvider):
         candidate = data["candidates"][0]
         parts = candidate.get("content", {}).get("parts", [])
 
-        # Extract text parts and function calls
+        # Extract text parts, thinking parts, and function calls
         text_parts = []
+        thinking_parts = []
         tool_calls = []
 
         for part in parts:
-            if "text" in part:
+            if part.get("thought") and "text" in part:
+                thinking_parts.append(part["text"])
+            elif "text" in part:
                 text_parts.append(part["text"])
             elif "functionCall" in part:
                 fc = part["functionCall"]
@@ -417,6 +430,7 @@ class GoogleProvider(LLMProvider):
             input_tokens=usage.get("promptTokenCount", 0),
             output_tokens=usage.get("candidatesTokenCount", 0),
             tool_calls=tool_calls if tool_calls else None,
+            thinking="".join(thinking_parts) if thinking_parts else None,
         )
 
     async def embed(

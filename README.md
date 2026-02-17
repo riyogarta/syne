@@ -212,6 +212,8 @@ All configuration lives in the `config` table. You can change any setting by tal
 |-----|---------|-------------|
 | `session.compaction_threshold` | `80000` | Token count before triggering context compaction |
 | `session.max_messages` | `100` | Max messages before compaction |
+| `session.thinking_budget` | `null` | Thinking budget: `0`=off, `1024`=low, `4096`=medium, `8192`=high, `24576`=max, `null`=model default |
+| `session.reasoning_visible` | `false` | Show model's thinking/reasoning text in responses |
 
 ### Sub-agent Settings
 
@@ -486,14 +488,33 @@ syne ability info <name>   # Show ability details
 ## Telegram Commands
 
 ```
-/start     — Welcome message
-/help      — Available commands
-/status    — Agent status (memories, sessions)
-/memory    — Memory statistics
-/compact   — Compact conversation history (owner only)
-/forget    — Clear current conversation
-/identity  — Show agent identity
+/start        — Welcome message
+/help         — Available commands
+/status       — Agent status (model, context, memories, sessions)
+/memory       — Memory statistics
+/compact      — Compact conversation history (owner only)
+/think        — Set thinking level: off, low, medium, high, max (owner only)
+/reasoning    — Toggle reasoning visibility: on/off (owner only)
+/autocapture  — Toggle auto memory capture: on/off (owner only)
+/forget       — Clear current conversation
+/identity     — Show agent identity
 ```
+
+### Thinking & Reasoning
+
+| Command | What it does | Persists? |
+|---------|-------------|-----------|
+| `/think off` | Disable model thinking (budget = 0) | ✅ DB |
+| `/think low` | 1,024 token thinking budget | ✅ DB |
+| `/think medium` | 4,096 token thinking budget | ✅ DB |
+| `/think high` | 8,192 token thinking budget | ✅ DB |
+| `/think max` | 24,576 token thinking budget | ✅ DB |
+| `/reasoning on` | Show model's thinking in responses | ✅ DB |
+| `/reasoning off` | Hide thinking (default) | ✅ DB |
+| `/autocapture on` | Auto-evaluate messages for memory storage | ✅ DB |
+| `/autocapture off` | Only store on explicit request (default) | ✅ DB |
+
+`/think` controls **how much** the model reasons. `/reasoning` controls **whether you see it**. `/autocapture` controls **automatic memory storage** (⚠️ ON adds extra LLM + embedding calls per message).
 
 **Group behavior:** Syne responds when @mentioned, called by name (e.g. "Syne, what time is it?"), or replied to.
 

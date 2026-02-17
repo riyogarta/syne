@@ -192,6 +192,9 @@ class Conversation:
         # Save assistant response
         await self.save_message("assistant", response.content)
 
+        # Store thinking for the channel to optionally display
+        self._last_thinking = response.thinking
+
         # Attach any media collected during tool calls to the final response
         final_response = response.content
         if self._pending_media:
@@ -413,6 +416,12 @@ class ConversationManager:
             abilities=self.abilities,
             is_group=is_group,
         )
+
+        # Load thinking budget from DB config
+        from .db.models import get_config as _get_config
+        saved_budget = await _get_config("session.thinking_budget", None)
+        if saved_budget is not None:
+            conv.thinking_budget = int(saved_budget)
 
         self._active[key] = conv
         return conv

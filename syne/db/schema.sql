@@ -231,6 +231,8 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recall_limit', '10', 'Max memories to recall per query'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Token count threshold for compaction'),
+    ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
+    ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
     -- Telegram channel config
     ('telegram.dm_policy', '"open"', 'DM policy: open (accept all) or registered (only known users)'),
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
