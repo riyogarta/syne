@@ -221,11 +221,10 @@ class GoogleProvider(LLMProvider):
             gen_config["maxOutputTokens"] = max_tokens
 
         # Thinking config for Gemini 2.5 Pro
-        if thinking_budget is not None:
-            if thinking_budget == 0:
-                gen_config["thinkingConfig"] = {"thinkingBudget": 0}
-            else:
-                gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+        # Note: thinkingBudget=0 may not be supported by CCA endpoint
+        # Only set when budget > 0; budget=0 means "off" (just don't send thinkingConfig)
+        if thinking_budget is not None and thinking_budget > 0:
+            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
 
         inner["generationConfig"] = gen_config
 
@@ -254,6 +253,14 @@ class GoogleProvider(LLMProvider):
         # Use non-streaming endpoint for simplicity
         url = f"{_CCA_ENDPOINT}/v1internal:generateContent"
 
+        # Debug: log request structure (not full content)
+        inner_req = body.get("request", {})
+        n_contents = len(inner_req.get("contents", []))
+        has_system = "systemInstruction" in inner_req
+        has_tools = "tools" in inner_req
+        gen_config = inner_req.get("generationConfig", {})
+        logger.debug(f"CCA request: model={body.get('model')}, contents={n_contents}, system={has_system}, tools={has_tools}, genConfig={gen_config}")
+
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, json=body, headers=headers)
 
@@ -262,6 +269,9 @@ class GoogleProvider(LLMProvider):
                 logger.debug("Non-streaming endpoint unavailable, using streaming...")
                 return await self._chat_cca_streaming(body, headers)
 
+            if resp.status_code != 200:
+                body_text = resp.text[:500] if resp.text else "(empty)"
+                logger.error(f"CCA error {resp.status_code}: {body_text}")
             resp.raise_for_status()
             data = resp.json()
 
