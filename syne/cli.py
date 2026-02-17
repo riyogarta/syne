@@ -78,15 +78,18 @@ def init():
 
     # 2. Telegram bot (optional)
     console.print("\n[bold]Step 2: Telegram Bot (optional)[/bold]")
+    telegram_token = None
     if click.confirm("Setup Telegram bot?", default=True):
         console.print("Get a bot token from @BotFather on Telegram")
-        token = click.prompt("Telegram bot token")
-        env_lines.append(f"SYNE_TELEGRAM_BOT_TOKEN={token}")
+        telegram_token = click.prompt("Telegram bot token")
+        # Token goes to DB, not .env (per credential policy)
+        console.print("[dim]Token will be saved to database after schema init.[/dim]")
 
-    # 3. Database (Docker only — no external DB for security)
+    # 3. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 3: Database[/bold]")
-    console.print("  Syne uses its own isolated PostgreSQL container.")
+    console.print("  Syne uses its own isolated PostgreSQL + pgvector container.")
     console.print("  [dim]This ensures your API keys, OAuth tokens, and memories stay private.[/dim]")
+    console.print("  [dim]Docker is required — PostgreSQL is bundled, not optional.[/dim]")
     db_url = "postgresql://syne:syne@localhost:5433/syne"
     env_lines.append(f"SYNE_DATABASE_URL={db_url}")
 
@@ -106,30 +109,64 @@ def init():
             f.write(env_content)
         console.print(f"[green]✓ .env written[/green]")
 
-    # 5. Start DB if docker
-    if use_docker:
-        console.print("\n[bold]Starting database...[/bold]")
-        console.print("[dim]Run: docker compose up -d db[/dim]")
-        os.system("docker compose up -d db")
+    # 5. Start DB (Docker — always)
+    console.print("\n[bold]Starting database...[/bold]")
+    console.print("[dim]Run: docker compose up -d db[/dim]")
+    result = os.system("docker compose up -d db")
+    if result != 0:
+        console.print("[red]Failed to start database. Make sure Docker is installed and running.[/red]")
+        console.print("[dim]Install Docker: https://docs.docker.com/get-docker/[/dim]")
+        return
 
-        # Wait for DB
-        console.print("Waiting for PostgreSQL to be ready...")
-        import time
-        for _ in range(15):
-            result = os.system("docker compose exec -T db pg_isready -U syne > /dev/null 2>&1")
-            if result == 0:
-                break
-            time.sleep(2)
-        else:
-            console.print("[red]Database didn't start in time. Run 'docker compose up -d db' manually.[/red]")
-            return
+    # Wait for DB
+    console.print("Waiting for PostgreSQL to be ready...")
+    import time
+    for _ in range(15):
+        result = os.system("docker compose exec -T db pg_isready -U syne > /dev/null 2>&1")
+        if result == 0:
+            break
+        time.sleep(2)
+    else:
+        console.print("[red]Database didn't start in time. Run 'docker compose up -d db' manually.[/red]")
+        return
 
-        console.print("[green]✓ Database ready[/green]")
+    console.print("[green]✓ Database ready[/green]")
 
-    # 6. Agent identity
-    console.print("\n[bold]Step 4: Agent Identity[/bold]")
+    # 6. Initialize schema + Agent identity
+    console.print("\n[bold]Step 4: Initialize database schema...[/bold]")
+    schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
+    with open(schema_path) as f:
+        schema = f.read()
+
+    async def _init_schema():
+        from .db.connection import init_db, close_db
+        pool = await init_db(db_url)
+        async with pool.acquire() as conn:
+            await conn.execute(schema)
+        await close_db()
+
+    asyncio.run(_init_schema())
+    console.print("[green]✓ Schema initialized[/green]")
+
+    console.print("\n[bold]Step 5: Agent Identity[/bold]")
     name = click.prompt("Agent name", default="Syne")
     motto = click.prompt("Motto (optional)", default="I remember, therefore I am")
+
+    # Save identity + credentials to DB
+    async def _save_identity():
+        from .db.connection import init_db, close_db
+        from .db.models import set_identity
+        pool = await init_db(db_url)
+        await set_identity("name", name)
+        await set_identity("motto", motto)
+        # Save Telegram token to DB if provided
+        if telegram_token:
+            from .db.credentials import set_telegram_bot_token
+            await set_telegram_bot_token(telegram_token)
+            console.print("[green]✓ Telegram bot token saved to database[/green]")
+        await close_db()
+
+    asyncio.run(_save_identity())
 
     console.print()
     console.print(Panel(
@@ -142,12 +179,9 @@ def init():
     console.print("\n[bold green]✅ Setup complete![/bold green]")
     console.print()
     console.print("Next steps:")
-    if use_docker:
-        console.print("  [bold]docker compose up -d[/bold]     # Start everything")
-    else:
-        console.print("  [bold]syne db init[/bold]             # Initialize database schema")
-        console.print("  [bold]syne start[/bold]               # Start agent")
+    console.print("  [bold]syne start[/bold]               # Start agent")
     console.print("  [bold]syne status[/bold]              # Check status")
+    console.print("  [bold]syne repair[/bold]              # Diagnose issues")
     console.print()
 
 
@@ -570,7 +604,7 @@ def repair(fix):
                 if fix:
                     from .db.models import set_config
                     defaults = {
-                        "memory.auto_capture": True,
+                        "memory.auto_capture": False,
                         "memory.auto_evaluate": True,
                         "memory.recall_limit": 10,
                         "memory.max_importance": 1.0,
