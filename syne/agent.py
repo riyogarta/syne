@@ -1,6 +1,7 @@
 """Syne Agent — ties everything together."""
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from .config import SyneSettings
@@ -548,7 +549,10 @@ class SyneAgent:
         output_max = await get_config("exec.output_max_chars", 4000)
 
         timeout = min(max(timeout, 1), timeout_max)
-        cwd = workdir or os.path.expanduser("~")
+        # Default cwd = project root (parent of syne/ package)
+        # so relative paths like syne/abilities/foo.py resolve correctly
+        project_root = str(Path(__file__).resolve().parent.parent)
+        cwd = workdir or project_root
 
         logger.info(f"Executing command: {command[:100]}")
 
