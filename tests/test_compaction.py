@@ -9,6 +9,8 @@ from syne.compaction import (
     auto_compact_check,
     get_session_stats,
     COMPACTION_PROMPT,
+    UPDATE_COMPACTION_PROMPT,
+    _serialize_messages,
 )
 from syne.llm.provider import ChatMessage, ChatResponse
 
@@ -41,19 +43,58 @@ def make_message_rows(count: int, role: str = "user") -> list:
 # ── Tests ────────────────────────────────────────────────────
 
 class TestCompactionPrompt:
-    """Ensure the compaction prompt has the right properties."""
-
-    def test_prompt_includes_factual_rule(self):
-        assert "factual" in COMPACTION_PROMPT.lower()
+    """Ensure the compaction prompts have the right properties."""
 
     def test_prompt_blocks_assistant_suggestions(self):
         assert "assistant suggestions" in COMPACTION_PROMPT.lower()
 
-    def test_prompt_blocks_assumptions(self):
-        assert "assumptions" in COMPACTION_PROMPT.lower()
+    def test_prompt_has_structured_sections(self):
+        for section in ["## Goal", "## Progress", "## Key Decisions", "## Next Steps"]:
+            assert section in COMPACTION_PROMPT
 
-    def test_prompt_preserves_corrections(self):
-        assert "corrected" in COMPACTION_PROMPT.lower()
+    def test_update_prompt_preserves_existing(self):
+        assert "preserve" in UPDATE_COMPACTION_PROMPT.lower()
+
+    def test_update_prompt_blocks_hallucination(self):
+        assert "assistant suggestions" in UPDATE_COMPACTION_PROMPT.lower()
+
+    def test_update_prompt_has_previous_summary_tags(self):
+        assert "previous-summary" in UPDATE_COMPACTION_PROMPT.lower()
+
+
+class TestSerializeMessages:
+    """Test message serialization for summarization."""
+
+    def test_user_message(self):
+        rows = [{"role": "user", "content": "Hello", "metadata": None}]
+        result = _serialize_messages(rows)
+        assert "[User]: Hello" in result
+
+    def test_assistant_message(self):
+        rows = [{"role": "assistant", "content": "Hi there", "metadata": None}]
+        result = _serialize_messages(rows)
+        assert "[Assistant]: Hi there" in result
+
+    def test_tool_message(self):
+        rows = [{"role": "tool", "content": "result data", "metadata": None}]
+        result = _serialize_messages(rows)
+        assert "[Tool result]: result data" in result
+
+    def test_truncates_long_messages(self):
+        rows = [{"role": "user", "content": "x" * 1000, "metadata": None}]
+        result = _serialize_messages(rows)
+        assert "..." in result
+        assert len(result) < 1000
+
+    def test_skips_system_prompts(self):
+        rows = [{"role": "system", "content": "You are helpful.", "metadata": None}]
+        result = _serialize_messages(rows)
+        assert result == ""  # System prompt skipped
+
+    def test_includes_compaction_summary(self):
+        rows = [{"role": "system", "content": "# Previous summary", "metadata": '{"type": "compaction_summary"}'}]
+        result = _serialize_messages(rows)
+        assert "[Previous summary]" in result
 
 
 class TestShouldCompact:
@@ -169,9 +210,9 @@ class TestCompactSession:
             provider.chat.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_successful_compaction(self):
-        """Full compaction flow: summarize + delete + insert summary."""
-        summary_text = "## Summary\n- Discussed project X\n- Decided on approach Y"
+    async def test_successful_initial_compaction(self):
+        """First compaction: structured summary without previous summary."""
+        summary_text = "## Goal\nDiscuss project X\n## Progress\n### Done\n- [x] Approach Y decided"
         provider = make_mock_provider(summary_text)
 
         with patch("syne.compaction.get_connection") as mock_conn, \
@@ -181,14 +222,15 @@ class TestCompactSession:
             mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
             mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            # First call: count messages
-            conn.fetchrow = AsyncMock(return_value={"count": 50})
+            # conn.fetchrow calls inside compact_session (after get_session_stats is patched):
+            # 1. prev_summary query → None (no previous summary)
+            conn.fetchrow = AsyncMock(return_value=None)
             # Fetch old messages to summarize
             old_messages = make_message_rows(30)
             conn.fetch = AsyncMock(return_value=old_messages)
             conn.execute = AsyncMock()
 
-            # Stats calls (pre and post)
+            # get_session_stats calls (pre and post)
             mock_stats.side_effect = [
                 {"message_count": 50, "total_chars": 15000, "oldest_message": None, "newest_message": None},
                 {"message_count": 21, "total_chars": 3000, "oldest_message": None, "newest_message": None},
@@ -198,16 +240,54 @@ class TestCompactSession:
 
             assert result is not None
             assert result["messages_before"] == 50
-            assert result["messages_after"] == 21  # 20 kept + 1 summary
+            assert result["messages_after"] == 21
             assert result["messages_summarized"] == 30
             assert result["summary"] == summary_text
+            assert result["is_update"] is False
 
-            # Verify LLM was called with compaction prompt
+            # Verify LLM was called
             provider.chat.assert_called_once()
             call_args = provider.chat.call_args
             messages = call_args.kwargs.get("messages") or call_args[1].get("messages") if len(call_args) > 1 else call_args.kwargs["messages"]
-            assert messages[0].role == "system"
-            assert "Summarize" in messages[0].content
+            # Should use initial prompt (no <previous-summary> tags)
+            assert "<previous-summary>" not in messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_iterative_compaction(self):
+        """Subsequent compaction: merges into existing summary."""
+        summary_text = "## Goal\nUpdated goal"
+        provider = make_mock_provider(summary_text)
+
+        with patch("syne.compaction.get_connection") as mock_conn, \
+             patch("syne.compaction.get_session_stats") as mock_stats:
+
+            conn = AsyncMock()
+            mock_conn.return_value.__aenter__ = AsyncMock(return_value=conn)
+            mock_conn.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            # conn.fetchrow: prev_summary EXISTS
+            conn.fetchrow = AsyncMock(return_value={
+                "content": "# Previous Conversation Summary\n## Goal\nOriginal goal",
+            })
+            old_messages = make_message_rows(40)
+            conn.fetch = AsyncMock(return_value=old_messages)
+            conn.execute = AsyncMock()
+
+            mock_stats.side_effect = [
+                {"message_count": 60, "total_chars": 20000, "oldest_message": None, "newest_message": None},
+                {"message_count": 21, "total_chars": 4000, "oldest_message": None, "newest_message": None},
+            ]
+
+            result = await compact_session(1, provider, keep_recent=20)
+
+            assert result is not None
+            assert result["is_update"] is True
+
+            # Verify LLM was called with update prompt (has <previous-summary> tags)
+            call_args = provider.chat.call_args
+            messages = call_args.kwargs.get("messages") or call_args[1].get("messages") if len(call_args) > 1 else call_args.kwargs["messages"]
+            assert "<previous-summary>" in messages[0].content
+            assert "Original goal" in messages[0].content
 
 
 class TestAutoCompactCheck:

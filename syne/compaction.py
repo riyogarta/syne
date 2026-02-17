@@ -1,4 +1,8 @@
-"""Compaction — summarize old conversations to save context window."""
+"""Compaction — summarize old conversations to save context window.
+
+Modeled after OpenClaw's compaction system: structured summaries with
+iterative updates and anti-hallucination rules.
+"""
 
 import logging
 from typing import Optional
@@ -8,22 +12,115 @@ from .llm.provider import LLMProvider, ChatMessage
 
 logger = logging.getLogger("syne.compaction")
 
-COMPACTION_PROMPT = """Summarize this conversation into a concise summary that preserves:
-1. Key decisions made
-2. Important facts learned about the user
-3. Tasks completed or in progress
-4. Any commitments or promises made
-5. Critical context needed for future conversations
+# ── Initial summary prompt (no previous summary exists) ─────
 
-Rules:
-- Be factual. Only include what was explicitly stated or confirmed by the user.
-- Do NOT include assistant suggestions that weren't confirmed.
-- Do NOT include greetings, small talk, or filler.
-- Do NOT make assumptions about user preferences.
-- If the user corrected something, use the corrected version.
-- Group related items under clear topic headings.
+COMPACTION_PROMPT = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
 
-Format as bullet points grouped by topic."""
+CRITICAL: Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
+
+Use this EXACT format:
+
+## Goal
+[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+
+## Constraints & Preferences
+- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]
+
+## Progress
+### Done
+- [x] [Completed tasks/changes]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues preventing progress, if any]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale]
+
+## Next Steps
+1. [Ordered list of what should happen next]
+
+## Critical Context
+- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]
+
+Keep each section concise. Preserve exact names, identifiers, and error messages."""
+
+# ── Update prompt (previous summary exists, merge new info) ──
+
+UPDATE_COMPACTION_PROMPT = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+
+Update the existing structured summary with new information. RULES:
+- PRESERVE all existing information from the previous summary
+- ADD new progress, decisions, and context from the new messages
+- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
+- UPDATE "Next Steps" based on what was accomplished
+- If something is no longer relevant, you may remove it
+
+CRITICAL: Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals, add new ones if the task expanded]
+
+## Constraints & Preferences
+- [Preserve existing, add new ones discovered]
+
+## Progress
+### Done
+- [x] [Include previously done items AND newly completed items]
+
+### In Progress
+- [ ] [Current work — update based on progress]
+
+### Blocked
+- [Current blockers — remove if resolved]
+
+## Key Decisions
+- **[Decision]**: [Brief rationale] (preserve all previous, add new)
+
+## Next Steps
+1. [Update based on current state]
+
+## Critical Context
+- [Preserve important context, add new if needed]
+
+Keep each section concise. Preserve exact names, identifiers, and error messages."""
+
+
+def _serialize_messages(rows: list) -> str:
+    """Serialize message rows into text for summarization.
+    
+    Wraps in [User]/[Assistant]/[Tool]/[System] labels so the model
+    treats it as a transcript, not a conversation to continue.
+    """
+    parts = []
+    for row in rows:
+        role = row["role"]
+        content = row["content"]
+        # Truncate very long individual messages
+        if len(content) > 800:
+            content = content[:800] + "..."
+
+        if role == "user":
+            parts.append(f"[User]: {content}")
+        elif role == "assistant":
+            parts.append(f"[Assistant]: {content}")
+        elif role == "tool":
+            parts.append(f"[Tool result]: {content}")
+        elif role == "system":
+            # Skip system prompts, but include compaction summaries
+            if "compaction_summary" in str(row.get("metadata", "")):
+                parts.append(f"[Previous summary]: {content}")
+            # Otherwise skip (system prompt is noise for summarization)
+        else:
+            parts.append(f"[{role}]: {content}")
+
+    return "\n\n".join(parts)
 
 
 async def get_session_stats(session_id: int) -> dict:
@@ -57,6 +154,10 @@ async def compact_session(
 ) -> Optional[dict]:
     """Compact a session by summarizing old messages.
     
+    Uses OpenClaw-style structured summaries with iterative updates:
+    - First compaction: generates full structured summary
+    - Subsequent compactions: merges new messages into existing summary
+    
     Keeps the most recent `keep_recent` messages and summarizes the rest.
     Returns dict with summary and stats, or None if no compaction needed.
     """
@@ -68,10 +169,26 @@ async def compact_session(
         if total <= keep_recent + 5:
             return None  # Not enough to compact
 
+        # Check for previous compaction summary
+        prev_summary_row = await conn.fetchrow("""
+            SELECT content FROM messages
+            WHERE session_id = $1 AND metadata @> '{"type": "compaction_summary"}'::jsonb
+            ORDER BY created_at DESC LIMIT 1
+        """, session_id)
+
+        previous_summary = None
+        if prev_summary_row:
+            content = prev_summary_row["content"]
+            # Strip the "# Previous Conversation Summary\n" header if present
+            if content.startswith("# Previous Conversation Summary\n"):
+                previous_summary = content[len("# Previous Conversation Summary\n"):]
+            else:
+                previous_summary = content
+
         # Get messages to summarize (everything except recent)
         to_summarize = total - keep_recent
         old_rows = await conn.fetch("""
-            SELECT id, role, content FROM messages
+            SELECT id, role, content, metadata FROM messages
             WHERE session_id = $1
             ORDER BY created_at ASC
             LIMIT $2
@@ -80,31 +197,37 @@ async def compact_session(
         if not old_rows:
             return None
 
-        # Build conversation text for summarization
-        conv_lines = []
-        summarized_chars = 0
-        for row in old_rows:
-            role = row["role"].upper()
-            content = row["content"]
-            summarized_chars += len(content)
-            # Truncate very long individual messages
-            if len(content) > 500:
-                content = content[:500] + "..."
-            conv_lines.append(f"{role}: {content}")
-
-        conv_text = "\n\n".join(conv_lines)
+        # Serialize conversation for summarization
+        summarized_chars = sum(len(r["content"]) for r in old_rows)
+        conv_text = _serialize_messages(old_rows)
 
         # Cap input to summarizer
         if len(conv_text) > 30000:
             conv_text = conv_text[:30000] + "\n\n[...truncated...]"
 
-        logger.info(f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary")
+        logger.info(
+            f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary"
+            f"{' (iterative update)' if previous_summary else ' (initial)'}"
+        )
 
-        # Summarize via LLM
+        # Build summarization prompt
+        if previous_summary:
+            # Iterative update: merge new messages into existing summary
+            prompt_text = (
+                f"<conversation>\n{conv_text}\n</conversation>\n\n"
+                f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
+                f"{UPDATE_COMPACTION_PROMPT}"
+            )
+        else:
+            # First compaction: generate initial structured summary
+            prompt_text = (
+                f"<conversation>\n{conv_text}\n</conversation>\n\n"
+                f"{COMPACTION_PROMPT}"
+            )
+
         summary_response = await provider.chat(
             messages=[
-                ChatMessage(role="system", content=COMPACTION_PROMPT),
-                ChatMessage(role="user", content=conv_text),
+                ChatMessage(role="user", content=prompt_text),
             ],
             temperature=0.1,
             max_tokens=2000,
@@ -142,6 +265,7 @@ async def compact_session(
             "chars_before": pre_stats["total_chars"],
             "chars_after": post_stats["total_chars"],
             "summary_length": len(summary),
+            "is_update": previous_summary is not None,
         }
 
         logger.info(
