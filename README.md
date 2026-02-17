@@ -490,6 +490,7 @@ syne ability info <name>   # Show ability details
 /help      — Available commands
 /status    — Agent status (memories, sessions)
 /memory    — Memory statistics
+/compact   — Compact conversation history (owner only)
 /forget    — Clear current conversation
 /identity  — Show agent identity
 ```
