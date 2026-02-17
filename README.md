@@ -32,13 +32,13 @@ Most AI assistants forget everything between sessions. They have no persistent m
 │  │                        CORE                                 │ │
 │  │  (Cannot be modified by Syne)                               │ │
 │  │                                                             │ │
-│  │  ┌────────┐ ┌────────┐ ┌──────────┐ ┌─────────┐ ┌──────────┐│ │
-│  │  │  Chat  │ │ Memory │ │Compaction│ │Channels │ │Sub-agents││ │
-│  │  │ (LLM)  │ │(pgvec) │ │(context) │ │(Telegram│ │(max: 2)  ││ │
-│  │  └────────┘ └────────┘ └──────────┘ └─────────┘ └──────────┘│ │
+│  │  ┌────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐│ │
+│  │  │  Chat  │ │ Memory │ │Compaction│ │ Telegram │ │Sub-agents││ │
+│  │  │ (LLM)  │ │(pgvec) │ │(context) │ │ (bot)    │ │(max: 2)  ││ │
+│  │  └────────┘ └────────┘ └──────────┘ └──────────┘ └──────────┘│ │
 │  │                                                             │ │
 │  │  ┌──────────────────────────────────────────────────────┐  │ │
-│  │  │  Core Tools: web_search │ web_fetch                   │  │ │
+│  │  │  Core Tools: web_search │ web_fetch (httpx, no browser)│  │ │
 │  │  └──────────────────────────────────────────────────────┘  │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                                                                  │
@@ -66,10 +66,10 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 ### Core vs Abilities
 
-| Layer | What it does | Modifiable? |
-|-------|--------------|-------------|
-| **Core** | Chat, Memory, Compaction, Channels, Sub-agents | ❌ Protected |
-| **Abilities** | Everything else (image gen, search, maps, etc.) | ✅ Pluggable |
+| Layer | What it includes | Modifiable? |
+|-------|-----------------|-------------|
+| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, Sub-agents, Web Search, Web Fetch | ❌ Protected |
+| **Abilities** | Everything else (image gen, maps, exec, TTS, etc.) | ✅ Pluggable |
 
 ---
 
