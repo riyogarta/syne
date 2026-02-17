@@ -72,6 +72,18 @@ class TelegramChannel:
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
 
+        # Register bot commands menu (the "/" button in Telegram)
+        from telegram import BotCommand
+        await self.app.bot.set_my_commands([
+            BotCommand("start", "Welcome message"),
+            BotCommand("help", "Available commands"),
+            BotCommand("status", "Agent status"),
+            BotCommand("memory", "Memory statistics"),
+            BotCommand("compact", "Compact conversation history"),
+            BotCommand("forget", "Clear current conversation"),
+            BotCommand("identity", "Show agent identity"),
+        ])
+
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
         if self.agent.conversations:
             self._bot = self.app.bot
