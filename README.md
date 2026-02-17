@@ -495,7 +495,7 @@ syne ability info <name>   # Show ability details
 /identity  — Show agent identity
 ```
 
-**Group behavior:** Syne only responds when @mentioned or replied to.
+**Group behavior:** Syne responds when @mentioned, called by name (e.g. "Syne, what time is it?"), or replied to.
 
 ---
 
