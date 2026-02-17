@@ -1,8 +1,11 @@
 """Ability Loader — discovers and registers abilities."""
 
+import importlib
 import json
 import logging
-from typing import Type
+import sys
+from pathlib import Path
+from typing import Type, Optional
 
 from .base import Ability
 from .registry import AbilityRegistry
@@ -25,13 +28,11 @@ def get_bundled_ability_classes() -> list[Type[Ability]]:
     from .image_gen import ImageGenAbility
     from .image_analysis import ImageAnalysisAbility
     from .maps import MapsAbility
-    from .screenshot import ScreenshotAbility
     
     return [
         ImageGenAbility,
         ImageAnalysisAbility,
         MapsAbility,
-        ScreenshotAbility,
     ]
 
 
@@ -165,8 +166,185 @@ async def ensure_abilities_table():
         logger.info("Abilities table ensured")
 
 
+def load_dynamic_ability(module_path: str) -> Optional[Ability]:
+    """Dynamically load an Ability class from a module path.
+
+    Supports both dotted import paths (``syne.abilities.screenshot``) and
+    file paths (``syne/abilities/screenshot.py``).  The module must contain
+    exactly one public subclass of :class:`Ability`.
+
+    Args:
+        module_path: Python dotted path or file path to the ability module.
+
+    Returns:
+        An instantiated Ability, or None on failure.
+    """
+    try:
+        # Normalise file path → dotted module path
+        if module_path.endswith(".py") or "/" in module_path:
+            # e.g. "syne/abilities/screenshot.py" → "syne.abilities.screenshot"
+            module_path = module_path.replace("/", ".").removesuffix(".py")
+
+        # If already imported, reload to pick up changes
+        if module_path in sys.modules:
+            mod = importlib.reload(sys.modules[module_path])
+        else:
+            mod = importlib.import_module(module_path)
+
+        # Find the Ability subclass in the module
+        ability_cls = None
+        for attr_name in dir(mod):
+            attr = getattr(mod, attr_name)
+            if (
+                isinstance(attr, type)
+                and issubclass(attr, Ability)
+                and attr is not Ability
+                and not attr_name.startswith("_")
+            ):
+                ability_cls = attr
+                break
+
+        if ability_cls is None:
+            logger.error(f"No Ability subclass found in {module_path}")
+            return None
+
+        return ability_cls()
+
+    except Exception as e:
+        logger.error(f"Failed to load dynamic ability from {module_path}: {e}")
+        return None
+
+
+async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:
+    """Load non-bundled abilities (installed / self_created) from DB.
+
+    For each DB record whose ``source`` is *not* ``bundled`` and that is not
+    already in the registry, attempt to dynamically import the module and
+    register the ability.
+
+    Args:
+        registry: The AbilityRegistry to populate.
+
+    Returns:
+        Number of dynamic abilities loaded.
+    """
+    count = 0
+    async with get_connection() as conn:
+        rows = await conn.fetch("""
+            SELECT id, name, description, version, source, module_path,
+                   config, enabled, requires_access_level
+            FROM abilities
+            WHERE source != 'bundled'
+        """)
+
+    for row in rows:
+        name = row["name"]
+        if registry.get(name):
+            continue  # already loaded
+
+        ability = load_dynamic_ability(row["module_path"])
+        if ability is None:
+            logger.warning(f"Skipping dynamic ability '{name}' — load failed")
+            continue
+
+        registry.register(
+            ability=ability,
+            source=row["source"],
+            module_path=row["module_path"],
+            config=json.loads(row["config"]) if row["config"] else {},
+            enabled=row["enabled"],
+            requires_access_level=row["requires_access_level"],
+            db_id=row["id"],
+        )
+        count += 1
+        logger.info(f"Loaded dynamic ability: {name} (source={row['source']})")
+
+    if count:
+        logger.info(f"Loaded {count} dynamic abilities from DB")
+    return count
+
+
+async def register_dynamic_ability(
+    registry: AbilityRegistry,
+    name: str,
+    description: str,
+    module_path: str,
+    version: str = "1.0",
+    config: Optional[dict] = None,
+) -> Optional[str]:
+    """Register a new self-created ability at runtime.
+
+    Called by the ``update_ability`` tool when ``action=create``.
+    Dynamically imports the module, inserts/updates the DB record,
+    and registers the ability in the live registry.
+
+    Args:
+        registry: The live AbilityRegistry.
+        name: Ability name (must match the class's ``name`` attribute).
+        description: Human-readable description.
+        module_path: Dotted Python path (e.g. ``syne.abilities.screenshot``).
+        version: Version string.
+        config: Optional initial config dict.
+
+    Returns:
+        None on success, or an error message string.
+    """
+    # 1. Try to load
+    ability = load_dynamic_ability(module_path)
+    if ability is None:
+        return f"Failed to load ability from '{module_path}'. Ensure file exists and contains a class that extends Ability."
+
+    # Override name/description if the class doesn't set them
+    if not ability.name:
+        ability.name = name
+    if not ability.description:
+        ability.description = description
+
+    # 2. Upsert into DB
+    async with get_connection() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM abilities WHERE name = $1", ability.name
+        )
+        if existing:
+            await conn.execute("""
+                UPDATE abilities
+                SET description = $1, version = $2, module_path = $3,
+                    source = 'self_created', config = $4::jsonb, enabled = true,
+                    updated_at = NOW()
+                WHERE name = $5
+            """, description, version, module_path,
+                json.dumps(config or {}), ability.name)
+            db_id = existing["id"]
+            logger.info(f"Updated dynamic ability in DB: {ability.name}")
+        else:
+            row = await conn.fetchrow("""
+                INSERT INTO abilities (name, description, version, source, module_path, config, enabled)
+                VALUES ($1, $2, $3, 'self_created', $4, $5::jsonb, true)
+                RETURNING id
+            """, ability.name, description, version, module_path,
+                json.dumps(config or {}))
+            db_id = row["id"]
+            logger.info(f"Inserted dynamic ability to DB: {ability.name}")
+
+    # 3. Register in live registry (replace if exists)
+    if registry.get(ability.name):
+        registry.unregister(ability.name)
+
+    registry.register(
+        ability=ability,
+        source="self_created",
+        module_path=module_path,
+        config=config or {},
+        enabled=True,
+        requires_access_level="family",
+        db_id=db_id,
+    )
+
+    return None  # success
+
+
 async def load_all_abilities(registry: AbilityRegistry) -> int:
-    """Full ability loading flow: ensure table, load bundled, sync to DB.
+    """Full ability loading flow: ensure table, load bundled, sync to DB, load dynamic.
     
     Args:
         registry: The AbilityRegistry to populate
@@ -183,7 +361,7 @@ async def load_all_abilities(registry: AbilityRegistry) -> int:
     # 3. Sync to DB and load user config
     await sync_abilities_to_db(registry)
     
-    # 4. Load any installed/self_created abilities from DB
-    # (not implemented yet — would dynamically import from module_path)
+    # 4. Load dynamic abilities (installed / self_created) from DB
+    dynamic_count = await load_dynamic_abilities_from_db(registry)
     
-    return bundled_count
+    return bundled_count + dynamic_count

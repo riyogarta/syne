@@ -401,18 +401,32 @@ class SyneAgent:
         # Update ability config
         self.tools.register(
             name="update_ability",
-            description="Enable, disable, or configure an ability. Use action 'list' to see all abilities, 'enable'/'disable' to toggle, 'config' to update ability settings.",
+            description=(
+                "Manage abilities. Actions: "
+                "'list' — show all abilities; "
+                "'create' — register a new self-created ability (provide name, description, module_path for the Python file you wrote to syne/abilities/); "
+                "'enable'/'disable' — toggle an ability; "
+                "'config' — update ability settings (JSON)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "enable", "disable", "config"],
+                        "enum": ["list", "create", "enable", "disable", "config"],
                         "description": "Action to perform",
                     },
                     "name": {
                         "type": "string",
-                        "description": "Ability name (for enable/disable/config)",
+                        "description": "Ability name",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Ability description (for create action)",
+                    },
+                    "module_path": {
+                        "type": "string",
+                        "description": "Python module path e.g. 'syne.abilities.screenshot' (for create action)",
                     },
                     "config": {
                         "type": "string",
@@ -606,7 +620,7 @@ class SyneAgent:
 
         return f"Unknown action: {action}"
 
-    async def _tool_update_ability(self, action: str, name: str = "", config: str = "") -> str:
+    async def _tool_update_ability(self, action: str, name: str = "", description: str = "", module_path: str = "", config: str = "") -> str:
         """Tool handler: manage abilities."""
         if action == "list":
             all_abilities = self.abilities.list_all()
@@ -623,6 +637,32 @@ class SyneAgent:
 
         if not name:
             return "Error: ability name is required."
+
+        if action == "create":
+            if not module_path:
+                module_path = f"syne.abilities.{name}"
+            if not description:
+                description = f"Self-created ability: {name}"
+            
+            from .abilities.loader import register_dynamic_ability
+            error = await register_dynamic_ability(
+                registry=self.abilities,
+                name=name,
+                description=description,
+                module_path=module_path,
+            )
+            if error:
+                return f"Error creating ability: {error}"
+            
+            # Rebuild system prompt to include new ability schema
+            ability_schemas = self.abilities.to_openai_schema("owner")
+            from .boot import build_system_prompt
+            self._system_prompt = await build_system_prompt(
+                tools=self.tools,
+                abilities=ability_schemas,
+            )
+            
+            return f"✅ Ability '{name}' created and registered. It is now available as a tool."
 
         if action == "enable":
             ok = await self.abilities.enable(name)
