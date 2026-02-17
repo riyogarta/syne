@@ -395,8 +395,12 @@ Or just send me a message!"""
         await update.message.reply_text(help_text, parse_mode="Markdown")
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command."""
+        """Handle /status command — comprehensive agent status."""
         from ..db.connection import get_connection
+        from ..db.models import get_identity, get_config
+        from ..compaction import get_session_stats
+
+        chat_id = str(update.effective_chat.id)
 
         async with get_connection() as conn:
             mem_count = await conn.fetchrow("SELECT COUNT(*) as c FROM memory")
@@ -404,16 +408,74 @@ Or just send me a message!"""
             session_count = await conn.fetchrow(
                 "SELECT COUNT(*) as c FROM sessions WHERE status = 'active'"
             )
+            group_count = await conn.fetchrow(
+                "SELECT COUNT(*) as c FROM groups WHERE enabled = true"
+            )
+            ability_count = await conn.fetchrow(
+                "SELECT COUNT(*) as c FROM abilities WHERE enabled = true"
+            )
 
-        status = f"""🧠 **Syne Status**
+            # Current session info
+            session_row = await conn.fetchrow("""
+                SELECT id, message_count, created_at, updated_at,
+                       (SELECT COUNT(*) FROM messages WHERE session_id = s.id 
+                        AND metadata @> '{"type": "compaction_summary"}'::jsonb) as compactions
+                FROM sessions s
+                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, chat_id)
 
-Provider: {self.agent.provider.name}
-Memories: {mem_count['c']}
-Users: {user_count['c']}
-Active sessions: {session_count['c']}
-Tools: {len(self.agent.tools.list_tools('owner'))}"""
+        # Identity
+        identity = await get_identity()
+        name = identity.get("name", "Syne")
 
-        await update.message.reply_text(status, parse_mode="Markdown")
+        # Models
+        chat_model = await get_config("provider.chat_model", "unknown")
+        auto_capture = await get_config("memory.auto_capture", False)
+
+        # Provider info
+        provider_name = self.agent.provider.name
+        
+        # Tools & abilities
+        tool_count = len(self.agent.tools.list_tools("owner"))
+        abilities = ability_count["c"] if ability_count else 0
+
+        # Session details
+        session_info = ""
+        if session_row:
+            msg_count = session_row["message_count"]
+            compactions = session_row["compactions"]
+            
+            # Estimate context usage
+            stats = await get_session_stats(session_row["id"])
+            chars = stats["total_chars"]
+            # Rough token estimate (chars / 3.5)
+            est_tokens = int(chars / 3.5)
+            max_tokens = 128000  # Gemini context window
+            pct = round(est_tokens / max_tokens * 100)
+            
+            session_info = (
+                f"📋 Messages: {msg_count} | ~{est_tokens:,}/{max_tokens:,} tokens ({pct}%)\n"
+                f"🧹 Compactions: {compactions}"
+            )
+
+        status_lines = [
+            f"🧠 **{name} Status**",
+            "",
+            f"🤖 Model: `{chat_model}` ({provider_name})",
+            f"📚 Memories: {mem_count['c']}",
+            f"👥 Users: {user_count['c']} | Groups: {group_count['c']}",
+            f"💬 Active sessions: {session_count['c']}",
+            f"🔧 Tools: {tool_count} | Abilities: {abilities}",
+            f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
+        ]
+
+        if session_info:
+            status_lines.append("")
+            status_lines.append("**Current session:**")
+            status_lines.append(session_info)
+
+        await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
 
     async def _cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /memory command — show memory stats."""
