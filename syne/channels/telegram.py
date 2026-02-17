@@ -969,19 +969,37 @@ Or just send me a message!"""
                 ext = os.path.splitext(media_path)[1].lower()
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
                     with open(media_path, "rb") as f:
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=f,
-                            caption=caption_text or None,
-                            parse_mode="Markdown" if caption_text else None,
-                        )
+                        try:
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=f,
+                                caption=caption_text or None,
+                                parse_mode="Markdown" if caption_text else None,
+                            )
+                        except Exception:
+                            # Markdown parse failed — retry without parse_mode
+                            f.seek(0)
+                            await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=f,
+                                caption=caption_text or None,
+                            )
                 else:
                     with open(media_path, "rb") as f:
-                        await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=f,
-                            caption=caption_text or None,
-                        )
+                        try:
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=f,
+                                caption=caption_text or None,
+                                parse_mode="Markdown" if caption_text else None,
+                            )
+                        except Exception:
+                            f.seek(0)
+                            await context.bot.send_document(
+                                chat_id=chat_id,
+                                document=f,
+                                caption=caption_text or None,
+                            )
                 logger.info(f"Sent media: {media_path} to {chat_id}")
                 return
             except Exception as e:
