@@ -17,7 +17,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Unlimited memory** — Semantic search over millions of memories using pgvector
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **Free by default** — Uses Google Gemini via OAuth (free, rate-limited), not paid API keys
+- **Free by default** — Core chat and memory use Google Gemini via OAuth (free, rate-limited). Optional abilities (image generation) may use paid APIs
 - **PostgreSQL-native** — Everything in the database, no file-based config drift
 
 ---
@@ -112,8 +112,7 @@ Fresh install comes with sensible defaults. You can override anything through co
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 16+ with pgvector extension
-- Docker (recommended for PostgreSQL)
+- Docker (for PostgreSQL 16+ with pgvector)
 
 ### Installation
 
