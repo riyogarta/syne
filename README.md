@@ -557,7 +557,42 @@ All data lives in PostgreSQL:
 | Telegram Bot | — | **$0** | Telegram Bot API is free |
 | **Typical monthly** | | **< $1** | Embedding is the only paid component for core usage |
 
-> **Why Together AI for embedding?** Google's CCA OAuth (used for free Gemini access) returns 403 on the embedding endpoint (`generativelanguage.googleapis.com`). Together AI's `BAAI/bge-base-en-v1.5` is open-source, multilingual, and costs ~$0.008 per million tokens — effectively free for personal use.
+### Why Together AI for Embedding?
+
+Syne uses Google Gemini for chat (free via CCA OAuth). The natural question is: **why not also use Gemini for embeddings?**
+
+**Short answer:** Google's CCA OAuth endpoint returns **403 Forbidden** on the embedding API. We tested this directly — it doesn't work.
+
+**The technical explanation:**
+- Syne uses Cloud Code Assist (CCA) OAuth for free Gemini access
+- CCA wraps the Gemini API through `cloudcode-pa.googleapis.com`
+- This wrapper exposes `generateContent` (chat) but **blocks** `embedContent` (embedding)
+- The standard Gemini API at `generativelanguage.googleapis.com` requires a **paid API key** for embedding
+- So: free OAuth = chat only. Embedding needs a different provider.
+
+**Why Together AI specifically?**
+- `BAAI/bge-base-en-v1.5` is open-source and multilingual
+- 768 dimensions — good balance of quality vs storage
+- **~$0.008 per million tokens** — the cheapest embedding provider we found
+- Together AI signup gives $5 free credit (enough for ~625M tokens)
+
+**Alternative: OpenAI embedding**
+
+If you prefer OpenAI, you can switch the embedding provider:
+
+```
+You:  Switch embedding to OpenAI text-embedding-3-small
+Syne: Done — provider.embedding_model updated. ✅
+```
+
+| Provider | Model | Cost | Dimensions |
+|----------|-------|------|------------|
+| Together AI | `BAAI/bge-base-en-v1.5` | ~$0.008/1M tokens | 768 |
+| OpenAI | `text-embedding-3-small` | $0.02/1M tokens | 1536 |
+| OpenAI | `text-embedding-3-large` | $0.13/1M tokens | 3072 |
+| Google API Key | `text-embedding-004` | $0.006/1M tokens | 768 |
+
+> ⚠️ Google API Key embedding is the cheapest, but requires a **paid** API key from AI Studio — it's not free like CCA OAuth chat. Together AI is the default because it requires no Google billing setup.
 
 ---
 
