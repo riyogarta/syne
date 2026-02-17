@@ -94,6 +94,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("reasoning", self._cmd_reasoning))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
+        self.app.add_handler(CommandHandler("restart", self._cmd_restart))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -132,6 +133,7 @@ class TelegramChannel:
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("forget", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
+            BotCommand("restart", "Restart Syne (owner only)"),
         ])
 
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
@@ -815,6 +817,23 @@ Or just send me a message!"""
             lines.append(f"• **{k}**: {v}")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /restart command — owner only, restarts the Syne process."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can restart Syne.")
+            return
+
+        await update.message.reply_text("🔄 Restarting Syne...")
+        logger.info(f"Restart requested by {user.id}")
+
+        import os
+        import signal
+        # Send SIGTERM to self — systemd will auto-restart (Restart=always)
+        os.kill(os.getpid(), signal.SIGTERM)
 
     # ── Helpers ───────────────────────────────────────────────
 
