@@ -1,5 +1,6 @@
 """Telegram channel adapter."""
 
+import asyncio
 import logging
 import re
 from typing import Optional, Tuple
@@ -26,6 +27,43 @@ from ..db.models import (
 from ..ratelimit import check_rate_limit
 
 logger = logging.getLogger("syne.telegram")
+
+
+class _TypingIndicator:
+    """Keeps sending 'typing' action every 4s until cancelled.
+
+    Usage:
+        async with _TypingIndicator(bot, chat_id):
+            await long_running_work()
+    """
+
+    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0):
+        self._bot = bot
+        self._chat_id = chat_id
+        self._interval = interval
+        self._task: Optional[asyncio.Task] = None
+
+    async def _loop(self):
+        try:
+            while True:
+                await self._bot.send_chat_action(self._chat_id, "typing")
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass  # silently ignore — typing is best-effort
+
+    async def __aenter__(self):
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
 
 class TelegramChannel:
@@ -152,45 +190,44 @@ class TelegramChannel:
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {text[:100]}")
 
-        # Send typing indicator
-        await chat.send_action("typing")
+        # Keep typing indicator alive throughout the entire processing
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or user.username or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=text,
+                    display_name=self._get_display_name(user),
+                    is_group=is_group,  # Pass group flag for security restrictions
+                )
 
-        try:
-            response = await self.agent.handle_message(
-                platform="telegram",
-                chat_id=str(chat.id),
-                user_name=user.first_name or user.username or str(user.id),
-                user_platform_id=str(user.id),
-                message=text,
-                display_name=self._get_display_name(user),
-                is_group=is_group,  # Pass group flag for security restrictions
-            )
+                if response:
+                    # Check if reasoning visibility is ON — prepend thinking if available
+                    reasoning_visible = await get_config("session.reasoning_visible", False)
+                    if reasoning_visible:
+                        key = f"telegram:{chat.id}"
+                        conv = self.agent.conversations._active.get(key)
+                        thinking = getattr(conv, '_last_thinking', None) if conv else None
+                        if thinking:
+                            thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
+                            response = thinking_block + response
 
-            if response:
-                # Check if reasoning visibility is ON — prepend thinking if available
-                reasoning_visible = await get_config("session.reasoning_visible", False)
-                if reasoning_visible:
-                    key = f"telegram:{chat.id}"
-                    conv = self.agent.conversations._active.get(key)
-                    thinking = getattr(conv, '_last_thinking', None) if conv else None
-                    if thinking:
-                        thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
-                        response = thinking_block + response
+                    await self._send_response_with_media(chat.id, response, context)
 
-                await self._send_response_with_media(chat.id, response, context)
-
-        except Exception as e:
-            logger.error(f"Error handling message: {e}", exc_info=True)
-            # Provide more useful error context
-            error_msg = str(e)
-            if "400" in error_msg:
-                await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /forget to start fresh.")
-            elif "429" in error_msg:
-                await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
-            elif "401" in error_msg or "403" in error_msg:
-                await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
-            else:
-                await update.message.reply_text("Sorry, something went wrong. Please try again.")
+            except Exception as e:
+                logger.error(f"Error handling message: {e}", exc_info=True)
+                # Provide more useful error context
+                error_msg = str(e)
+                if "400" in error_msg:
+                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /forget to start fresh.")
+                elif "429" in error_msg:
+                    await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
+                elif "401" in error_msg or "403" in error_msg:
+                    await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
+                else:
+                    await update.message.reply_text("Sorry, something went wrong. Please try again.")
 
     async def _process_group_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
@@ -339,50 +376,51 @@ class TelegramChannel:
         await self._ensure_user(user)
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [photo] {caption[:100]}")
-        await chat.send_action("typing")
 
-        try:
-            # Download the largest photo version
-            photo = update.message.photo[-1]  # Largest size
-            tg_file = await photo.get_file()
+        # Keep typing indicator alive throughout photo processing
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                # Download the largest photo version
+                photo = update.message.photo[-1]  # Largest size
+                tg_file = await photo.get_file()
 
-            # Download to memory and encode as base64
-            photo_bytes = await tg_file.download_as_bytearray()
+                # Download to memory and encode as base64
+                photo_bytes = await tg_file.download_as_bytearray()
 
-            if not photo_bytes or len(photo_bytes) == 0:
-                logger.error(f"Downloaded photo is empty (0 bytes)")
-                await update.message.reply_text("Sorry, couldn't download the photo. Try sending again.")
-                return
+                if not photo_bytes or len(photo_bytes) == 0:
+                    logger.error(f"Downloaded photo is empty (0 bytes)")
+                    await update.message.reply_text("Sorry, couldn't download the photo. Try sending again.")
+                    return
 
-            photo_b64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
-            logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, base64: {len(photo_b64)} chars")
+                photo_b64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
+                logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, base64: {len(photo_b64)} chars")
 
-            # Build message with image metadata for vision
-            user_text = caption if caption else "What's in this image?"
-            metadata = {
-                "image": {
-                    "mime_type": "image/jpeg",
-                    "base64": photo_b64,
+                # Build message with image metadata for vision
+                user_text = caption if caption else "What's in this image?"
+                metadata = {
+                    "image": {
+                        "mime_type": "image/jpeg",
+                        "base64": photo_b64,
+                    }
                 }
-            }
 
-            response = await self.agent.handle_message(
-                platform="telegram",
-                chat_id=str(chat.id),
-                user_name=user.first_name or str(user.id),
-                user_platform_id=str(user.id),
-                message=user_text,
-                display_name=self._get_display_name(user),
-                is_group=is_group,
-                message_metadata=metadata,
-            )
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=user_text,
+                    display_name=self._get_display_name(user),
+                    is_group=is_group,
+                    message_metadata=metadata,
+                )
 
-            if response:
-                await self._send_response_with_media(chat.id, response, context)
+                if response:
+                    await self._send_response_with_media(chat.id, response, context)
 
-        except Exception as e:
-            logger.error(f"Error handling photo: {e}", exc_info=True)
-            await update.message.reply_text("Sorry, something went wrong processing that photo.")
+            except Exception as e:
+                logger.error(f"Error handling photo: {e}", exc_info=True)
+                await update.message.reply_text("Sorry, something went wrong processing that photo.")
 
     # ── Command handlers ─────────────────────────────────────
 
