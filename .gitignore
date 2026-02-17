@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Credentials (should never be committed)
+google_credentials.json
+*.credentials.json
+
+# Logs
+*.log
+syne.log
+
+# User-created abilities (runtime, not source)
+user_abilities/
+
+# Database dumps
+*.dump
+*.sql.bak

@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: syne-db
+    environment:
+      # Use environment variables for credentials (set by syne-setup.sh)
+      # Falls back to 'syne' for existing installations
+      POSTGRES_DB: ${SYNE_DB_NAME:-syne}
+      POSTGRES_USER: ${SYNE_DB_USER:-syne}
+      POSTGRES_PASSWORD: ${SYNE_DB_PASSWORD:-syne}
+    ports:
+      - "5433:5432"    # 5433 to avoid conflict with existing PostgreSQL
+    volumes:
+      - syne_pgdata:/var/lib/postgresql/data
+      - ./syne/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SYNE_DB_USER:-syne}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  syne:
+    build: .
+    container_name: syne-agent
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database URL constructed from env vars (set by syne-setup.sh)
+      SYNE_DATABASE_URL: postgresql://${SYNE_DB_USER:-syne}:${SYNE_DB_PASSWORD:-syne}@db:5432/${SYNE_DB_NAME:-syne}
+    env_file:
+      - .env
+    ports:
+      - "8200:8200"
+    restart: unless-stopped
+
+volumes:
+  syne_pgdata:
