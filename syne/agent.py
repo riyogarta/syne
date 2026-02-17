@@ -721,9 +721,10 @@ class SyneAgent:
             
             # Rebuild system prompt to include new ability schema
             ability_schemas = self.abilities.to_openai_schema("owner")
+            tool_schemas = self.tools.to_openai_schema("owner")
             from .boot import build_system_prompt
             self._system_prompt = await build_system_prompt(
-                tools=self.tools,
+                tools=tool_schemas,
                 abilities=ability_schemas,
             )
             
