@@ -194,7 +194,7 @@ All configuration lives in the `config` table. You can change any setting by tal
 |-----|---------|-------------|
 | `provider.primary` | `{"name": "google", "auth": "oauth"}` | LLM provider. Options: `google` (OAuth/free), `openai` |
 | `provider.chat_model` | `gemini-2.5-pro` | Model used for chat. Any Gemini model name |
-| `provider.embedding_model` | `text-embedding-004` | Model for memory embeddings (Google) |
+| `provider.embedding_model` | `BAAI/bge-base-en-v1.5` | Model for memory embeddings (Together AI) |
 | `provider.embedding_dimensions` | `768` | Embedding vector dimensions |
 
 ### Memory Settings
@@ -233,7 +233,7 @@ Syne: Done — subagents.enabled set to false. ✅
 
 You:  What model are you using?
 Syne: I'm using gemini-2.5-pro for chat via Google OAuth (free).
-      Embeddings use text-embedding-004.
+      Embeddings use BAAI/bge-base-en-v1.5 via Together AI.
 ```
 
 **Via SQL (advanced):**
@@ -502,14 +502,16 @@ All data lives in PostgreSQL:
 
 ## Cost
 
-| Component | Cost | Why |
-|-----------|------|-----|
-| Gemini 2.5 Pro (chat) | **$0** — free via OAuth | Google CCA OAuth = free, rate-limited |
-| Together AI (embedding) | **~$0.008/1M tokens** | Google OAuth can't access embedding API (403). Together AI's `BAAI/bge-base-en-v1.5` is the cheapest alternative |
-| Together AI (image gen) | **~$0.003/image** | Optional ability, not required |
-| PostgreSQL | **$0** — self-hosted | Bundled via Docker |
-| Telegram Bot | **$0** | Telegram Bot API is free |
-| **Typical monthly** | **< $1** | Embedding is the only paid component for core usage |
+| Component | Model | Cost | Notes |
+|-----------|-------|------|-------|
+| Chat LLM | `gemini-2.5-pro` (Google) | **$0** | Free via CCA OAuth (rate-limited) |
+| Embedding | `BAAI/bge-base-en-v1.5` (Together AI) | **~$0.008/1M tokens** | Google CCA OAuth doesn't support embedding API. Together AI is the cheapest alternative |
+| Image Gen | `FLUX.1-schnell` (Together AI) | **~$0.003/image** | Optional ability, not required for core |
+| PostgreSQL | — | **$0** | Self-hosted via Docker |
+| Telegram Bot | — | **$0** | Telegram Bot API is free |
+| **Typical monthly** | | **< $1** | Embedding is the only paid component for core usage |
+
+> **Why Together AI for embedding?** Google's CCA OAuth (used for free Gemini access) returns 403 on the embedding endpoint (`generativelanguage.googleapis.com`). Together AI's `BAAI/bge-base-en-v1.5` is open-source, multilingual, and costs ~$0.008 per million tokens — effectively free for personal use.
 
 ---
 
