@@ -25,51 +25,50 @@ Most AI assistants forget everything between sessions. They have no persistent m
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         SYNE AGENT                               │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                        CORE                                 │ │
-│  │  (Cannot be modified by Syne)                               │ │
-│  │                                                             │ │
-│  │  ┌────────┐ ┌────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐│ │
-│  │  │  Chat  │ │ Memory │ │Compaction│ │ Telegram │ │Sub-agents││ │
-│  │  │ (LLM)  │ │(pgvec) │ │(context) │ │ (bot)    │ │(max: 2)  ││ │
-│  │  └────────┘ └────────┘ └──────────┘ └──────────┘ └──────────┘│ │
-│  │                                                             │ │
-│  │  ┌──────────────────────────────────────────────────────┐  │ │
-│  │  │  Core Tools: web_search │ web_fetch (httpx, no browser)│  │ │
-│  │  └──────────────────────────────────────────────────────┘  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                      ABILITIES                              │ │
-│  │  (Pluggable — can be ON/OFF, added, created)                │ │
-│  │                                                             │ │
-│  │  ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐          │ │
-│  │  │image_gen│ │  maps   │ │   tts   │ │  exec   │  ...     │ │
-│  │  └─────────┘ └─────────┘ └─────────┘ └─────────┘          │ │
-│  │                                                             │ │
-│  │  ┌─────────────────────────────────────────────────────┐  │ │
-│  │  │              Self-Created Abilities                  │  │ │
-│  │  │  (Syne can create new abilities with exec ON)        │  │ │
-│  │  └─────────────────────────────────────────────────────┘  │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                   PostgreSQL + pgvector                     │ │
-│  │  identity │ soul │ rules │ users │ memory │ sessions       │ │
-│  │  messages │ abilities │ config                              │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                        SYNE AGENT                            │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                       CORE                              │  │
+│  │  (Cannot be modified by Syne)                           │  │
+│  │                                                         │  │
+│  │  ┌───────┐ ┌────────┐ ┌──────────┐ ┌────────┐ ┌─────┐ │  │
+│  │  │ Chat  │ │ Memory │ │Compaction│ │Telegram│ │ Sub │ │  │
+│  │  │ (LLM) │ │(pgvec) │ │(context) │ │ (bot)  │ │agent│ │  │
+│  │  └───────┘ └────────┘ └──────────┘ └────────┘ └─────┘ │  │
+│  │                                                         │  │
+│  │  Core Tools:                                            │  │
+│  │  exec │ web_search │ web_fetch │ memory │ config │ ...  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                     ABILITIES                           │  │
+│  │  (Pluggable — can be ON/OFF, added, created)            │  │
+│  │                                                         │  │
+│  │  ┌─────────┐ ┌──────────────┐ ┌──────┐                 │  │
+│  │  │image_gen│ │image_analysis│ │ maps │   ...            │  │
+│  │  └─────────┘ └──────────────┘ └──────┘                 │  │
+│  │                                                         │  │
+│  │  ┌───────────────────────────────────────────────────┐  │  │
+│  │  │            Self-Created Abilities                  │  │  │
+│  │  │  (Syne can create new abilities at runtime)       │  │  │
+│  │  └───────────────────────────────────────────────────┘  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                PostgreSQL + pgvector                    │  │
+│  │  identity │ soul │ rules │ users │ memory │ sessions   │  │
+│  │  messages │ abilities │ config │ subagent_runs         │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ### Core vs Abilities
 
-| Layer | What it includes | Modifiable? |
-|-------|-----------------|-------------|
-| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, Sub-agents, Web Search, Web Fetch | ❌ Protected |
-| **Abilities** | Everything else (image gen, maps, exec, TTS, etc.) | ✅ Pluggable |
+| Layer | What it includes | Modifiable by Syne? |
+|-------|-----------------|---------------------|
+| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, Sub-agents, 12 Core Tools | ❌ Protected |
+| **Abilities** | Everything else (image gen, image analysis, maps, etc.) | ✅ Pluggable |
 
 ---
 
@@ -266,7 +265,7 @@ VALUES ('custom.key', '"value"', 'My custom setting');
 | `identity` | Name, motto, personality | `name` = "Syne", `personality` = "Helpful, direct, resourceful" |
 | `soul` | Behavioral rules by category | `tone` = "casual and witty", `privacy` = "never share user info" |
 | `rules` | Hard/soft rules with severity | `[700] Server Access: owner only` (hard) |
-| `abilities` | Enabled abilities + config | `image_gen` enabled, `exec` disabled |
+| `abilities` | Enabled abilities + config | `image_gen` enabled, `maps` enabled |
 
 ---
 
@@ -299,15 +298,25 @@ Everything beyond core functionality is an **Ability**. Abilities can be:
 | Source | Description | Location |
 |--------|-------------|----------|
 | `bundled` | Ships with Syne | `syne/abilities/` |
-| `installed` | Downloaded from marketplace | Database |
-| `self_created` | Created by Syne itself | `user_abilities/` |
+| `installed` | Downloaded from marketplace | `syne/abilities/` + Database |
+| `self_created` | Created by Syne itself | `syne/abilities/` + Database |
 
-### Core Tools (Always Available)
+### Core Tools (Always Available — 12 tools)
 
-| Tool | Description | Provider |
-|------|-------------|----------|
-| `web_search` | Search the web | Brave Search API |
-| `web_fetch` | Fetch and extract content from URLs | Built-in |
+| Tool | Description |
+|------|-------------|
+| `exec` | Execute shell commands on the host system |
+| `memory_search` | Semantic search over stored memories |
+| `memory_store` | Store new memories with anti-hallucination checks |
+| `spawn_subagent` | Spawn isolated background agents |
+| `subagent_status` | Check running sub-agent status |
+| `update_config` | Change runtime configuration |
+| `update_ability` | Enable/disable/create abilities |
+| `update_soul` | Modify behavioral rules |
+| `manage_group` | Manage group chat settings |
+| `manage_user` | Manage user access levels |
+| `web_search` | Search the web (Brave Search API) |
+| `web_fetch` | Fetch and extract content from URLs |
 
 ### Bundled Abilities (v1)
 
@@ -316,8 +325,6 @@ Everything beyond core functionality is an **Ability**. Abilities can be:
 | `image_gen` | Generate images from text | Together AI (FLUX.1-schnell) | ON |
 | `image_analysis` | Analyze and describe images | Google Gemini vision | ON |
 | `maps` | Places, directions, geocoding | Google Maps/Places | ON |
-| `exec` | Execute shell commands | Local system | **OFF** |
-| `tts` | Text-to-speech | ElevenLabs / Google | ON |
 
 ### Ability Interface
 
@@ -340,42 +347,48 @@ class Ability:
 
 ### Managing Abilities
 
-```bash
-syne ability list              # List all abilities
-syne ability enable image_gen  # Enable an ability
-syne ability disable exec      # Disable an ability
-syne ability info web_search   # Show ability details
+Abilities are managed through conversation:
+
+```
+You:  Enable image generation
+Syne: Done — image_gen enabled. ✅
+
+You:  Disable maps
+Syne: Done — maps disabled. ✅
+
+You:  What abilities do I have?
+Syne: Here's your ability list:
+      ✅ image_gen — Generate images (Together AI)
+      ✅ image_analysis — Analyze images (Gemini vision)
+      ❌ maps — Places and directions (disabled)
 ```
 
 ---
 
 ## Self-Modification
 
-When the `exec` ability is enabled, Syne can create new abilities for itself:
+Syne can create new abilities for itself at runtime using the `update_ability` core tool — no restart required:
 
 ```
 User: "I wish you could check Bitcoin prices"
     │
     ├─ Syne recognizes the need
-    ├─ Creates user_abilities/crypto_price.py
-    ├─ Registers as source='self_created', enabled=false
+    ├─ Writes syne/abilities/crypto_price.py using exec
+    ├─ Registers via update_ability (source='self_created')
+    ├─ Ability is immediately available — no restart
     │
-    └─ Asks for owner approval:
-        "I created a 'crypto_price' ability. Enable it?"
-        │
-        ├─ Owner approves → Enabled
-        └─ Owner rejects → Remains disabled
+    └─ Reports back:
+        "Created 'crypto_price' ability. Try it: what's BTC now?"
 ```
 
 ### Safety Rules
 
 | Rule | Description |
 |------|-------------|
-| 1 | Syne can CREATE files in `user_abilities/` only |
-| 2 | Syne CANNOT modify `syne/` (core code) |
-| 3 | Syne CANNOT modify `syne/abilities/` (bundled) |
-| 4 | Owner approval required for new abilities |
-| 5 | `exec` is OFF by default — owner must enable |
+| 1 | Syne can CREATE ability files in `syne/abilities/` |
+| 2 | Syne CANNOT modify core code (`syne/` engine, tools, channels, db, llm, security) |
+| 3 | Syne CANNOT modify `syne/db/schema.sql` |
+| 4 | Core bugs → Syne drafts a bug report in chat for the owner to post as a GitHub issue |
 
 ---
 
@@ -469,12 +482,16 @@ syne init                  # Interactive setup wizard
 syne start                 # Start the agent
 syne start --debug         # Start with debug logging
 syne status                # Show status
+syne repair                # Diagnose and repair installation
+syne restart               # Restart the agent
+syne stop                  # Stop the agent
+syne autostart             # Configure systemd autostart
 
 # Database
 syne db init               # Initialize schema
 syne db reset              # Reset database (destructive!)
 
-# Identity
+# Identity & Prompt
 syne identity              # View current identity
 syne identity name "Syne"  # Set identity value
 syne prompt                # Show current system prompt
@@ -483,12 +500,6 @@ syne prompt                # Show current system prompt
 syne memory stats          # Memory statistics
 syne memory search "query" # Semantic search
 syne memory add "info" -c fact  # Manually add memory
-
-# Abilities
-syne ability list          # List all abilities
-syne ability enable <name> # Enable an ability
-syne ability disable <name># Disable an ability
-syne ability info <name>   # Show ability details
 ```
 
 ---
@@ -498,7 +509,8 @@ syne ability info <name>   # Show ability details
 ```
 /start        — Welcome message
 /help         — Available commands
-/status       — Agent status (model, context, memories, sessions)
+/version      — Show agent version
+/status       — Agent status (model, context, memories, compactions, abilities)
 /memory       — Memory statistics
 /compact      — Compact conversation history (owner only)
 /think        — Set thinking level: off, low, medium, high, max (owner only)
@@ -506,6 +518,7 @@ syne ability info <name>   # Show ability details
 /autocapture  — Toggle auto memory capture: on/off (owner only)
 /forget       — Clear current conversation
 /identity     — Show agent identity
+/restart      — Restart the agent (owner only)
 ```
 
 ### Thinking & Reasoning
@@ -538,11 +551,14 @@ All data lives in PostgreSQL:
 | `soul` | Behavioral rules by category |
 | `rules` | Hard/soft rules with severity |
 | `users` | Multi-user with access levels |
+| `groups` | Group chat configuration |
 | `memory` | Semantic memory with embeddings |
 | `sessions` | Conversation sessions |
 | `messages` | Full message history |
 | `abilities` | Registered abilities |
 | `config` | Runtime configuration |
+| `subagent_runs` | Sub-agent execution history |
+| `capabilities` | System capabilities registry |
 
 ---
 
@@ -618,7 +634,6 @@ syne/
 │       ├── schema.sql
 │       ├── connection.py
 │       └── models.py
-├── user_abilities/          # Self-created abilities
 ├── tests/
 ├── docker-compose.yml
 ├── pyproject.toml
