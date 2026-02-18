@@ -260,9 +260,19 @@ class Conversation:
             ))
 
             for tool_call in current.tool_calls:
-                func = tool_call.get("function", tool_call)
-                name = func.get("name", "")
-                args = json.loads(func.get("arguments", "{}"))
+                # Handle both normalized format (name/args) and OpenAI raw (function.name/arguments)
+                if "function" in tool_call:
+                    func = tool_call["function"]
+                    name = func.get("name", "")
+                    raw_args = func.get("arguments", "{}")
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                else:
+                    name = tool_call.get("name", "")
+                    args = tool_call.get("args", {})
+                    if isinstance(args, str):
+                        args = json.loads(args)
+
+                tool_call_id = tool_call.get("id")
 
                 logger.info(f"Tool call (round {round_num + 1}): {name}({args})")
 
@@ -292,8 +302,11 @@ class Conversation:
                 else:
                     result = f"Error: Unknown tool or ability '{name}'"
 
-                await self.save_message("tool", result, metadata={"tool_name": name})
-                context.append(ChatMessage(role="tool", content=str(result), metadata={"tool_name": name}))
+                tool_meta = {"tool_name": name}
+                if tool_call_id:
+                    tool_meta["tool_call_id"] = tool_call_id
+                await self.save_message("tool", result, metadata=tool_meta)
+                context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
             # Get next response — may contain more tool calls
             current = await self.provider.chat(

@@ -95,6 +95,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
+        self.app.add_handler(CommandHandler("model", self._cmd_model))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -133,6 +134,7 @@ class TelegramChannel:
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("forget", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
+            BotCommand("model", "Switch LLM model (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
         ])
 
@@ -818,6 +820,96 @@ Or just send me a message!"""
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+    async def _cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /model command — switch LLM model with inline buttons.
+        
+        Uses driver-based model registry from DB (provider.models).
+        Tests the model before switching; rolls back on failure.
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can switch models.")
+            return
+
+        # Get model registry from DB
+        models = await get_config("provider.models", [])
+        if not models:
+            await update.message.reply_text("⚠️ No models configured. Check provider.models in config.")
+            return
+        
+        # Get current active model
+        active_model_key = await get_config("provider.active_model", "gemini-pro")
+
+        # Build buttons from DB entries
+        buttons = []
+        for model in models:
+            key = model.get("key", "")
+            label = model.get("label", key)
+            is_active = (key == active_model_key)
+            btn_label = f"✅ {label}" if is_active else label
+            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
+
+        # Arrange buttons in rows of 2
+        keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+        
+        # Get current model label
+        current_model = next((m for m in models if m.get("key") == active_model_key), None)
+        current_label = current_model.get("label", active_model_key) if current_model else active_model_key
+        
+        await update.message.reply_text(
+            f"🤖 **Current model:** {current_label}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _apply_model(self, model_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
+        """Apply a model from registry — test before switching.
+        
+        Args:
+            model_key: Key of model to switch to
+            chat_id: Chat ID for sending status messages
+            context: Telegram context for sending messages
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from ..llm.drivers import create_hybrid_provider, test_model, get_model_from_list
+        
+        # Get model registry
+        models = await get_config("provider.models", [])
+        model_entry = get_model_from_list(models, model_key)
+        
+        if not model_entry:
+            return False, f"Model '{model_key}' not found in registry"
+        
+        # Save current model for rollback
+        previous_model_key = await get_config("provider.active_model", "gemini-pro")
+        await set_config("provider.previous_model", previous_model_key)
+        
+        # Send "testing" message
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔄 Testing {model_entry.get('label', model_key)}...",
+        )
+        
+        try:
+            # Create provider and test it
+            provider = await create_hybrid_provider(model_entry)
+            success, error = await test_model(provider, timeout=10)
+            
+            if success:
+                # Test passed — save new model
+                await set_config("provider.active_model", model_key)
+                return True, model_entry.get("label", model_key)
+            else:
+                # Test failed — report error
+                return False, f"{model_entry.get('label', model_key)} failed: {error}"
+                
+        except Exception as e:
+            return False, f"{model_entry.get('label', model_key)} failed: {str(e)[:100]}"
+
     async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restart command — owner only, restarts the Syne process."""
         user = update.effective_user
@@ -910,6 +1002,48 @@ Or just send me a message!"""
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
+
+        elif data.startswith("model:"):
+            model_key = data.split(":", 1)[1]
+            
+            # Get model registry
+            models = await get_config("provider.models", [])
+            model_entry = next((m for m in models if m.get("key") == model_key), None)
+            
+            if model_entry:
+                # Test and apply model
+                chat_id = query.message.chat_id
+                success, result = await self._apply_model(model_key, chat_id, context)
+                
+                # Get updated active model
+                active_model_key = model_key if success else await get_config("provider.active_model", "gemini-pro")
+                
+                # Rebuild buttons
+                buttons = []
+                for m in models:
+                    key = m.get("key", "")
+                    label = m.get("label", key)
+                    is_active = (key == active_model_key)
+                    btn_label = f"✅ {label}" if is_active else label
+                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
+                keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+                
+                if success:
+                    await query.edit_message_text(
+                        f"✅ **Switched to:** {result}\n\n⚠️ Use /restart to fully apply.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    # Rollback and show error
+                    previous = await get_config("provider.previous_model", "gemini-pro")
+                    previous_entry = next((m for m in models if m.get("key") == previous), None)
+                    previous_label = previous_entry.get("label", previous) if previous_entry else previous
+                    await query.edit_message_text(
+                        f"❌ {result}\n\nRolled back to {previous_label}.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
 
         elif data.startswith("autocapture:"):
             toggle = data.split(":", 1)[1]

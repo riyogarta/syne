@@ -248,5 +248,8 @@ INSERT INTO config (key, value, description) VALUES
     ('exec.output_max_chars', '4000', 'Maximum output characters to return'),
     -- Web tools config
     ('web_search.api_key', '""', 'Brave Search API key (get from https://brave.com/search/api/)'),
-    ('web_fetch.timeout', '30', 'Web fetch timeout in seconds')
+    ('web_fetch.timeout', '30', 'Web fetch timeout in seconds'),
+    -- Model registry (driver-based model system)
+    ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth"}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth"}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth"}]', 'Available LLM models with driver configuration'),
+    ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models')
 ON CONFLICT (key) DO NOTHING;

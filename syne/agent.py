@@ -6,12 +6,17 @@ from typing import Optional
 
 from .config import SyneSettings
 from .db.connection import init_db, close_db
-from .db.models import get_config, get_or_create_user
+from .db.models import get_config, set_config, get_or_create_user
 from .llm.provider import LLMProvider
 from .llm.google import GoogleProvider
 from .llm.openai import OpenAIProvider
+from .llm.codex import CodexProvider
 from .llm.together import TogetherProvider
 from .llm.hybrid import HybridProvider
+from .llm.drivers import (
+    create_hybrid_provider,
+    get_model_from_list,
+)
 from .auth.google_oauth import get_credentials
 from .memory.engine import MemoryEngine
 from .tools.registry import ToolRegistry
@@ -110,28 +115,100 @@ class SyneAgent:
         logger.info("Syne agent stopped.")
 
     async def _init_provider(self) -> LLMProvider:
-        """Initialize the LLM provider based on config."""
-        # Check DB config first
+        """Initialize the LLM provider based on config.
+        
+        Uses the driver-based model registry system:
+        1. Read provider.active_model (key into provider.models)
+        2. Look up the model entry from provider.models
+        3. Use create_hybrid_provider() to instantiate
+        
+        Backward compatibility:
+        - If provider.primary exists (old format), migrate to new format
+        """
+        # ═══════════════════════════════════════════════════════════════
+        # Check for new driver-based model system
+        # ═══════════════════════════════════════════════════════════════
+        models = await get_config("provider.models", None)
+        active_model_key = await get_config("provider.active_model", None)
+        
+        if models and active_model_key:
+            # New driver-based system
+            model_entry = get_model_from_list(models, active_model_key)
+            if model_entry:
+                logger.info(f"Using driver-based model: {model_entry.get('label', active_model_key)}")
+                return await create_hybrid_provider(model_entry)
+            else:
+                logger.warning(f"Model key '{active_model_key}' not found in registry, falling back to default")
+        
+        # ═══════════════════════════════════════════════════════════════
+        # Backward compatibility: old provider.primary system
+        # Migrate to new format if possible
+        # ═══════════════════════════════════════════════════════════════
         provider_config = await get_config("provider.primary", {"name": "google", "auth": "oauth"})
         provider_name = provider_config.get("name", "google") if isinstance(provider_config, dict) else "google"
-
         chat_model = await get_config("provider.chat_model", "gemini-2.5-pro")
+        
+        # Try to migrate to new format
+        await self._migrate_to_driver_system(provider_name, chat_model)
+        
+        # Now use driver system
+        models = await get_config("provider.models", None)
+        active_model_key = await get_config("provider.active_model", None)
+        
+        if models and active_model_key:
+            model_entry = get_model_from_list(models, active_model_key)
+            if model_entry:
+                return await create_hybrid_provider(model_entry)
+        
+        # Final fallback: use old system directly
+        logger.warning("Falling back to legacy provider initialization")
+        return await self._init_provider_legacy(provider_name, chat_model)
+
+    async def _migrate_to_driver_system(self, provider_name: str, chat_model: str):
+        """Migrate from old provider.primary format to new driver-based system."""
+        # Check if already migrated
+        models = await get_config("provider.models", None)
+        if models:
+            return  # Already has model registry
+        
+        # Default model registry
+        default_models = [
+            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth"},
+            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth"},
+            {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth"},
+        ]
+        
+        # Map old provider to new model key
+        model_key_map = {
+            ("google", "gemini-2.5-pro"): "gemini-pro",
+            ("google", "gemini-2.5-flash"): "gemini-flash",
+            ("codex", "gpt-5.2"): "gpt-5.2",
+            ("codex", "gpt-4.1"): "gpt-5.2",  # Map old models
+        }
+        
+        active_key = model_key_map.get((provider_name, chat_model), "gemini-pro")
+        
+        # Save new format
+        await set_config("provider.models", default_models)
+        await set_config("provider.active_model", active_key)
+        logger.info(f"Migrated to driver-based model system: {active_key}")
+
+    async def _init_provider_legacy(self, provider_name: str, chat_model: str) -> LLMProvider:
+        """Legacy provider initialization for backward compatibility."""
+        import os
+        import json
+        
         embedding_model = await get_config("provider.embedding_model", "text-embedding-004")
 
         if provider_name == "google":
-            # OAuth is the default — auto-detects OpenClaw creds or uses saved creds
             creds = await get_credentials()
             chat_provider = GoogleProvider(
                 credentials=creds,
                 chat_model=chat_model,
             )
-
-            # Embedding: Google CCA OAuth token cannot access generativelanguage.googleapis.com
-            # embedding endpoint (403 Forbidden). Use Together AI for embeddings (very cheap).
-            import os
+            
             together_key = os.environ.get("TOGETHER_API_KEY")
             if not together_key:
-                import json
                 try:
                     oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
                     together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
@@ -144,21 +221,69 @@ class SyneAgent:
                     embedding_model="BAAI/bge-base-en-v1.5",
                 )
                 return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            else:
-                logger.warning(
-                    "No embedding provider available. Memory search will not work. "
-                    "Set TOGETHER_API_KEY for embeddings."
-                )
-                return chat_provider
+            return chat_provider
 
-        elif provider_name == "openai":
-            if not self.settings.openai_api_key:
-                raise RuntimeError("OpenAI provider selected but SYNE_OPENAI_API_KEY not set.")
-            return OpenAIProvider(
-                api_key=self.settings.openai_api_key,
+        elif provider_name == "codex":
+            auth_path = os.path.expanduser("~/.openclaw/agents/main/agent/auth.json")
+            with open(auth_path) as f:
+                auth_data = json.load(f)
+            codex_auth = auth_data.get("openai-codex", {})
+            
+            chat_provider = CodexProvider(
+                access_token=codex_auth.get("access", ""),
+                refresh_token=codex_auth.get("refresh", ""),
                 chat_model=chat_model,
-                embedding_model=embedding_model,
             )
+            
+            together_key = os.environ.get("TOGETHER_API_KEY")
+            if not together_key:
+                try:
+                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
+                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
+                except Exception:
+                    pass
+
+            if together_key:
+                embed_provider = TogetherProvider(
+                    api_key=together_key,
+                    embedding_model="BAAI/bge-base-en-v1.5",
+                )
+                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
+            return chat_provider
+
+        elif provider_name == "groq":
+            groq_key = await get_config("credential.groq_api_key", None)
+            if not groq_key:
+                groq_key = os.environ.get("GROQ_API_KEY")
+            if not groq_key:
+                try:
+                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
+                    groq_key = oc_config.get("env", {}).get("GROQ_API_KEY")
+                except Exception:
+                    pass
+            
+            chat_provider = OpenAIProvider(
+                api_key=groq_key,
+                chat_model=chat_model,
+                base_url="https://api.groq.com/openai/v1",
+                provider_name="groq",
+            )
+            
+            together_key = os.environ.get("TOGETHER_API_KEY")
+            if not together_key:
+                try:
+                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
+                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
+                except Exception:
+                    pass
+
+            if together_key:
+                embed_provider = TogetherProvider(
+                    api_key=together_key,
+                    embedding_model="BAAI/bge-base-en-v1.5",
+                )
+                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
+            return chat_provider
 
         else:
             raise RuntimeError(f"Unknown provider: {provider_name}")
