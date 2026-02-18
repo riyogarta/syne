@@ -244,14 +244,20 @@ class Conversation:
         context: list[ChatMessage],
         access_level: str,
         tool_schemas: Optional[list[dict]] = None,
-        max_rounds: int = 50,
     ) -> ChatResponse:
         """Execute tool calls and get final response. Loops for multi-step tool use.
         
-        max_rounds is a safety net against infinite loops, not a practical limit.
-        The LLM decides when to stop calling tools.
+        max_rounds loaded from DB config `session.max_tool_rounds` (default: 25).
+        If limit is reached, appends a notice to the response.
         """
+        from .db.models import get_config
+
+        max_rounds = await get_config("session.max_tool_rounds", 25)
+        if isinstance(max_rounds, str):
+            max_rounds = int(max_rounds)
+
         current = response
+        limit_reached = False
 
         for round_num in range(max_rounds):
             if not current.tool_calls:
@@ -318,6 +324,38 @@ class Conversation:
                 thinking_budget=self.thinking_budget,
                 tools=tool_schemas if tool_schemas else None,
             )
+        else:
+            # Loop exhausted without breaking — limit reached
+            if current.tool_calls:
+                limit_reached = True
+
+        if limit_reached:
+            notice = (
+                f"\n\n⚠️ Tool call limit reached ({max_rounds} rounds). "
+                f"Some steps may be incomplete. Use /compact or continue the conversation to proceed."
+            )
+            if current.content:
+                current = ChatResponse(
+                    content=current.content + notice,
+                    tool_calls=None,
+                    thinking=current.thinking,
+                )
+            else:
+                # LLM didn't produce text — generate a final response without tools
+                context.append(ChatMessage(
+                    role="system",
+                    content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done so far and what remains.",
+                ))
+                current = await self.provider.chat(
+                    messages=context,
+                    thinking_budget=self.thinking_budget,
+                    tools=None,  # No tools — force text response
+                )
+                current = ChatResponse(
+                    content=(current.content or "") + notice,
+                    tool_calls=None,
+                    thinking=current.thinking,
+                )
 
         return current
 
