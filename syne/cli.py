@@ -45,32 +45,17 @@ def init():
 
     env_lines = []
     provider_config = None  # Will be saved to DB after schema init
+    google_creds = None  # Only set for Google OAuth provider
 
     if choice == 1:
         console.print("\n[bold green]✓ Google Gemini selected (OAuth)[/bold green]")
 
-        # Check for existing OpenClaw credentials
-        from .auth.google_oauth import detect_openclaw_credentials, login_google
-        existing = detect_openclaw_credentials()
-        if existing:
-            console.print(f"  Found existing OpenClaw credentials for [bold]{existing.email}[/bold]")
-            if click.confirm("  Reuse these credentials?", default=True):
-                from pathlib import Path
-                creds_path = Path.home() / ".syne" / "google_credentials.json"
-                existing.save(creds_path)
-                console.print(f"  [green]✓ Credentials saved to {creds_path}[/green]")
-            else:
-                console.print("  Starting fresh OAuth login...")
-                creds = asyncio.run(login_google())
-                from pathlib import Path
-                creds_path = Path.home() / ".syne" / "google_credentials.json"
-                creds.save(creds_path)
-        else:
-            console.print("  No existing credentials found. Starting OAuth login...")
-            creds = asyncio.run(login_google())
-            from pathlib import Path
-            creds_path = Path.home() / ".syne" / "google_credentials.json"
-            creds.save(creds_path)
+        # Always do fresh OAuth login — user must authenticate with their own Google account
+        from .auth.google_oauth import login_google
+        console.print("  Opening browser for Google sign-in...")
+        console.print("  [dim]Sign in with YOUR Google account to get free Gemini access.[/dim]")
+        google_creds = asyncio.run(login_google())
+        # Credentials saved to DB after schema init (Step 6)
 
         env_lines.append("SYNE_PROVIDER=google")
         provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "oauth"}
@@ -198,6 +183,10 @@ def init():
             from .db.credentials import set_telegram_bot_token
             await set_telegram_bot_token(telegram_token)
             console.print("[green]✓ Telegram bot token saved to database[/green]")
+        # Save Google OAuth credentials to DB if collected
+        if provider_config and provider_config.get("driver") == "google_cca" and google_creds:
+            await google_creds.save_to_db()
+            console.print(f"[green]✓ Google OAuth credentials saved to database ({google_creds.email})[/green]")
         await close_db()
 
     asyncio.run(_save_identity())
@@ -675,19 +664,21 @@ def repair(fix):
 
         # ── 2. Google OAuth ──
         console.print("\n[bold]2. Google OAuth[/bold]")
-        from pathlib import Path
-        creds_path = Path.home() / ".syne" / "google_credentials.json"
-        if creds_path.exists():
-            try:
-                from .auth.google_oauth import get_credentials
-                creds = await get_credentials()
+        try:
+            from .auth.google_oauth import get_credentials
+            creds = await get_credentials(auto_refresh=False)
+            if creds:
                 token = await creds.get_token()
                 console.print(f"   [green]✓ Authenticated as {creds.email}[/green]")
                 console.print(f"   [dim]Token valid (first 8): {token[:8]}...[/dim]")
-            except Exception as e:
-                issues.append(f"OAuth token refresh failed: {e}")
-                console.print(f"   [red]✗ Token refresh failed: {e}[/red]")
-                console.print("   [dim]Run 'syne init' to re-authenticate[/dim]")
+            else:
+                issues.append("No Google OAuth credentials found")
+                console.print("   [yellow]⚠ No credentials found[/yellow]")
+                console.print("   [dim]Run 'syne init' to authenticate[/dim]")
+        except Exception as e:
+            issues.append(f"OAuth token refresh failed: {e}")
+            console.print(f"   [red]✗ Token refresh failed: {e}[/red]")
+            console.print("   [dim]Run 'syne init' to re-authenticate[/dim]")
         else:
             issues.append("No Google credentials found")
             console.print("   [yellow]⚠ No credentials at {creds_path}[/yellow]")
@@ -931,6 +922,9 @@ def _get_provider(settings):
 
         async def _make():
             creds = await get_credentials()
+            if not creds:
+                console.print("[red]No Google OAuth credentials. Run 'syne init' to authenticate.[/red]")
+                sys.exit(1)
             return GoogleProvider(credentials=creds)
 
         return asyncio.run(_make())

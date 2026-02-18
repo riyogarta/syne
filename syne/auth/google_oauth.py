@@ -461,7 +461,7 @@ async def _migrate_from_file() -> Optional[GoogleCredentials]:
     return creds
 
 
-async def get_credentials(auto_refresh: bool = True) -> GoogleCredentials:
+async def get_credentials(auto_refresh: bool = True) -> Optional[GoogleCredentials]:
     """Get Google credentials from (in order):
     1. PostgreSQL database (primary)
     2. Legacy file ~/.syne/google_credentials.json (auto-migrate to DB)
@@ -490,16 +490,9 @@ async def get_credentials(auto_refresh: bool = True) -> GoogleCredentials:
         logger.info(f"Migrated file credentials for {creds.email}")
         return creds
 
-    # 3. Try OpenClaw (migrate to DB)
-    creds = detect_openclaw_credentials()
-    if creds:
-        await creds.save_to_db()
-        if auto_refresh and creds.is_expired:
-            await creds.get_token()
-        logger.info(f"Imported OpenClaw credentials for {creds.email}")
-        return creds
-
-    # 4. Fresh login (saves to DB)
-    creds = await login_google()
-    await creds.save_to_db()
-    return creds
+    # No credentials found — user must run `syne init` to authenticate
+    # Note: OpenClaw credential detection (detect_openclaw_credentials) is available
+    # but NOT used at runtime — users must authenticate via `syne init` with their
+    # own Google account. Auto-importing another tool's credentials would be wrong.
+    logger.warning("No Google OAuth credentials found. Run 'syne init' to authenticate.")
+    return None

@@ -63,6 +63,8 @@ class ImageAnalysisAbility(Ability):
             
             try:
                 creds = await get_credentials()
+                if not creds:
+                    return {"success": False, "error": "No Google OAuth credentials. Run 'syne init' to authenticate."}
                 access_token = await creds.get_token()
             except Exception as e:
                 return {"success": False, "error": f"Failed to get Google credentials: {str(e)}"}

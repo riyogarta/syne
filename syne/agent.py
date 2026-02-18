@@ -202,6 +202,8 @@ class SyneAgent:
 
         if provider_name == "google":
             creds = await get_credentials()
+            if not creds:
+                raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
             chat_provider = GoogleProvider(
                 credentials=creds,
                 chat_model=chat_model,

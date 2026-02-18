@@ -80,6 +80,8 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     if driver_name == "google_cca":
         from ..auth.google_oauth import get_credentials
         creds = await get_credentials()
+        if not creds:
+            raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
         return GoogleProvider(
             credentials=creds,
             chat_model=model_id,
