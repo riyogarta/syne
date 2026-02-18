@@ -16,7 +16,8 @@ logger = logging.getLogger("syne.llm.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
-# Claude CLI credentials path
+# Credential paths (in priority order)
+OPENCLAW_AUTH_PROFILES = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
 CLAUDE_CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 
 
@@ -47,52 +48,91 @@ class AnthropicProvider(LLMProvider):
         return True
 
     def _load_token(self) -> str:
-        """Load OAuth token from credentials file. Re-reads if stale."""
+        """Load token from OpenClaw auth-profiles or Claude CLI credentials.
+        
+        Priority:
+        1. OpenClaw auth-profiles.json (anthropic:default or anthropic:*)
+        2. Claude CLI ~/.claude/.credentials.json (claudeAiOauth)
+        """
         now = time.time()
         
         # Re-read file at most every 30 seconds
-        if self._access_token and (now - self._last_read) < 30 and now < self._expires_at:
-            return self._access_token
+        if self._access_token and (now - self._last_read) < 30:
+            if self._expires_at == 0 or now < self._expires_at:
+                return self._access_token
         
+        # Try OpenClaw auth-profiles first
+        token = self._load_from_openclaw_profiles()
+        if token:
+            self._access_token = token
+            self._expires_at = 0  # OpenClaw manages refresh, no expiry tracking needed
+            self._last_read = now
+            return token
+        
+        # Fallback: Claude CLI credentials
+        token = self._load_from_claude_cli()
+        if token:
+            return token
+        
+        raise RuntimeError(
+            "No Claude/Anthropic token found. Check:\n"
+            f"  1. OpenClaw auth-profiles: {OPENCLAW_AUTH_PROFILES}\n"
+            f"  2. Claude CLI credentials: {self.credentials_path}"
+        )
+    
+    def _load_from_openclaw_profiles(self) -> Optional[str]:
+        """Load token from OpenClaw auth-profiles.json."""
+        try:
+            with open(OPENCLAW_AUTH_PROFILES) as f:
+                data = json.load(f)
+            
+            profiles = data.get("profiles", {})
+            # Try anthropic:default first, then any anthropic:* profile
+            for key in ["anthropic:default", *[k for k in profiles if k.startswith("anthropic:")]]:
+                profile = profiles.get(key, {})
+                token = profile.get("token", "")
+                if token:
+                    logger.debug(f"Loaded Anthropic token from OpenClaw profile: {key}")
+                    return token
+            
+            return None
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+    
+    def _load_from_claude_cli(self) -> Optional[str]:
+        """Load token from Claude CLI credentials."""
         try:
             with open(self.credentials_path) as f:
                 creds = json.load(f)
             
             oauth = creds.get("claudeAiOauth", {})
-            self._access_token = oauth.get("accessToken", "")
+            token = oauth.get("accessToken", "")
+            if not token:
+                return None
+            
             expires_at_ms = oauth.get("expiresAt", 0)
             self._expires_at = expires_at_ms / 1000 if expires_at_ms > 1e12 else expires_at_ms
-            self._last_read = now
+            self._access_token = token
+            self._last_read = time.time()
             
-            if not self._access_token:
-                raise RuntimeError("No accessToken in Claude credentials")
+            if time.time() >= self._expires_at:
+                logger.warning("Claude CLI token expired. Run 'claude' to refresh.")
             
-            # Check if expired
-            if now >= self._expires_at:
-                logger.warning(
-                    f"Claude OAuth token expired at {time.strftime('%Y-%m-%d %H:%M', time.localtime(self._expires_at))}. "
-                    "Run 'claude' CLI to refresh, or OpenClaw will refresh automatically."
-                )
-                # Still return the token — Anthropic may accept it briefly,
-                # or the caller needs to handle the 401
-            
-            return self._access_token
-            
-        except FileNotFoundError:
-            raise RuntimeError(
-                f"Claude credentials not found: {self.credentials_path}. "
-                "Run 'claude' CLI to authenticate first."
-            )
-        except json.JSONDecodeError:
-            raise RuntimeError(f"Invalid JSON in {self.credentials_path}")
+            return token
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
 
     def _headers(self) -> dict:
         token = self._load_token()
-        return {
+        headers = {
             "Authorization": f"Bearer {token}",
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
         }
+        # OAuth tokens (sk-ant-oat*) require the beta header
+        if token.startswith("sk-ant-oat"):
+            headers["anthropic-beta"] = "oauth-2025-04-20"
+        return headers
 
     async def chat(
         self,
