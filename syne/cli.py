@@ -49,12 +49,35 @@ def init():
 
     if choice == 1:
         console.print("\n[bold green]✓ Google Gemini selected (OAuth)[/bold green]")
+        console.print()
+        console.print("  [bold]You need a Google Cloud OAuth client ID.[/bold]")
+        console.print("  If you don't have one yet, follow these steps:")
+        console.print()
+        console.print("  1. Go to [link=https://console.cloud.google.com]console.cloud.google.com[/link]")
+        console.print("  2. Create a project (or use existing)")
+        console.print("  3. Enable the [bold]Generative Language API[/bold]:")
+        console.print("     [link=https://console.cloud.google.com/flows/enableapi?apiid=generativelanguage.googleapis.com]Enable API →[/link]")
+        console.print("  4. Go to [bold]Google Auth platform → Clients[/bold]")
+        console.print("  5. Click [bold]Create Client → Desktop app[/bold]")
+        console.print("  6. Download the [bold]client_secret.json[/bold] file")
+        console.print()
 
-        # Always do fresh OAuth login — user must authenticate with their own Google account
-        from .auth.google_oauth import login_google
-        console.print("  Opening browser for Google sign-in...")
-        console.print("  [dim]Sign in with YOUR Google account to get free Gemini access.[/dim]")
-        google_creds = asyncio.run(login_google())
+        client_secret_path = click.prompt(
+            "  Path to client_secret.json",
+            type=str,
+        )
+
+        from .auth.google_oauth import load_client_secret, login_google
+        try:
+            client_id, client_secret = load_client_secret(client_secret_path)
+            console.print(f"  [green]✓ Client ID loaded: {client_id[:20]}...[/green]")
+        except (FileNotFoundError, ValueError) as e:
+            console.print(f"  [red]✗ {e}[/red]")
+            return
+
+        console.print()
+        console.print("  [dim]Opening browser — sign in with YOUR Google account.[/dim]")
+        google_creds = asyncio.run(login_google(client_id, client_secret))
         # Credentials saved to DB after schema init (Step 6)
 
         env_lines.append("SYNE_PROVIDER=google")

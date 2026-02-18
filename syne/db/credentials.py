@@ -23,6 +23,8 @@ CRED_GOOGLE_REFRESH_TOKEN = "credential.google_oauth_refresh_token"
 CRED_GOOGLE_EXPIRES_AT = "credential.google_oauth_expires_at"
 CRED_GOOGLE_PROJECT_ID = "credential.google_oauth_project_id"
 CRED_GOOGLE_EMAIL = "credential.google_oauth_email"
+CRED_GOOGLE_CLIENT_ID = "credential.google_oauth_client_id"
+CRED_GOOGLE_CLIENT_SECRET = "credential.google_oauth_client_secret"
 
 
 # ============================================================
@@ -70,8 +72,8 @@ async def set_telegram_bot_token(token: str) -> None:
 async def get_google_oauth_credentials() -> Optional[dict]:
     """Get Google OAuth credentials from DB.
     
-    Returns dict with: access_token, refresh_token, expires_at, project_id, email
-    or None if not found.
+    Returns dict with: access_token, refresh_token, expires_at, project_id, email,
+    client_id, client_secret — or None if not found.
     """
     refresh = await get_credential(CRED_GOOGLE_REFRESH_TOKEN)
     if not refresh:
@@ -83,6 +85,8 @@ async def get_google_oauth_credentials() -> Optional[dict]:
         "expires_at": await get_credential(CRED_GOOGLE_EXPIRES_AT, 0),
         "project_id": await get_credential(CRED_GOOGLE_PROJECT_ID, ""),
         "email": await get_credential(CRED_GOOGLE_EMAIL),
+        "client_id": await get_credential(CRED_GOOGLE_CLIENT_ID, ""),
+        "client_secret": await get_credential(CRED_GOOGLE_CLIENT_SECRET, ""),
     }
 
 
@@ -92,8 +96,10 @@ async def set_google_oauth_credentials(
     expires_at: float,
     project_id: str,
     email: Optional[str] = None,
+    client_id: str = "",
+    client_secret: str = "",
 ) -> None:
-    """Store Google OAuth credentials in DB."""
+    """Store Google OAuth credentials in DB (including user's own client ID/secret)."""
     await set_credential(
         CRED_GOOGLE_ACCESS_TOKEN,
         access_token,
@@ -119,6 +125,18 @@ async def set_google_oauth_credentials(
             CRED_GOOGLE_EMAIL,
             email,
             "Google account email"
+        )
+    if client_id:
+        await set_credential(
+            CRED_GOOGLE_CLIENT_ID,
+            client_id,
+            "Google OAuth client ID (user's own)"
+        )
+    if client_secret:
+        await set_credential(
+            CRED_GOOGLE_CLIENT_SECRET,
+            client_secret,
+            "Google OAuth client secret (user's own)"
         )
     
     logger.info(f"Google OAuth credentials stored in DB for {email or 'unknown'}")
