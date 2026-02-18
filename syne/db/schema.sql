@@ -215,12 +215,11 @@ CREATE TABLE IF NOT EXISTS abilities (
 CREATE INDEX IF NOT EXISTS idx_abilities_enabled ON abilities (enabled) WHERE enabled = true;
 CREATE INDEX IF NOT EXISTS idx_abilities_source ON abilities (source);
 
--- Default bundled abilities
+-- Default bundled abilities (screenshot is NOT here — Syne creates it dynamically)
 INSERT INTO abilities (name, description, version, source, module_path, requires_access_level) VALUES
     ('image_gen', 'Generate images from text descriptions using AI', '1.0', 'bundled', 'syne.abilities.image_gen', 'family'),
     ('image_analysis', 'Analyze and describe images using AI vision', '1.0', 'bundled', 'syne.abilities.image_analysis', 'family'),
-    ('maps', 'Search for nearby places, get directions, and geocode addresses', '1.0', 'bundled', 'syne.abilities.maps', 'family'),
-    ('screenshot', 'Take a screenshot of a webpage given its URL. Returns a PNG image.', '1.0', 'bundled', 'syne.abilities.screenshot', 'family')
+    ('maps', 'Search for nearby places, get directions, and geocode addresses', '1.0', 'bundled', 'syne.abilities.maps', 'family')
 ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================

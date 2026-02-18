@@ -24,17 +24,16 @@ def get_bundled_ability_classes() -> list[Type[Ability]]:
     3. No surprises from dynamic discovery
     
     NOTE: web_search was migrated to core tool (syne/tools/web_search.py)
+    NOTE: screenshot is created by Syne itself (dynamic ability, not bundled)
     """
     from .image_gen import ImageGenAbility
     from .image_analysis import ImageAnalysisAbility
     from .maps import MapsAbility
-    from .screenshot import ScreenshotAbility
     
     return [
         ImageGenAbility,
         ImageAnalysisAbility,
         MapsAbility,
-        ScreenshotAbility,
     ]
 
 
