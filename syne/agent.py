@@ -806,6 +806,16 @@ class SyneAgent:
             except json.JSONDecodeError:
                 parsed = value  # Store as string
             await set_config(key, parsed)
+            
+            # Auto-sync: if chat_model changes, find matching model in registry
+            # and update active_model to keep them in sync
+            if key == "provider.chat_model":
+                models = await get_config("provider.models", [])
+                for m in models:
+                    if m.get("model_id") == parsed or m.get("key") == parsed:
+                        await set_config("provider.active_model", m["key"])
+                        break
+            
             return f"Config updated: `{key}` = {parsed}"
 
         return f"Unknown action: {action}"

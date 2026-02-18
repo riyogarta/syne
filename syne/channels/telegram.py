@@ -512,16 +512,22 @@ Or just send me a message!"""
         identity = await get_identity()
         name = identity.get("name", "Syne")
 
-        # Models
-        chat_model = await get_config("provider.chat_model", "unknown")
+        # Get model registry and active model
+        models = await get_config("provider.models", [])
+        active_model_key = await get_config("provider.active_model", None)
+        active_model_entry = next((m for m in models if m.get("key") == active_model_key), None) if models and active_model_key else None
+        
+        # Model name — prefer registry, fallback to legacy key
+        if active_model_entry:
+            chat_model = active_model_entry.get("model_id", active_model_key)
+        else:
+            chat_model = await get_config("provider.chat_model", "unknown")
+        
         auto_capture = await get_config("memory.auto_capture", False)
         thinking_budget = await get_config("session.thinking_budget", None)
         reasoning_visible = await get_config("session.reasoning_visible", False)
 
-        # Get context window and driver name from active model registry
-        models = await get_config("provider.models", [])
-        active_model_key = await get_config("provider.active_model", None)
-        active_model_entry = next((m for m in models if m.get("key") == active_model_key), None) if models and active_model_key else None
+        # Context window and driver name from registry
         context_window = active_model_entry.get("context_window", 128000) if active_model_entry else 128000
         provider_name = active_model_entry.get("driver", self.agent.provider.name) if active_model_entry else self.agent.provider.name
         
