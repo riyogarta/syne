@@ -276,6 +276,14 @@ class AnthropicProvider(LLMProvider):
         """Anthropic does not support embeddings."""
         raise NotImplementedError("Anthropic does not provide an embedding API")
 
+    async def embed_batch(
+        self,
+        texts: list[str],
+        model: Optional[str] = None,
+    ) -> list[EmbeddingResponse]:
+        """Anthropic does not support embeddings."""
+        raise NotImplementedError("Anthropic does not provide an embedding API")
+
     @staticmethod
     def _convert_tools(tools: list[dict]) -> list[dict]:
         """Convert OpenAI-style tool definitions to Anthropic format."""
