@@ -155,15 +155,13 @@ class AnthropicProvider(LLMProvider):
                     conversation.append({"role": "user", "content": pending_tool_results})
                     pending_tool_results = []
                 
-                # Build content — handle vision (base64 images)
-                if m.images:
+                # Build content — handle vision (base64 images via metadata)
+                img_meta = (m.metadata or {}).get("image")
+                if img_meta:
                     content_parts = []
-                    for img in m.images:
-                        media_type = "image/jpeg"
-                        img_data = img
-                        if img.startswith("data:"):
-                            header, img_data = img.split(",", 1)
-                            media_type = header.split(":")[1].split(";")[0]
+                    media_type = img_meta.get("mime_type", "image/jpeg")
+                    img_data = img_meta.get("base64", "")
+                    if img_data:
                         content_parts.append({
                             "type": "image",
                             "source": {
