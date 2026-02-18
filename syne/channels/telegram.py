@@ -521,6 +521,18 @@ Or just send me a message!"""
         # Provider info
         provider_name = self.agent.provider.name
         
+        # Get context window from active model registry
+        models = await get_config("provider.models", [])
+        active_model_key = await get_config("provider.active_model", None)
+        active_model_entry = next((m for m in models if m.get("key") == active_model_key), None) if models and active_model_key else None
+        context_window = active_model_entry.get("context_window", 128000) if active_model_entry else 128000
+        
+        # Get active embedding info
+        embed_models = await get_config("provider.embedding_models", [])
+        active_embed_key = await get_config("provider.active_embedding", None)
+        active_embed_entry = next((m for m in embed_models if m.get("key") == active_embed_key), None) if embed_models and active_embed_key else None
+        embed_label = active_embed_entry.get("label", "Together AI") if active_embed_entry else "Together AI"
+        
         # Tools & abilities
         tool_count = len(self.agent.tools.list_tools("owner"))
         abilities = ability_count["c"] if ability_count else 0
@@ -536,11 +548,18 @@ Or just send me a message!"""
             chars = stats["total_chars"]
             # Rough token estimate (chars / 3.5)
             est_tokens = int(chars / 3.5)
-            max_tokens = 128000  # Gemini context window
+            max_tokens = context_window
             pct = round(est_tokens / max_tokens * 100)
+            
+            # Format context window for display
+            if max_tokens >= 1000000:
+                ctx_display = f"{max_tokens / 1000000:.1f}M"
+            else:
+                ctx_display = f"{max_tokens // 1000}K"
             
             session_info = (
                 f"📋 Messages: {msg_count} | ~{est_tokens:,}/{max_tokens:,} tokens ({pct}%)\n"
+                f"📐 Context window: {ctx_display}\n"
                 f"🧹 Compactions: {compactions}"
             )
 
@@ -548,6 +567,7 @@ Or just send me a message!"""
             f"🧠 **{name} Status**",
             "",
             f"🤖 Model: `{chat_model}` ({provider_name})",
+            f"🧬 Embedding: {embed_label}",
             f"📚 Memories: {mem_count['c']}",
             f"👥 Users: {user_count['c']} | Groups: {group_count['c']}",
             f"💬 Active sessions: {session_count['c']}",
@@ -856,12 +876,20 @@ Or just send me a message!"""
         # Arrange buttons in rows of 2
         keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
         
-        # Get current model label
+        # Get current model label and context window
         current_model = next((m for m in models if m.get("key") == active_model_key), None)
         current_label = current_model.get("label", active_model_key) if current_model else active_model_key
+        ctx_window = current_model.get("context_window") if current_model else None
+        
+        ctx_info = ""
+        if ctx_window:
+            if ctx_window >= 1000000:
+                ctx_info = f"\n📐 Context window: {ctx_window / 1000000:.1f}M tokens"
+            else:
+                ctx_info = f"\n📐 Context window: {ctx_window // 1000}K tokens"
         
         await update.message.reply_text(
-            f"🤖 **Current model:** {current_label}",
+            f"🤖 **Current model:** {current_label}{ctx_info}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -992,6 +1020,15 @@ Or just send me a message!"""
             if success:
                 # Test passed — save new model
                 await set_config("provider.active_model", model_key)
+                
+                # Auto-adjust compaction threshold based on context window
+                # Default: ~75% of context window in chars (tokens * 3.5)
+                ctx_window = model_entry.get("context_window")
+                if ctx_window:
+                    new_threshold = int(ctx_window * 0.75 * 3.5)
+                    await set_config("session.compaction_threshold", new_threshold)
+                    logger.info(f"Auto-adjusted compaction threshold to {new_threshold} chars for {ctx_window} token context")
+                
                 return True, model_entry.get("label", model_key)
             else:
                 # Test failed — report error
