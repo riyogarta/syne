@@ -252,7 +252,7 @@ class Conversation:
         """
         from .db.models import get_config
 
-        max_rounds = await get_config("session.max_tool_rounds", 25)
+        max_rounds = await get_config("session.max_tool_rounds", 100)
         if isinstance(max_rounds, str):
             max_rounds = int(max_rounds)
 
