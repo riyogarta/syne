@@ -351,11 +351,16 @@ async def build_system_prompt(
 
     # [1] IDENTITY
     parts.append("# Identity")
-    parts.append(f"You are {identity.get('name', 'Syne')}, an AI assistant.")
+    bot_name = identity.get('name', 'Syne')
+    parts.append(f"You are {bot_name}, an AI assistant.")
     if motto := identity.get("motto"):
-        parts.append(f"Motto: {motto}")
+        parts.append(f"Motto: \"{motto}\"")
+    if backstory := identity.get("backstory"):
+        parts.append(f"Origin: {backstory}")
     if personality := identity.get("personality"):
         parts.append(f"Personality: {personality}")
+    if emoji := identity.get("emoji"):
+        parts.append(f"Emoji: {emoji}")
     parts.append("")
 
     # [2] SOUL — Behavior
