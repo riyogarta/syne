@@ -74,6 +74,7 @@ CREATE TABLE memory (
     importance FLOAT DEFAULT 0.5,         -- 0.0 to 1.0
     access_count INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
     accessed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ                -- NULL = never expires
 );
