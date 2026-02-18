@@ -17,6 +17,7 @@ from .codex import CodexProvider
 from .openai import OpenAIProvider
 from .together import TogetherProvider
 from .hybrid import HybridProvider
+from .anthropic import AnthropicProvider
 
 logger = logging.getLogger("syne.llm.drivers")
 
@@ -25,6 +26,7 @@ _DRIVER_MAP: dict[str, Type[LLMProvider]] = {
     "google_cca": GoogleProvider,
     "codex": CodexProvider,
     "openai_compat": OpenAIProvider,
+    "anthropic": AnthropicProvider,
 }
 
 
@@ -91,6 +93,14 @@ async def create_provider(model_entry: dict) -> LLMProvider:
         return CodexProvider(
             access_token=access_token,
             refresh_token=refresh_token,
+            chat_model=model_id,
+        )
+    
+    # ═══════════════════════════════════════════════════════════════
+    # Anthropic Claude (OAuth via claude.ai)
+    # ═══════════════════════════════════════════════════════════════
+    elif driver_name == "anthropic":
+        return AnthropicProvider(
             chat_model=model_id,
         )
     
