@@ -336,11 +336,11 @@ class TestBundledAbilitiesExist:
         assert ability.name == "image_gen"
         assert "TOGETHER_API_KEY" not in ability.get_required_config()  # Falls back to env
     
-    def test_web_search_ability_exists(self):
-        """WebSearchAbility should be importable."""
-        from syne.abilities.web_search import WebSearchAbility
-        ability = WebSearchAbility()
-        assert ability.name == "web_search"
+    def test_screenshot_ability_exists(self):
+        """ScreenshotAbility should be importable."""
+        from syne.abilities.screenshot import ScreenshotAbility
+        ability = ScreenshotAbility()
+        assert ability.name == "screenshot"
     
     def test_image_analysis_ability_exists(self):
         """ImageAnalysisAbility should be importable."""
@@ -351,10 +351,10 @@ class TestBundledAbilitiesExist:
     def test_all_bundled_abilities_have_valid_schemas(self):
         """All bundled abilities should have valid OpenAI schemas."""
         from syne.abilities.image_gen import ImageGenAbility
-        from syne.abilities.web_search import WebSearchAbility
+        from syne.abilities.screenshot import ScreenshotAbility
         from syne.abilities.image_analysis import ImageAnalysisAbility
         
-        for ability_cls in [ImageGenAbility, WebSearchAbility, ImageAnalysisAbility]:
+        for ability_cls in [ImageGenAbility, ScreenshotAbility, ImageAnalysisAbility]:
             ability = ability_cls()
             schema = ability.get_schema()
             
@@ -379,18 +379,18 @@ class TestLoader:
         registry = AbilityRegistry()
         count = load_bundled_abilities(registry)
         
-        # NOTE: web_search was migrated to core tool (syne/tools/web_search.py)
-        assert count >= 3  # image_gen, image_analysis, maps
+        assert count >= 4  # image_gen, image_analysis, maps, screenshot
         assert registry.get("image_gen") is not None
         assert registry.get("image_analysis") is not None
         assert registry.get("maps") is not None
+        assert registry.get("screenshot") is not None
     
     def test_get_bundled_ability_classes(self):
         """Should return list of ability classes."""
         from syne.abilities.loader import get_bundled_ability_classes
         
         classes = get_bundled_ability_classes()
-        assert len(classes) >= 3  # image_gen, image_analysis, maps
+        assert len(classes) >= 4  # image_gen, image_analysis, maps, screenshot
         
         # All should be Ability subclasses
         for cls in classes:
