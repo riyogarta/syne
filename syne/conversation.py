@@ -244,9 +244,13 @@ class Conversation:
         context: list[ChatMessage],
         access_level: str,
         tool_schemas: Optional[list[dict]] = None,
-        max_rounds: int = 10,
+        max_rounds: int = 50,
     ) -> ChatResponse:
-        """Execute tool calls and get final response. Loops for multi-step tool use."""
+        """Execute tool calls and get final response. Loops for multi-step tool use.
+        
+        max_rounds is a safety net against infinite loops, not a practical limit.
+        The LLM decides when to stop calling tools.
+        """
         current = response
 
         for round_num in range(max_rounds):
