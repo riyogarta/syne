@@ -518,14 +518,12 @@ Or just send me a message!"""
         thinking_budget = await get_config("session.thinking_budget", None)
         reasoning_visible = await get_config("session.reasoning_visible", False)
 
-        # Provider info
-        provider_name = self.agent.provider.name
-        
-        # Get context window from active model registry
+        # Get context window and driver name from active model registry
         models = await get_config("provider.models", [])
         active_model_key = await get_config("provider.active_model", None)
         active_model_entry = next((m for m in models if m.get("key") == active_model_key), None) if models and active_model_key else None
         context_window = active_model_entry.get("context_window", 128000) if active_model_entry else 128000
+        provider_name = active_model_entry.get("driver", self.agent.provider.name) if active_model_entry else self.agent.provider.name
         
         # Get active embedding info
         embed_models = await get_config("provider.embedding_models", [])
