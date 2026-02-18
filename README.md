@@ -25,42 +25,38 @@ Most AI assistants forget everything between sessions. They have no persistent m
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                       SYNE AGENT                           │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                      CORE                            │  │
-│  │  (Cannot be modified by Syne)                        │  │
-│  │                                                      │  │
-│  │  ┌──────┐ ┌───────┐ ┌──────────┐ ┌────────┐ ┌─────┐ │  │
-│  │  │ Chat │ │Memory │ │Compaction│ │Telegram│ │ Sub │ │  │
-│  │  │(LLM) │ │(pgvec)│ │(context) │ │ (bot)  │ │agent│ │  │
-│  │  └──────┘ └───────┘ └──────────┘ └────────┘ └─────┘ │  │
-│  │                                                      │  │
-│  │  Core Tools:                                         │  │
-│  │  exec · web_search · web_fetch · memory · config     │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │                    ABILITIES                         │  │
-│  │  (Pluggable — ON/OFF, added, self-created)           │  │
-│  │                                                      │  │
-│  │  ┌─────────┐ ┌──────────────┐ ┌──────┐              │  │
-│  │  │image_gen│ │image_analysis│ │ maps │  ...          │  │
-│  │  └─────────┘ └──────────────┘ └──────┘              │  │
-│  │                                                      │  │
-│  │  ┌────────────────────────────────────────────────┐  │  │
-│  │  │          Self-Created Abilities                │  │  │
-│  │  │  (Syne creates new abilities at runtime)       │  │  │
-│  │  └────────────────────────────────────────────────┘  │  │
-│  └──────────────────────────────────────────────────────┘  │
-│                                                            │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              PostgreSQL + pgvector                   │  │
-│  │  identity · soul · rules · users · memory · sessions │  │
-│  │  messages · abilities · config · subagent_runs       │  │
-│  └──────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────┘
++------------------------------------------------------------+
+|                       SYNE AGENT                           |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |                      CORE                            |  |
+|  |  (Cannot be modified by Syne)                        |  |
+|  |                                                      |  |
+|  |  [Chat]  [Memory]  [Compaction]  [Telegram]  [Sub]   |  |
+|  |  (LLM)   (pgvec)    (context)     (bot)     agent    |  |
+|  |                                                      |  |
+|  |  Core Tools:                                         |  |
+|  |  exec · web_search · web_fetch · memory · config     |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |                    ABILITIES                         |  |
+|  |  (Pluggable — ON/OFF, added, self-created)           |  |
+|  |                                                      |  |
+|  |  [image_gen]  [image_analysis]  [maps]  ...          |  |
+|  |                                                      |  |
+|  |  +------------------------------------------------+  |  |
+|  |  |          Self-Created Abilities                |  |  |
+|  |  |  (Syne creates new abilities at runtime)       |  |  |
+|  |  +------------------------------------------------+  |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |              PostgreSQL + pgvector                   |  |
+|  |  identity · soul · rules · users · memory · sessions |  |
+|  |  messages · abilities · config · subagent_runs       |  |
+|  +------------------------------------------------------+  |
++------------------------------------------------------------+
 ```
 
 ### Core vs Abilities
