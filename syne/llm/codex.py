@@ -11,7 +11,10 @@ from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
 logger = logging.getLogger("syne.llm.codex")
 
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api"
-# No hardcoded auth file path — tokens come from DB or env
+
+# Codex OAuth (same client ID as OpenClaw/Codex CLI — public app)
+_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+_CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 
 # Token refresh buffer — refresh if expires within this many seconds
 _REFRESH_BUFFER_SECONDS = 300  # 5 minutes
@@ -50,16 +53,89 @@ class CodexProvider(LLMProvider):
         return True
 
     def _refresh_token(self) -> bool:
-        """Check if token needs refresh. Currently tokens are provided at init.
+        """Refresh Codex OAuth token if expired or about to expire.
         
-        TODO: Implement proper Codex OAuth token refresh via chatgpt.com endpoint.
-        For now, user must update token in DB when it expires.
+        Uses the same refresh endpoint as OpenClaw/Codex CLI:
+        POST https://auth.openai.com/oauth/token
         
         Returns:
             True if token was refreshed, False otherwise
         """
-        # Token refresh not yet implemented — tokens come from DB at init
-        return False
+        now = time.time()
+        
+        # Check if refresh needed
+        if self._token_expires_at > 0 and (now + _REFRESH_BUFFER_SECONDS) < self._token_expires_at:
+            return False
+        
+        if not self.refresh_token:
+            logger.warning("No refresh token available for Codex")
+            return False
+        
+        try:
+            # Synchronous refresh using httpx (called from sync context)
+            with httpx.Client(timeout=30) as client:
+                resp = client.post(
+                    _CODEX_TOKEN_URL,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": self.refresh_token,
+                        "client_id": _CODEX_CLIENT_ID,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                
+                if not resp.is_success:
+                    logger.error(f"Codex token refresh failed: {resp.status_code} {resp.text[:200]}")
+                    return False
+                
+                data = resp.json()
+            
+            new_access = data.get("access_token")
+            new_refresh = data.get("refresh_token")
+            expires_in = data.get("expires_in", 0)
+            
+            if not new_access or not new_refresh:
+                logger.error("Codex token refresh response missing fields")
+                return False
+            
+            self.access_token = new_access
+            self.refresh_token = new_refresh
+            self._token_expires_at = now + expires_in
+            
+            # Save refreshed tokens to DB (fire and forget via thread)
+            self._save_tokens_to_db(new_access, new_refresh, self._token_expires_at)
+            
+            logger.info("Codex OAuth token refreshed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Codex token refresh error: {e}")
+            return False
+    
+    def _save_tokens_to_db(self, access_token: str, refresh_token: str, expires_at: float):
+        """Save refreshed tokens to DB in background."""
+        import asyncio
+        import threading
+        
+        async def _save():
+            try:
+                from ..db.models import set_config
+                await set_config("credential.codex_access_token", access_token)
+                await set_config("credential.codex_refresh_token", refresh_token)
+                await set_config("credential.codex_expires_at", expires_at)
+                logger.debug("Codex tokens saved to DB")
+            except Exception as e:
+                logger.warning(f"Failed to save Codex tokens to DB: {e}")
+        
+        def _run():
+            try:
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(_save())
+                loop.close()
+            except Exception:
+                pass
+        
+        threading.Thread(target=_run, daemon=True).start()
 
     def _get_headers(self) -> dict:
         # Refresh token if needed before building headers

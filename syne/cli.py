@@ -46,6 +46,7 @@ def init():
     env_lines = []
     provider_config = None  # Will be saved to DB after schema init
     google_creds = None  # Only set for Google OAuth provider
+    codex_creds = None  # Only set for Codex OAuth provider
 
     if choice == 1:
         console.print("\n[bold green]✓ Google Gemini selected (OAuth)[/bold green]")
@@ -60,15 +61,21 @@ def init():
 
     elif choice == 2:
         console.print("\n[bold green]✓ ChatGPT selected (Codex OAuth)[/bold green]")
-        console.print("  [dim]Requires OpenAI/ChatGPT login via Codex CLI.[/dim]")
         console.print("  [dim]Requires ChatGPT Plus/Pro/Team subscription.[/dim]")
+
+        from .auth.codex_oauth import login_codex
+        codex_creds = asyncio.run(login_codex())
+        # Credentials saved to DB after schema init (Step 6)
+
         env_lines.append("SYNE_PROVIDER=codex")
         provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
 
     elif choice == 3:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
-        console.print("  [dim]Requires claude.ai subscription + Claude CLI login.[/dim]")
-        console.print("  [dim]Auth tokens read from ~/.claude/.credentials.json[/dim]")
+        console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
+        console.print("  [dim]Install Claude CLI: npm install -g @anthropic-ai/claude-code[/dim]")
+        console.print("  [dim]Then run: claude login[/dim]")
+        console.print("  [dim]Syne reads tokens from ~/.claude/.credentials.json[/dim]")
         env_lines.append("SYNE_PROVIDER=anthropic")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
 
@@ -185,6 +192,13 @@ def init():
         if google_creds:
             await google_creds.save_to_db()
             console.print(f"[green]✓ Google OAuth credentials saved to database ({google_creds.email})[/green]")
+        # Save Codex OAuth credentials to DB if collected
+        if codex_creds:
+            from .db.models import set_config
+            await set_config("credential.codex_access_token", codex_creds["access_token"])
+            await set_config("credential.codex_refresh_token", codex_creds["refresh_token"])
+            await set_config("credential.codex_expires_at", codex_creds["expires_at"])
+            console.print("[green]✓ ChatGPT OAuth credentials saved to database[/green]")
         await close_db()
 
     asyncio.run(_save_identity())
