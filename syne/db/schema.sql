@@ -251,5 +251,8 @@ INSERT INTO config (key, value, description) VALUES
     ('web_fetch.timeout', '30', 'Web fetch timeout in seconds'),
     -- Model registry (driver-based model system)
     ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth"}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth"}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth"}]', 'Available LLM models with driver configuration'),
-    ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models')
+    ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models'),
+    -- Embedding model registry (same pattern as chat model registry)
+    ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}]', 'Available embedding models with driver configuration'),
+    ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key')
 ON CONFLICT (key) DO NOTHING;

@@ -128,11 +128,57 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     raise RuntimeError(f"Unhandled driver: {driver_name}")
 
 
-async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
-    """Create a HybridProvider with chat from model_entry and embedding from Together AI.
+async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
+    """Instantiate an embedding provider from an embedding registry entry.
     
-    This is the standard setup: chat from any provider, embeddings from Together AI
-    (cheap and reliable).
+    Args:
+        embed_entry: Dict with keys:
+            - driver: 'together' or 'openai_compat'
+            - model_id: Embedding model name
+            - auth: 'api_key'
+            - credential_key: Config key for API credentials
+            - base_url: (optional) API base URL for openai_compat
+            - dimensions: (optional) Embedding dimensions
+            
+    Returns:
+        Configured LLMProvider instance or None on failure
+    """
+    driver_name = embed_entry.get("driver")
+    model_id = embed_entry.get("model_id")
+    credential_key = embed_entry.get("credential_key")
+    
+    if not driver_name or not model_id:
+        logger.error(f"Embedding entry missing driver/model_id: {embed_entry}")
+        return None
+    
+    api_key = await _load_api_key(credential_key)
+    if not api_key:
+        logger.error(f"No API key for embedding provider {embed_entry.get('label', model_id)}")
+        return None
+    
+    if driver_name == "together":
+        return TogetherProvider(
+            api_key=api_key,
+            embedding_model=model_id,
+        )
+    elif driver_name == "openai_compat":
+        base_url = embed_entry.get("base_url", "https://api.openai.com/v1")
+        return OpenAIProvider(
+            api_key=api_key,
+            chat_model="unused",
+            base_url=base_url,
+            provider_name="embedding",
+        )
+    else:
+        logger.error(f"Unsupported embedding driver: {driver_name}")
+        return None
+
+
+async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
+    """Create a HybridProvider with chat from model_entry and embedding from registry.
+    
+    Uses the embedding model registry (provider.embedding_models + provider.active_embedding)
+    to select the embedding provider. Falls back to Together AI if registry not set.
     
     Args:
         model_entry: Model registry entry for chat provider
@@ -140,9 +186,29 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
     Returns:
         HybridProvider with chat and embedding capabilities
     """
+    from ..db.models import get_config
+    
     chat_provider = await create_provider(model_entry)
     
-    # Load Together API key for embeddings
+    # ═══════════════════════════════════════════════════════════════
+    # Try embedding model registry first
+    # ═══════════════════════════════════════════════════════════════
+    embed_models = await get_config("provider.embedding_models", None)
+    active_embed_key = await get_config("provider.active_embedding", None)
+    
+    if embed_models and active_embed_key:
+        embed_entry = get_model_from_list(embed_models, active_embed_key)
+        if embed_entry:
+            embed_provider = await create_embedding_provider(embed_entry)
+            if embed_provider:
+                logger.info(f"Using embedding: {embed_entry.get('label', active_embed_key)}")
+                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
+            else:
+                logger.warning(f"Failed to create embedding provider '{active_embed_key}', falling back")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # Fallback: Together AI (legacy behavior)
+    # ═══════════════════════════════════════════════════════════════
     together_key = os.environ.get("TOGETHER_API_KEY")
     if not together_key:
         try:
@@ -232,6 +298,42 @@ async def _load_api_key(credential_key: Optional[str]) -> Optional[str]:
         pass
     
     return None
+
+
+async def test_embedding(embed_entry: dict, timeout: int = 10) -> tuple[bool, str]:
+    """Test an embedding provider by generating a small embedding.
+    
+    Args:
+        embed_entry: Embedding registry entry dict
+        timeout: Timeout in seconds
+        
+    Returns:
+        Tuple of (success, error_message)
+    """
+    try:
+        provider = await create_embedding_provider(embed_entry)
+        if not provider:
+            return False, "Failed to create provider (missing API key?)"
+        
+        model_id = embed_entry.get("model_id", "")
+        result = await asyncio.wait_for(
+            provider.embed("test embedding", model=model_id),
+            timeout=timeout,
+        )
+        
+        if result and result.embedding and len(result.embedding) > 0:
+            logger.info(f"Embedding test passed: {embed_entry.get('label')} → {len(result.embedding)} dims")
+            return True, ""
+        else:
+            return False, "Empty embedding response"
+            
+    except asyncio.TimeoutError:
+        return False, f"Timeout after {timeout}s"
+    except Exception as e:
+        error_msg = str(e)
+        if hasattr(e, "response") and hasattr(e.response, "status_code"):
+            error_msg = f"HTTP {e.response.status_code}: {error_msg[:100]}"
+        return False, error_msg[:200]
 
 
 async def test_model(provider: LLMProvider, timeout: int = 10) -> tuple[bool, str]:

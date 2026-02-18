@@ -96,6 +96,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("model", self._cmd_model))
+        self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -135,6 +136,7 @@ class TelegramChannel:
             BotCommand("forget", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
             BotCommand("model", "Switch LLM model (owner only)"),
+            BotCommand("embedding", "Switch embedding model (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
         ])
 
@@ -864,6 +866,94 @@ Or just send me a message!"""
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
+    async def _cmd_embedding(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /embedding command — switch embedding model with inline buttons.
+        
+        Uses driver-based embedding registry from DB (provider.embedding_models).
+        Tests the embedding before switching; rolls back on failure.
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can switch embedding models.")
+            return
+
+        # Get embedding registry from DB
+        models = await get_config("provider.embedding_models", [])
+        if not models:
+            await update.message.reply_text("⚠️ No embedding models configured. Check provider.embedding_models in config.")
+            return
+        
+        # Get current active embedding
+        active_key = await get_config("provider.active_embedding", "together-bge")
+
+        # Build buttons from DB entries
+        buttons = []
+        for model in models:
+            key = model.get("key", "")
+            label = model.get("label", key)
+            cost = model.get("cost", "")
+            is_active = (key == active_key)
+            btn_label = f"✅ {label}" if is_active else label
+            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"embedding:{key}"))
+
+        # Arrange buttons — one per row (labels are long)
+        keyboard = [[btn] for btn in buttons]
+        
+        # Get current model label
+        current_model = next((m for m in models if m.get("key") == active_key), None)
+        current_label = current_model.get("label", active_key) if current_model else active_key
+        current_cost = current_model.get("cost", "") if current_model else ""
+        
+        await update.message.reply_text(
+            f"🧠 **Current embedding:** {current_label}\n💰 Cost: {current_cost}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    async def _apply_embedding(self, embed_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
+        """Apply an embedding model from registry — test before switching.
+        
+        Args:
+            embed_key: Key of embedding model to switch to
+            chat_id: Chat ID for sending status messages
+            context: Telegram context for sending messages
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        from ..llm.drivers import test_embedding, get_model_from_list
+        
+        # Get embedding registry
+        models = await get_config("provider.embedding_models", [])
+        embed_entry = get_model_from_list(models, embed_key)
+        
+        if not embed_entry:
+            return False, f"Embedding '{embed_key}' not found in registry"
+        
+        # Save current for rollback
+        previous_key = await get_config("provider.active_embedding", "together-bge")
+        await set_config("provider.previous_embedding", previous_key)
+        
+        # Send "testing" message
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🔄 Testing {embed_entry.get('label', embed_key)}...",
+        )
+        
+        try:
+            success, error = await test_embedding(embed_entry, timeout=10)
+            
+            if success:
+                await set_config("provider.active_embedding", embed_key)
+                return True, embed_entry.get("label", embed_key)
+            else:
+                return False, f"{embed_entry.get('label', embed_key)} failed: {error}"
+                
+        except Exception as e:
+            return False, f"{embed_entry.get('label', embed_key)} failed: {str(e)[:100]}"
+
     async def _apply_model(self, model_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
         """Apply a model from registry — test before switching.
         
@@ -1037,6 +1127,47 @@ Or just send me a message!"""
                 else:
                     # Rollback and show error
                     previous = await get_config("provider.previous_model", "gemini-pro")
+                    previous_entry = next((m for m in models if m.get("key") == previous), None)
+                    previous_label = previous_entry.get("label", previous) if previous_entry else previous
+                    await query.edit_message_text(
+                        f"❌ {result}\n\nRolled back to {previous_label}.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+
+        elif data.startswith("embedding:"):
+            embed_key = data.split(":", 1)[1]
+            
+            # Get embedding registry
+            models = await get_config("provider.embedding_models", [])
+            embed_entry = next((m for m in models if m.get("key") == embed_key), None)
+            
+            if embed_entry:
+                chat_id = query.message.chat_id
+                success, result = await self._apply_embedding(embed_key, chat_id, context)
+                
+                # Get updated active embedding
+                active_key = embed_key if success else await get_config("provider.active_embedding", "together-bge")
+                
+                # Rebuild buttons
+                buttons = []
+                for m in models:
+                    key = m.get("key", "")
+                    label = m.get("label", key)
+                    is_active = (key == active_key)
+                    btn_label = f"✅ {label}" if is_active else label
+                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"embedding:{key}"))
+                keyboard = [[btn] for btn in buttons]
+                
+                if success:
+                    current_cost = embed_entry.get("cost", "")
+                    await query.edit_message_text(
+                        f"✅ **Switched embedding to:** {result}\n💰 Cost: {current_cost}\n\n⚠️ Use /restart to fully apply.",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    previous = await get_config("provider.previous_embedding", "together-bge")
                     previous_entry = next((m for m in models if m.get("key") == previous), None)
                     previous_label = previous_entry.get("label", previous) if previous_entry else previous
                     await query.edit_message_text(

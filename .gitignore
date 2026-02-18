@@ -42,3 +42,5 @@ user_abilities/
 # Database dumps
 *.dump
 *.sql.bak
+*.png
+data/output/
