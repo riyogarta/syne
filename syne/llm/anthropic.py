@@ -268,6 +268,11 @@ class AnthropicProvider(LLMProvider):
                         "Run 'claude' CLI to refresh authentication."
                     )
                 
+                if resp.status_code == 400:
+                    error_text = resp.text[:500]
+                    logger.error(f"Anthropic 400 Bad Request: {error_text}")
+                    raise RuntimeError(f"Anthropic API error 400: {error_text}")
+                
                 resp.raise_for_status()
                 break
             else:
