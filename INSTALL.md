@@ -220,7 +220,6 @@ syne/
 │   ├── registry.py      # Ability management
 │   ├── loader.py        # Auto-discovery & DB sync
 │   ├── image_gen.py     # Together AI FLUX.1
-│   ├── web_search.py    # Brave Search
 │   ├── image_analysis.py # Gemini vision
 │   └── maps.py          # Google Maps
 └── channels/

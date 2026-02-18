@@ -119,6 +119,27 @@ CREATE TABLE messages (
 CREATE INDEX idx_messages_session ON messages (session_id, created_at);
 
 -- ============================================================
+-- SUB-AGENT RUNS: Track spawned sub-agent tasks
+-- ============================================================
+CREATE TABLE subagent_runs (
+    id SERIAL PRIMARY KEY,
+    run_id UUID NOT NULL DEFAULT gen_random_uuid(),
+    parent_session_id INTEGER REFERENCES sessions(id),
+    task TEXT NOT NULL,
+    status VARCHAR(20) DEFAULT 'running',  -- running, completed, failed
+    result TEXT,
+    error TEXT,
+    model VARCHAR(100),
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    input_tokens INTEGER DEFAULT 0,
+    output_tokens INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_subagent_runs_parent ON subagent_runs (parent_session_id);
+CREATE INDEX idx_subagent_runs_status ON subagent_runs (status);
+
+-- ============================================================
 -- CAPABILITIES: Registered tools/skills
 -- ============================================================
 CREATE TABLE capabilities (

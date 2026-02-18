@@ -614,8 +614,12 @@ syne/
 │   │   └── google_oauth.py  # Google OAuth PKCE
 │   ├── llm/
 │   │   ├── provider.py      # Abstract interface
-│   │   ├── google.py        # Gemini CCA
-│   │   ├── together.py      # Together AI
+│   │   ├── drivers.py       # Driver registry + model system
+│   │   ├── google.py        # Gemini CCA (OAuth)
+│   │   ├── codex.py         # ChatGPT/Codex (OAuth)
+│   │   ├── openai.py        # OpenAI-compatible (Groq, etc.)
+│   │   ├── anthropic.py     # Claude (OAuth)
+│   │   ├── together.py      # Together AI (embedding)
 │   │   └── hybrid.py        # Chat + Embed hybrid
 │   ├── memory/
 │   │   ├── engine.py        # Store, recall, dedup
