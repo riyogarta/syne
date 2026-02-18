@@ -28,15 +28,23 @@ def init():
     console.print()
 
     # 1. Provider selection
-    console.print("[bold]Step 1: Choose your AI provider[/bold]")
+    console.print("[bold]Step 1: Choose your chat AI provider[/bold]")
+    console.print()
+    console.print("  [bold cyan]OAuth (free, rate limited):[/bold cyan]")
     console.print("  1. Google Gemini [green](recommended — free via OAuth)[/green]")
-    console.print("  2. OpenAI [yellow](requires API key, paid)[/yellow]")
-    console.print("  3. Together [yellow](requires API key, paid)[/yellow]")
+    console.print("  2. ChatGPT / GPT [green](free via Codex OAuth)[/green]")
+    console.print("  3. Claude [green](free via claude.ai OAuth)[/green]")
+    console.print()
+    console.print("  [bold yellow]API Key (paid per token):[/bold yellow]")
+    console.print("  4. OpenAI [yellow](API key, paid)[/yellow]")
+    console.print("  5. Anthropic Claude [yellow](API key, paid)[/yellow]")
+    console.print("  6. Together AI [yellow](API key, paid)[/yellow]")
     console.print()
 
-    choice = click.prompt("Select provider", type=click.IntRange(1, 3), default=1)
+    choice = click.prompt("Select provider", type=click.IntRange(1, 6), default=1)
 
     env_lines = []
+    provider_config = None  # Will be saved to DB after schema init
 
     if choice == 1:
         console.print("\n[bold green]✓ Google Gemini selected (OAuth)[/bold green]")
@@ -65,16 +73,42 @@ def init():
             creds.save(creds_path)
 
         env_lines.append("SYNE_PROVIDER=google")
+        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "oauth"}
+
     elif choice == 2:
-        console.print("\n[bold green]✓ OpenAI selected[/bold green]")
+        console.print("\n[bold green]✓ ChatGPT selected (Codex OAuth)[/bold green]")
+        console.print("  [dim]Requires OpenAI/ChatGPT login via Codex CLI.[/dim]")
+        console.print("  [dim]Auth tokens read from ~/.openclaw or Codex config.[/dim]")
+        env_lines.append("SYNE_PROVIDER=codex")
+        provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
+
+    elif choice == 3:
+        console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
+        console.print("  [dim]Requires claude.ai subscription + Claude CLI login.[/dim]")
+        console.print("  [dim]Auth tokens read from ~/.claude/.credentials.json[/dim]")
+        env_lines.append("SYNE_PROVIDER=anthropic")
+        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
+
+    elif choice == 4:
+        console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key", hide_input=True)
         env_lines.append(f"SYNE_OPENAI_API_KEY={api_key}")
         env_lines.append("SYNE_PROVIDER=openai")
-    elif choice == 3:
-        console.print("\n[bold green]✓ Together selected[/bold green]")
+        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key"}
+
+    elif choice == 5:
+        console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
+        api_key = click.prompt("Anthropic API key", hide_input=True)
+        env_lines.append(f"SYNE_ANTHROPIC_API_KEY={api_key}")
+        env_lines.append("SYNE_PROVIDER=anthropic")
+        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key"}
+
+    elif choice == 6:
+        console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key", hide_input=True)
         env_lines.append(f"SYNE_TOGETHER_API_KEY={api_key}")
         env_lines.append("SYNE_PROVIDER=together")
+        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key"}
 
     # 2. Telegram bot (optional)
     console.print("\n[bold]Step 2: Telegram Bot (optional)[/bold]")
