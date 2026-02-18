@@ -134,6 +134,128 @@ class AnthropicProvider(LLMProvider):
             headers["anthropic-beta"] = "oauth-2025-04-20"
         return headers
 
+    @staticmethod
+    def _sanitize_conversation(conversation: list[dict]) -> list[dict]:
+        """Sanitize conversation to ensure Anthropic tool_use/tool_result pairing.
+        
+        Anthropic requires:
+        1. Every tool_result must reference a tool_use_id from the immediately preceding assistant message
+        2. Every tool_use in an assistant message must have a matching tool_result in the next user message
+        
+        This removes orphaned tool_results and converts orphaned tool_use assistant
+        messages to plain text to prevent 400 errors from context trimming/compaction.
+        """
+        if not conversation:
+            return conversation
+        
+        sanitized = []
+        i = 0
+        while i < len(conversation):
+            msg = conversation[i]
+            
+            # Check if this is an assistant message with tool_use blocks
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+                tool_use_ids = {
+                    block["id"]
+                    for block in msg["content"]
+                    if isinstance(block, dict) and block.get("type") == "tool_use"
+                }
+                
+                if tool_use_ids:
+                    # Look ahead: next message must be user with matching tool_results
+                    next_msg = conversation[i + 1] if i + 1 < len(conversation) else None
+                    
+                    if next_msg and next_msg.get("role") == "user" and isinstance(next_msg.get("content"), list):
+                        result_ids = {
+                            block.get("tool_use_id")
+                            for block in next_msg["content"]
+                            if isinstance(block, dict) and block.get("type") == "tool_result"
+                        }
+                        
+                        if tool_use_ids & result_ids:
+                            # Has matching pairs — keep both, but filter to only matched IDs
+                            matched_ids = tool_use_ids & result_ids
+                            
+                            # Filter assistant content: keep text + matched tool_use
+                            filtered_assistant = [
+                                block for block in msg["content"]
+                                if block.get("type") != "tool_use" or block.get("id") in matched_ids
+                            ]
+                            # Filter tool results: keep only matched
+                            filtered_results = [
+                                block for block in next_msg["content"]
+                                if block.get("type") != "tool_result" or block.get("tool_use_id") in matched_ids
+                            ]
+                            
+                            sanitized.append({"role": "assistant", "content": filtered_assistant})
+                            if filtered_results:
+                                sanitized.append({"role": "user", "content": filtered_results})
+                            i += 2
+                            continue
+                    
+                    # No matching tool_results found — convert to plain text
+                    text_parts = [
+                        block.get("text", "")
+                        for block in msg["content"]
+                        if isinstance(block, dict) and block.get("type") == "text"
+                    ]
+                    text = " ".join(t for t in text_parts if t) or "[tool calls without results — trimmed]"
+                    sanitized.append({"role": "assistant", "content": text})
+                    i += 1
+                    continue
+            
+            # Check if this is a user message with tool_results (orphaned — no preceding tool_use)
+            if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                has_tool_results = any(
+                    isinstance(block, dict) and block.get("type") == "tool_result"
+                    for block in msg["content"]
+                )
+                
+                if has_tool_results:
+                    # Check if previous message was assistant with matching tool_use
+                    prev = sanitized[-1] if sanitized else None
+                    if prev and prev.get("role") == "assistant" and isinstance(prev.get("content"), list):
+                        prev_tool_ids = {
+                            block["id"]
+                            for block in prev["content"]
+                            if isinstance(block, dict) and block.get("type") == "tool_use"
+                        }
+                        # Filter to only matching results
+                        filtered = [
+                            block for block in msg["content"]
+                            if block.get("type") != "tool_result" or block.get("tool_use_id") in prev_tool_ids
+                        ]
+                        if filtered:
+                            sanitized.append({"role": "user", "content": filtered})
+                    else:
+                        # Orphaned tool_results with no preceding tool_use — skip entirely
+                        logger.debug("Dropping orphaned tool_result message (no preceding tool_use)")
+                    i += 1
+                    continue
+            
+            sanitized.append(msg)
+            i += 1
+        
+        # Final pass: merge consecutive same-role messages (Anthropic requires alternating)
+        merged = []
+        for msg in sanitized:
+            if merged and merged[-1].get("role") == msg.get("role"):
+                # Merge content
+                prev_content = merged[-1].get("content", "")
+                new_content = msg.get("content", "")
+                if isinstance(prev_content, str) and isinstance(new_content, str):
+                    merged[-1]["content"] = prev_content + "\n" + new_content
+                elif isinstance(prev_content, list) and isinstance(new_content, list):
+                    merged[-1]["content"] = prev_content + new_content
+                elif isinstance(prev_content, str) and isinstance(new_content, list):
+                    merged[-1]["content"] = [{"type": "text", "text": prev_content}] + new_content
+                elif isinstance(prev_content, list) and isinstance(new_content, str):
+                    merged[-1]["content"] = prev_content + [{"type": "text", "text": new_content}]
+            else:
+                merged.append(msg)
+        
+        return merged
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -219,6 +341,9 @@ class AnthropicProvider(LLMProvider):
         # Flush remaining tool results
         if pending_tool_results:
             conversation.append({"role": "user", "content": pending_tool_results})
+        
+        # Sanitize: ensure all tool_use/tool_result pairs are valid
+        conversation = self._sanitize_conversation(conversation)
         
         # Build request body
         body: dict = {
