@@ -11,7 +11,7 @@ from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
 logger = logging.getLogger("syne.llm.codex")
 
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api"
-_AUTH_FILE_PATH = os.path.expanduser("~/.openclaw/agents/main/agent/auth.json")
+# No hardcoded auth file path — tokens come from DB or env
 
 # Token refresh buffer — refresh if expires within this many seconds
 _REFRESH_BUFFER_SECONDS = 300  # 5 minutes
@@ -20,11 +20,8 @@ _REFRESH_BUFFER_SECONDS = 300  # 5 minutes
 class CodexProvider(LLMProvider):
     """OpenAI Codex via ChatGPT backend (Responses API, OAuth).
     
-    Uses the same OAuth flow as OpenClaw/Codex CLI.
     Free via ChatGPT subscription (Plus/Pro/Team).
-    
-    Token refresh: Before each request, checks if the token is expired or about
-    to expire (<5 min). If so, re-reads from the auth file (OpenClaw refreshes it).
+    Tokens stored in DB (credential.codex_access_token, credential.codex_refresh_token).
     """
 
     def __init__(
@@ -53,61 +50,15 @@ class CodexProvider(LLMProvider):
         return True
 
     def _refresh_token(self) -> bool:
-        """Re-read token from auth file if expired or about to expire.
+        """Check if token needs refresh. Currently tokens are provided at init.
+        
+        TODO: Implement proper Codex OAuth token refresh via chatgpt.com endpoint.
+        For now, user must update token in DB when it expires.
         
         Returns:
             True if token was refreshed, False otherwise
         """
-        now = time.time()
-        
-        # Check if we need to refresh
-        if self._token_expires_at > 0 and (now + _REFRESH_BUFFER_SECONDS) < self._token_expires_at:
-            # Token still valid, no refresh needed
-            return False
-        
-        # Check cache validity (re-read file at most every 30 seconds)
-        if self._auth_cache and (now - self._auth_cache_time) < 30:
-            # Cache is fresh enough, check if token changed
-            codex_auth = self._auth_cache.get("openai-codex", {})
-            new_token = codex_auth.get("access", "")
-            if new_token and new_token != self.access_token:
-                self.access_token = new_token
-                self.refresh_token = codex_auth.get("refresh", "")
-                # Parse expires timestamp (ms → s)
-                expires = codex_auth.get("expires", 0)
-                self._token_expires_at = expires / 1000 if expires > 1e12 else expires
-                logger.debug("Codex token refreshed from cached auth file")
-                return True
-            return False
-        
-        # Read fresh from file
-        try:
-            with open(_AUTH_FILE_PATH) as f:
-                auth_data = json.load(f)
-            self._auth_cache = auth_data
-            self._auth_cache_time = now
-            
-            codex_auth = auth_data.get("openai-codex", {})
-            new_token = codex_auth.get("access", "")
-            
-            if new_token and new_token != self.access_token:
-                self.access_token = new_token
-                self.refresh_token = codex_auth.get("refresh", "")
-                # Parse expires timestamp (ms → s)
-                expires = codex_auth.get("expires", 0)
-                self._token_expires_at = expires / 1000 if expires > 1e12 else expires
-                logger.info("Codex token refreshed from auth file")
-                return True
-            elif new_token:
-                # Same token, but update expiry
-                expires = codex_auth.get("expires", 0)
-                self._token_expires_at = expires / 1000 if expires > 1e12 else expires
-                
-        except FileNotFoundError:
-            logger.warning(f"Auth file not found: {_AUTH_FILE_PATH}")
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(f"Failed to parse auth file: {e}")
-        
+        # Token refresh not yet implemented — tokens come from DB at init
         return False
 
     def _get_headers(self) -> dict:

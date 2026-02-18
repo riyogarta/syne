@@ -61,7 +61,7 @@ def init():
     elif choice == 2:
         console.print("\n[bold green]✓ ChatGPT selected (Codex OAuth)[/bold green]")
         console.print("  [dim]Requires OpenAI/ChatGPT login via Codex CLI.[/dim]")
-        console.print("  [dim]Auth tokens read from ~/.openclaw or Codex config.[/dim]")
+        console.print("  [dim]Requires ChatGPT Plus/Pro/Team subscription.[/dim]")
         env_lines.append("SYNE_PROVIDER=codex")
         provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
 

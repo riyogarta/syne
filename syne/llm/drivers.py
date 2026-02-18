@@ -91,7 +91,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     # Codex (ChatGPT OAuth)
     # ═══════════════════════════════════════════════════════════════
     elif driver_name == "codex":
-        access_token, refresh_token = _load_codex_tokens()
+        access_token, refresh_token = await _load_codex_tokens()
         return CodexProvider(
             access_token=access_token,
             refresh_token=refresh_token,
@@ -219,17 +219,11 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
                 logger.warning(f"Failed to create embedding provider '{active_embed_key}', falling back")
     
     # ═══════════════════════════════════════════════════════════════
-    # Fallback: Together AI (legacy behavior)
+    # Fallback: Together AI from env or DB
     # ═══════════════════════════════════════════════════════════════
     together_key = os.environ.get("TOGETHER_API_KEY")
     if not together_key:
-        try:
-            oc_config = json.loads(
-                open(os.path.expanduser("~/.openclaw/openclaw.json")).read()
-            )
-            together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
-        except Exception:
-            pass
+        together_key = await get_config("credential.together_api_key", None)
     
     if together_key:
         embed_provider = TogetherProvider(
@@ -245,8 +239,8 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
         return chat_provider
 
 
-def _load_codex_tokens() -> tuple[str, str]:
-    """Load Codex OAuth tokens from OpenClaw auth store.
+async def _load_codex_tokens() -> tuple[str, str]:
+    """Load Codex OAuth tokens from DB or environment.
     
     Returns:
         Tuple of (access_token, refresh_token)
@@ -254,21 +248,25 @@ def _load_codex_tokens() -> tuple[str, str]:
     Raises:
         RuntimeError: If tokens not found
     """
-    auth_path = os.path.expanduser("~/.openclaw/agents/main/agent/auth.json")
-    try:
-        with open(auth_path) as f:
-            auth_data = json.load(f)
-        codex_auth = auth_data.get("openai-codex", {})
-        access_token = codex_auth.get("access", "")
-        refresh_token = codex_auth.get("refresh", "")
-        if not access_token:
-            raise RuntimeError("No Codex OAuth token found in OpenClaw auth store.")
+    from ..db.models import get_config
+    
+    # Try DB first
+    access_token = await get_config("credential.codex_access_token", "")
+    refresh_token = await get_config("credential.codex_refresh_token", "")
+    if access_token:
         return access_token, refresh_token
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"OpenClaw auth file not found: {auth_path}. "
-            "Run OpenClaw with openai-codex OAuth first."
-        )
+    
+    # Try environment
+    access_token = os.environ.get("CODEX_ACCESS_TOKEN", "")
+    refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "")
+    if access_token:
+        return access_token, refresh_token
+    
+    raise RuntimeError(
+        "No Codex OAuth tokens found. Store them via:\n"
+        "  update_config(key='credential.codex_access_token', value='...')\n"
+        "  update_config(key='credential.codex_refresh_token', value='...')"
+    )
 
 
 async def _load_api_key(credential_key: Optional[str]) -> Optional[str]:
@@ -295,19 +293,6 @@ async def _load_api_key(credential_key: Optional[str]) -> Optional[str]:
         env_val = os.environ.get(env_name)
         if env_val:
             return env_val
-    
-    # Try OpenClaw config
-    try:
-        oc_config = json.loads(
-            open(os.path.expanduser("~/.openclaw/openclaw.json")).read()
-        )
-        if credential_key:
-            env_name = credential_key.split(".")[-1].upper()
-            key = oc_config.get("env", {}).get(env_name)
-            if key:
-                return key
-    except Exception:
-        pass
     
     return None
 

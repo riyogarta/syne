@@ -16,16 +16,17 @@ logger = logging.getLogger("syne.llm.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
-# Credential paths (in priority order)
-OPENCLAW_AUTH_PROFILES = os.path.expanduser("~/.openclaw/agents/main/agent/auth-profiles.json")
+# Credential paths
 CLAUDE_CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using OAuth tokens from claude.ai subscription.
     
-    Reads OAuth tokens from ~/.claude/.credentials.json (shared with Claude CLI).
-    Auto-refreshes when token is expired or near expiry.
+    Reads OAuth tokens from:
+    1. DB (credential.anthropic_access_token)
+    2. Environment (ANTHROPIC_ACCESS_TOKEN or ANTHROPIC_API_KEY)
+    3. Claude CLI ~/.claude/.credentials.json (user's own login)
     """
 
     def __init__(
@@ -48,56 +49,37 @@ class AnthropicProvider(LLMProvider):
         return True
 
     def _load_token(self) -> str:
-        """Load token from OpenClaw auth-profiles or Claude CLI credentials.
+        """Load Anthropic token from DB, env, or Claude CLI credentials.
         
         Priority:
-        1. OpenClaw auth-profiles.json (anthropic:default or anthropic:*)
-        2. Claude CLI ~/.claude/.credentials.json (claudeAiOauth)
+        1. Environment: ANTHROPIC_ACCESS_TOKEN or ANTHROPIC_API_KEY
+        2. Claude CLI ~/.claude/.credentials.json (user's own login)
         """
         now = time.time()
         
-        # Re-read file at most every 30 seconds
+        # Re-read at most every 30 seconds
         if self._access_token and (now - self._last_read) < 30:
             if self._expires_at == 0 or now < self._expires_at:
                 return self._access_token
         
-        # Try OpenClaw auth-profiles first
-        token = self._load_from_openclaw_profiles()
-        if token:
-            self._access_token = token
-            self._expires_at = 0  # OpenClaw manages refresh, no expiry tracking needed
+        # Try environment
+        env_token = os.environ.get("ANTHROPIC_ACCESS_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
+        if env_token:
+            self._access_token = env_token
+            self._expires_at = 0
             self._last_read = now
-            return token
+            return env_token
         
-        # Fallback: Claude CLI credentials
+        # Try Claude CLI credentials (user's own login)
         token = self._load_from_claude_cli()
         if token:
             return token
         
         raise RuntimeError(
-            "No Claude/Anthropic token found. Check:\n"
-            f"  1. OpenClaw auth-profiles: {OPENCLAW_AUTH_PROFILES}\n"
-            f"  2. Claude CLI credentials: {self.credentials_path}"
+            "No Claude/Anthropic token found. Options:\n"
+            "  1. Set ANTHROPIC_ACCESS_TOKEN or ANTHROPIC_API_KEY env var\n"
+            f"  2. Login via Claude CLI: claude login (saves to {self.credentials_path})"
         )
-    
-    def _load_from_openclaw_profiles(self) -> Optional[str]:
-        """Load token from OpenClaw auth-profiles.json."""
-        try:
-            with open(OPENCLAW_AUTH_PROFILES) as f:
-                data = json.load(f)
-            
-            profiles = data.get("profiles", {})
-            # Try anthropic:default first, then any anthropic:* profile
-            for key in ["anthropic:default", *[k for k in profiles if k.startswith("anthropic:")]]:
-                profile = profiles.get(key, {})
-                token = profile.get("token", "")
-                if token:
-                    logger.debug(f"Loaded Anthropic token from OpenClaw profile: {key}")
-                    return token
-            
-            return None
-        except (FileNotFoundError, json.JSONDecodeError):
-            return None
     
     def _load_from_claude_cli(self) -> Optional[str]:
         """Load token from Claude CLI credentials."""

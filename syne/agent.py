@@ -211,11 +211,7 @@ class SyneAgent:
             
             together_key = os.environ.get("TOGETHER_API_KEY")
             if not together_key:
-                try:
-                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
-                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
-                except Exception:
-                    pass
+                together_key = await get_config("credential.together_api_key", None)
 
             if together_key:
                 embed_provider = TogetherProvider(
@@ -226,24 +222,21 @@ class SyneAgent:
             return chat_provider
 
         elif provider_name == "codex":
-            auth_path = os.path.expanduser("~/.openclaw/agents/main/agent/auth.json")
-            with open(auth_path) as f:
-                auth_data = json.load(f)
-            codex_auth = auth_data.get("openai-codex", {})
+            access_token = await get_config("credential.codex_access_token", "")
+            refresh_token = await get_config("credential.codex_refresh_token", "")
+            if not access_token:
+                access_token = os.environ.get("CODEX_ACCESS_TOKEN", "")
+                refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "")
             
             chat_provider = CodexProvider(
-                access_token=codex_auth.get("access", ""),
-                refresh_token=codex_auth.get("refresh", ""),
+                access_token=access_token,
+                refresh_token=refresh_token,
                 chat_model=chat_model,
             )
             
             together_key = os.environ.get("TOGETHER_API_KEY")
             if not together_key:
-                try:
-                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
-                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
-                except Exception:
-                    pass
+                together_key = await get_config("credential.together_api_key", None)
 
             if together_key:
                 embed_provider = TogetherProvider(
@@ -257,12 +250,6 @@ class SyneAgent:
             groq_key = await get_config("credential.groq_api_key", None)
             if not groq_key:
                 groq_key = os.environ.get("GROQ_API_KEY")
-            if not groq_key:
-                try:
-                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
-                    groq_key = oc_config.get("env", {}).get("GROQ_API_KEY")
-                except Exception:
-                    pass
             
             chat_provider = OpenAIProvider(
                 api_key=groq_key,
@@ -273,11 +260,7 @@ class SyneAgent:
             
             together_key = os.environ.get("TOGETHER_API_KEY")
             if not together_key:
-                try:
-                    oc_config = json.loads(open(os.path.expanduser("~/.openclaw/openclaw.json")).read())
-                    together_key = oc_config.get("env", {}).get("TOGETHER_API_KEY")
-                except Exception:
-                    pass
+                together_key = await get_config("credential.together_api_key", None)
 
             if together_key:
                 embed_provider = TogetherProvider(
