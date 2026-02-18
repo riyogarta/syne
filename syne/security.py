@@ -234,12 +234,9 @@ BLOCKED_COMMAND_PATTERNS = [
     "chmod 777 /",
     "chmod -R 777 /",
     
-    # Remote code execution - pipe to shell patterns
-    # Note: These will be checked with regex to handle spaces around pipes
-    "| sh",
-    "|sh",
-    "| bash",
-    "|bash",
+    # Remote code execution - pipe to shell interpreters
+    # These use word boundaries via regex check below
+    # "| sh" and "| bash" are checked separately with regex
     
     # Credential/config file access patterns
     ".syne/",
@@ -287,6 +284,14 @@ def check_command_safety(command: str) -> tuple[bool, str]:
             reason = f"[Security] Blocked: command contains dangerous pattern '{pattern}'"
             logger.warning(f"Blocked dangerous command: {command[:100]} (pattern: {pattern})")
             return False, reason
+    
+    # Regex check: pipe to shell interpreters (word boundary, not substring)
+    import re
+    pipe_to_shell = re.compile(r'\|\s*(sh|bash|zsh|dash|csh)\b')
+    if pipe_to_shell.search(command_lower):
+        reason = "[Security] Blocked: pipe to shell interpreter"
+        logger.warning(f"Blocked dangerous command: {command[:100]} (pipe to shell)")
+        return False, reason
     
     return True, ""
 

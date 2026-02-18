@@ -244,7 +244,7 @@ class Conversation:
         context: list[ChatMessage],
         access_level: str,
         tool_schemas: Optional[list[dict]] = None,
-        max_rounds: int = 5,
+        max_rounds: int = 10,
     ) -> ChatResponse:
         """Execute tool calls and get final response. Loops for multi-step tool use."""
         current = response
