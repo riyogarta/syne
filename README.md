@@ -290,15 +290,13 @@ Syne supports multiple users with different access levels:
 
 | Level | Permissions |
 |-------|------------|
-| `owner` | Full access — exec, config, abilities, memory, all tools |
-| `admin` | Most tools except system-level config |
-| `family` | Memory access, conversation, limited tools |
-| `friend` | Conversation, basic tools |
+| `owner` | Full access — exec, config, abilities, memory, all tools (Rule 700) |
+| `family` | Memory access, conversation (Rule 760) |
 | `public` | Conversation only |
 
 The first user to message Syne automatically becomes `owner`.
 
-Manage via conversation: *"Make @alice an admin"*, *"Remove @bob's access"*
+Manage via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 ---
 
