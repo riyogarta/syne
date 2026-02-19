@@ -44,7 +44,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 |-------------|---------|
 | **OS** | Linux (Ubuntu 22.04+, Debian 12+) or macOS |
 | **Python** | 3.11+ |
-| **RAM** | 1 GB minimum |
+| **RAM** | 2 GB minimum (4 GB recommended) |
 | **Storage** | 500 MB (excluding Docker images) |
 | **Docker** | Required — PostgreSQL 16 + pgvector runs in Docker |
 | **Network** | Access to: Together AI (embedding), Google OAuth (chat), Telegram API (bot), Brave Search (optional) |
