@@ -4,11 +4,11 @@
 
 *"I remember, therefore I am"*
 
----
-
 Named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), the Greek goddess of memory and mother of the Muses.
 
 Syne is a standalone, open-source AI agent framework built in Python. It features **PostgreSQL-native memory** with semantic search, an **ability-based architecture** for extensibility, and **self-evolution** capabilities where the agent can create new abilities for itself.
+
+---
 
 ## Why Syne?
 
@@ -17,154 +17,65 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Unlimited memory** — Semantic search over millions of memories using pgvector
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **Near-zero cost** — Chat uses Google Gemini via OAuth (free). Embedding via Together AI (~$0.008/1M tokens). Typical monthly cost < $1
-- **PostgreSQL-native** — Everything in the database, no file-based config drift
+- **No config files** — Everything lives in PostgreSQL. Change behavior through conversation, not YAML
+- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding via Together AI (~$0.008/1M tokens)
+- **Interactive CLI** — Code like Claude Code, but with persistent memory and tools
 
 ---
 
-## Architecture
+## Cost
 
-```
-+------------------------------------------------------------+
-|                       SYNE AGENT                           |
-|                                                            |
-|  +------------------------------------------------------+  |
-|  |                      CORE                            |  |
-|  |  (Cannot be modified by Syne)                        |  |
-|  |                                                      |  |
-|  |  [Chat]  [Memory]  [Compaction]  [Telegram]  [Sub]   |  |
-|  |  (LLM)   (pgvec)    (context)     (bot)     agent    |  |
-|  |                                                      |  |
-|  |  Core Tools (13):                                     |  |
-|  |  exec · web_search · web_fetch · memory · config     |  |
-|  |  read_source · sub-agents · users · groups · soul    |  |
-|  +------------------------------------------------------+  |
-|                                                            |
-|  +------------------------------------------------------+  |
-|  |                    ABILITIES                         |  |
-|  |  (Pluggable — ON/OFF, added, self-created)           |  |
-|  |                                                      |  |
-|  |  [image_gen]  [image_analysis]  [maps]  ...          |  |
-|  |                                                      |  |
-|  |  +------------------------------------------------+  |  |
-|  |  |          Self-Created Abilities                |  |  |
-|  |  |  (Syne creates new abilities at runtime)       |  |  |
-|  |  +------------------------------------------------+  |  |
-|  +------------------------------------------------------+  |
-|                                                            |
-|  +------------------------------------------------------+  |
-|  |              PostgreSQL + pgvector                   |  |
-|  |  identity · soul · rules · users · memory · sessions |  |
-|  |  messages · abilities · config · subagent_runs       |  |
-|  +------------------------------------------------------+  |
-+------------------------------------------------------------+
-```
+| Component | Model | Cost | Notes |
+|-----------|-------|------|-------|
+| Chat LLM | Gemini 2.5 Pro (Google) | **$0** | Free via CCA OAuth (rate-limited) |
+| Embedding | bge-base-en-v1.5 (Together AI) | **~$0.008/1M tokens** | Required — Google OAuth doesn't cover embedding |
+| Image Gen | FLUX.1-schnell (Together AI) | **~$0.003/image** | Optional ability |
+| PostgreSQL | Self-hosted (Docker) | **$0** | |
+| Telegram Bot | Telegram Bot API | **$0** | |
+| **Typical monthly** | | **< $1** | Embedding is the only paid component for core usage |
 
-### Core vs Abilities
-
-| Layer | What it includes | Modifiable by Syne? |
-|-------|-----------------|---------------------|
-| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, CLI, Sub-agents, 13 Core Tools | ❌ Protected |
-| **Abilities** | Everything else (image gen, image analysis, maps, etc.) | ✅ Pluggable |
+> Together AI gives **$5 free credit** on signup (~625M tokens). For typical personal use, that lasts months.
 
 ---
 
-## No Config Files — Just Talk
+## Minimum Requirements
 
-Most agent frameworks require editing files like `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml` to change behavior. **Syne has none of that.** Everything lives in PostgreSQL, and you change it through conversation.
-
-| Traditional File | Syne Equivalent | How to change it |
-|------------------|-----------------|------------------|
-| `SOUL.md` | `soul` table | *"Be more casual and use humor"* |
-| `AGENTS.md` | `rules` table | *"Add a rule: never share my location"* |
-| `IDENTITY.md` | `identity` table | *"Change your name to Atlas"* |
-| `CONFIG.yaml` | `config` table | *"Switch to GPT-4 for chat"* |
-
-### Example: Changing personality
-
-```
-You:  Your tone is too formal. Be more casual and funny.
-Syne: Got it — updated my personality to casual + humor. ✅
-
-You:  What's your current personality?
-Syne: Here's my soul:
-      - Tone: casual, witty, helpful
-      - Language: adapts to yours
-      - Boundaries: respect privacy, ask before external actions
-      Want to change anything?
-
-You:  Add a rule: always respond in Indonesian if I write in Indonesian.
-Syne: Done — added as a communication rule. ✅
-```
-
-Fresh install comes with sensible defaults. You can override anything through conversation — no SQL, no files, no commands to memorize.
-
-> **For advanced users:** You can also modify tables directly via SQL or the CLI (`syne identity`, `syne prompt`). But you'll never *need* to.
+| Requirement | Details |
+|-------------|---------|
+| **OS** | Linux (Ubuntu 22.04+, Debian 12+) or macOS |
+| **Python** | 3.11+ |
+| **RAM** | 1 GB minimum |
+| **Storage** | 500 MB (excluding Docker images) |
+| **Docker** | Required — PostgreSQL 16 + pgvector runs in Docker |
+| **Network** | Access to: Together AI (embedding), Google OAuth (chat), Telegram API (bot), Brave Search (optional) |
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- **Python 3.11+**
-- **Docker** (required — PostgreSQL 16 + pgvector runs in Docker)
-
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/riyogarta/syne.git
 cd syne
-
-# Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-
-# Install dependencies
+source .venv/bin/activate
 pip install -e .
-
-# Run interactive setup (Docker, DB, auth, systemd service — fully automated)
 syne init
-# That's it! Syne is running as a systemd service.
 ```
 
 ### What `syne init` Does
 
-```
-syne init
-    │
-    ├─ Step 1: Choose AI provider
-    │   ├─ OAuth (free, rate limited):
-    │   │   ├─ Google Gemini (recommended)
-    │   │   ├─ ChatGPT / GPT
-    │   │   └─ Claude
-    │   └─ API Key (paid per token):
-    │       ├─ OpenAI
-    │       ├─ Anthropic Claude
-    │       ├─ Together AI
-    │       └─ Groq
-    │
-    ├─ Step 2: Choose embedding provider (for memory)
-    │   ├─ Together AI (recommended — ~$0.008/1M tokens)
-    │   └─ OpenAI (~$0.02/1M tokens)
-    │
-    ├─ Step 3: Telegram bot token (required, from @BotFather)
-    │
-    ├─ Step 4: Start PostgreSQL + pgvector Docker container
-    │
-    ├─ Step 5: Initialize database & agent identity
-    │   ├─ Create schema (12 tables + seed data)
-    │   ├─ Set agent name & motto
-    │   └─ Save all credentials to database
-    │
-    ├─ Step 6: Setup systemd service
-    │   ├─ Create user service file
-    │   ├─ Enable autostart + linger
-    │   └─ Start Syne immediately
-    │
-    └─ ✅ Done! Syne is running.
-```
+`syne init` is fully automated — no manual steps mid-install:
+
+1. **Choose AI provider** — OAuth (free): Google Gemini, ChatGPT, Claude. API key (paid): OpenAI, Anthropic, Together AI, Groq
+2. **Choose embedding provider** — Together AI (recommended) or OpenAI
+3. **Enter Telegram bot token** — from @BotFather
+4. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
+5. **Initialize database** — Schema, identity, credentials saved to DB
+6. **Setup systemd service** — Auto-start on boot, linger enabled
+
+When init finishes, Syne is running.
 
 ### Verify Installation
 
@@ -175,253 +86,54 @@ syne status     # Quick status check
 
 ---
 
-## Configuration
+## No Config Files — Just Talk
 
-`syne init` handles everything — database credentials are auto-generated (unique per install), and all other credentials (Telegram token, OAuth tokens, API keys) are stored securely in PostgreSQL. No manual `.env` editing needed.
-
-### Why OAuth, Not API Keys?
-
-| Method | Cost | Notes |
-|--------|------|-------|
-| Google AI Studio API Key | **PAID** per token | $0.35/1M input, $1.05/1M output |
-| Google CCA OAuth | **FREE** | Rate limited, but sufficient for personal use |
-
-Syne uses OAuth by default because it's **free**. This is a core design principle — the agent should be usable without paying per token.
-
----
-
-## Configuration Reference
-
-All configuration lives in the `config` table. You can change any setting by talking to Syne or via SQL.
-
-### Provider Settings
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `provider.primary` | `{"name": "google", "auth": "oauth"}` | LLM provider. Options: `google` (OAuth/free), `openai` |
-| `provider.chat_model` | `gemini-2.5-pro` | Model used for chat. Any Gemini model name |
-| `provider.embedding_model` | `BAAI/bge-base-en-v1.5` | Model for memory embeddings (Together AI) |
-| `provider.embedding_dimensions` | `768` | Embedding vector dimensions |
-
-### Memory Settings
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `memory.auto_capture` | `false` | Auto-evaluate incoming messages for memory storage |
-| `memory.auto_evaluate` | `true` | Use LLM to judge what's worth storing (only when auto_capture is ON) |
-| `memory.recall_limit` | `10` | Max memories to recall per query |
-| `memory.max_importance` | `1.0` | Maximum importance score (0.0–1.0) |
-
-### Session Settings
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `session.compaction_threshold` | `80000` | Token count before triggering context compaction |
-| `session.max_messages` | `100` | Max messages before compaction |
-| `session.thinking_budget` | `null` | Thinking budget: `0`=off, `1024`=low, `4096`=medium, `8192`=high, `24576`=max, `null`=model default |
-| `session.reasoning_visible` | `false` | Show model's thinking/reasoning text in responses |
-
-### Sub-agent Settings
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `subagents.enabled` | `true` | Master switch for sub-agent spawning |
-| `subagents.max_concurrent` | `2` | Max sub-agents running at once |
-| `subagents.timeout_seconds` | `300` | Sub-agent timeout (5 min default) |
-
-### Changing Configuration
-
-**Via conversation (recommended):**
-```
-You:  Increase the memory recall limit to 20
-Syne: Done — memory.recall_limit updated to 20. ✅
-
-You:  Disable sub-agents
-Syne: Done — subagents.enabled set to false. ✅
-
-You:  What model are you using?
-Syne: I'm using gemini-2.5-pro for chat via Google OAuth (free).
-      Embeddings use BAAI/bge-base-en-v1.5 via Together AI.
-```
-
-**Via SQL (advanced):**
-```sql
--- View all config
-SELECT key, value FROM config ORDER BY key;
-
--- Change a setting
-UPDATE config SET value = '20' WHERE key = 'memory.recall_limit';
-
--- Add a new setting
-INSERT INTO config (key, value, description)
-VALUES ('custom.key', '"value"', 'My custom setting');
-```
-
-### Identity & Soul (in database)
-
-| Table | What it controls | Example |
-|-------|-----------------|---------|
-| `identity` | Name, motto, personality | `name` = "Syne", `personality` = "Helpful, direct, resourceful" |
-| `soul` | Behavioral rules by category | `tone` = "casual and witty", `privacy` = "never share user info" |
-| `rules` | Hard/soft rules with severity | `[700] Server Access: owner only` (hard) |
-| `abilities` | Enabled abilities + config | `image_gen` enabled, `maps` enabled |
-
----
-
-## Sub-agents (Core)
-
-Syne can spawn isolated background agents for parallel tasks — just like delegating work to an assistant.
-
-| Config | Default | Description |
-|--------|---------|-------------|
-| `subagents.enabled` | `true` | Master ON/OFF switch |
-| `subagents.max_concurrent` | `2` | Max simultaneous sub-agents |
+Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml`. Syne has none of that. Everything lives in PostgreSQL, and you change it through conversation:
 
 ```
-User: "Write full documentation for the project"
-    │
-    ├─ Syne spawns sub-agent (background)
-    ├─ Main session continues chatting
-    │
-    └─ Sub-agent completes → results delivered back
+You:  Be more casual and use humor.
+Syne: Updated my personality. ✅
+
+You:  Add a rule: never share my location.
+Syne: Added as a hard rule. ✅
+
+You:  Switch to GPT-5.2 for chat.
+Syne: Model switched. ✅
 ```
 
-Sub-agents inherit abilities and memory access but run in isolated sessions. They cannot spawn other sub-agents.
+| Traditional File | Syne Equivalent | How to change |
+|------------------|-----------------|---------------|
+| `SOUL.md` | `soul` table | *"Be more casual and witty"* |
+| `AGENTS.md` | `rules` table | *"Add a rule: never share my location"* |
+| `IDENTITY.md` | `identity` table | *"Change your name to Atlas"* |
+| `CONFIG.yaml` | `config` table | *"Switch to GPT for chat"* |
 
----
-
-## Ability System
-
-Everything beyond core functionality is an **Ability**. Abilities can be:
-
-| Source | Description | Location |
-|--------|-------------|----------|
-| `bundled` | Ships with Syne | `syne/abilities/` |
-| `installed` | Downloaded from marketplace | `syne/abilities/` + Database |
-| `self_created` | Created by Syne itself | `syne/abilities/` + Database |
-
-### Core Tools (Always Available — 12 tools)
-
-| Tool | Description |
-|------|-------------|
-| `exec` | Execute shell commands on the host system |
-| `memory_search` | Semantic search over stored memories |
-| `memory_store` | Store new memories with anti-hallucination checks |
-| `spawn_subagent` | Spawn isolated background agents |
-| `subagent_status` | Check running sub-agent status |
-| `update_config` | Change runtime configuration |
-| `update_ability` | Enable/disable/create abilities |
-| `update_soul` | Modify behavioral rules |
-| `manage_group` | Manage group chat settings |
-| `manage_user` | Manage user access levels |
-| `web_search` | Search the web (Brave Search API) |
-| `web_fetch` | Fetch and extract content from URLs |
-| `read_source` | Read-only access to Syne's own source code (for self-healing) |
-
-### Bundled Abilities (v1)
-
-| Ability | Description | Provider | Default |
-|---------|-------------|----------|---------|
-| `image_gen` | Generate images from text | Together AI (FLUX.1-schnell) | ON |
-| `image_analysis` | Analyze and describe images | Google Gemini vision | ON |
-| `maps` | Places, directions, geocoding | Google Maps/Places | ON |
-
-### Ability Interface
-
-All abilities implement a standard interface:
-
-```python
-class Ability:
-    name: str           # Unique identifier
-    description: str    # Human-readable description
-    version: str        # Semantic version
-    
-    async def execute(self, params: dict, context: dict) -> dict:
-        """Execute the ability."""
-        ...
-    
-    def get_schema(self) -> dict:
-        """Return JSON schema for LLM function calling."""
-        ...
-```
-
-### Managing Abilities
-
-Abilities are managed through conversation:
-
-```
-You:  Enable image generation
-Syne: Done — image_gen enabled. ✅
-
-You:  Disable maps
-Syne: Done — maps disabled. ✅
-
-You:  What abilities do I have?
-Syne: Here's your ability list:
-      ✅ image_gen — Generate images (Together AI)
-      ✅ image_analysis — Analyze images (Gemini vision)
-      ❌ maps — Places and directions (disabled)
-```
-
----
-
-## Self-Modification
-
-Syne can create new abilities for itself at runtime using the `update_ability` core tool — no restart required:
-
-```
-User: "I wish you could check Bitcoin prices"
-    │
-    ├─ Syne recognizes the need
-    ├─ Writes syne/abilities/crypto_price.py using exec
-    ├─ Registers via update_ability (source='self_created')
-    ├─ Ability is immediately available — no restart
-    │
-    └─ Reports back:
-        "Created 'crypto_price' ability. Try it: what's BTC now?"
-```
-
-### Safety Rules
-
-| Rule | Description |
-|------|-------------|
-| 1 | Syne can CREATE ability files in `syne/abilities/` |
-| 2 | Syne CANNOT modify core code (`syne/` engine, tools, channels, db, llm, security) |
-| 3 | Syne CANNOT modify `syne/db/schema.sql` |
-| 4 | Core bugs → Syne drafts a bug report in chat for the owner to post as a GitHub issue |
+Fresh install comes with sensible defaults. Override anything through conversation — no SQL, no files.
 
 ---
 
 ## Memory System
 
-Syne's memory is designed to **never store hallucinations**. Only user-confirmed facts are stored.
-
 ### Three-Layer Anti-Hallucination
+
+Only user-confirmed facts are stored. Never assistant suggestions.
 
 ```
 User message
     │
     ├─ Layer 1: Quick Filter (no LLM call)
-    │   └─ Skip: short messages, greetings, questions-only
+    │   └─ Skip: greetings, short messages, questions-only
     │
     ├─ Layer 2: LLM Evaluation
-    │   └─ Analyze: Is this worth remembering?
+    │   └─ Is this worth remembering?
     │
     └─ Layer 3: Similarity Dedup
-        └─ Check: Does this already exist?
+        └─ Does this already exist?
 ```
 
-### Conflict Resolution — Three Zones
+### Conflict Resolution
 
 When storing a new memory, similarity to existing memories determines the action:
-
-```
-    0.0            0.70            0.85            1.0
-     │──────────────│───────────────│───────────────│
-     │   INSERT     │    UPDATE     │     SKIP      │
-     │  New topic   │  Same topic,  │   Duplicate   │
-     │              │  updated info │               │
-```
 
 | Similarity | Action | Example |
 |------------|--------|---------|
@@ -429,221 +141,329 @@ When storing a new memory, similarity to existing memories determines the action
 | 0.70–0.84 | **Update** existing | "I moved to Bandung" updates "lives in Jakarta" |
 | ≥ 0.85 | **Skip** duplicate | "I live in Jakarta" (already stored) |
 
-### How Memory Storage Works
+### Auto Capture vs Manual
 
-Syne has two memory storage modes, controlled by `memory.auto_capture`:
+| Mode | Trigger | Cost impact |
+|------|---------|-------------|
+| `auto_capture = false` (default) | Only when user says "remember this" | No extra LLM calls |
+| `auto_capture = true` | Every message evaluated automatically | +1 LLM call + 1 embedding per message |
 
-**`auto_capture = false` (default):**
-Memory is only stored when the user explicitly asks — e.g. "remember this", "save that", "note that down". This gives the user full control over what enters long-term memory.
+> ⚠️ `auto_capture = true` adds extra LLM + embedding calls per message. On free-tier OAuth this exhausts rate limits faster.
 
-**`auto_capture = true`:**
-Syne automatically evaluates every conversation turn using the LLM and stores what it considers important. The evaluator uses a 3-layer anti-hallucination defense:
+### Managing Your Memories
 
-1. **Only user-confirmed statements** — assistant suggestions are never stored
-2. **Conflict resolution** — new facts are checked against existing memories
-3. **Importance scoring** — trivial messages are filtered out
+```
+You:  What do you remember about my family?
+Syne: [recalls relevant memories via semantic search]
 
-> ⚠️ **Cost warning:** Enabling `auto_capture` adds **one extra LLM call per message** (for evaluation) plus **one embedding call per stored memory**. On free-tier OAuth this means faster rate-limit exhaustion. On paid providers this increases cost per turn. Keep it OFF if cost or rate limits are a concern.
+You:  Remember: I'm allergic to shellfish.
+Syne: Stored. ✅
 
-### What Gets Stored (when auto_capture is ON)?
-
-✅ **STORE:**
-- Personal facts (name, job, family)
-- Preferences (likes, dislikes)
-- Important events/milestones
-- Decisions and commitments
-- Health information
-- Lessons learned
-
-❌ **NEVER STORE:**
-- Casual greetings ("hi", "thanks")
-- Questions without new info
-- **Assistant suggestions** (only user-confirmed)
-- Temporary/transient info
-- Vague statements
-
-### Source Tracking
-
-Every memory has a `source` field:
-
-```sql
-source = 'user_confirmed'  -- Only this is stored by evaluator
+You:  Forget that I like sushi.
+Syne: Removed from memory. ✅
 ```
 
-This prevents the common AI problem of storing assistant interpretations as user facts.
+Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
 
 ---
 
-## Interactive CLI (Coding Mode)
+## Ability System
 
-Syne includes a full interactive terminal — like Claude Code, but with Syne's memory and tools:
+### Core Tools (13 — Always Available)
 
-```bash
-# Run from any project directory
-cd /path/to/your/project
-syne cli
+| Tool | Description |
+|------|-------------|
+| `exec` | Execute shell commands |
+| `memory_search` | Semantic search over memories |
+| `memory_store` | Store new memories |
+| `spawn_subagent` | Spawn background agents |
+| `subagent_status` | Check sub-agent status |
+| `update_config` | Change runtime configuration |
+| `update_ability` | Enable/disable/create abilities |
+| `update_soul` | Modify behavioral rules |
+| `manage_group` | Manage group chat settings |
+| `manage_user` | Manage user access levels |
+| `web_search` | Search the web (Brave Search API) |
+| `web_fetch` | Fetch and extract content from URLs |
+| `read_source` | Read Syne's own source code (for self-healing) |
+
+### Bundled Abilities
+
+| Ability | Description | Provider |
+|---------|-------------|----------|
+| `image_gen` | Generate images from text | Together AI (FLUX.1-schnell) |
+| `image_analysis` | Analyze and describe images | Google Gemini vision |
+| `maps` | Places, directions, geocoding | Google Maps/Places |
+
+### Ability Interface
+
+```python
+class Ability:
+    name: str
+    description: str
+    version: str
+
+    async def execute(self, params: dict, context: dict) -> dict: ...
+    def get_schema(self) -> dict: ...
 ```
 
+### Managing Abilities
+
 ```
-┌─────────────────────────────────────────────────┐
-│ Syne 🧠                                         │
-│ I remember, therefore I am                       │
-│ Model: anthropic | Tools: 13 | Type /help        │
-└─────────────────────────────────────────────────┘
+You:  Enable image generation
+Syne: Done — image_gen enabled. ✅
 
-> What's in this project?
-Syne reads files, analyzes code, runs commands...
-
-> Refactor the auth module
-Syne edits files, runs tests, explains changes...
+You:  What abilities do I have?
+Syne: ✅ image_gen, ✅ image_analysis, ❌ maps (disabled)
 ```
-
-### CLI Features
-
-| Feature | Description |
-|---------|-------------|
-| **Full tool access** | All 13 core tools + abilities (exec, memory, web_search, etc.) |
-| **CWD-aware** | Commands run in your current directory, not Syne's project root |
-| **Arrow key history** | ↑↓ to browse previous inputs, persistent across sessions |
-| **Multiline input** | End a line with `\` to continue on the next line |
-| **Markdown rendering** | Code blocks, bold, headers rendered in terminal |
-| **Auto-owner** | CLI user is always owner (full access) |
-| **Compaction alerts** | Notifies when context is compacted |
-
-### CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show available commands |
-| `/status` | Agent status (model, memories, tools) |
-| `/model` | Show current model |
-| `/clear` | Clear conversation history |
-| `/exit` | Exit CLI |
 
 ---
 
-## CLI Commands (Management)
+## Self-Modification
+
+Syne can create new abilities at runtime — no restart required:
+
+### Flow
+
+```
+User: "I wish you could check Bitcoin prices"
+    │
+    ├─ Syne writes syne/abilities/crypto_price.py
+    ├─ Registers via update_ability (source='self_created')
+    ├─ Ability is immediately available
+    │
+    └─ "Created 'crypto_price' ability. Try: what's BTC now?"
+```
+
+### Safety Rules
+
+| Rule | Description |
+|------|-------------|
+| ✅ CAN | Create/edit files in `syne/abilities/` |
+| ❌ CANNOT | Modify core code (`syne/` engine, tools, channels, db, llm, security) |
+| ❌ CANNOT | Modify `syne/db/schema.sql` |
+| 📝 INSTEAD | Core bugs → draft GitHub issue for owner to post |
+
+### ⚠️ Security Warning (exec)
+
+The `exec` tool gives Syne shell access on the host system. This is powerful but dangerous:
+
+- **Owner-only** — Only users with `owner` access level can trigger exec
+- **Timeout** — Configurable per-session via `session.max_tool_rounds` (default: 100)
+- **Sub-agents** — Inherit exec access but run in isolated sessions
+- **Your responsibility** — Review what Syne executes, especially on production systems
+
+---
+
+## Sub-agents
+
+Syne can spawn isolated background agents for parallel tasks:
+
+```
+User: "Write full documentation for the project"
+    │
+    ├─ Syne spawns sub-agent (background)
+    ├─ Main session continues chatting
+    └─ Sub-agent completes → results delivered back
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `subagents.enabled` | `true` | Master ON/OFF switch |
+| `subagents.max_concurrent` | `2` | Max simultaneous sub-agents |
+| `subagents.timeout_seconds` | `300` | Sub-agent timeout (5 min) |
+
+Sub-agents inherit abilities and memory access but run in isolated sessions. They cannot spawn other sub-agents.
+
+---
+
+## Multi-User Access
+
+Syne supports multiple users with different access levels:
+
+| Level | Permissions |
+|-------|------------|
+| `owner` | Full access — exec, config, abilities, memory, all tools |
+| `admin` | Most tools except system-level config |
+| `family` | Memory access, conversation, limited tools |
+| `friend` | Conversation, basic tools |
+| `public` | Conversation only |
+
+The first user to message Syne automatically becomes `owner`.
+
+Manage via conversation: *"Make @alice an admin"*, *"Remove @bob's access"*
+
+---
+
+## Configuration Reference
+
+All configuration lives in the `config` table. Change via conversation or SQL.
+
+### Provider Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `provider.primary` | `google` | LLM provider |
+| `provider.chat_model` | `gemini-2.5-pro` | Chat model |
+| `provider.embedding_model` | `BAAI/bge-base-en-v1.5` | Embedding model (Together AI) |
+| `provider.embedding_dimensions` | `768` | Vector dimensions |
+
+### Memory Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `memory.auto_capture` | `false` | Auto-evaluate messages for storage |
+| `memory.recall_limit` | `10` | Max memories per query |
+
+### Session Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `session.compaction_threshold` | `80000` | Tokens before compaction |
+| `session.max_messages` | `100` | Messages before compaction |
+| `session.max_tool_rounds` | `100` | Max tool call rounds per turn |
+| `session.thinking_budget` | `null` | Thinking: `0`=off, `1024`=low, `4096`=medium, `8192`=high, `24576`=max |
+| `session.reasoning_visible` | `false` | Show thinking in responses |
+
+### Sub-agent Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `subagents.enabled` | `true` | Enable sub-agents |
+| `subagents.max_concurrent` | `2` | Max concurrent sub-agents |
+| `subagents.timeout_seconds` | `300` | Sub-agent timeout |
+
+---
+
+## CLI Commands
 
 ```bash
 # Setup & Running
-syne init                  # Interactive setup wizard (fully automated)
-syne start                 # Start the Telegram agent
+syne init                  # Interactive setup (fully automated)
+syne start                 # Start Telegram agent
 syne start --debug         # Start with debug logging
-syne cli                   # Interactive terminal chat (coding mode)
+syne cli                   # Interactive terminal chat
 syne cli --debug           # CLI with debug logging
 syne status                # Show status
-syne repair                # Diagnose and repair installation
-syne restart               # Restart the agent
-syne stop                  # Stop the agent
-syne autostart             # Configure systemd autostart
+syne repair                # Diagnose and repair
+syne restart               # Restart agent
+syne stop                  # Stop agent
 
 # Database
 syne db init               # Initialize schema
 syne db reset              # Reset database (destructive!)
 
-# Identity & Prompt
-syne identity              # View current identity
+# Identity
+syne identity              # View identity
 syne identity name "Syne"  # Set identity value
-syne prompt                # Show current system prompt
+syne prompt                # Show system prompt
 
 # Memory
 syne memory stats          # Memory statistics
 syne memory search "query" # Semantic search
-syne memory add "info" -c fact  # Manually add memory
+syne memory add "info"     # Manually add memory
 ```
+
+### Interactive CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show commands |
+| `/status` | Agent status (model, memories, tools) |
+| `/model` | Show/switch model |
+| `/clear` | Clear conversation |
+| `/compact` | Compact conversation |
+| `/think [level]` | Set thinking budget |
+| `/exit` | Exit CLI |
 
 ---
 
 ## Telegram Commands
 
+| Command | Description | Access |
+|---------|-------------|--------|
+| `/start` | Welcome message | All |
+| `/help` | Available commands | All |
+| `/version` | Agent version | All |
+| `/status` | Agent status | All |
+| `/memory` | Memory statistics | All |
+| `/identity` | Agent identity | All |
+| `/compact` | Compact conversation | Owner |
+| `/think [level]` | Set thinking (off/low/medium/high/max) | Owner |
+| `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
+| `/autocapture [on/off]` | Toggle auto memory capture | Owner |
+| `/model` | Show/switch model | Owner |
+| `/embedding` | Show/switch embedding model | Owner |
+| `/forget` | Clear conversation | Owner |
+| `/restart` | Restart agent | Owner |
+
+---
+
+## Architecture
+
 ```
-/start        — Welcome message
-/help         — Available commands
-/version      — Show agent version
-/status       — Agent status (model, context, memories, compactions, abilities)
-/memory       — Memory statistics
-/compact      — Compact conversation history (owner only)
-/think        — Set thinking level: off, low, medium, high, max (owner only)
-/reasoning    — Toggle reasoning visibility: on/off (owner only)
-/autocapture  — Toggle auto memory capture: on/off (owner only)
-/forget       — Clear current conversation
-/identity     — Show agent identity
-/restart      — Restart the agent (owner only)
++------------------------------------------------------------+
+|                       SYNE AGENT                           |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |                 CORE (Protected)                     |  |
+|  |                                                      |  |
+|  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
+|  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
+|  |                                                      |  |
+|  |  Core Tools (13):                                    |  |
+|  |  exec · memory · web · config · source · sub-agents  |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |              ABILITIES (Pluggable)                   |  |
+|  |                                                      |  |
+|  |  [image_gen]  [image_analysis]  [maps]  [custom...]  |  |
+|  |                                                      |  |
+|  |  Self-Created: Syne adds new abilities at runtime    |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |              PostgreSQL + pgvector                   |  |
+|  |  12 tables: identity · soul · rules · users ·       |  |
+|  |  memory · sessions · messages · config · abilities · |  |
+|  |  groups · subagent_runs · capabilities               |  |
+|  +------------------------------------------------------+  |
++------------------------------------------------------------+
 ```
-
-### Thinking & Reasoning
-
-| Command | What it does | Persists? |
-|---------|-------------|-----------|
-| `/think off` | Disable model thinking (budget = 0) | ✅ DB |
-| `/think low` | 1,024 token thinking budget | ✅ DB |
-| `/think medium` | 4,096 token thinking budget | ✅ DB |
-| `/think high` | 8,192 token thinking budget | ✅ DB |
-| `/think max` | 24,576 token thinking budget | ✅ DB |
-| `/reasoning on` | Show model's thinking in responses | ✅ DB |
-| `/reasoning off` | Hide thinking (default) | ✅ DB |
-| `/autocapture on` | Auto-evaluate messages for memory storage | ✅ DB |
-| `/autocapture off` | Only store on explicit request (default) | ✅ DB |
-
-`/think` controls **how much** the model reasons. `/reasoning` controls **whether you see it**. `/autocapture` controls **automatic memory storage** (⚠️ ON adds extra LLM + embedding calls per message).
-
-**Group behavior:** Syne responds when @mentioned, called by name (e.g. "Syne, what time is it?"), or replied to.
 
 ---
 
 ## Database Schema
 
-All data lives in PostgreSQL:
-
 | Table | Purpose |
 |-------|---------|
-| `identity` | Agent identity (name, motto, personality) |
+| `identity` | Agent name, motto, personality |
 | `soul` | Behavioral rules by category |
 | `rules` | Hard/soft rules with severity |
 | `users` | Multi-user with access levels |
 | `groups` | Group chat configuration |
-| `memory` | Semantic memory with embeddings |
+| `memory` | Semantic memory with pgvector embeddings |
 | `sessions` | Conversation sessions |
 | `messages` | Full message history |
-| `abilities` | Registered abilities |
-| `config` | Runtime configuration |
+| `abilities` | Registered abilities + config |
+| `config` | Runtime configuration (key-value) |
 | `subagent_runs` | Sub-agent execution history |
 | `capabilities` | System capabilities registry |
 
 ---
 
-## Cost
+## Tech Stack
 
-| Component | Model | Cost | Notes |
-|-----------|-------|------|-------|
-| Chat LLM | `gemini-2.5-pro` (Google) | **$0** | Free via CCA OAuth (rate-limited) |
-| Embedding | `BAAI/bge-base-en-v1.5` (Together AI) | **~$0.008/1M tokens** | Google CCA OAuth doesn't support embedding API. Together AI is the cheapest alternative |
-| Image Gen | `FLUX.1-schnell` (Together AI) | **~$0.003/image** | Optional ability, not required for core |
-| PostgreSQL | — | **$0** | Self-hosted via Docker |
-| Telegram Bot | — | **$0** | Telegram Bot API is free |
-| **Typical monthly** | | **< $1** | Embedding is the only paid component for core usage |
-
-### Why Together AI for Embedding?
-
-Syne uses Google Gemini for chat — free via OAuth. But **the free OAuth only covers chat, not embedding**. The embedding API requires a separate paid API key. This means Syne needs a different provider for embeddings.
-
-Three providers can do embeddings:
-
-| Provider | Model | Cost | Why / Why not |
-|----------|-------|------|---------------|
-| **Together AI** | `BAAI/bge-base-en-v1.5` | **~$0.008/1M tokens** | ✅ Cheapest. Open-source model, multilingual. $5 free signup credit (~625M tokens). **Default choice.** |
-| Google API Key | `text-embedding-004` | ~$0.006/1M tokens | Slightly cheaper per token, but requires a paid Google API key (separate from the free OAuth used for chat). Extra billing setup. |
-| OpenAI | `text-embedding-3-small` | $0.02/1M tokens | Good quality, but 2.5× more expensive than Together AI. Requires OpenAI API key. |
-| OpenAI | `text-embedding-3-large` | $0.13/1M tokens | Best quality, but 16× more expensive. Overkill for personal use. |
-
-**Together AI wins on simplicity**: sign up, get $5 free credit, done. No Google billing setup, no OpenAI subscription. For typical personal use (a few hundred memories), the $5 credit lasts months.
-
-**Want to switch?** Just tell Syne:
-
-```
-You:  Switch embedding to OpenAI text-embedding-3-small
-Syne: Done — provider.embedding_model updated. ✅
-```
+| Component | Technology |
+|-----------|-----------|
+| Language | Python 3.12 |
+| Database | PostgreSQL 16 + pgvector |
+| Chat LLM | Google Gemini 2.5 Pro (OAuth), Claude, GPT (multi-driver) |
+| Embedding | Together AI (bge-base-en-v1.5) |
+| Telegram | python-telegram-bot |
+| HTTP | httpx (async) |
+| CLI | Click + Rich |
 
 ---
 
@@ -655,42 +475,36 @@ syne/
 │   ├── main.py              # Entry point
 │   ├── agent.py             # Main agent coordinator
 │   ├── boot.py              # System prompt builder
-│   ├── config.py            # Settings
+│   ├── config.py            # Settings loader
 │   ├── conversation.py      # Session management
 │   ├── context.py           # Context window management
 │   ├── compaction.py        # Conversation summarization
-│   ├── cli.py               # CLI commands
+│   ├── security.py          # Rule 700/760 enforcement
+│   ├── cli.py               # CLI commands (init, start, repair, etc.)
 │   ├── auth/
-│   │   └── google_oauth.py  # Google OAuth PKCE
+│   │   └── google_oauth.py  # Google CCA OAuth PKCE
 │   ├── llm/
-│   │   ├── provider.py      # Abstract interface
+│   │   ├── provider.py      # Abstract LLM interface
 │   │   ├── drivers.py       # Driver registry + model system
-│   │   ├── google.py        # Gemini CCA (OAuth)
+│   │   ├── google.py        # Gemini (OAuth)
 │   │   ├── codex.py         # ChatGPT/Codex (OAuth)
 │   │   ├── openai.py        # OpenAI-compatible (Groq, etc.)
 │   │   ├── anthropic.py     # Claude (OAuth)
 │   │   ├── together.py      # Together AI (embedding)
-│   │   └── hybrid.py        # Chat + Embed hybrid
+│   │   └── hybrid.py        # Chat + Embed from different providers
 │   ├── memory/
-│   │   ├── engine.py        # Store, recall, dedup
-│   │   └── evaluator.py     # Auto-evaluate
+│   │   ├── engine.py        # Store, recall, dedup, conflict resolution
+│   │   └── evaluator.py     # Auto-evaluate (3-layer filter)
 │   ├── channels/
-│   │   ├── telegram.py      # Telegram adapter
-│   │   └── cli_channel.py   # Interactive CLI (coding mode)
-│   ├── tools/               # Core tools
-│   │   ├── web_search.py    # Brave Search
-│   │   ├── web_fetch.py     # URL content extraction
-│   │   ├── read_source.py   # Source code introspection
-│   │   └── registry.py      # Tool registry
-│   ├── abilities/           # Bundled abilities
-│   │   ├── base.py
-│   │   ├── image_gen.py
-│   │   └── ...
+│   │   ├── telegram.py      # Telegram bot adapter
+│   │   └── cli_channel.py   # Interactive CLI (REPL)
+│   ├── tools/               # 13 core tools
+│   ├── abilities/           # Bundled + self-created abilities
 │   └── db/
-│       ├── schema.sql
-│       ├── connection.py
-│       └── models.py
-├── tests/
+│       ├── schema.sql       # Database schema (12 tables)
+│       ├── connection.py    # Async connection pool
+│       └── models.py        # Data access layer
+├── tests/                   # 247 tests
 ├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
@@ -698,26 +512,9 @@ syne/
 
 ---
 
-## Tech Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Language | Python 3.12 |
-| Database | PostgreSQL 16 + pgvector |
-| Chat LLM | Google Gemini 2.5 Pro (CCA OAuth) |
-| Embedding | Together AI (BAAI/bge-base-en-v1.5) |
-| Image Gen | Together AI (FLUX.1-schnell) |
-| Telegram | python-telegram-bot |
-| HTTP | httpx (async) |
-| CLI | Click + Rich |
-
----
-
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Development Setup
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
 git clone https://github.com/riyogarta/syne.git
@@ -725,12 +522,7 @@ cd syne
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-
-# Run tests
 pytest
-
-# Run linter
-ruff check .
 ```
 
 ---
@@ -740,15 +532,19 @@ ruff check .
 - [x] Core memory system with pgvector
 - [x] Google OAuth (free Gemini access)
 - [x] Telegram channel
-- [x] Anti-hallucination memory
-- [x] Conflict resolution (3-zone)
-- [x] Ability system
-- [x] Self-modification (abilities only — Syne can create/edit abilities but never touch core)
-- [x] Multi-model support (Google, OpenAI, Anthropic, Groq, Together AI — driver-based with DB registry)
-- [x] Interactive CLI mode (coding agent — like Claude Code)
-- [x] Source code introspection (read_source tool for self-healing)
-- [x] Systemd service auto-setup from init
+- [x] Anti-hallucination memory (3-layer)
+- [x] Conflict resolution (3-zone similarity)
+- [x] Ability system (bundled + self-created)
+- [x] Self-modification (abilities only)
+- [x] Multi-model support (5 drivers: Google, OpenAI, Anthropic, Groq, Together AI)
+- [x] Interactive CLI mode
+- [x] Source code introspection (read_source)
+- [x] Systemd service auto-setup
+- [x] Sub-agents
+- [x] Multi-user access control
+- [ ] Ollama support (local embedding)
 - [ ] Ability marketplace
+- [ ] Web UI
 
 ---
 
@@ -758,10 +554,6 @@ Apache 2.0
 
 ---
 
-## Author
-
-**Riyogarta Pratikto** — [@riyogarta](https://github.com/riyogarta)
-
----
+**Author:** [Riyogarta Pratikto](https://github.com/riyogarta)
 
 *"I remember, therefore I am"*
