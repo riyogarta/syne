@@ -202,18 +202,6 @@ Each ability requires its own API key. Just tell Syne in chat: *"Set up image ge
 | `image_analysis` | Analyze and describe images | Google Gemini |
 | `maps` | Places, directions, geocoding | Google Maps/Places |
 
-### Ability Interface
-
-```python
-class Ability:
-    name: str
-    description: str
-    version: str
-
-    async def execute(self, params: dict, context: dict) -> dict: ...
-    def get_schema(self) -> dict: ...
-```
-
 ### Managing Abilities
 
 ```
@@ -250,6 +238,18 @@ User: "I wish you could check Bitcoin prices"
 | ❌ CANNOT | Modify core code (`syne/` engine, tools, channels, db, llm, security) |
 | ❌ CANNOT | Modify `syne/db/schema.sql` |
 | 📝 INSTEAD | Core bugs → draft GitHub issue for owner to post |
+
+### Ability Interface
+
+```python
+class Ability:
+    name: str
+    description: str
+    version: str
+
+    async def execute(self, params: dict, context: dict) -> dict: ...
+    def get_schema(self) -> dict: ...
+```
 
 ### ⚠️ Security Warning (exec)
 
