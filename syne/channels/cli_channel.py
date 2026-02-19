@@ -23,6 +23,12 @@ async def run_cli(debug: bool = False):
     """Run Syne in interactive CLI mode."""
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
+    else:
+        # Suppress noisy loggers in CLI mode — only show errors
+        logging.getLogger("syne").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("asyncpg").setLevel(logging.WARNING)
 
     settings = load_settings()
     agent = SyneAgent(settings)
