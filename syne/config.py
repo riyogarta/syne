@@ -1,8 +1,15 @@
 """Syne configuration management."""
 
+import os
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional
+
+# Resolve .env relative to project root (parent of syne/ package)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class SyneSettings(BaseSettings):
@@ -43,7 +50,7 @@ class SyneSettings(BaseSettings):
     brave_api_key: Optional[str] = Field(default=None, description="Brave Search API key")
     elevenlabs_api_key: Optional[str] = Field(default=None, description="ElevenLabs TTS API key")
 
-    model_config = {"env_prefix": "SYNE_", "env_file": ".env", "extra": "ignore"}
+    model_config = {"env_prefix": "SYNE_", "env_file": str(_ENV_FILE), "extra": "ignore"}
 
 
 def load_settings() -> SyneSettings:
