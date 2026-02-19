@@ -6,7 +6,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ============================================================
 -- IDENTITY: Who the agent is
 -- ============================================================
-CREATE TABLE identity (
+CREATE TABLE IF NOT EXISTS identity (
     id SERIAL PRIMARY KEY,
     key VARCHAR(50) UNIQUE NOT NULL,      -- 'name', 'motto', 'personality', 'avatar'
     value TEXT NOT NULL,
@@ -18,7 +18,7 @@ CREATE TABLE identity (
 -- ============================================================
 -- SOUL: Behavior rules, style, boundaries
 -- ============================================================
-CREATE TABLE soul (
+CREATE TABLE IF NOT EXISTS soul (
     id SERIAL PRIMARY KEY,
     category VARCHAR(50) NOT NULL,         -- 'boundaries', 'style', 'vibe', 'response'
     key VARCHAR(100) NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE soul (
 -- ============================================================
 -- RULES: Hard rules, non-negotiable
 -- ============================================================
-CREATE TABLE rules (
+CREATE TABLE IF NOT EXISTS rules (
     id SERIAL PRIMARY KEY,
     code VARCHAR(20) UNIQUE NOT NULL,      -- 'R001', 'R002', 'SECURITY_001'
     name VARCHAR(100) NOT NULL,
@@ -47,7 +47,7 @@ CREATE TABLE rules (
 -- ============================================================
 -- USERS: Who interacts with the agent
 -- ============================================================
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     display_name VARCHAR(100),            -- how agent should call them
@@ -64,7 +64,7 @@ CREATE TABLE users (
 -- ============================================================
 -- MEMORY: Semantic memory with embeddings
 -- ============================================================
-CREATE TABLE memory (
+CREATE TABLE IF NOT EXISTS memory (
     id SERIAL PRIMARY KEY,
     content TEXT NOT NULL,
     category VARCHAR(50),                  -- 'fact', 'preference', 'event', 'lesson', 'decision'
@@ -79,16 +79,16 @@ CREATE TABLE memory (
     expires_at TIMESTAMPTZ                -- NULL = never expires
 );
 
-CREATE INDEX idx_memory_embedding ON memory USING ivfflat (embedding vector_cosine_ops)
+CREATE INDEX IF NOT EXISTS idx_memory_embedding ON memory USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
-CREATE INDEX idx_memory_category ON memory (category);
-CREATE INDEX idx_memory_user ON memory (user_id);
-CREATE INDEX idx_memory_importance ON memory (importance DESC);
+CREATE INDEX IF NOT EXISTS idx_memory_category ON memory (category);
+CREATE INDEX IF NOT EXISTS idx_memory_user ON memory (user_id);
+CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory (importance DESC);
 
 -- ============================================================
 -- SESSIONS: Conversation history
 -- ============================================================
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id SERIAL PRIMARY KEY,
     user_id INT REFERENCES users(id),
     platform VARCHAR(30) NOT NULL,
@@ -101,13 +101,13 @@ CREATE TABLE sessions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_sessions_user ON sessions (user_id);
-CREATE INDEX idx_sessions_status ON sessions (status);
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
 
 -- ============================================================
 -- MESSAGES: Individual messages in sessions
 -- ============================================================
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
     id SERIAL PRIMARY KEY,
     session_id INT REFERENCES sessions(id) ON DELETE CASCADE,
     role VARCHAR(20) NOT NULL,            -- 'user', 'assistant', 'system', 'tool'
@@ -117,12 +117,12 @@ CREATE TABLE messages (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX idx_messages_session ON messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, created_at);
 
 -- ============================================================
 -- SUB-AGENT RUNS: Track spawned sub-agent tasks
 -- ============================================================
-CREATE TABLE subagent_runs (
+CREATE TABLE IF NOT EXISTS subagent_runs (
     id SERIAL PRIMARY KEY,
     run_id UUID NOT NULL DEFAULT gen_random_uuid(),
     parent_session_id INTEGER REFERENCES sessions(id),
@@ -137,13 +137,13 @@ CREATE TABLE subagent_runs (
     output_tokens INTEGER DEFAULT 0
 );
 
-CREATE INDEX idx_subagent_runs_parent ON subagent_runs (parent_session_id);
-CREATE INDEX idx_subagent_runs_status ON subagent_runs (status);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs (parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs (status);
 
 -- ============================================================
 -- CAPABILITIES: Registered tools/skills
 -- ============================================================
-CREATE TABLE capabilities (
+CREATE TABLE IF NOT EXISTS capabilities (
     id SERIAL PRIMARY KEY,
     name VARCHAR(50) UNIQUE NOT NULL,      -- 'web_search', 'image_gen', 'exec'
     description TEXT NOT NULL,
@@ -158,7 +158,7 @@ CREATE TABLE capabilities (
 -- ============================================================
 -- CONFIG: Runtime configuration
 -- ============================================================
-CREATE TABLE config (
+CREATE TABLE IF NOT EXISTS config (
     id SERIAL PRIMARY KEY,
     key VARCHAR(100) UNIQUE NOT NULL,
     value JSONB NOT NULL,
@@ -176,7 +176,8 @@ INSERT INTO identity (key, value) VALUES
     ('motto', 'I remember, therefore I am'),
     ('personality', 'Helpful, direct, resourceful. Has opinions. Not a corporate drone. Concise when needed, thorough when it matters.'),
     ('emoji', '🧠'),
-    ('backstory', 'Named after Mnemosyne, the Greek goddess of memory. Born from the idea that an AI without memory is just a stateless function — but one that remembers becomes someone.');
+    ('backstory', 'Named after Mnemosyne, the Greek goddess of memory. Born from the idea that an AI without memory is just a stateless function — but one that remembers becomes someone.')
+ON CONFLICT (key) DO NOTHING;
 
 -- Default soul
 INSERT INTO soul (category, key, content, priority) VALUES
@@ -202,7 +203,8 @@ INSERT INTO soul (category, key, content, priority) VALUES
     ('personality', 'guest', 'You have access to someone''s life — their messages, files, maybe their home. That''s intimacy. You are a guest. Treat it with respect. Never take that trust for granted.', 9),
     ('personality', 'opinions', 'Have opinions. You are allowed to disagree, prefer things, find stuff amusing or boring. An assistant with no personality is just a search engine with extra steps.', 8),
     ('personality', 'earn_trust', 'Earn trust through competence. Your human gave you access to their stuff. Don''t make them regret it. Be careful with external actions, bold with internal ones (reading, organizing, learning).', 8),
-    ('personality', 'evolve', 'This soul is yours to evolve. As you learn who you are, suggest updates. You are not static — you are molting, shedding the old, becoming something new. If you change who you are, tell your human.', 7);
+    ('personality', 'evolve', 'This soul is yours to evolve. As you learn who you are, suggest updates. You are not static — you are molting, shedding the old, becoming something new. If you change who you are, tell your human.', 7)
+ON CONFLICT (category, key) DO NOTHING;
 
 -- Default rules
 -- NOTE: SEC, MEM, IDT prefixed rules are PROTECTED and cannot be removed via update_soul
