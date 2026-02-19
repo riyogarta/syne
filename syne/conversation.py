@@ -74,6 +74,9 @@ class Conversation:
 
     async def save_message(self, role: str, content: str, metadata: Optional[dict] = None):
         """Save a message to the database."""
+        # Strip null bytes — PostgreSQL text columns reject 0x00
+        if content and "\x00" in content:
+            content = content.replace("\x00", "")
         meta_json = json.dumps(metadata) if metadata else "{}"
 
         async with get_connection() as conn:

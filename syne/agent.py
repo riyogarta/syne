@@ -772,11 +772,11 @@ class SyneAgent:
 
             parts = []
             if stdout:
-                out = stdout.decode("utf-8", errors="replace").strip()
+                out = stdout.decode("utf-8", errors="replace").replace("\x00", "").strip()
                 if out:
                     parts.append(f"stdout:\n{out[:output_max]}")
             if stderr:
-                err = stderr.decode("utf-8", errors="replace").strip()
+                err = stderr.decode("utf-8", errors="replace").replace("\x00", "").strip()
                 if err:
                     parts.append(f"stderr:\n{err[:output_max // 2]}")
             parts.append(f"exit_code: {proc.returncode}")
