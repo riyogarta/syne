@@ -87,12 +87,12 @@ async def run_cli(debug: bool = False):
 
         # REPL loop
         chat_id = f"cli:{username}"
-        _ctrl_c_count = {"n": 0}
+        import time as _time
+        _last_ctrl_c = 0.0
         while True:
             try:
                 # Prompt
                 user_input = _get_input()
-                _ctrl_c_count["n"] = 0  # Reset on successful input
                 if user_input is None:
                     # EOF (Ctrl+D)
                     console.print("\n[dim]Goodbye![/dim]")
@@ -110,7 +110,7 @@ async def run_cli(debug: bool = False):
                     if handled:
                         continue
 
-                # Send to agent — prepend CWD context on first message
+                # Send to agent
                 console.print()
                 msg = user_input
                 with console.status("[bold blue]Thinking...", spinner="dots"):
@@ -128,10 +128,12 @@ async def run_cli(debug: bool = False):
                 console.print()
 
             except KeyboardInterrupt:
-                if _ctrl_c_count.get("n", 0) >= 1:
+                now = _time.time()
+                if now - _last_ctrl_c < 2.0:
+                    # Double Ctrl+C within 2 seconds → exit
                     console.print("\n[dim]Goodbye![/dim]")
                     break
-                _ctrl_c_count["n"] = _ctrl_c_count.get("n", 0) + 1
+                _last_ctrl_c = now
                 console.print("\n[dim](Press Ctrl+C again to exit)[/dim]")
                 continue
 
