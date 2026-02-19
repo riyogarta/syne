@@ -44,7 +44,7 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 |------|-----------|
 | Chat (OAuth, free) | Google Gemini, ChatGPT, Claude |
 | Chat (API key, paid) | OpenAI, Anthropic, Together AI, Groq |
-| Embedding | Together AI, OpenAI |
+| Embedding (paid) | Together AI, OpenAI |
 
 > Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path.
 >
