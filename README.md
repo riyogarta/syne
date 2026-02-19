@@ -57,7 +57,7 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 | Requirement | Details |
 |-------------|---------|
 | **CPU** | 1 vCPU minimum (2+ recommended) |
-| **OS** | Linux (Ubuntu 22.04+, Debian 12+) or macOS |
+| **OS** | Linux (Ubuntu 22.04+, Debian 12+) |
 | **Python** | 3.11+ |
 | **RAM** | 1 GB minimum with 1 GB swap (2 GB recommended) |
 | **Storage** | 500 MB (excluding Docker images) |
