@@ -93,7 +93,7 @@ def _ensure_docker() -> str:
     return prefix
 
 
-def _setup_service(docker_prefix: str = ""):
+def _setup_service():
     """Setup systemd user service, enable, and start Syne."""
     import subprocess
     import getpass
@@ -107,10 +107,8 @@ def _setup_service(docker_prefix: str = ""):
 
     service_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build ExecStartPre for docker compose up -d db
-    docker_compose = f"{docker_prefix}docker compose"
-    pre_cmd = f"{docker_compose} -f {syne_dir}/docker-compose.yml up -d db"
-
+    # DB container has restart: unless-stopped — Docker auto-starts it.
+    # No ExecStartPre needed (avoids sudo/docker-group issues on fresh install).
     service_content = f"""[Unit]
 Description=Syne AI Agent
 After=network.target docker.service
@@ -119,10 +117,11 @@ After=network.target docker.service
 Type=simple
 WorkingDirectory={syne_dir}
 EnvironmentFile={env_file}
-ExecStartPre=/bin/bash -c '{pre_cmd}'
 ExecStart={venv_python} -m syne.main
 Restart=on-failure
-RestartSec=5
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Install]
 WantedBy=default.target
@@ -494,7 +493,7 @@ def init():
 
     # 7. Setup systemd service + start
     console.print("\n[bold]Setting up systemd service...[/bold]")
-    _setup_service(docker_prefix)
+    _setup_service()
 
     console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
     console.print()
