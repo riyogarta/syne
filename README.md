@@ -25,16 +25,28 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 ## Cost
 
+The table below shows the **minimum cost** setup using free OAuth providers. During `syne init`, you choose your own chat LLM and embedding provider — costs vary depending on your choice.
+
+**Minimum cost setup (Google Gemini + Together AI):**
+
 | Component | Model | Cost | Notes |
 |-----------|-------|------|-------|
-| Chat LLM | Gemini 2.5 Pro (Google) | **$0** | Free via CCA OAuth (rate-limited) |
-| Embedding | bge-base-en-v1.5 (Together AI) | **~$0.008/1M tokens** | Required — Google OAuth doesn't cover embedding |
+| Chat LLM | Gemini 2.5 Pro (Google OAuth) | **$0** | Free, rate-limited |
+| Embedding | bge-base-en-v1.5 (Together AI) | **~$0.008/1M tokens** | $5 free credit on signup |
 | Image Gen | FLUX.1-schnell (Together AI) | **~$0.003/image** | Optional ability |
 | PostgreSQL | Self-hosted (Docker) | **$0** | |
 | Telegram Bot | Telegram Bot API | **$0** | |
-| **Typical monthly** | | **< $1** | Embedding is the only paid component for core usage |
+| **Typical monthly** | | **< $1** | |
 
-> Together AI gives **$5 free credit** on signup (~625M tokens). For typical personal use, that lasts months.
+**Other provider options available during install:**
+
+| Type | Providers |
+|------|-----------|
+| Chat (OAuth, free) | Google Gemini, ChatGPT, Claude |
+| Chat (API key, paid) | OpenAI, Anthropic, Together AI, Groq |
+| Embedding | Together AI, OpenAI |
+
+> Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path.
 
 ---
 
