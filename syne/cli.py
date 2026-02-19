@@ -25,8 +25,13 @@ def cli():
 @cli.command()
 def _docker_ok(use_sudo=False) -> bool:
     """Check if Docker daemon is reachable."""
-    cmd = "sudo docker info" if use_sudo else "docker info"
-    return os.system(f"{cmd} > /dev/null 2>&1") == 0
+    import subprocess
+    cmd = ["sudo", "docker", "info"] if use_sudo else ["docker", "info"]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def _ensure_docker() -> str:
@@ -37,9 +42,6 @@ def _ensure_docker() -> str:
     import shutil
     import time
     import getpass
-    import subprocess
-
-    need_sudo = False
 
     # 1. Install if missing
     if not shutil.which("docker"):
@@ -52,7 +54,6 @@ def _ensure_docker() -> str:
         # Add user to docker group
         current_user = getpass.getuser()
         os.system(f"sudo usermod -aG docker {current_user}")
-        need_sudo = True  # Group not active until re-login
         console.print(f"[green]✓ Docker installed, {current_user} added to docker group[/green]")
 
     # 2. Start daemon if not running
@@ -63,7 +64,7 @@ def _ensure_docker() -> str:
         os.system("sudo systemctl enable docker > /dev/null 2>&1")
         for _ in range(20):
             time.sleep(2)
-            if _docker_ok(use_sudo=True):
+            if _docker_ok() or _docker_ok(use_sudo=True):
                 break
         else:
             console.print("[bold red]Docker daemon failed to start.[/bold red]")
@@ -75,7 +76,6 @@ def _ensure_docker() -> str:
         prefix = ""
     elif _docker_ok(use_sudo=True):
         prefix = "sudo "
-        need_sudo = True
     else:
         console.print("[bold red]Cannot connect to Docker.[/bold red]")
         raise SystemExit(1)
