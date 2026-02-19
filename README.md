@@ -47,6 +47,8 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 | Embedding | Together AI, OpenAI |
 
 > Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path.
+>
+> **Coming soon:** Ollama support for local embedding — bringing the total cost to **$0**. Trade-off: requires additional CPU and RAM on your server.
 
 ---
 
@@ -555,7 +557,7 @@ pytest
 - [x] Systemd service auto-setup
 - [x] Sub-agents
 - [x] Multi-user access control
-- [ ] Ollama support (local embedding)
+- [ ] Ollama support (local embedding — zero cost, but requires more CPU/RAM)
 - [ ] Ability marketplace
 - [ ] Web UI
 
