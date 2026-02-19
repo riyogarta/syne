@@ -13,6 +13,13 @@ from rich.syntax import Syntax
 console = Console()
 
 
+def _mask_key(key: str) -> str:
+    """Show first 4 and last 4 chars of a key, mask the rest."""
+    if len(key) <= 10:
+        return key[:2] + "•" * (len(key) - 4) + key[-2:]
+    return key[:4] + "•" * 8 + key[-4:]
+
+
 @click.group()
 @click.version_option(version="0.2.0", prog_name="syne")
 def cli():
@@ -103,26 +110,26 @@ def init():
     elif choice == 4:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key", hide_input=True)
-        console.print("  [green]✓ API key received[/green]")
+        console.print(f"  [green]✓ Key: {_mask_key(api_key)}[/green]")
         provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 5:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key", hide_input=True)
-        console.print("  [green]✓ API key received[/green]")
+        console.print(f"  [green]✓ Key: {_mask_key(api_key)}[/green]")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 6:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key", hide_input=True)
-        console.print("  [green]✓ API key received[/green]")
+        console.print(f"  [green]✓ Key: {_mask_key(api_key)}[/green]")
         provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 7:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.groq.com[/dim]")
         api_key = click.prompt("Groq API key", hide_input=True)
-        console.print("  [green]✓ API key received[/green]")
+        console.print(f"  [green]✓ Key: {_mask_key(api_key)}[/green]")
         provider_config = {"driver": "openai_compat", "model": "llama-3.3-70b-versatile", "auth": "api_key", "_api_key": api_key}
 
     # 2. Embedding provider (for memory)
@@ -140,7 +147,7 @@ def init():
         console.print("  [dim]Sign up at together.ai — $5 free credit included.[/dim]")
         embed_api_key = click.prompt("Together AI API key", hide_input=True)
         if embed_api_key:
-            console.print("  [green]✓ API key received[/green]")
+            console.print(f"  [green]✓ Key: {_mask_key(embed_api_key)}[/green]")
         embedding_config = {
             "driver": "together",
             "model": "BAAI/bge-base-en-v1.5",
@@ -152,7 +159,7 @@ def init():
         console.print("\n[bold green]✓ OpenAI selected for embeddings[/bold green]")
         embed_api_key = click.prompt("OpenAI API key", hide_input=True)
         if embed_api_key:
-            console.print("  [green]✓ API key received[/green]")
+            console.print(f"  [green]✓ Key: {_mask_key(embed_api_key)}[/green]")
         embedding_config = {
             "driver": "openai",
             "model": "text-embedding-3-small",
@@ -164,9 +171,8 @@ def init():
     # 3. Telegram bot
     console.print("\n[bold]Step 3: Telegram Bot[/bold]")
     console.print("  [dim]Create a bot via @BotFather on Telegram to get your token.[/dim]")
-    telegram_token = click.prompt("Telegram bot token")
-    # Token goes to DB, not .env (per credential policy)
-    console.print("[dim]Token will be saved to database after schema init.[/dim]")
+    telegram_token = click.prompt("Telegram bot token", hide_input=True)
+    console.print(f"  [green]✓ Token: {_mask_key(telegram_token)}[/green]")
 
     # 4. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 4: Database[/bold]")
