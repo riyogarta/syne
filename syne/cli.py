@@ -75,7 +75,6 @@ def init():
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
         
         # Check if Claude CLI credentials exist
-        import os
         cred_path = os.path.expanduser("~/.claude/.credentials.json")
         if os.path.exists(cred_path):
             console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
