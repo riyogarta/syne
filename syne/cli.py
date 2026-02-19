@@ -338,19 +338,10 @@ def init():
     env_content = "\n".join(env_lines) + "\n"
     env_path = os.path.join(os.getcwd(), ".env")
 
-    if os.path.exists(env_path):
-        if not click.confirm(f"\n.env already exists. Overwrite?"):
-            console.print("[yellow]Keeping existing .env[/yellow]")
-        else:
-            with open(env_path, "w") as f:
-                f.write(env_content)
-            os.chmod(env_path, 0o600)
-            console.print(f"[green]✓ .env written (chmod 600)[/green]")
-    else:
-        with open(env_path, "w") as f:
-            f.write(env_content)
-        os.chmod(env_path, 0o600)
-        console.print(f"[green]✓ .env written (chmod 600)[/green]")
+    with open(env_path, "w") as f:
+        f.write(env_content)
+    os.chmod(env_path, 0o600)
+    console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
     docker_cmd = f"{docker_prefix}docker compose"
