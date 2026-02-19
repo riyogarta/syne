@@ -23,68 +23,77 @@ def cli():
 # ── Init ─────────────────────────────────────────────────────
 
 @cli.command()
+def _docker_ok(use_sudo=False) -> bool:
+    """Check if Docker daemon is reachable."""
+    cmd = "sudo docker info" if use_sudo else "docker info"
+    return os.system(f"{cmd} > /dev/null 2>&1") == 0
+
+
+def _ensure_docker() -> str:
+    """Ensure Docker is installed, running, and accessible.
+
+    Returns the docker command prefix: '' or 'sudo ' depending on permissions.
+    """
+    import shutil
+    import time
+    import getpass
+    import subprocess
+
+    need_sudo = False
+
+    # 1. Install if missing
+    if not shutil.which("docker"):
+        console.print("[bold yellow]Docker is not installed — installing now...[/bold yellow]")
+        ret = os.system("curl -fsSL https://get.docker.com | sh")
+        if ret != 0:
+            console.print("[red]Docker installation failed.[/red]")
+            console.print("[dim]Install manually: https://docs.docker.com/get-docker/[/dim]")
+            raise SystemExit(1)
+        # Add user to docker group
+        current_user = getpass.getuser()
+        os.system(f"sudo usermod -aG docker {current_user}")
+        need_sudo = True  # Group not active until re-login
+        console.print(f"[green]✓ Docker installed, {current_user} added to docker group[/green]")
+
+    # 2. Start daemon if not running
+    if not _docker_ok() and not _docker_ok(use_sudo=True):
+        console.print("[dim]Starting Docker daemon...[/dim]")
+        os.system("sudo systemctl daemon-reload")
+        os.system("sudo systemctl start docker")
+        os.system("sudo systemctl enable docker > /dev/null 2>&1")
+        for _ in range(20):
+            time.sleep(2)
+            if _docker_ok(use_sudo=True):
+                break
+        else:
+            console.print("[bold red]Docker daemon failed to start.[/bold red]")
+            console.print("[dim]Run: sudo systemctl status docker[/dim]")
+            raise SystemExit(1)
+
+    # 3. Determine if we need sudo prefix
+    if _docker_ok():
+        prefix = ""
+    elif _docker_ok(use_sudo=True):
+        prefix = "sudo "
+        need_sudo = True
+    else:
+        console.print("[bold red]Cannot connect to Docker.[/bold red]")
+        raise SystemExit(1)
+
+    console.print("[green]✓ Docker ready[/green]")
+    if need_sudo:
+        console.print("[dim]  (using sudo — after reboot 'sudo' won't be needed)[/dim]")
+    console.print()
+    return prefix
+
+
 def init():
     """Initialize Syne: authenticate, setup database, configure."""
     console.print(Panel("[bold]Welcome to Syne 🧠[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
     console.print()
 
-    # Pre-check: Docker
-    import shutil
-    if not shutil.which("docker"):
-        console.print("[bold red]Docker is not installed.[/bold red]")
-        console.print("Syne requires Docker for its PostgreSQL database.\n")
-        install = click.confirm("Install Docker now?", default=True)
-        if install:
-            console.print("\n[dim]Installing Docker...[/dim]")
-            ret = os.system("curl -fsSL https://get.docker.com | sh")
-            if ret != 0:
-                console.print("[red]Docker installation failed. Install manually:[/red]")
-                console.print("[dim]https://docs.docker.com/get-docker/[/dim]")
-                raise SystemExit(1)
-            # Add current user to docker group, start & enable
-            import getpass
-            import time as _time
-            current_user = getpass.getuser()
-            os.system(f"sudo usermod -aG docker {current_user}")
-            os.system("sudo systemctl daemon-reload")
-            os.system("sudo systemctl start docker")
-            os.system("sudo systemctl enable docker > /dev/null 2>&1")
-            # Wait for Docker to be ready after fresh install
-            console.print("[dim]Waiting for Docker to be ready...[/dim]")
-            for _ in range(15):
-                _time.sleep(2)
-                if os.system("sudo docker info > /dev/null 2>&1") == 0:
-                    break
-            console.print(f"\n[green]✓ Docker installed and started[/green]")
-            console.print(f"[yellow]⚠ Added {current_user} to docker group.[/yellow]")
-            console.print("[yellow]  If you get permission errors, logout & login or run: newgrp docker[/yellow]\n")
-        else:
-            console.print("\n[dim]Install Docker first: https://docs.docker.com/get-docker/[/dim]")
-            raise SystemExit(1)
-
-    # Verify Docker daemon is running
-    # Try without sudo first (user in docker group), then with sudo
-    if os.system("docker info > /dev/null 2>&1") != 0:
-        if os.system("sudo docker info > /dev/null 2>&1") != 0:
-            console.print("[dim]Docker is not running, starting...[/dim]")
-            os.system("sudo systemctl daemon-reload")
-            os.system("sudo systemctl start docker")
-            os.system("sudo systemctl enable docker > /dev/null 2>&1")
-            import time
-            for i in range(15):
-                time.sleep(2)
-                if os.system("docker info > /dev/null 2>&1") == 0 or \
-                   os.system("sudo docker info > /dev/null 2>&1") == 0:
-                    break
-            else:
-                console.print("[bold red]Failed to start Docker daemon.[/bold red]")
-                console.print("[dim]Check: sudo systemctl status docker[/dim]")
-                raise SystemExit(1)
-        else:
-            # Docker runs but user not in docker group — need sudo for compose
-            console.print("[dim]Docker running (using sudo — run 'newgrp docker' to avoid sudo)[/dim]")
-
-    console.print("[green]✓ Docker ready[/green]\n")
+    # Pre-check: Docker (install + start + determine sudo prefix)
+    docker_prefix = _ensure_docker()
 
     # 1. Provider selection
     console.print("[bold]Step 1: Choose your chat AI provider[/bold]")
@@ -253,29 +262,25 @@ def init():
         os.chmod(env_path, 0o600)
         console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
-    # 5. Start DB (Docker — always)
-    # Use sudo for docker compose if user not yet in docker group (fresh install)
-    docker_cmd = "docker compose"
-    if os.system("docker compose version > /dev/null 2>&1") != 0:
-        docker_cmd = "sudo docker compose"
+    # 5. Start DB (Docker — uses prefix from _ensure_docker)
+    docker_cmd = f"{docker_prefix}docker compose"
 
     console.print("\n[bold]Starting database...[/bold]")
     result = os.system(f"{docker_cmd} up -d db")
     if result != 0:
         console.print("[red]Failed to start database.[/red]")
-        console.print("[dim]Try: sudo docker compose up -d db[/dim]")
         return
 
     # Wait for DB
     console.print("Waiting for PostgreSQL to be ready...")
     import time
-    for _ in range(15):
+    for _ in range(20):
         result = os.system(f"{docker_cmd} exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
         if result == 0:
             break
         time.sleep(2)
     else:
-        console.print("[red]Database didn't start in time. Run 'sudo docker compose up -d db' manually.[/red]")
+        console.print("[red]Database didn't start in time.[/red]")
         return
 
     console.print("[green]✓ Database ready[/green]")
