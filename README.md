@@ -35,8 +35,9 @@ Most AI assistants forget everything between sessions. They have no persistent m
 |  |  [Chat]  [Memory]  [Compaction]  [Telegram]  [Sub]   |  |
 |  |  (LLM)   (pgvec)    (context)     (bot)     agent    |  |
 |  |                                                      |  |
-|  |  Core Tools:                                         |  |
+|  |  Core Tools (13):                                     |  |
 |  |  exec · web_search · web_fetch · memory · config     |  |
+|  |  read_source · sub-agents · users · groups · soul    |  |
 |  +------------------------------------------------------+  |
 |                                                            |
 |  +------------------------------------------------------+  |
@@ -63,7 +64,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 | Layer | What it includes | Modifiable by Syne? |
 |-------|-----------------|---------------------|
-| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, Sub-agents, 12 Core Tools | ❌ Protected |
+| **Core** | Chat (LLM), Memory (pgvector), Compaction, Telegram, CLI, Sub-agents, 13 Core Tools | ❌ Protected |
 | **Abilities** | Everything else (image gen, image analysis, maps, etc.) | ✅ Pluggable |
 
 ---
@@ -123,11 +124,9 @@ source .venv/bin/activate  # or .venv\Scripts\activate on Windows
 # Install dependencies
 pip install -e .
 
-# Run interactive setup (starts Docker DB, initializes schema, configures auth)
+# Run interactive setup (Docker, DB, auth, systemd service — fully automated)
 syne init
-
-# Start the agent
-syne start
+# That's it! Syne is running as a systemd service.
 ```
 
 ### What `syne init` Does
@@ -159,7 +158,12 @@ syne init
     │   ├─ Set agent name & motto
     │   └─ Save all credentials to database
     │
-    └─ Ready! Run `syne start`
+    ├─ Step 6: Setup systemd service
+    │   ├─ Create user service file
+    │   ├─ Enable autostart + linger
+    │   └─ Start Syne immediately
+    │
+    └─ ✅ Done! Syne is running.
 ```
 
 ### Verify Installation
@@ -312,6 +316,7 @@ Everything beyond core functionality is an **Ability**. Abilities can be:
 | `manage_user` | Manage user access levels |
 | `web_search` | Search the web (Brave Search API) |
 | `web_fetch` | Fetch and extract content from URLs |
+| `read_source` | Read-only access to Syne's own source code (for self-healing) |
 
 ### Bundled Abilities (v1)
 
@@ -469,13 +474,63 @@ This prevents the common AI problem of storing assistant interpretations as user
 
 ---
 
-## CLI Commands
+## Interactive CLI (Coding Mode)
+
+Syne includes a full interactive terminal — like Claude Code, but with Syne's memory and tools:
+
+```bash
+# Run from any project directory
+cd /path/to/your/project
+syne cli
+```
+
+```
+┌─────────────────────────────────────────────────┐
+│ Syne 🧠                                         │
+│ I remember, therefore I am                       │
+│ Model: anthropic | Tools: 13 | Type /help        │
+└─────────────────────────────────────────────────┘
+
+> What's in this project?
+Syne reads files, analyzes code, runs commands...
+
+> Refactor the auth module
+Syne edits files, runs tests, explains changes...
+```
+
+### CLI Features
+
+| Feature | Description |
+|---------|-------------|
+| **Full tool access** | All 13 core tools + abilities (exec, memory, web_search, etc.) |
+| **CWD-aware** | Commands run in your current directory, not Syne's project root |
+| **Arrow key history** | ↑↓ to browse previous inputs, persistent across sessions |
+| **Multiline input** | End a line with `\` to continue on the next line |
+| **Markdown rendering** | Code blocks, bold, headers rendered in terminal |
+| **Auto-owner** | CLI user is always owner (full access) |
+| **Compaction alerts** | Notifies when context is compacted |
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `/help` | Show available commands |
+| `/status` | Agent status (model, memories, tools) |
+| `/model` | Show current model |
+| `/clear` | Clear conversation history |
+| `/exit` | Exit CLI |
+
+---
+
+## CLI Commands (Management)
 
 ```bash
 # Setup & Running
-syne init                  # Interactive setup wizard
-syne start                 # Start the agent
+syne init                  # Interactive setup wizard (fully automated)
+syne start                 # Start the Telegram agent
 syne start --debug         # Start with debug logging
+syne cli                   # Interactive terminal chat (coding mode)
+syne cli --debug           # CLI with debug logging
 syne status                # Show status
 syne repair                # Diagnose and repair installation
 syne restart               # Restart the agent
@@ -620,10 +675,12 @@ syne/
 │   │   ├── engine.py        # Store, recall, dedup
 │   │   └── evaluator.py     # Auto-evaluate
 │   ├── channels/
-│   │   └── telegram.py      # Telegram adapter
+│   │   ├── telegram.py      # Telegram adapter
+│   │   └── cli_channel.py   # Interactive CLI (coding mode)
 │   ├── tools/               # Core tools
 │   │   ├── web_search.py    # Brave Search
 │   │   ├── web_fetch.py     # URL content extraction
+│   │   ├── read_source.py   # Source code introspection
 │   │   └── registry.py      # Tool registry
 │   ├── abilities/           # Bundled abilities
 │   │   ├── base.py
@@ -687,7 +744,10 @@ ruff check .
 - [x] Conflict resolution (3-zone)
 - [x] Ability system
 - [x] Self-modification (abilities only — Syne can create/edit abilities but never touch core)
-- [ ] Multi-model support (OpenAI, Anthropic, local models via configurable providers)
+- [x] Multi-model support (Google, OpenAI, Anthropic, Groq, Together AI — driver-based with DB registry)
+- [x] Interactive CLI mode (coding agent — like Claude Code)
+- [x] Source code introspection (read_source tool for self-healing)
+- [x] Systemd service auto-setup from init
 - [ ] Ability marketplace
 
 ---
