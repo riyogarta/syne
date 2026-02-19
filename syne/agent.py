@@ -808,6 +808,13 @@ class SyneAgent:
 
         logger.info(f"Executing command: {command[:100]}")
 
+        # ── CLI PTY mode: interactive commands get a real terminal ──
+        # When running from `syne cli`, commands that need user input
+        # (sudo, ssh, etc.) run with PTY pass-through so the user can
+        # type passwords/confirmations directly in their terminal.
+        if self._cli_cwd and self._command_needs_interactive(command_stripped):
+            return await self._exec_pty(command, cwd, timeout)
+
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -839,6 +846,143 @@ class SyneAgent:
         except Exception as e:
             logger.error(f"Exec error: {e}")
             return f"Error: {str(e)}"
+
+    @staticmethod
+    def _command_needs_interactive(command: str) -> bool:
+        """Detect if a command likely needs interactive terminal input.
+        
+        This checks for commands that prompt for passwords or confirmations
+        that can't work with piped stdin (e.g. sudo, ssh, passwd).
+        """
+        cmd = command.strip()
+        # sudo at start or in a chain
+        if cmd.startswith("sudo ") or "| sudo " in cmd or "&& sudo " in cmd:
+            return True
+        # ssh without -o BatchMode (interactive login)
+        if cmd.startswith("ssh ") and "-o BatchMode" not in cmd:
+            return True
+        # Other known interactive commands
+        for prefix in ("passwd", "su ", "su\n"):
+            if cmd.startswith(prefix):
+                return True
+        return False
+
+    async def _exec_pty(self, command: str, cwd: str, timeout: int) -> str:
+        """Execute command with PTY pass-through for interactive input.
+        
+        Runs in a real pseudo-terminal so the user can type passwords,
+        confirmations, etc. directly. Output is captured AND displayed
+        live in the terminal.
+        
+        Only used in CLI mode.
+        """
+        import asyncio
+        import os
+        import pty
+        import select
+        import signal
+        import sys
+
+        logger.info(f"PTY exec (interactive): {command[:100]}")
+
+        # Run the blocking PTY operation in a thread to not block the event loop
+        def _pty_run() -> tuple[int, str]:
+            """Spawn command in PTY, forward I/O, capture output."""
+            output_chunks: list[bytes] = []
+
+            # Create PTY pair
+            parent_fd, child_fd = pty.openpty()
+
+            pid = os.fork()
+            if pid == 0:
+                # ── Child process ──
+                os.setsid()
+                os.dup2(child_fd, 0)  # stdin
+                os.dup2(child_fd, 1)  # stdout
+                os.dup2(child_fd, 2)  # stderr
+                os.close(parent_fd)
+                os.close(child_fd)
+                os.chdir(cwd)
+                os.execvp("/bin/bash", ["/bin/bash", "-c", command])
+                os._exit(1)  # shouldn't reach here
+            else:
+                # ── Parent process ──
+                os.close(child_fd)
+                
+                # Print a subtle indicator that interactive mode is active
+                sys.stdout.write("\033[2m── interactive ──\033[0m\n")
+                sys.stdout.flush()
+
+                try:
+                    while True:
+                        # Wait for data from PTY or stdin
+                        rlist, _, _ = select.select(
+                            [parent_fd, sys.stdin.fileno()], [], [], 1.0
+                        )
+
+                        if parent_fd in rlist:
+                            try:
+                                data = os.read(parent_fd, 4096)
+                            except OSError:
+                                break
+                            if not data:
+                                break
+                            # Write to user's terminal AND capture
+                            sys.stdout.buffer.write(data)
+                            sys.stdout.flush()
+                            output_chunks.append(data)
+
+                        if sys.stdin.fileno() in rlist:
+                            try:
+                                user_data = os.read(sys.stdin.fileno(), 4096)
+                            except OSError:
+                                break
+                            if not user_data:
+                                break
+                            # Forward user input to the PTY child
+                            os.write(parent_fd, user_data)
+
+                except KeyboardInterrupt:
+                    # Ctrl+C → send SIGINT to child
+                    try:
+                        os.kill(pid, signal.SIGINT)
+                    except ProcessLookupError:
+                        pass
+
+                finally:
+                    os.close(parent_fd)
+
+                # Wait for child to finish
+                _, status = os.waitpid(pid, 0)
+                exit_code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -1
+
+                sys.stdout.write("\033[2m── end ──\033[0m\n")
+                sys.stdout.flush()
+
+                captured = b"".join(output_chunks)
+                text = captured.decode("utf-8", errors="replace").strip()
+                return exit_code, text
+
+        loop = asyncio.get_event_loop()
+        try:
+            exit_code, output = await asyncio.wait_for(
+                loop.run_in_executor(None, _pty_run),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return f"Error: Interactive command timed out after {timeout}s"
+        except Exception as e:
+            logger.error(f"PTY exec error: {e}", exc_info=True)
+            return f"Error: {str(e)}"
+
+        from .db.models import get_config
+        output_max = await get_config("exec.output_max_chars", 4000)
+
+        parts = []
+        if output:
+            parts.append(f"stdout:\n{output[:output_max]}")
+        parts.append(f"exit_code: {exit_code}")
+        return "\n".join(parts)
 
     async def _tool_update_config(self, action: str, key: str = "", value: str = "") -> str:
         """Tool handler: read/write config."""
