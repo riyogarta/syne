@@ -102,11 +102,22 @@ async def get_or_create_user(
     platform_id: str,
     display_name: Optional[str] = None,
 ) -> dict:
-    """Get existing user or create new one."""
+    """Get existing user or create new one.
+    
+    The first user ever created automatically becomes the owner.
+    """
     user = await get_user(platform, platform_id)
     if user:
         return user
-    return await create_user(name, platform, platform_id, display_name)
+    
+    # First user ever → owner
+    access_level = "public"
+    async with get_connection() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM users")
+        if count == 0:
+            access_level = "owner"
+    
+    return await create_user(name, platform, platform_id, display_name, access_level)
 
 
 async def update_user(
