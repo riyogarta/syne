@@ -171,13 +171,22 @@ class SyneAgent:
         if models:
             return  # Already has model registry
         
-        # Default model registry
+        # Build model registry based on detected provider
         default_models = [
-            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth"},
-            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth"},
-            {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth"},
+            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
+            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
+            {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
         ]
-        
+
+        # Check if provider.primary has driver info (new init format)
+        provider_config = await get_config("provider.primary", None)
+        if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
+            auth = provider_config.get("auth", "oauth")
+            default_models.extend([
+                {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": auth, "context_window": 200000},
+                {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-20250514", "auth": auth, "context_window": 200000},
+            ])
+
         # Map old provider to new model key
         model_key_map = {
             ("google", "gemini-2.5-pro"): "gemini-pro",
@@ -185,8 +194,16 @@ class SyneAgent:
             ("codex", "gpt-5.2"): "gpt-5.2",
             ("codex", "gpt-4.1"): "gpt-5.2",  # Map old models
         }
-        
-        active_key = model_key_map.get((provider_name, chat_model), "gemini-pro")
+
+        # Handle anthropic provider mapping
+        if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
+            model_id = provider_config.get("model", chat_model)
+            if "opus" in model_id:
+                active_key = "claude-opus"
+            else:
+                active_key = "claude-sonnet"
+        else:
+            active_key = model_key_map.get((provider_name, chat_model), "gemini-pro")
         
         # Save new format
         await set_config("provider.models", default_models)

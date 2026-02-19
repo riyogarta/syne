@@ -364,7 +364,54 @@ def init():
             # Strip internal _api_key before saving
             db_config = {k: v for k, v in provider_config.items() if not k.startswith("_")}
             await set_config("provider.primary", db_config)
-            await set_config("provider.active_model", provider_config["model"])
+
+            # Build model registry from selected provider
+            driver = provider_config["driver"]
+            auth = provider_config["auth"]
+            model_id = provider_config["model"]
+            models_registry = []
+
+            if driver == "google_cca":
+                models_registry = [
+                    {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
+                    {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
+                ]
+                active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
+            elif driver == "codex":
+                models_registry = [
+                    {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
+                ]
+                active_key = "gpt-5.2"
+            elif driver == "anthropic":
+                models_registry = [
+                    {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": auth, "context_window": 200000},
+                    {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-20250514", "auth": auth, "context_window": 200000},
+                ]
+                active_key = "claude-sonnet" if "sonnet" in model_id else "claude-opus"
+            elif driver == "openai_compat":
+                # OpenAI API key, Together AI, or Groq — needs base_url + credential_key
+                active_key = model_id.split("/")[-1].replace(".", "-")  # e.g. "gpt-4o", "llama-3-3-70b-versatile"
+                # Determine base_url and credential_key from model/provider context
+                if "groq" in model_id or "groq" in provider_config.get("_api_key", ""):
+                    base_url = "https://api.groq.com/openai/v1"
+                    cred_key = "credential.openai_compat_api_key"
+                elif "together" in model_id.lower() or "llama" in model_id.lower() or "meta-llama" in model_id:
+                    base_url = "https://api.together.xyz/v1"
+                    cred_key = "credential.openai_compat_api_key"
+                else:
+                    base_url = "https://api.openai.com/v1"
+                    cred_key = "credential.openai_compat_api_key"
+                models_registry = [
+                    {"key": active_key, "label": model_id, "driver": "openai_compat", "model_id": model_id, "auth": auth, "base_url": base_url, "credential_key": cred_key},
+                ]
+            else:
+                active_key = model_id
+                models_registry = [
+                    {"key": active_key, "label": model_id, "driver": driver, "model_id": model_id, "auth": auth},
+                ]
+
+            await set_config("provider.models", models_registry)
+            await set_config("provider.active_model", active_key)
             console.print(f"[green]✓ Provider config saved to database[/green]")
         # Save embedding config to DB
         if embedding_config:
