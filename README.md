@@ -193,10 +193,12 @@ Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "in
 
 ### Bundled Abilities
 
-| Ability | Description | Provider |
-|---------|-------------|----------|
-| `image_gen` | Generate images from text | Together AI (FLUX.1-schnell) |
-| `image_analysis` | Analyze and describe images | Google Gemini vision |
+Each ability requires its own API key. Just tell Syne in chat: *"Set up image generation"* — it will ask for the key and configure itself.
+
+| Ability | Description | API Required |
+|---------|-------------|--------------|
+| `image_gen` | Generate images from text | Together AI |
+| `image_analysis` | Analyze and describe images | Google Gemini |
 | `maps` | Places, directions, geocoding | Google Maps/Places |
 
 ### Ability Interface
