@@ -73,9 +73,32 @@ def init():
     elif choice == 3:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
-        console.print("  [dim]Install Claude CLI: npm install -g @anthropic-ai/claude-code[/dim]")
-        console.print("  [dim]Then run: claude login[/dim]")
-        console.print("  [dim]Syne reads tokens from ~/.claude/.credentials.json[/dim]")
+        
+        # Check if Claude CLI credentials exist
+        import os
+        cred_path = os.path.expanduser("~/.claude/.credentials.json")
+        if os.path.exists(cred_path):
+            console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
+        else:
+            console.print("\n  [yellow]⚠ Claude credentials not found.[/yellow]")
+            console.print("  [dim]You need to install Claude CLI and login first:[/dim]")
+            console.print("  [bold]1.[/bold] npm install -g @anthropic-ai/claude-code")
+            console.print("  [bold]2.[/bold] claude login")
+            console.print(f"  [dim]Syne reads tokens from {cred_path}[/dim]")
+            
+            proceed = click.confirm("\n  Have you completed claude login?", default=False)
+            if not proceed:
+                console.print("  [dim]Run 'claude login' first, then re-run 'syne init'.[/dim]")
+                raise SystemExit(1)
+            
+            # Re-check after user says yes
+            if not os.path.exists(cred_path):
+                console.print(f"  [red]✗ Still not found: {cred_path}[/red]")
+                console.print("  [dim]Please run 'claude login' and try again.[/dim]")
+                raise SystemExit(1)
+            
+            console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
+        
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
 
     elif choice == 4:
