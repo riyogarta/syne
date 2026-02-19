@@ -87,10 +87,12 @@ async def run_cli(debug: bool = False):
 
         # REPL loop
         chat_id = f"cli:{username}"
+        _ctrl_c_count = {"n": 0}
         while True:
             try:
                 # Prompt
                 user_input = _get_input()
+                _ctrl_c_count["n"] = 0  # Reset on successful input
                 if user_input is None:
                     # EOF (Ctrl+D)
                     console.print("\n[dim]Goodbye![/dim]")
@@ -126,7 +128,11 @@ async def run_cli(debug: bool = False):
                 console.print()
 
             except KeyboardInterrupt:
-                console.print("\n[dim](Ctrl+C — type /exit to quit)[/dim]")
+                if _ctrl_c_count.get("n", 0) >= 1:
+                    console.print("\n[dim]Goodbye![/dim]")
+                    break
+                _ctrl_c_count["n"] = _ctrl_c_count.get("n", 0) + 1
+                console.print("\n[dim](Press Ctrl+C again to exit)[/dim]")
                 continue
 
     except Exception as e:
