@@ -519,6 +519,14 @@ def start(debug):
     asyncio.run(run())
 
 
+@cli.command(name="cli")
+@click.option("--debug", is_flag=True, help="Enable debug logging")
+def cli_mode(debug):
+    """Interactive CLI chat (like Claude Code)."""
+    from .channels.cli_channel import run_cli
+    asyncio.run(run_cli(debug=debug))
+
+
 # ── Status ───────────────────────────────────────────────────
 
 @cli.command()
