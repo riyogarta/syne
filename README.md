@@ -83,8 +83,8 @@ syne init
 
 `syne init` is fully automated — no manual steps mid-install:
 
-1. **Choose AI provider** — OAuth (free): Google Gemini, ChatGPT, Claude. API key (paid): OpenAI, Anthropic, Together AI, Groq
-2. **Choose embedding provider** — Together AI (recommended) or OpenAI
+1. **Choose AI provider** — OAuth (free) or API key (paid)
+2. **Choose embedding provider**
 3. **Enter Telegram bot token** — from @BotFather
 4. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
 5. **Initialize database** — Schema, identity, credentials saved to DB
