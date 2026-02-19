@@ -62,22 +62,27 @@ def init():
             console.print("\n[dim]Install Docker first: https://docs.docker.com/get-docker/[/dim]")
             raise SystemExit(1)
 
-    # Verify Docker daemon is running, start if not
-    ret = os.system("sudo docker info > /dev/null 2>&1")
-    if ret != 0:
-        console.print("[dim]Docker is not running, starting...[/dim]")
-        os.system("sudo systemctl daemon-reload")
-        os.system("sudo systemctl start docker")
-        os.system("sudo systemctl enable docker > /dev/null 2>&1")
-        import time
-        for i in range(15):
-            time.sleep(2)
-            if os.system("sudo docker info > /dev/null 2>&1") == 0:
-                break
+    # Verify Docker daemon is running
+    # Try without sudo first (user in docker group), then with sudo
+    if os.system("docker info > /dev/null 2>&1") != 0:
+        if os.system("sudo docker info > /dev/null 2>&1") != 0:
+            console.print("[dim]Docker is not running, starting...[/dim]")
+            os.system("sudo systemctl daemon-reload")
+            os.system("sudo systemctl start docker")
+            os.system("sudo systemctl enable docker > /dev/null 2>&1")
+            import time
+            for i in range(15):
+                time.sleep(2)
+                if os.system("docker info > /dev/null 2>&1") == 0 or \
+                   os.system("sudo docker info > /dev/null 2>&1") == 0:
+                    break
+            else:
+                console.print("[bold red]Failed to start Docker daemon.[/bold red]")
+                console.print("[dim]Check: sudo systemctl status docker[/dim]")
+                raise SystemExit(1)
         else:
-            console.print("[bold red]Failed to start Docker daemon.[/bold red]")
-            console.print("[dim]Check: sudo systemctl status docker[/dim]")
-            raise SystemExit(1)
+            # Docker runs but user not in docker group — need sudo for compose
+            console.print("[dim]Docker running (using sudo — run 'newgrp docker' to avoid sudo)[/dim]")
 
     console.print("[green]✓ Docker ready[/green]\n")
 
