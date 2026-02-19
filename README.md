@@ -302,7 +302,7 @@ Manage via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 ## Configuration Reference
 
-All configuration lives in the `config` table. Change via conversation or SQL.
+All configuration lives in the `config` table. Defaults below reflect the recommended setup from `syne init` (Google Gemini + Together AI). Change via conversation or SQL.
 
 ### Provider Settings
 
