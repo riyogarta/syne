@@ -297,6 +297,17 @@ def init():
     console.print("  [dim]Create a bot via @BotFather on Telegram to get your token.[/dim]")
     telegram_token = click.prompt("Telegram bot token")
 
+    # 3b. Web Search (optional)
+    console.print("\n[bold]Step 3b: Web Search (optional)[/bold]")
+    console.print("  [dim]Brave Search API key enables web search. Free tier: 2,000 queries/month.[/dim]")
+    console.print("  [dim]Get one at https://brave.com/search/api/ — press Enter to skip.[/dim]")
+    brave_api_key = click.prompt("Brave Search API key (optional)", default="", show_default=False)
+    brave_api_key = brave_api_key.strip()
+    if brave_api_key:
+        console.print("[green]✓ Brave Search API key provided[/green]")
+    else:
+        console.print("[dim]  Skipped — web search can be configured later via chat.[/dim]")
+
     # 4. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 4: Database[/bold]")
     console.print("  Syne uses its own isolated PostgreSQL + pgvector container.")
@@ -397,6 +408,11 @@ def init():
             from .db.credentials import set_telegram_bot_token
             await set_telegram_bot_token(telegram_token)
             console.print("[green]✓ Telegram bot token saved to database[/green]")
+        # Save Brave Search API key to DB if provided
+        if brave_api_key:
+            from .db.models import set_config
+            await set_config("web_search.api_key", brave_api_key)
+            console.print("[green]✓ Brave Search API key saved to database[/green]")
         # Save Google OAuth credentials to DB if collected
         if google_creds:
             await google_creds.save_to_db()
