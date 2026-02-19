@@ -46,9 +46,7 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 | Chat (API key, paid) | OpenAI, Anthropic, Together AI, Groq |
 | Embedding (paid) | Together AI, OpenAI |
 
-> Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path.
->
-> **Coming soon:** Ollama support for local embedding — bringing the total cost to **$0**. Trade-off: requires additional CPU and RAM on your server.
+> Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path. See [Roadmap](#roadmap) for upcoming Ollama support (local embedding, $0 cost).
 
 ---
 
