@@ -465,6 +465,7 @@ async def get_full_prompt(
     user: dict = None,
     tools: Optional[list[dict]] = None,
     abilities: Optional[list[dict]] = None,
+    extra_context: Optional[str] = None,
 ) -> str:
     """Get the complete system prompt, optionally with user context.
 
@@ -472,6 +473,7 @@ async def get_full_prompt(
         user: Optional user dict for user-specific context
         tools: Optional list of tools in OpenAI schema format
         abilities: Optional list of abilities in OpenAI schema format
+        extra_context: Optional extra context to append (e.g., CLI working directory)
         
     Returns:
         Complete system prompt string
@@ -481,5 +483,8 @@ async def get_full_prompt(
     if user:
         user_ctx = await build_user_context(user)
         prompt += "\n" + user_ctx
+
+    if extra_context:
+        prompt += "\n" + extra_context
 
     return prompt

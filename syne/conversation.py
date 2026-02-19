@@ -444,6 +444,7 @@ class ConversationManager:
         chat_id: str,
         user: dict,
         is_group: bool = False,
+        extra_context: str = None,
     ) -> Conversation:
         """Get existing conversation or create new one.
         
@@ -452,6 +453,7 @@ class ConversationManager:
             chat_id: Chat/conversation ID
             user: User dict with access_level, id, etc.
             is_group: Whether this is a group chat (affects security restrictions)
+            extra_context: Optional extra context for system prompt (e.g., CLI cwd)
             
         Returns:
             Conversation instance
@@ -488,6 +490,7 @@ class ConversationManager:
             user=user,
             tools=tool_schemas,
             abilities=ability_schemas,
+            extra_context=extra_context,
         )
 
         conv = Conversation(
@@ -535,5 +538,17 @@ class ConversationManager:
         Returns:
             Agent response string
         """
-        conv = await self.get_or_create_session(platform, chat_id, user, is_group=is_group)
+        # Extract extra context from metadata (e.g., CLI working directory)
+        extra_context = None
+        if message_metadata and message_metadata.get("cwd"):
+            cwd = message_metadata["cwd"]
+            extra_context = (
+                f"\n## Working Directory\n"
+                f"You are running in CLI mode. The user's current working directory is: {cwd}\n"
+                f"When using exec tool, commands run in this directory by default.\n"
+                f"Focus on the project/files in this directory unless asked otherwise."
+            )
+        conv = await self.get_or_create_session(
+            platform, chat_id, user, is_group=is_group, extra_context=extra_context
+        )
         return await conv.chat(message, message_metadata=message_metadata)

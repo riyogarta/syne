@@ -36,6 +36,9 @@ async def run_cli(debug: bool = False):
     try:
         await agent.start()
 
+        # Set CLI working directory to where user launched `syne cli`
+        agent._cli_cwd = os.getcwd()
+
         # Auto-migrate Google OAuth if needed
         from ..main import _auto_migrate_google_oauth
         await _auto_migrate_google_oauth()
@@ -96,14 +99,16 @@ async def run_cli(debug: bool = False):
                     if handled:
                         continue
 
-                # Send to agent
+                # Send to agent — prepend CWD context on first message
                 console.print()
+                msg = user_input
                 with console.status("[bold blue]Thinking...", spinner="dots"):
                     response = await agent.conversations.handle_message(
                         platform="cli",
                         chat_id=chat_id,
                         user=user,
-                        message=user_input,
+                        message=msg,
+                        message_metadata={"cwd": agent._cli_cwd},
                     )
 
                 # Display response

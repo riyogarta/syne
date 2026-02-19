@@ -45,6 +45,7 @@ class SyneAgent:
         self.subagents: Optional[SubAgentManager] = None
         self._running = False
         self._pending_sudo_command: Optional[str] = None
+        self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
 
     async def start(self):
         """Start the agent — initialize DB, provider, memory, tools."""
@@ -747,10 +748,16 @@ class SyneAgent:
         output_max = await get_config("exec.output_max_chars", 4000)
 
         timeout = min(max(timeout, 1), timeout_max)
-        # Default cwd = project root (parent of syne/ package)
-        # so relative paths like syne/abilities/foo.py resolve correctly
+        # Default cwd:
+        # - CLI mode: directory where user ran `syne cli`
+        # - Telegram/other: project root (for ability self-edit)
         project_root = str(Path(__file__).resolve().parent.parent)
-        cwd = workdir or project_root
+        if workdir:
+            cwd = workdir
+        elif self._cli_cwd:
+            cwd = self._cli_cwd
+        else:
+            cwd = project_root
 
         logger.info(f"Executing command: {command[:100]}")
 
