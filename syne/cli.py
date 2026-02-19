@@ -22,7 +22,6 @@ def cli():
 
 # ── Init ─────────────────────────────────────────────────────
 
-@cli.command()
 def _docker_ok(use_sudo=False) -> bool:
     """Check if Docker daemon is reachable."""
     import subprocess
@@ -94,6 +93,7 @@ def _ensure_docker() -> str:
     return prefix
 
 
+@cli.command()
 def init():
     """Initialize Syne: authenticate, setup database, configure."""
     console.print(Panel("[bold]Welcome to Syne 🧠[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
