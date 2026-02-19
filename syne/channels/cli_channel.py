@@ -4,6 +4,7 @@ import asyncio
 import getpass
 import logging
 import os
+import readline  # noqa: F401 — enables arrow keys, history in input()
 import sys
 
 from rich.console import Console
@@ -32,6 +33,14 @@ async def run_cli(debug: bool = False):
 
     settings = load_settings()
     agent = SyneAgent(settings)
+
+    # Setup readline history
+    history_file = os.path.expanduser("~/.syne_cli_history")
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(1000)
 
     try:
         await agent.start()
@@ -127,6 +136,7 @@ async def run_cli(debug: bool = False):
             traceback.print_exc()
         raise
     finally:
+        readline.write_history_file(history_file)
         await agent.stop()
 
 
@@ -134,15 +144,12 @@ def _get_input() -> str | None:
     """Get user input, supporting multiline with \\ continuation."""
     try:
         lines = []
-        prompt = "[bold green]>[/bold green] "
         
         while True:
             if not lines:
-                console.print(prompt, end="")
-                line = input()
+                line = input("> ")
             else:
-                console.print("[dim]...[/dim] ", end="")
-                line = input()
+                line = input("... ")
 
             if line.endswith("\\"):
                 lines.append(line[:-1])
