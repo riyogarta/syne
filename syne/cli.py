@@ -87,7 +87,7 @@ def _ensure_docker() -> str:
         raise SystemExit(1)
 
     console.print("[green]✓ Docker ready[/green]")
-    if need_sudo:
+    if prefix:
         console.print("[dim]  (using sudo — after reboot 'sudo' won't be needed)[/dim]")
     console.print()
     return prefix
