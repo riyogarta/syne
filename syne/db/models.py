@@ -104,17 +104,38 @@ async def get_or_create_user(
 ) -> dict:
     """Get existing user or create new one.
     
-    The first user ever created automatically becomes the owner.
+    If no owner exists yet, the first user to interact becomes the owner.
+    This handles both fresh installs (no users) and cases where users
+    were created before the owner logic was added.
     """
     user = await get_user(platform, platform_id)
     if user:
+        # Auto-promote: if no owner exists yet, promote this existing user
+        if user.get("access_level") != "owner":
+            async with get_connection() as conn:
+                owner_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE access_level = 'owner'"
+                )
+                if owner_count == 0:
+                    await conn.execute(
+                        "UPDATE users SET access_level = 'owner' WHERE id = $1",
+                        user["id"]
+                    )
+                    user = dict(user)
+                    user["access_level"] = "owner"
+                    import logging
+                    logging.getLogger("syne.db").info(
+                        f"Auto-promoted user {user['name']} ({platform_id}) to owner (no owner existed)"
+                    )
         return user
     
-    # First user ever → owner
+    # New user — if no owner exists, this one becomes owner
     access_level = "public"
     async with get_connection() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM users")
-        if count == 0:
+        owner_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM users WHERE access_level = 'owner'"
+        )
+        if owner_count == 0:
             access_level = "owner"
     
     return await create_user(name, platform, platform_id, display_name, access_level)
