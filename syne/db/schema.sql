@@ -141,6 +141,26 @@ CREATE INDEX IF NOT EXISTS idx_subagent_runs_parent ON subagent_runs (parent_ses
 CREATE INDEX IF NOT EXISTS idx_subagent_runs_status ON subagent_runs (status);
 
 -- ============================================================
+-- SCHEDULED TASKS: Cron/scheduler system
+-- ============================================================
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    schedule_type VARCHAR(20) NOT NULL,   -- 'once', 'interval', 'cron'
+    schedule_value TEXT NOT NULL,         -- ISO timestamp for 'once', interval seconds for 'interval', cron expression for 'cron'
+    payload TEXT NOT NULL,                -- message to inject as user message
+    enabled BOOLEAN DEFAULT true,
+    created_by BIGINT,                    -- telegram user id
+    last_run TIMESTAMPTZ,
+    next_run TIMESTAMPTZ,
+    run_count INTEGER DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled ON scheduled_tasks (enabled) WHERE enabled = true;
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_next_run ON scheduled_tasks (next_run) WHERE enabled = true;
+
+-- ============================================================
 -- CAPABILITIES: Registered tools/skills
 -- ============================================================
 CREATE TABLE IF NOT EXISTS capabilities (

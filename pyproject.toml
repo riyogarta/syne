@@ -32,6 +32,7 @@ dependencies = [
     "click>=8.0",
     "rich>=13.0",
     "pyyaml>=6.0",
+    "croniter>=2.0",
 ]
 
 [project.optional-dependencies]

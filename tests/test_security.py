@@ -70,7 +70,8 @@ class TestRule700:
     def test_owner_tools_list_is_complete(self):
         """Verify the owner-only tools list contains expected tools."""
         expected = {"exec", "update_config", "update_ability", "update_soul", 
-                    "manage_group", "manage_user"}
+                    "manage_group", "manage_user", "file_read", "file_write",
+                    "manage_schedule"}
         assert OWNER_ONLY_TOOLS == expected
 
 

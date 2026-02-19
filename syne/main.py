@@ -3,16 +3,21 @@
 import asyncio
 import logging
 import os
+from typing import Optional
 
 from .config import load_settings
 from .agent import SyneAgent
 from .channels.telegram import TelegramChannel
+from .scheduler import Scheduler
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("syne")
+
+# Global reference for scheduler callback
+_telegram_channel: Optional[TelegramChannel] = None
 
 
 async def _get_telegram_bot_token(settings) -> str | None:
@@ -54,11 +59,43 @@ async def _auto_migrate_google_oauth():
         logger.debug(f"Google OAuth migration check: {e}")
 
 
+async def _scheduler_callback(task_id: int, payload: str, created_by: int):
+    """Callback for scheduler — injects payload as message via Telegram.
+    
+    Args:
+        task_id: Scheduled task ID
+        payload: Message payload to inject
+        created_by: Telegram user ID of task creator
+    """
+    global _telegram_channel
+    
+    if not _telegram_channel:
+        logger.warning(f"Scheduler: No Telegram channel for task {task_id}")
+        return
+    
+    # Get the user's DM chat ID (same as user ID for DMs)
+    chat_id = created_by
+    if not chat_id:
+        logger.warning(f"Scheduler: No created_by for task {task_id}")
+        return
+    
+    logger.info(f"Scheduler: Executing task {task_id} for user {chat_id}")
+    
+    # Process the payload as if the user sent it
+    try:
+        await _telegram_channel.process_scheduled_message(chat_id, payload)
+    except Exception as e:
+        logger.error(f"Scheduler: Error executing task {task_id}: {e}", exc_info=True)
+
+
 async def run():
     """Main run loop."""
+    global _telegram_channel
+    
     settings = load_settings()
     agent = SyneAgent(settings)
     channels = []
+    scheduler = None
 
     try:
         await agent.start()
@@ -74,12 +111,18 @@ async def run():
             telegram = TelegramChannel(agent, bot_token)
             await telegram.start()
             channels.append(telegram)
+            _telegram_channel = telegram  # Store for scheduler callback
             logger.info("Telegram channel active.")
         else:
             logger.warning(
                 "No Telegram bot token configured. "
                 "Set via DB (credential.telegram_bot_token) or .env (SYNE_TELEGRAM_BOT_TOKEN)."
             )
+
+        # Start scheduler
+        scheduler = Scheduler(on_task_execute=_scheduler_callback)
+        await scheduler.start()
+        logger.info("Scheduler active.")
 
         # Keep alive
         logger.info("Syne is running. Press Ctrl+C to stop.")
@@ -89,6 +132,9 @@ async def run():
     except KeyboardInterrupt:
         pass
     finally:
+        # Stop scheduler
+        if scheduler:
+            await scheduler.stop()
         # Stop channels
         for ch in channels:
             await ch.stop()

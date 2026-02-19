@@ -3,12 +3,14 @@
 import asyncio
 import logging
 import re
+from collections import deque
 from typing import Optional, Tuple
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    MessageReactionHandler,
     CallbackQueryHandler,
     filters,
     ContextTypes,
@@ -73,6 +75,9 @@ class TelegramChannel:
         self.agent = agent
         self.bot_token = bot_token
         self.app: Optional[Application] = None
+        # Track recent message IDs per chat for reaction context
+        # Format: {chat_id: deque([(message_id, preview_text), ...], maxlen=10)}
+        self._recent_messages: dict[int, deque] = {}
 
     async def start(self):
         """Start the Telegram bot."""
@@ -110,6 +115,15 @@ class TelegramChannel:
             self._handle_photo,
         ))
 
+        # Voice message handler
+        self.app.add_handler(MessageHandler(
+            filters.VOICE | filters.AUDIO,
+            self._handle_voice,
+        ))
+
+        # Reaction update handler
+        self.app.add_handler(MessageReactionHandler(self._handle_reaction_update))
+
         # Callback query handler (inline button clicks)
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
 
@@ -146,6 +160,10 @@ class TelegramChannel:
             self.agent.conversations.set_delivery_callback(self._deliver_subagent_result)
             self.agent.conversations.set_status_callback(self._send_status_message)
 
+        # Wire up reactions tool with this channel reference
+        from ..tools.reactions import set_telegram_channel
+        set_telegram_channel(self)
+
         logger.info("Telegram bot started.")
 
     async def stop(self):
@@ -155,6 +173,63 @@ class TelegramChannel:
             await self.app.stop()
             await self.app.shutdown()
             logger.info("Telegram bot stopped.")
+
+    async def process_scheduled_message(self, chat_id: int, payload: str):
+        """Process a scheduled task payload as if the user sent it.
+        
+        This is called by the scheduler when a task executes.
+        
+        Args:
+            chat_id: Telegram chat ID (user ID for DMs)
+            payload: Message payload to process
+        """
+        if not self.app or not self.app.bot:
+            logger.warning("Cannot process scheduled message: bot not initialized")
+            return
+        
+        # Get user info
+        user = await get_user("telegram", str(chat_id))
+        if not user:
+            logger.warning(f"Scheduled message: user {chat_id} not found")
+            return
+        
+        user_name = user.get("display_name") or user.get("name") or str(chat_id)
+        access_level = user.get("access_level", "public")
+        
+        logger.info(f"[scheduled] {user_name} ({chat_id}): {payload[:100]}")
+        
+        # Send typing indicator
+        try:
+            await self.app.bot.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass  # Best-effort
+        
+        try:
+            # Process the message via agent (DM context, not group)
+            response = await self.agent.handle_message(
+                platform="telegram",
+                chat_id=str(chat_id),
+                user_name=user_name,
+                user_platform_id=str(chat_id),
+                message=payload,
+                display_name=user_name,
+                is_group=False,
+                message_metadata={"scheduled": True},
+            )
+            
+            if response:
+                # Send response back to user
+                await self._send_response_with_media(chat_id, response, None)
+        
+        except Exception as e:
+            logger.error(f"Error processing scheduled message: {e}", exc_info=True)
+            try:
+                await self.app.bot.send_message(
+                    chat_id,
+                    f"⚠️ Scheduled task failed: {str(e)[:100]}"
+                )
+            except Exception:
+                pass
 
     # ── Message handlers ─────────────────────────────────────
 
@@ -197,9 +272,19 @@ class TelegramChannel:
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {text[:100]}")
 
+        # Track incoming message ID for reaction context
+        message_id = update.message.message_id
+        self._track_message(chat.id, message_id, text[:100])
+
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
+                # Include message_id in metadata for tool context
+                metadata = {
+                    "message_id": message_id,
+                    "chat_id": str(chat.id),
+                }
+
                 response = await self.agent.handle_message(
                     platform="telegram",
                     chat_id=str(chat.id),
@@ -208,6 +293,7 @@ class TelegramChannel:
                     message=text,
                     display_name=self._get_display_name(user),
                     is_group=is_group,  # Pass group flag for security restrictions
+                    message_metadata=metadata,
                 )
 
                 if response:
@@ -221,7 +307,10 @@ class TelegramChannel:
                             thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
                             response = thinking_block + response
 
-                    await self._send_response_with_media(chat.id, response, context)
+                    sent = await self._send_response_with_media(chat.id, response, context)
+                    # Track bot's response for reaction context
+                    if sent:
+                        self._track_message(chat.id, sent.message_id, response[:100])
 
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
@@ -428,6 +517,197 @@ class TelegramChannel:
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
                 await update.message.reply_text("Sorry, something went wrong processing that photo.")
+
+    async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle voice messages and audio files — transcribe via STT and process as text."""
+        if not update.message:
+            return
+
+        user = update.effective_user
+        chat = update.effective_chat
+        is_group = chat.type in ("group", "supergroup")
+
+        # Rate limiting
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
+        if not allowed:
+            await update.message.reply_text(f"⏱️ {rate_msg}")
+            return
+
+        # Group checks — voice in groups requires mention/reply context
+        if is_group:
+            if not self._is_reply_to_bot(update):
+                return  # Ignore voice in groups unless replying to bot
+
+        await self._ensure_user(user)
+
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [voice message]")
+
+        # Keep typing indicator while transcribing
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                # Get the voice/audio file
+                voice = update.message.voice or update.message.audio
+                if not voice:
+                    return
+
+                tg_file = await voice.get_file()
+                audio_bytes = await tg_file.download_as_bytearray()
+
+                if not audio_bytes or len(audio_bytes) == 0:
+                    logger.error("Downloaded voice is empty (0 bytes)")
+                    await update.message.reply_text("Sorry, couldn't download the voice message.")
+                    return
+
+                logger.info(f"Voice downloaded: {len(audio_bytes)} bytes")
+
+                # Transcribe using STT
+                from ..tools.voice import transcribe_audio
+                
+                # Use file_unique_id as filename hint
+                filename = f"voice_{voice.file_unique_id}.ogg"
+                success, result = await transcribe_audio(bytes(audio_bytes), filename)
+
+                if not success:
+                    logger.error(f"Transcription failed: {result}")
+                    await update.message.reply_text(f"⚠️ Couldn't transcribe: {result[:200]}")
+                    return
+
+                transcribed_text = result
+                logger.info(f"Transcribed: {transcribed_text[:100]}")
+
+                # Track this message ID
+                self._track_message(chat.id, update.message.message_id, f"[voice] {transcribed_text[:50]}")
+
+                # Process the transcribed text as a normal message
+                # Include transcription indicator so agent knows it's from voice
+                user_message = f"[Voice message transcription]: {transcribed_text}"
+                
+                metadata = {
+                    "message_id": update.message.message_id,
+                    "voice_transcription": True,
+                    "original_text": transcribed_text,
+                }
+
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=user_message,
+                    display_name=self._get_display_name(user),
+                    is_group=is_group,
+                    message_metadata=metadata,
+                )
+
+                if response:
+                    sent = await self._send_response_with_media(chat.id, response, context)
+                    # Track bot's response message ID
+                    if sent:
+                        self._track_message(chat.id, sent.message_id, response[:50])
+
+            except Exception as e:
+                logger.error(f"Error handling voice: {e}", exc_info=True)
+                await update.message.reply_text("Sorry, something went wrong processing that voice message.")
+
+    async def _handle_reaction_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle reaction updates on messages."""
+        reaction = update.message_reaction
+        if not reaction:
+            return
+
+        chat = reaction.chat
+        user = reaction.user
+        message_id = reaction.message_id
+
+        # Get the new reactions (what was added)
+        new_reactions = reaction.new_reaction or []
+        old_reactions = reaction.old_reaction or []
+
+        if not new_reactions and not old_reactions:
+            return
+
+        # Determine what changed
+        added_emojis = []
+        removed_emojis = []
+
+        new_emoji_set = {r.emoji if hasattr(r, 'emoji') else str(r) for r in new_reactions}
+        old_emoji_set = {r.emoji if hasattr(r, 'emoji') else str(r) for r in old_reactions}
+
+        added_emojis = list(new_emoji_set - old_emoji_set)
+        removed_emojis = list(old_emoji_set - new_emoji_set)
+
+        if not added_emojis and not removed_emojis:
+            return
+
+        # Build reaction event message
+        user_name = self._get_display_name(user) if user else "Someone"
+        user_id = str(user.id) if user else "unknown"
+
+        # Get message preview from our tracking
+        msg_preview = self._get_message_preview(chat.id, message_id)
+        
+        if added_emojis:
+            emoji_str = " ".join(added_emojis)
+            event_text = f"[Reaction: {emoji_str} from {user_name} on message '{msg_preview}']"
+            logger.info(f"Reaction received: {emoji_str} from {user_id} on msg {message_id}")
+
+            # Only process reactions on bot's own messages or if configured to
+            # For now, just log — could pass to agent as system event
+            # await self.agent.handle_system_event(event_text, chat_id=str(chat.id))
+
+    def _track_message(self, chat_id: int, message_id: int, preview: str):
+        """Track a message ID for reaction context."""
+        if chat_id not in self._recent_messages:
+            self._recent_messages[chat_id] = deque(maxlen=20)
+        self._recent_messages[chat_id].append((message_id, preview[:100]))
+
+    def _get_message_preview(self, chat_id: int, message_id: int) -> str:
+        """Get a preview of a tracked message."""
+        if chat_id not in self._recent_messages:
+            return f"(msg #{message_id})"
+        for mid, preview in self._recent_messages[chat_id]:
+            if mid == message_id:
+                return preview
+        return f"(msg #{message_id})"
+
+    async def send_reaction(self, chat_id: int, message_id: int, emoji: str) -> bool:
+        """Send a reaction to a message.
+        
+        Args:
+            chat_id: The chat ID
+            message_id: The message ID to react to
+            emoji: The reaction emoji
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.app or not self.app.bot:
+            logger.error("Bot not initialized")
+            return False
+
+        try:
+            await self.app.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=message_id,
+                reaction=[ReactionTypeEmoji(emoji=emoji)],
+            )
+            logger.info(f"Sent reaction {emoji} to message {message_id} in chat {chat_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send reaction: {e}")
+            return False
+
+    def get_recent_messages(self, chat_id: int) -> list[tuple[int, str]]:
+        """Get recent message IDs and previews for a chat.
+        
+        Returns:
+            List of (message_id, preview) tuples, most recent first
+        """
+        if chat_id not in self._recent_messages:
+            return []
+        return list(reversed(self._recent_messages[chat_id]))
 
     # ── Command handlers ─────────────────────────────────────
 
@@ -1247,13 +1527,25 @@ Or just send me a message!"""
                 return True
         return False
 
-    async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
+    async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None):
         """Send a response, handling MEDIA: paths as photos/documents.
         
         If response contains 'MEDIA: /path/to/file', send the file as a photo
         (if image) or document, with the remaining text as caption.
+        
+        Args:
+            chat_id: Telegram chat ID
+            text: Response text (may contain MEDIA: path)
+            context: Telegram context (optional — uses self.app.bot if None)
+        
+        Returns:
+            The sent Message object, or None if send failed.
         """
         import os
+        from telegram import Message
+
+        # Get bot instance — from context if available, otherwise from app
+        bot = context.bot if context else self.app.bot
 
         # Check for MEDIA: in response
         media_path = None
@@ -1274,10 +1566,11 @@ Or just send me a message!"""
                     caption_text = caption_text[:1020] + "..."
 
                 ext = os.path.splitext(media_path)[1].lower()
+                sent_msg = None
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
                     with open(media_path, "rb") as f:
                         try:
-                            await context.bot.send_photo(
+                            sent_msg = await bot.send_photo(
                                 chat_id=chat_id,
                                 photo=f,
                                 caption=caption_text or None,
@@ -1286,7 +1579,7 @@ Or just send me a message!"""
                         except Exception:
                             # Markdown parse failed — retry without parse_mode
                             f.seek(0)
-                            await context.bot.send_photo(
+                            sent_msg = await bot.send_photo(
                                 chat_id=chat_id,
                                 photo=f,
                                 caption=caption_text or None,
@@ -1294,7 +1587,7 @@ Or just send me a message!"""
                 else:
                     with open(media_path, "rb") as f:
                         try:
-                            await context.bot.send_document(
+                            sent_msg = await bot.send_document(
                                 chat_id=chat_id,
                                 document=f,
                                 caption=caption_text or None,
@@ -1302,25 +1595,38 @@ Or just send me a message!"""
                             )
                         except Exception:
                             f.seek(0)
-                            await context.bot.send_document(
+                            sent_msg = await bot.send_document(
                                 chat_id=chat_id,
                                 document=f,
                                 caption=caption_text or None,
                             )
                 logger.info(f"Sent media: {media_path} to {chat_id}")
-                return
+                return sent_msg
             except Exception as e:
                 logger.error(f"Failed to send media {media_path}: {e}")
                 # Fall through to send as text
                 caption_text = text  # Send full text as fallback
 
         # No media or media send failed — send as text
-        await self._send_response(chat_id, caption_text, context)
+        return await self._send_response(chat_id, caption_text, context)
 
-    async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE):
+    async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None):
         """Send a response, splitting if too long for Telegram.
-        Falls back to plain text if Markdown parsing fails."""
+        Falls back to plain text if Markdown parsing fails.
+        
+        Args:
+            chat_id: Telegram chat ID
+            text: Response text
+            context: Telegram context (optional — uses self.app.bot if None)
+        
+        Returns:
+            The last sent Message object, or None if send failed.
+        """
+        # Get bot instance — from context if available, otherwise from app
+        bot = context.bot if context else self.app.bot
+        
         max_length = 4096
+        last_msg = None
 
         chunks = []
         remaining = text
@@ -1340,17 +1646,19 @@ Or just send me a message!"""
 
         for chunk in chunks:
             try:
-                await context.bot.send_message(
+                last_msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
                     parse_mode="Markdown",
                 )
             except Exception:
                 # Markdown parse failed — send as plain text
-                await context.bot.send_message(
+                last_msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
                 )
+
+        return last_msg
 
     async def _deliver_subagent_result(self, message: str):
         """Deliver sub-agent results to the last active Telegram chat."""

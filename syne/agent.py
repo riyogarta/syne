@@ -323,6 +323,53 @@ class SyneAgent:
             requires_access_level=READ_SOURCE_TOOL["requires_access_level"],
         )
 
+        # ── File Operations (Core) ──
+        from .tools.file_ops import FILE_READ_TOOL, FILE_WRITE_TOOL
+        self.tools.register(
+            name=FILE_READ_TOOL["name"],
+            description=FILE_READ_TOOL["description"],
+            parameters=FILE_READ_TOOL["parameters"],
+            handler=FILE_READ_TOOL["handler"],
+            requires_access_level=FILE_READ_TOOL["requires_access_level"],
+        )
+        self.tools.register(
+            name=FILE_WRITE_TOOL["name"],
+            description=FILE_WRITE_TOOL["description"],
+            parameters=FILE_WRITE_TOOL["parameters"],
+            handler=FILE_WRITE_TOOL["handler"],
+            requires_access_level=FILE_WRITE_TOOL["requires_access_level"],
+        )
+
+        # ── Scheduler (Core) ──
+        from .tools.scheduler import MANAGE_SCHEDULE_TOOL
+        self.tools.register(
+            name=MANAGE_SCHEDULE_TOOL["name"],
+            description=MANAGE_SCHEDULE_TOOL["description"],
+            parameters=MANAGE_SCHEDULE_TOOL["parameters"],
+            handler=MANAGE_SCHEDULE_TOOL["handler"],
+            requires_access_level=MANAGE_SCHEDULE_TOOL["requires_access_level"],
+        )
+
+        # ── Send Reaction (Core) ──
+        from .tools.reactions import SEND_REACTION_TOOL
+        self.tools.register(
+            name=SEND_REACTION_TOOL["name"],
+            description=SEND_REACTION_TOOL["description"],
+            parameters=SEND_REACTION_TOOL["parameters"],
+            handler=SEND_REACTION_TOOL["handler"],
+            requires_access_level=SEND_REACTION_TOOL["requires_access_level"],
+        )
+
+        # ── Send Voice (Core) ──
+        from .tools.voice import SEND_VOICE_TOOL
+        self.tools.register(
+            name=SEND_VOICE_TOOL["name"],
+            description=SEND_VOICE_TOOL["description"],
+            parameters=SEND_VOICE_TOOL["parameters"],
+            handler=SEND_VOICE_TOOL["handler"],
+            requires_access_level=SEND_VOICE_TOOL["requires_access_level"],
+        )
+
         # ── Exec (Core) ──
         self.tools.register(
             name="exec",

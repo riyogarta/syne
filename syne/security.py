@@ -27,6 +27,9 @@ OWNER_ONLY_TOOLS = frozenset({
     "update_soul",
     "manage_group",
     "manage_user",
+    "file_read",
+    "file_write",
+    "manage_schedule",
 })
 
 

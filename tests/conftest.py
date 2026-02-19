@@ -56,3 +56,17 @@ async def clean_test_users(db_pool):
     
     async with get_connection() as conn:
         await conn.execute("DELETE FROM users WHERE platform_id LIKE 'test_%'")
+
+
+@pytest.fixture
+async def clean_scheduled_tasks(db_pool):
+    """Clean up scheduled_tasks table before/after test."""
+    from syne.db.connection import get_connection
+    
+    async with get_connection() as conn:
+        await conn.execute("DELETE FROM scheduled_tasks WHERE name LIKE 'test_%'")
+    
+    yield
+    
+    async with get_connection() as conn:
+        await conn.execute("DELETE FROM scheduled_tasks WHERE name LIKE 'test_%'")
