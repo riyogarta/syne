@@ -238,11 +238,28 @@ def init():
     console.print("  [dim]This ensures your API keys, OAuth tokens, and memories stay private.[/dim]")
     console.print("  [dim]Docker is required — PostgreSQL is bundled, not optional.[/dim]")
 
-    # Generate unique credentials for this installation
-    db_suffix = secrets.token_hex(4)  # 8-char random suffix
-    db_user = f"syne_{db_suffix}"
-    db_name = "mnemosyne"
-    db_password = secrets.token_hex(16)  # 32-char random password
+    # Reuse existing credentials if .env exists, otherwise generate new ones
+    env_path = os.path.join(os.getcwd(), ".env")
+    existing_env = {}
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, v = line.split("=", 1)
+                    existing_env[k.strip()] = v.strip()
+
+    if existing_env.get("SYNE_DB_USER") and existing_env.get("SYNE_DB_PASSWORD"):
+        db_user = existing_env["SYNE_DB_USER"]
+        db_password = existing_env["SYNE_DB_PASSWORD"]
+        db_name = existing_env.get("SYNE_DB_NAME", "mnemosyne")
+        console.print(f"  [dim]Reusing existing DB credentials from .env ({db_user})[/dim]")
+    else:
+        db_suffix = secrets.token_hex(4)
+        db_user = f"syne_{db_suffix}"
+        db_password = secrets.token_hex(16)
+        db_name = "mnemosyne"
+
     db_url = f"postgresql://{db_user}:{db_password}@localhost:5433/{db_name}"
 
     env_lines.append(f"SYNE_DB_USER={db_user}")
