@@ -93,6 +93,72 @@ def _ensure_docker() -> str:
     return prefix
 
 
+def _setup_service(docker_prefix: str = ""):
+    """Setup systemd user service, enable, and start Syne."""
+    import subprocess
+    import getpass
+    from pathlib import Path
+
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    service_file = service_dir / "syne.service"
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
+    env_file = os.path.join(syne_dir, ".env")
+
+    service_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build ExecStartPre for docker compose up -d db
+    docker_compose = f"{docker_prefix}docker compose"
+    pre_cmd = f"{docker_compose} -f {syne_dir}/docker-compose.yml up -d db"
+
+    service_content = f"""[Unit]
+Description=Syne AI Agent
+After=network.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory={syne_dir}
+EnvironmentFile={env_file}
+ExecStartPre=/bin/bash -c '{pre_cmd}'
+ExecStart={venv_python} -m syne.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+    service_file.write_text(service_content)
+    console.print(f"  [green]✓ Service file: {service_file}[/green]")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "syne"], capture_output=True)
+    console.print("  [green]✓ Autostart enabled[/green]")
+
+    # Enable linger so service runs without active login session
+    username = getpass.getuser()
+    result = subprocess.run(["loginctl", "enable-linger", username], capture_output=True)
+    if result.returncode == 0:
+        console.print(f"  [green]✓ Linger enabled for {username}[/green]")
+
+    # Start the service
+    console.print("  Starting Syne...")
+    result = subprocess.run(["systemctl", "--user", "start", "syne"], capture_output=True, text=True)
+    if result.returncode == 0:
+        import time
+        time.sleep(2)
+        # Check if actually running
+        check = subprocess.run(["systemctl", "--user", "is-active", "syne"], capture_output=True, text=True)
+        if check.stdout.strip() == "active":
+            console.print("  [green]✓ Syne is running![/green]")
+        else:
+            console.print("  [yellow]⚠ Service started but may have exited. Check logs:[/yellow]")
+            console.print("    journalctl --user -u syne --no-pager -n 20")
+    else:
+        console.print(f"  [yellow]⚠ Could not start service: {result.stderr.strip()}[/yellow]")
+        console.print("    Try: systemctl --user start syne")
+
+
 @cli.command()
 def init():
     """Initialize Syne: authenticate, setup database, configure."""
@@ -435,13 +501,16 @@ def init():
         style="green",
     ))
 
-    # 7. Summary
-    console.print("\n[bold green]✅ Setup complete![/bold green]")
+    # 7. Setup systemd service + start
+    console.print("\n[bold]Setting up systemd service...[/bold]")
+    _setup_service(docker_prefix)
+
+    console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
     console.print()
-    console.print("Next steps:")
-    console.print("  [bold]syne start[/bold]               # Start agent")
-    console.print("  [bold]syne status[/bold]              # Check status")
-    console.print("  [bold]syne repair[/bold]              # Diagnose issues")
+    console.print("Commands:")
+    console.print("  [bold]systemctl --user status syne[/bold]    # Check status")
+    console.print("  [bold]systemctl --user restart syne[/bold]   # Restart")
+    console.print("  [bold]journalctl --user -u syne -f[/bold]   # Logs")
     console.print()
 
 
@@ -1039,12 +1108,9 @@ def autostart(enable):
     import subprocess
     from pathlib import Path
 
-    service_dir = Path.home() / ".config" / "systemd" / "user"
-    service_file = service_dir / "syne.service"
-    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
-
     if not enable:
+        service_dir = Path.home() / ".config" / "systemd" / "user"
+        service_file = service_dir / "syne.service"
         subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
         subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
         if service_file.exists():
@@ -1053,41 +1119,7 @@ def autostart(enable):
         console.print("[yellow]Autostart disabled.[/yellow]")
         return
 
-    # Create service file
-    service_dir.mkdir(parents=True, exist_ok=True)
-
-    env_file = os.path.join(syne_dir, ".env")
-
-    service_content = f"""[Unit]
-Description=Syne AI Agent
-After=network.target docker.service
-
-[Service]
-Type=simple
-WorkingDirectory={syne_dir}
-EnvironmentFile={env_file}
-ExecStart={venv_python} -m syne.main
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-"""
-
-    service_file.write_text(service_content)
-    console.print(f"[green]✓ Service file written: {service_file}[/green]")
-
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-    subprocess.run(["systemctl", "--user", "enable", "syne"], capture_output=True)
-    console.print("[green]✓ Autostart enabled[/green]")
-
-    # Enable linger so service runs without login
-    import getpass
-    username = getpass.getuser()
-    result = subprocess.run(["loginctl", "enable-linger", username], capture_output=True)
-    if result.returncode == 0:
-        console.print(f"[green]✓ Linger enabled for {username}[/green]")
-
+    _setup_service()
     console.print()
     console.print("[bold]Commands:[/bold]")
     console.print("  systemctl --user start syne    # Start now")
