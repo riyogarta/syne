@@ -86,7 +86,7 @@ syne init
 1. **Choose AI provider** — OAuth (free) or API key (paid)
 2. **Choose embedding provider**
 3. **Enter Telegram bot token** — from @BotFather
-4. **Web search API key** (optional) — Brave Search, free tier 2,000 queries/month
+4. **Web search API key** (optional) — Brave Search, free tier 2,000 queries/month. Can be added later via chat.
 5. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
 6. **Initialize database** — Schema, identity, credentials saved to DB
 7. **Setup systemd service** — Auto-start on boot, linger enabled
