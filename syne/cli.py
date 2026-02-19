@@ -43,10 +43,18 @@ def init():
                 raise SystemExit(1)
             # Add current user to docker group, start & enable
             import getpass
+            import time as _time
             current_user = getpass.getuser()
             os.system(f"sudo usermod -aG docker {current_user}")
+            os.system("sudo systemctl daemon-reload")
             os.system("sudo systemctl start docker")
             os.system("sudo systemctl enable docker > /dev/null 2>&1")
+            # Wait for Docker to be ready after fresh install
+            console.print("[dim]Waiting for Docker to be ready...[/dim]")
+            for _ in range(15):
+                _time.sleep(2)
+                if os.system("sudo docker info > /dev/null 2>&1") == 0:
+                    break
             console.print(f"\n[green]✓ Docker installed and started[/green]")
             console.print(f"[yellow]⚠ Added {current_user} to docker group.[/yellow]")
             console.print("[yellow]  If you get permission errors, logout & login or run: newgrp docker[/yellow]\n")
@@ -55,19 +63,20 @@ def init():
             raise SystemExit(1)
 
     # Verify Docker daemon is running, start if not
-    ret = os.system("docker info > /dev/null 2>&1")
+    ret = os.system("sudo docker info > /dev/null 2>&1")
     if ret != 0:
         console.print("[dim]Docker is not running, starting...[/dim]")
+        os.system("sudo systemctl daemon-reload")
         os.system("sudo systemctl start docker")
         os.system("sudo systemctl enable docker > /dev/null 2>&1")
         import time
-        for i in range(10):
-            time.sleep(1)
-            if os.system("docker info > /dev/null 2>&1") == 0:
+        for i in range(15):
+            time.sleep(2)
+            if os.system("sudo docker info > /dev/null 2>&1") == 0:
                 break
         else:
             console.print("[bold red]Failed to start Docker daemon.[/bold red]")
-            console.print("[dim]Try manually: sudo systemctl start docker[/dim]")
+            console.print("[dim]Check: sudo systemctl status docker[/dim]")
             raise SystemExit(1)
 
     console.print("[green]✓ Docker ready[/green]\n")
@@ -240,24 +249,28 @@ def init():
         console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
     # 5. Start DB (Docker — always)
+    # Use sudo for docker compose if user not yet in docker group (fresh install)
+    docker_cmd = "docker compose"
+    if os.system("docker compose version > /dev/null 2>&1") != 0:
+        docker_cmd = "sudo docker compose"
+
     console.print("\n[bold]Starting database...[/bold]")
-    console.print("[dim]Run: docker compose up -d db[/dim]")
-    result = os.system("docker compose up -d db")
+    result = os.system(f"{docker_cmd} up -d db")
     if result != 0:
-        console.print("[red]Failed to start database. Make sure Docker is installed and running.[/red]")
-        console.print("[dim]Install Docker: https://docs.docker.com/get-docker/[/dim]")
+        console.print("[red]Failed to start database.[/red]")
+        console.print("[dim]Try: sudo docker compose up -d db[/dim]")
         return
 
     # Wait for DB
     console.print("Waiting for PostgreSQL to be ready...")
     import time
     for _ in range(15):
-        result = os.system(f"docker compose exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
+        result = os.system(f"{docker_cmd} exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
         if result == 0:
             break
         time.sleep(2)
     else:
-        console.print("[red]Database didn't start in time. Run 'docker compose up -d db' manually.[/red]")
+        console.print("[red]Database didn't start in time. Run 'sudo docker compose up -d db' manually.[/red]")
         return
 
     console.print("[green]✓ Database ready[/green]")
