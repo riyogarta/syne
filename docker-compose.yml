@@ -5,7 +5,7 @@ services:
     environment:
       # Use environment variables for credentials (set by syne-setup.sh)
       # Falls back to 'syne' for existing installations
-      POSTGRES_DB: ${SYNE_DB_NAME:-syne}
+      POSTGRES_DB: ${SYNE_DB_NAME:-mnemosyne}
       POSTGRES_USER: ${SYNE_DB_USER:-syne}
       POSTGRES_PASSWORD: ${SYNE_DB_PASSWORD:-syne}
     ports:
@@ -27,7 +27,7 @@ services:
         condition: service_healthy
     environment:
       # Database URL constructed from env vars (set by syne-setup.sh)
-      SYNE_DATABASE_URL: postgresql://${SYNE_DB_USER:-syne}:${SYNE_DB_PASSWORD:-syne}@db:5432/${SYNE_DB_NAME:-syne}
+      SYNE_DATABASE_URL: postgresql://${SYNE_DB_USER:-syne}:${SYNE_DB_PASSWORD:-syne}@db:5432/${SYNE_DB_NAME:-mnemosyne}
     env_file:
       - .env
     ports:

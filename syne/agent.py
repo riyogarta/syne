@@ -295,6 +295,16 @@ class SyneAgent:
             requires_access_level=WEB_FETCH_TOOL["requires_access_level"],
         )
 
+        # ── Read Source (Core) ──
+        from .tools.read_source import READ_SOURCE_TOOL
+        self.tools.register(
+            name=READ_SOURCE_TOOL["name"],
+            description=READ_SOURCE_TOOL["description"],
+            parameters=READ_SOURCE_TOOL["parameters"],
+            handler=READ_SOURCE_TOOL["handler"],
+            requires_access_level=READ_SOURCE_TOOL["requires_access_level"],
+        )
+
         # ── Exec (Core) ──
         self.tools.register(
             name="exec",

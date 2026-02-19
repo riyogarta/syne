@@ -50,14 +50,16 @@ Connection (auto-configured): `postgresql://syne:syne@localhost:5433/syne`
 
 ### 2. Environment
 
-Create `.env` in the project root (copy from `.env.example`):
+`syne init` generates `.env` automatically with unique database credentials:
 
 ```env
-SYNE_DATABASE_URL=postgresql://syne:syne@localhost:5433/syne
-SYNE_PROVIDER=google
+SYNE_DB_USER=syne_<random>
+SYNE_DB_PASSWORD=<random>
+SYNE_DB_NAME=mnemosyne
+SYNE_DATABASE_URL=postgresql://syne_<random>:<random>@localhost:5433/mnemosyne
 ```
 
-That's it! All other credentials (Telegram token, API keys) are configured via `syne init` or chat, and stored securely in PostgreSQL.
+That's it — only database credentials. All other config (provider, Telegram token, API keys) is stored securely in PostgreSQL.
 
 ### 3. Google OAuth
 

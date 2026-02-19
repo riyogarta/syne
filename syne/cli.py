@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 import sys
 import click
 from rich.console import Console
@@ -39,9 +40,10 @@ def init():
     console.print("  4. OpenAI [yellow](API key, paid)[/yellow]")
     console.print("  5. Anthropic Claude [yellow](API key, paid)[/yellow]")
     console.print("  6. Together AI [yellow](API key, paid)[/yellow]")
+    console.print("  7. Groq [yellow](API key, free tier available)[/yellow]")
     console.print()
 
-    choice = click.prompt("Select provider", type=click.IntRange(1, 6), default=1)
+    choice = click.prompt("Select provider", type=click.IntRange(1, 7), default=1)
 
     env_lines = []
     provider_config = None  # Will be saved to DB after schema init
@@ -56,7 +58,6 @@ def init():
         google_creds = asyncio.run(login_google())
         # Credentials saved to DB after schema init (Step 6)
 
-        env_lines.append("SYNE_PROVIDER=google")
         provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "oauth"}
 
     elif choice == 2:
@@ -67,7 +68,6 @@ def init():
         codex_creds = asyncio.run(login_codex())
         # Credentials saved to DB after schema init (Step 6)
 
-        env_lines.append("SYNE_PROVIDER=codex")
         provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
 
     elif choice == 3:
@@ -76,46 +76,94 @@ def init():
         console.print("  [dim]Install Claude CLI: npm install -g @anthropic-ai/claude-code[/dim]")
         console.print("  [dim]Then run: claude login[/dim]")
         console.print("  [dim]Syne reads tokens from ~/.claude/.credentials.json[/dim]")
-        env_lines.append("SYNE_PROVIDER=anthropic")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
 
     elif choice == 4:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key", hide_input=True)
-        env_lines.append(f"SYNE_OPENAI_API_KEY={api_key}")
-        env_lines.append("SYNE_PROVIDER=openai")
-        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key"}
+        # API key goes to DB, not .env (per credential policy)
+        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 5:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key", hide_input=True)
-        env_lines.append(f"SYNE_ANTHROPIC_API_KEY={api_key}")
-        env_lines.append("SYNE_PROVIDER=anthropic")
-        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key"}
+        # API key goes to DB, not .env (per credential policy)
+        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 6:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key", hide_input=True)
-        env_lines.append(f"SYNE_TOGETHER_API_KEY={api_key}")
-        env_lines.append("SYNE_PROVIDER=together")
-        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key"}
+        # API key goes to DB, not .env (per credential policy)
+        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key}
 
-    # 2. Telegram bot (optional)
-    console.print("\n[bold]Step 2: Telegram Bot (optional)[/bold]")
-    telegram_token = None
-    if click.confirm("Setup Telegram bot?", default=True):
-        console.print("Get a bot token from @BotFather on Telegram")
-        telegram_token = click.prompt("Telegram bot token")
-        # Token goes to DB, not .env (per credential policy)
-        console.print("[dim]Token will be saved to database after schema init.[/dim]")
+    elif choice == 7:
+        console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
+        console.print("  [dim]Get your key at console.groq.com[/dim]")
+        api_key = click.prompt("Groq API key", hide_input=True)
+        # API key goes to DB, not .env (per credential policy)
+        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        provider_config = {"driver": "openai_compat", "model": "llama-3.3-70b-versatile", "auth": "api_key", "_api_key": api_key}
 
-    # 3. Database (Docker only — no external DB option)
-    console.print("\n[bold]Step 3: Database[/bold]")
+    # 2. Embedding provider (for memory)
+    console.print("\n[bold]Step 2: Choose embedding provider (for memory)[/bold]")
+    console.print()
+    console.print("  1. Together AI [green](recommended — ~$0.008/1M tokens)[/green]")
+    console.print("  2. OpenAI [yellow](~$0.02/1M tokens)[/yellow]")
+    console.print()
+
+    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 2), default=1)
+    embedding_config = None
+
+    if embed_choice == 1:
+        console.print("\n[bold green]✓ Together AI selected for embeddings[/bold green]")
+        console.print("  [dim]Sign up at together.ai — $5 free credit included.[/dim]")
+        embed_api_key = click.prompt("Together AI API key", hide_input=True)
+        embedding_config = {
+            "driver": "together",
+            "model": "BAAI/bge-base-en-v1.5",
+            "dimensions": 768,
+            "_api_key": embed_api_key,
+            "_credential_key": "credential.together_api_key",
+        }
+    elif embed_choice == 2:
+        console.print("\n[bold green]✓ OpenAI selected for embeddings[/bold green]")
+        embed_api_key = click.prompt("OpenAI API key", hide_input=True)
+        embedding_config = {
+            "driver": "openai",
+            "model": "text-embedding-3-small",
+            "dimensions": 1536,
+            "_api_key": embed_api_key,
+            "_credential_key": "credential.openai_compat_api_key",
+        }
+
+    # 3. Telegram bot
+    console.print("\n[bold]Step 3: Telegram Bot[/bold]")
+    console.print("  [dim]Create a bot via @BotFather on Telegram to get your token.[/dim]")
+    telegram_token = click.prompt("Telegram bot token")
+    # Token goes to DB, not .env (per credential policy)
+    console.print("[dim]Token will be saved to database after schema init.[/dim]")
+
+    # 4. Database (Docker only — no external DB option)
+    console.print("\n[bold]Step 4: Database[/bold]")
     console.print("  Syne uses its own isolated PostgreSQL + pgvector container.")
     console.print("  [dim]This ensures your API keys, OAuth tokens, and memories stay private.[/dim]")
     console.print("  [dim]Docker is required — PostgreSQL is bundled, not optional.[/dim]")
-    db_url = "postgresql://syne:syne@localhost:5433/syne"
+
+    # Generate unique credentials for this installation
+    db_suffix = secrets.token_hex(4)  # 8-char random suffix
+    db_user = f"syne_{db_suffix}"
+    db_name = "mnemosyne"
+    db_password = secrets.token_hex(16)  # 32-char random password
+    db_url = f"postgresql://{db_user}:{db_password}@localhost:5433/{db_name}"
+
+    env_lines.append(f"SYNE_DB_USER={db_user}")
+    env_lines.append(f"SYNE_DB_PASSWORD={db_password}")
+    env_lines.append(f"SYNE_DB_NAME={db_name}")
     env_lines.append(f"SYNE_DATABASE_URL={db_url}")
+    console.print(f"  [green]✓ Database credentials generated (unique to this install)[/green]")
 
     # 4. Write .env
     env_content = "\n".join(env_lines) + "\n"
@@ -127,11 +175,13 @@ def init():
         else:
             with open(env_path, "w") as f:
                 f.write(env_content)
-            console.print(f"[green]✓ .env written[/green]")
+            os.chmod(env_path, 0o600)
+            console.print(f"[green]✓ .env written (chmod 600)[/green]")
     else:
         with open(env_path, "w") as f:
             f.write(env_content)
-        console.print(f"[green]✓ .env written[/green]")
+        os.chmod(env_path, 0o600)
+        console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
     # 5. Start DB (Docker — always)
     console.print("\n[bold]Starting database...[/bold]")
@@ -146,7 +196,7 @@ def init():
     console.print("Waiting for PostgreSQL to be ready...")
     import time
     for _ in range(15):
-        result = os.system("docker compose exec -T db pg_isready -U syne > /dev/null 2>&1")
+        result = os.system(f"docker compose exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
         if result == 0:
             break
         time.sleep(2)
@@ -157,7 +207,7 @@ def init():
     console.print("[green]✓ Database ready[/green]")
 
     # 6. Initialize schema + Agent identity
-    console.print("\n[bold]Step 4: Initialize database schema...[/bold]")
+    console.print("\n[bold]Step 5: Initialize database & agent identity...[/bold]")
     schema_path = os.path.join(os.path.dirname(__file__), "db", "schema.sql")
     with open(schema_path) as f:
         schema = f.read()
@@ -172,7 +222,7 @@ def init():
     asyncio.run(_init_schema())
     console.print("[green]✓ Schema initialized[/green]")
 
-    console.print("\n[bold]Step 5: Agent Identity[/bold]")
+    console.print()  # Agent identity (part of Step 5)
     name = click.prompt("Agent name", default="Syne")
     motto = click.prompt("Motto (optional)", default="I remember, therefore I am")
 
@@ -199,6 +249,31 @@ def init():
             await set_config("credential.codex_refresh_token", codex_creds["refresh_token"])
             await set_config("credential.codex_expires_at", codex_creds["expires_at"])
             console.print("[green]✓ ChatGPT OAuth credentials saved to database[/green]")
+        # Save API key to DB if provided (not in .env!)
+        if provider_config and provider_config.get("_api_key"):
+            from .db.models import set_config
+            driver = provider_config["driver"]
+            await set_config(f"credential.{driver}_api_key", provider_config["_api_key"])
+            console.print(f"[green]✓ API key saved to database[/green]")
+        # Save provider config to DB
+        if provider_config:
+            from .db.models import set_config
+            # Strip internal _api_key before saving
+            db_config = {k: v for k, v in provider_config.items() if not k.startswith("_")}
+            await set_config("provider.primary", db_config)
+            await set_config("provider.active_model", provider_config["model"])
+            console.print(f"[green]✓ Provider config saved to database[/green]")
+        # Save embedding config to DB
+        if embedding_config:
+            from .db.models import set_config
+            await set_config("provider.embedding_model", embedding_config["model"])
+            await set_config("provider.embedding_dimensions", embedding_config["dimensions"])
+            await set_config("provider.embedding_driver", embedding_config["driver"])
+            # Save embedding API key
+            if embedding_config.get("_api_key"):
+                cred_key = embedding_config["_credential_key"]
+                await set_config(cred_key, embedding_config["_api_key"])
+            console.print(f"[green]✓ Embedding config saved to database[/green]")
         await close_db()
 
     asyncio.run(_save_identity())
@@ -277,9 +352,19 @@ def status():
         except Exception as e:
             table.add_row("Database", f"[red]Error: {e}[/red]")
 
-        # Provider
-        provider = os.environ.get("SYNE_PROVIDER", "not configured")
-        table.add_row("Provider", provider)
+        # Provider (from DB)
+        try:
+            from .db.models import get_config
+            async def _get_prov():
+                p = await get_config("provider.primary")
+                return p if p else "not configured"
+            provider = asyncio.run(_get_prov())
+            if isinstance(provider, dict):
+                table.add_row("Provider", f"{provider.get('driver', '?')} ({provider.get('auth', '?')})")
+            else:
+                table.add_row("Provider", str(provider))
+        except Exception:
+            table.add_row("Provider", "not configured")
 
         # Telegram
         tg = "✓ Configured" if settings.telegram_bot_token else "Not configured"
@@ -925,29 +1010,17 @@ def restart():
 # ── Helpers ──────────────────────────────────────────────────
 
 def _get_provider(settings):
-    """Quick provider init for CLI commands."""
-    provider_name = os.environ.get("SYNE_PROVIDER", "google")
+    """Quick provider init for CLI commands. Reads config from DB."""
+    from .llm.drivers import create_chat_provider
 
-    if provider_name == "google":
-        from .llm.google import GoogleProvider
-        from .auth.google_oauth import get_credentials
+    async def _make():
+        return await create_chat_provider()
 
-        async def _make():
-            creds = await get_credentials()
-            if not creds:
-                console.print("[red]No Google OAuth credentials. Run 'syne init' to authenticate.[/red]")
-                sys.exit(1)
-            return GoogleProvider(credentials=creds)
-
+    try:
         return asyncio.run(_make())
-    elif provider_name == "openai":
-        from .llm.openai import OpenAIProvider
-        if not settings.openai_api_key:
-            console.print("[red]SYNE_OPENAI_API_KEY not set[/red]")
-            sys.exit(1)
-        return OpenAIProvider(api_key=settings.openai_api_key)
-    else:
-        console.print(f"[red]Unknown provider: {provider_name}[/red]")
+    except Exception as e:
+        console.print(f"[red]Failed to initialize provider: {e}[/red]")
+        console.print("[dim]Run 'syne init' to configure a provider.[/dim]")
         sys.exit(1)
 
 
