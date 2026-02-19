@@ -23,6 +23,10 @@ class HybridProvider(LLMProvider):
         return f"{self._chat.name}+{self._embed.name}"
 
     @property
+    def chat_model(self) -> str:
+        return getattr(self._chat, "chat_model", "unknown")
+
+    @property
     def supports_vision(self) -> bool:
         return self._chat.supports_vision
 

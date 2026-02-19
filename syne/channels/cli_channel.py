@@ -242,13 +242,13 @@ async def _handle_cli_command(
         async with get_connection() as conn:
             mem_count = await conn.fetchval("SELECT COUNT(*) FROM memory")
             user_count = await conn.fetchval("SELECT COUNT(*) FROM users WHERE active = true")
-            group_count = await conn.fetchval("SELECT COUNT(*) FROM groups WHERE active = true")
+            group_count = await conn.fetchval("SELECT COUNT(*) FROM groups WHERE enabled = true")
             session_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM sessions WHERE status = 'active'"
             )
 
         tool_count = len(agent.tools.list_tools("owner"))
-        ability_count = len(agent.abilities.list_abilities()) if agent.abilities else 0
+        ability_count = len(agent.abilities.list_all()) if agent.abilities else 0
 
         auto_capture = await get_config("memory.auto_capture", False)
         thinking = await get_config("session.thinking_budget", "default")
