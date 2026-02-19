@@ -28,6 +28,40 @@ def init():
     console.print(Panel("[bold]Welcome to Syne 🧠[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
     console.print()
 
+    # Pre-check: Docker
+    import shutil
+    if not shutil.which("docker"):
+        console.print("[bold red]Docker is not installed.[/bold red]")
+        console.print("Syne requires Docker for its PostgreSQL database.\n")
+        install = click.confirm("Install Docker now?", default=True)
+        if install:
+            console.print("\n[dim]Installing Docker...[/dim]")
+            ret = os.system("curl -fsSL https://get.docker.com | sh")
+            if ret != 0:
+                console.print("[red]Docker installation failed. Install manually:[/red]")
+                console.print("[dim]https://docs.docker.com/get-docker/[/dim]")
+                raise SystemExit(1)
+            # Add current user to docker group
+            import getpass
+            current_user = getpass.getuser()
+            os.system(f"sudo usermod -aG docker {current_user}")
+            console.print(f"\n[green]✓ Docker installed[/green]")
+            console.print(f"[yellow]⚠ Added {current_user} to docker group.[/yellow]")
+            console.print("[yellow]  You may need to logout & login for group to take effect.[/yellow]")
+            console.print("[yellow]  Or run: newgrp docker[/yellow]\n")
+        else:
+            console.print("\n[dim]Install Docker first: https://docs.docker.com/get-docker/[/dim]")
+            raise SystemExit(1)
+
+    # Verify Docker daemon is running
+    ret = os.system("docker info > /dev/null 2>&1")
+    if ret != 0:
+        console.print("[bold red]Docker is installed but not running.[/bold red]")
+        console.print("[dim]Start Docker and try again: sudo systemctl start docker[/dim]")
+        raise SystemExit(1)
+
+    console.print("[green]✓ Docker detected[/green]\n")
+
     # 1. Provider selection
     console.print("[bold]Step 1: Choose your chat AI provider[/bold]")
     console.print()
