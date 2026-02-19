@@ -294,19 +294,43 @@ def init():
 
     # 3. Telegram bot
     console.print("\n[bold]Step 3: Telegram Bot[/bold]")
-    console.print("  [dim]Create a bot via @BotFather on Telegram to get your token.[/dim]")
-    telegram_token = click.prompt("Telegram bot token")
+    console.print("  A Telegram bot is [bold]required[/bold] — it's how Syne talks to you.")
+    console.print()
+    console.print("  [bold cyan]How to create a bot (takes 1 minute):[/bold cyan]")
+    console.print("  1. Open Telegram → search [bold]@BotFather[/bold] → tap Start")
+    console.print("  2. Send [bold]/newbot[/bold]")
+    console.print("  3. Choose a display name (e.g. \"My Syne\")")
+    console.print("  4. Choose a username ending in 'bot' (e.g. \"my_syne_bot\")")
+    console.print("  5. BotFather gives you a token like: [dim]1234567890:ABCdefGHIjklMNOpqrsTUVwxyz[/dim]")
+    console.print()
+    console.print("  [dim]Tip: Also send /setprivacy → Disable so the bot can read group messages.[/dim]")
+    console.print()
+    while True:
+        telegram_token = click.prompt("Paste your bot token here")
+        telegram_token = telegram_token.strip()
+        # Basic format validation: digits:alphanumeric
+        if ":" in telegram_token and len(telegram_token) > 20:
+            break
+        console.print("  [red]That doesn't look like a valid bot token.[/red]")
+        console.print("  [dim]Expected format: 1234567890:ABCdefGHIjklMNOpqrsTUVwxyz[/dim]")
 
     # 3b. Web Search (optional)
     console.print("\n[bold]Step 3b: Web Search (optional)[/bold]")
-    console.print("  [dim]Brave Search API key enables web search. Free tier: 2,000 queries/month.[/dim]")
-    console.print("  [dim]Get one at https://brave.com/search/api/ — press Enter to skip.[/dim]")
+    console.print("  Brave Search API lets Syne search the web. Free tier: 2,000 queries/month.")
+    console.print()
+    console.print("  [bold cyan]How to get a free API key:[/bold cyan]")
+    console.print("  1. Go to [link]https://brave.com/search/api/[/link]")
+    console.print("  2. Click \"Get Started\" → sign up (free)")
+    console.print("  3. Create an app → copy the API key")
+    console.print()
+    console.print("  [dim]Press Enter to skip — you can add it later via chat.[/dim]")
+    console.print()
     brave_api_key = click.prompt("Brave Search API key (optional)", default="", show_default=False)
     brave_api_key = brave_api_key.strip()
     if brave_api_key:
-        console.print("[green]✓ Brave Search API key provided[/green]")
+        console.print("[green]✓ Brave Search API key saved[/green]")
     else:
-        console.print("[dim]  Skipped — web search can be configured later via chat.[/dim]")
+        console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
 
     # 4. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 4: Database[/bold]")
