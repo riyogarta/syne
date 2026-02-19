@@ -103,21 +103,10 @@ syne status     # Quick status check
 
 ## No Config Files — Just Talk
 
-Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml`. Syne has none of that. Everything lives in PostgreSQL, and you change it through conversation:
+Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml`. Syne has none of that. Everything lives in PostgreSQL, and you change it through chat:
 
-```
-You:  Be more casual and use humor.
-Syne: Updated my personality. ✅
-
-You:  Add a rule: never share my location.
-Syne: Added as a hard rule. ✅
-
-You:  Switch to GPT-5.2 for chat.
-Syne: Model switched. ✅
-```
-
-| Traditional File | Syne Equivalent | How to change |
-|------------------|-----------------|---------------|
+| Traditional File | Syne Equivalent | Just say... |
+|------------------|-----------------|-------------|
 | `SOUL.md` | `soul` table | *"Be more casual and witty"* |
 | `AGENTS.md` | `rules` table | *"Add a rule: never share my location"* |
 | `IDENTITY.md` | `identity` table | *"Change your name to Atlas"* |
