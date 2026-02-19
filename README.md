@@ -42,6 +42,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 | Requirement | Details |
 |-------------|---------|
+| **CPU** | 1 vCPU minimum (2+ recommended) |
 | **OS** | Linux (Ubuntu 22.04+, Debian 12+) or macOS |
 | **Python** | 3.11+ |
 | **RAM** | 2 GB minimum (4 GB recommended) |
