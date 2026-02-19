@@ -51,10 +51,17 @@ def _ensure_docker() -> str:
             console.print("[red]Docker installation failed.[/red]")
             console.print("[dim]Install manually: https://docs.docker.com/get-docker/[/dim]")
             raise SystemExit(1)
-        # Add user to docker group
+        # Add user to docker group, start Docker
         current_user = getpass.getuser()
         os.system(f"sudo usermod -aG docker {current_user}")
+        os.system("sudo systemctl daemon-reload")
+        os.system("sudo systemctl start docker")
+        os.system("sudo systemctl enable docker > /dev/null 2>&1")
         console.print(f"[green]✓ Docker installed, {current_user} added to docker group[/green]")
+        # Re-exec syne init with docker group active
+        console.print("[dim]Activating docker group and restarting init...[/dim]\n")
+        os.execvp("sg", ["sg", "docker", "-c", "syne init"])
+        # execvp replaces current process — code below won't run
 
     # 2. Start daemon if not running
     if not _docker_ok() and not _docker_ok(use_sudo=True):
