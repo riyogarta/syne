@@ -90,28 +90,39 @@ async def run_cli(debug: bool = False):
         import time as _time
         _last_ctrl_c = 0.0
         while True:
+            # Phase 1: Get input (idle)
             try:
-                # Prompt
                 user_input = _get_input()
-                if user_input is None:
-                    # EOF (Ctrl+D)
+            except KeyboardInterrupt:
+                # Ctrl+C at prompt → double-tap to exit
+                now = _time.time()
+                if now - _last_ctrl_c < 2.0:
                     console.print("\n[dim]Goodbye![/dim]")
                     break
+                _last_ctrl_c = now
+                console.print("\n[dim](Press Ctrl+C again to exit)[/dim]")
+                continue
 
-                user_input = user_input.strip()
-                if not user_input:
+            if user_input is None:
+                # EOF (Ctrl+D)
+                console.print("\n[dim]Goodbye![/dim]")
+                break
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            # Built-in CLI commands
+            if user_input.startswith("/"):
+                handled = await _handle_cli_command(user_input, agent, user, chat_id)
+                if handled == "exit":
+                    break
+                if handled:
                     continue
 
-                # Built-in CLI commands
-                if user_input.startswith("/"):
-                    handled = await _handle_cli_command(user_input, agent, user, chat_id)
-                    if handled == "exit":
-                        break
-                    if handled:
-                        continue
-
-                # Send to agent
-                console.print()
+            # Phase 2: Process (Ctrl+C = cancel this request)
+            console.print()
+            try:
                 msg = user_input
                 with console.status("[bold blue]Thinking...", spinner="dots"):
                     response = await agent.conversations.handle_message(
@@ -126,15 +137,9 @@ async def run_cli(debug: bool = False):
                 if response:
                     _display_response(response)
                 console.print()
-
             except KeyboardInterrupt:
-                now = _time.time()
-                if now - _last_ctrl_c < 2.0:
-                    # Double Ctrl+C within 2 seconds → exit
-                    console.print("\n[dim]Goodbye![/dim]")
-                    break
-                _last_ctrl_c = now
-                console.print("\n[dim](Press Ctrl+C again to exit)[/dim]")
+                # Ctrl+C during processing → cancel, back to prompt
+                console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
     except Exception as e:
