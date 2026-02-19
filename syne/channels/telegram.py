@@ -144,6 +144,7 @@ class TelegramChannel:
         if self.agent.conversations:
             self._bot = self.app.bot
             self.agent.conversations.set_delivery_callback(self._deliver_subagent_result)
+            self.agent.conversations.set_status_callback(self._send_status_message)
 
         logger.info("Telegram bot started.")
 
@@ -1384,6 +1385,21 @@ Or just send me a message!"""
                     )
             except Exception as e:
                 logger.error(f"Failed to deliver sub-agent result to {chat_id}: {e}")
+
+    async def _send_status_message(self, session_id: int, message: str):
+        """Send a status notification to the chat associated with a session."""
+        # Find chat_id from active conversations by session_id
+        for key, conv in self.agent.conversations._active.items():
+            if conv.session_id == session_id:
+                parts = key.split(":", 1)
+                if len(parts) == 2 and parts[0] == "telegram":
+                    chat_id = int(parts[1])
+                    try:
+                        await self._bot.send_message(chat_id=chat_id, text=message)
+                    except Exception as e:
+                        logger.error(f"Failed to send status to {chat_id}: {e}")
+                return
+        logger.debug(f"No active chat found for session {session_id}")
 
     async def _handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors."""

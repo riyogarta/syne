@@ -48,6 +48,7 @@ class Conversation:
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
+        self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
 
     async def load_history(self, limit: int = 50) -> list[ChatMessage]:
         """Load recent message history from database."""
@@ -224,6 +225,15 @@ class Conversation:
             threshold=0.75,
         ):
             logger.info(f"Context at 75%+, triggering compaction for session {self.session_id}")
+            # Notify user that compaction is starting
+            if self._mgr and self._mgr._status_callback:
+                try:
+                    await self._mgr._status_callback(
+                        self.session_id,
+                        "🧹 Compacting memory... please wait a moment."
+                    )
+                except Exception as e:
+                    logger.debug(f"Status callback failed: {e}")
             result = await auto_compact_check(
                 session_id=self.session_id,
                 provider=self.provider,
@@ -234,6 +244,15 @@ class Conversation:
                 )
                 # Reload history after compaction
                 await self.load_history()
+                # Notify user compaction is done
+                if self._mgr and self._mgr._status_callback:
+                    try:
+                        await self._mgr._status_callback(
+                            self.session_id,
+                            f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Status callback failed: {e}")
 
         self._processing = False
         return final_response
@@ -380,6 +399,7 @@ class ConversationManager:
         self.subagents = subagents
         self._active: dict[str, Conversation] = {}
         self._delivery_callback = None  # Set by channel for delivering sub-agent results
+        self._status_callback = None  # Set by channel for status notifications (e.g., compaction)
 
         # Wire up sub-agent completion callback
         if self.subagents:
@@ -407,6 +427,13 @@ class ConversationManager:
         callback(message: str) -> None
         """
         self._delivery_callback = callback
+
+    def set_status_callback(self, callback):
+        """Set callback for status notifications (compaction, etc.).
+        
+        callback(session_id: str, message: str) -> None
+        """
+        self._status_callback = callback
 
     def _session_key(self, platform: str, chat_id: str) -> str:
         return f"{platform}:{chat_id}"
@@ -474,6 +501,8 @@ class ConversationManager:
             abilities=self.abilities,
             is_group=is_group,
         )
+
+        conv._mgr = self  # Back-reference for status callbacks
 
         # Load thinking budget from DB config
         from .db.models import get_config as _get_config
