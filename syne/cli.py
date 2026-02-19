@@ -103,30 +103,26 @@ def init():
     elif choice == 4:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key", hide_input=True)
-        # API key goes to DB, not .env (per credential policy)
-        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        console.print("  [green]✓ API key received[/green]")
         provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 5:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key", hide_input=True)
-        # API key goes to DB, not .env (per credential policy)
-        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        console.print("  [green]✓ API key received[/green]")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 6:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key", hide_input=True)
-        # API key goes to DB, not .env (per credential policy)
-        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        console.print("  [green]✓ API key received[/green]")
         provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 7:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.groq.com[/dim]")
         api_key = click.prompt("Groq API key", hide_input=True)
-        # API key goes to DB, not .env (per credential policy)
-        console.print("[dim]API key will be saved to database after schema init.[/dim]")
+        console.print("  [green]✓ API key received[/green]")
         provider_config = {"driver": "openai_compat", "model": "llama-3.3-70b-versatile", "auth": "api_key", "_api_key": api_key}
 
     # 2. Embedding provider (for memory)
@@ -143,6 +139,8 @@ def init():
         console.print("\n[bold green]✓ Together AI selected for embeddings[/bold green]")
         console.print("  [dim]Sign up at together.ai — $5 free credit included.[/dim]")
         embed_api_key = click.prompt("Together AI API key", hide_input=True)
+        if embed_api_key:
+            console.print("  [green]✓ API key received[/green]")
         embedding_config = {
             "driver": "together",
             "model": "BAAI/bge-base-en-v1.5",
@@ -153,6 +151,8 @@ def init():
     elif embed_choice == 2:
         console.print("\n[bold green]✓ OpenAI selected for embeddings[/bold green]")
         embed_api_key = click.prompt("OpenAI API key", hide_input=True)
+        if embed_api_key:
+            console.print("  [green]✓ API key received[/green]")
         embedding_config = {
             "driver": "openai",
             "model": "text-embedding-3-small",
