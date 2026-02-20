@@ -1488,6 +1488,58 @@ def _get_provider(settings):
         sys.exit(1)
 
 
+@cli.command()
+def update():
+    """Pull latest code and reinstall."""
+    import subprocess
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_dir = os.path.join(syne_dir, ".venv")
+    venv_pip = os.path.join(venv_dir, "bin", "pip")
+    venv_syne = os.path.join(venv_dir, "bin", "syne")
+
+    console.print("📥 Pulling latest code...")
+    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]Git pull failed: {result.stderr}[/red]")
+        return
+    console.print(f"[dim]{result.stdout.strip()}[/dim]")
+
+    console.print("🔧 Setting up virtual environment...")
+    subprocess.run([sys.executable, "-m", "venv", venv_dir], cwd=syne_dir)
+
+    console.print("📦 Installing...")
+    result = subprocess.run([venv_pip, "install", "-e", ".", "-q"], cwd=syne_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]Install failed: {result.stderr}[/red]")
+        return
+
+    # Ensure syne is callable from anywhere
+    local_bin = os.path.expanduser("~/.local/bin")
+    os.makedirs(local_bin, exist_ok=True)
+    target = os.path.join(local_bin, "syne")
+    if os.path.exists(venv_syne):
+        if os.path.exists(target) or os.path.islink(target):
+            os.remove(target)
+        os.symlink(venv_syne, target)
+
+    # Ensure ~/.local/bin is in PATH
+    path_line = 'export PATH="$HOME/.local/bin:$PATH"'
+    shell_rc = os.path.expanduser("~/.bashrc")
+    if os.path.exists(os.path.expanduser("~/.zshrc")):
+        shell_rc = os.path.expanduser("~/.zshrc")
+    try:
+        with open(shell_rc, "r") as f:
+            content = f.read()
+        if path_line not in content and ".local/bin" not in content:
+            with open(shell_rc, "a") as f:
+                f.write(f"\n# Syne CLI\n{path_line}\n")
+    except Exception:
+        pass
+
+    console.print("[green]✅ Syne updated! Run: syne cli[/green]")
+
+
 def main():
     """CLI entry point."""
     cli()
