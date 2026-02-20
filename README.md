@@ -188,7 +188,7 @@ During `syne init`, you choose one of three embedding providers:
 
 ## Ability System
 
-### Core Tools (18 — Always Available)
+### Core Tools (19 — Always Available)
 
 | Tool | Description |
 |------|-------------|
@@ -208,6 +208,7 @@ During `syne init`, you choose one of three embedding providers:
 | `file_read` | Read files with offset/limit (max 100KB) |
 | `file_write` | Write files (restricted to safe directories) |
 | `manage_schedule` | Create/list/delete cron jobs and scheduled tasks |
+| `send_file` | Send files to chat (images as photos, others as documents) |
 | `send_reaction` | Send emoji reactions to messages |
 | `send_voice` | Send voice messages (STT via Groq Whisper) |
 
@@ -436,8 +437,8 @@ syne memory add "info"     # Manually add memory
 |  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
 |  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
 |  |                                                      |  |
-|  |  Core Tools (18):                                    |  |
-|  |  exec · memory · web · config · source · sub-agents  |  |
+|  |  Core Tools (19):                                    |  |
+|  |  exec · memory · web · config · files · cron · voice  |  |
 |  |  files · cron · reactions · voice                     |  |
 |  +------------------------------------------------------+  |
 |                                                            |
@@ -527,7 +528,7 @@ syne/
 │   ├── channels/
 │   │   ├── telegram.py      # Telegram bot adapter
 │   │   └── cli_channel.py   # Interactive CLI (REPL)
-│   ├── tools/               # 18 core tools
+│   ├── tools/               # 19 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   ├── scheduler.py         # Cron/scheduled task runner
 │   └── db/

@@ -368,6 +368,16 @@ class SyneAgent:
             requires_access_level=FILE_WRITE_TOOL["requires_access_level"],
         )
 
+        # ── Send File (Core) ──
+        from .tools.send_file import SEND_FILE_TOOL
+        self.tools.register(
+            name=SEND_FILE_TOOL["name"],
+            description=SEND_FILE_TOOL["description"],
+            parameters=SEND_FILE_TOOL["parameters"],
+            handler=SEND_FILE_TOOL["handler"],
+            requires_access_level=SEND_FILE_TOOL["requires_access_level"],
+        )
+
         # ── Scheduler (Core) ──
         from .tools.scheduler import MANAGE_SCHEDULE_TOOL
         self.tools.register(

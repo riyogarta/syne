@@ -502,22 +502,105 @@
             background: var(--bg-secondary);
         }
 
-        .arch-diagram {
+        .arch-visual {
+            max-width: 800px;
+            margin: 40px auto 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .arch-layer {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px 28px;
+            position: relative;
+        }
+
+        .arch-layer.core {
+            border-color: var(--accent);
+            border-width: 2px;
+        }
+
+        .arch-layer-label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: var(--accent-secondary);
+            margin-bottom: 14px;
+        }
+
+        .arch-layer.core .arch-layer-label {
+            color: var(--accent);
+        }
+
+        .arch-modules {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+
+        .arch-module {
             background: var(--bg-primary);
             border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 40px;
-            max-width: 800px;
-            margin: 32px auto 0;
-            font-family: 'SF Mono', 'Fira Code', monospace;
+            border-radius: 8px;
+            padding: 8px 14px;
             font-size: 0.8rem;
-            line-height: 1.5;
-            overflow-x: auto;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .arch-module sub {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .arch-tools {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+
+        .arch-tools span {
             color: var(--text-secondary);
         }
 
-        .arch-diagram .highlight {
+        .arch-layer.abilities .arch-note {
+            font-size: 0.8rem;
             color: var(--accent-secondary);
+            font-style: italic;
+            margin-top: 8px;
+        }
+
+        .arch-layer.db {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.05), rgba(6, 182, 212, 0.05));
+        }
+
+        .arch-layer.db .arch-tables {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            line-height: 1.8;
+        }
+
+        .arch-connector {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 1.2rem;
+            line-height: 1;
+        }
+
+        @media (max-width: 640px) {
+            .arch-layer {
+                padding: 18px 16px;
+            }
+            .arch-module {
+                padding: 6px 10px;
+                font-size: 0.75rem;
+            }
         }
 
         /* Footer */
@@ -845,36 +928,34 @@
                     <h2>Clean Architecture</h2>
                     <p>Protected core, pluggable abilities, single-database truth.</p>
                 </div>
-                <div class="arch-diagram">
-<pre>
-┌──────────────────────────────────────────────────────────────┐
-│                        <span class="highlight">SYNE AGENT</span>                           │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │                   CORE (Protected)                     │  │
-│  │                                                        │  │
-│  │   [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]    │  │
-│  │   (LLM)   (pgvec)    (context)   (TG + CLI)   agent    │  │
-│  │                                                        │  │
-│  │   Core Tools (18):                                     │  │
-│  │   exec · memory · web · config · files · cron · voice  │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │                ABILITIES (Pluggable)                   │  │
-│  │                                                        │  │
-│  │   [image_gen]  [image_analysis]  [maps]  [custom...]   │  │
-│  │                                                        │  │
-│  │   <span class="highlight">Self-Created: Syne adds new abilities at runtime</span>      │  │
-│  └────────────────────────────────────────────────────────┘  │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐  │
-│  │              PostgreSQL + pgvector                     │  │
-│  │   13 tables: identity · soul · rules · users ·         │  │
-│  │   memory · sessions · messages · config · abilities    │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-</pre>
+                <div class="arch-visual">
+                    <div class="arch-layer core">
+                        <div class="arch-layer-label">Core (Protected)</div>
+                        <div class="arch-modules">
+                            <div class="arch-module">Chat <sub>LLM</sub></div>
+                            <div class="arch-module">Memory <sub>pgvector</sub></div>
+                            <div class="arch-module">Compaction <sub>context</sub></div>
+                            <div class="arch-module">Channels <sub>TG + CLI</sub></div>
+                            <div class="arch-module">Sub-agents</div>
+                        </div>
+                        <div class="arch-tools">19 Core Tools: <span>exec · memory · web · config · files · cron · voice · send_file · source</span></div>
+                    </div>
+                    <div class="arch-connector">↕</div>
+                    <div class="arch-layer abilities">
+                        <div class="arch-layer-label">Abilities (Pluggable)</div>
+                        <div class="arch-modules">
+                            <div class="arch-module">image_gen</div>
+                            <div class="arch-module">image_analysis</div>
+                            <div class="arch-module">maps</div>
+                            <div class="arch-module" style="border-style: dashed; color: var(--text-muted);">custom…</div>
+                        </div>
+                        <div class="arch-note">Self-created: Syne adds new abilities at runtime</div>
+                    </div>
+                    <div class="arch-connector">↕</div>
+                    <div class="arch-layer db">
+                        <div class="arch-layer-label">PostgreSQL + pgvector</div>
+                        <div class="arch-tables">13 tables: identity · soul · rules · users · memory · sessions · messages · config · abilities · groups · subagent_runs · scheduled_tasks · capabilities</div>
+                    </div>
                 </div>
             </div>
         </section>
