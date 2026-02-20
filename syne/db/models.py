@@ -110,7 +110,8 @@ async def get_or_create_user(
     """
     user = await get_user(platform, platform_id)
     if user:
-        # Auto-promote: if no owner exists yet, promote this existing user
+        # Auto-promote: if no owner exists yet, OR if same person is already
+        # owner on another platform, promote this user too
         if user.get("access_level") != "owner":
             async with get_connection() as conn:
                 owner_count = await conn.fetchval(
@@ -127,9 +128,27 @@ async def get_or_create_user(
                     logging.getLogger("syne.db").info(
                         f"Auto-promoted user {user['name']} ({platform_id}) to owner (no owner existed)"
                     )
+                else:
+                    # Check if same person (by name) is owner on another platform
+                    same_person_owner = await conn.fetchval(
+                        "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND name = $1 AND id != $2",
+                        user.get("name"), user["id"]
+                    )
+                    if same_person_owner > 0:
+                        await conn.execute(
+                            "UPDATE users SET access_level = 'owner' WHERE id = $1",
+                            user["id"]
+                        )
+                        user = dict(user)
+                        user["access_level"] = "owner"
+                        import logging
+                        logging.getLogger("syne.db").info(
+                            f"Auto-promoted user {user['name']} ({platform_id}) to owner (same person owns on another platform)"
+                        )
         return user
     
-    # New user — if no owner exists, this one becomes owner
+    # New user — if no owner exists, this one becomes owner.
+    # Also promote if same person (by name) is already owner on another platform.
     access_level = "public"
     async with get_connection() as conn:
         owner_count = await conn.fetchval(
@@ -137,6 +156,13 @@ async def get_or_create_user(
         )
         if owner_count == 0:
             access_level = "owner"
+        elif name:
+            same_person_owner = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND name = $1",
+                name
+            )
+            if same_person_owner > 0:
+                access_level = "owner"
     
     return await create_user(name, platform, platform_id, display_name, access_level)
 
