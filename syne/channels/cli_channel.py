@@ -20,7 +20,7 @@ logger = logging.getLogger("syne.cli_channel")
 console = Console()
 
 
-async def run_cli(debug: bool = False, yolo: bool = False):
+async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False):
     """Run Syne in interactive CLI mode."""
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
@@ -135,8 +135,25 @@ async def run_cli(debug: bool = False, yolo: bool = False):
         ))
         console.print()
 
-        # REPL loop
-        chat_id = f"cli:{username}"
+        # REPL loop — session is per-directory
+        cwd = agent._cli_cwd or os.getcwd()
+        chat_id = f"cli:{username}:{cwd}"
+
+        # Clear previous session if not resuming
+        if not resume:
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                # Close old sessions for this chat_id so a fresh one is created
+                await conn.execute("""
+                    UPDATE sessions SET status = 'closed'
+                    WHERE platform = 'cli' AND platform_chat_id = $1 AND status = 'active'
+                """, chat_id)
+            # Also clear in-memory cache
+            key = f"cli:{chat_id}"
+            if key in agent.conversations._active:
+                del agent.conversations._active[key]
+        else:
+            console.print("[dim]Resuming previous session...[/dim]")
         import time as _time
         _last_ctrl_c = 0.0
         while True:
