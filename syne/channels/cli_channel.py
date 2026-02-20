@@ -90,9 +90,9 @@ async def run_cli(debug: bool = False):
         import time as _time
         _last_ctrl_c = 0.0
         while True:
-            # Phase 1: Get input (idle — runs in thread to not block event loop)
+            # Phase 1: Get input (idle)
             try:
-                user_input = await _get_input()
+                user_input = _get_input()
             except KeyboardInterrupt:
                 # Ctrl+C at prompt → double-tap to exit
                 now = _time.time()
@@ -153,8 +153,8 @@ async def run_cli(debug: bool = False):
         await agent.stop()
 
 
-def _get_input_sync() -> str | None:
-    """Get user input (blocking), supporting multiline with \\\\ continuation."""
+def _get_input() -> str | None:
+    """Get user input, supporting multiline with \\ continuation."""
     try:
         lines = []
         
@@ -174,12 +174,6 @@ def _get_input_sync() -> str | None:
         return "\n".join(lines)
     except EOFError:
         return None
-
-
-async def _get_input() -> str | None:
-    """Run blocking input() in a thread so asyncio event loop stays free."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_input_sync)
 
 
 def _display_response(response: str):
