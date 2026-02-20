@@ -513,22 +513,33 @@ def init():
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
     docker_cmd = f"{docker_prefix}docker compose"
 
-    # Check if DB container already exists with potentially different credentials
+    # Check if DB container/volume already exists — credentials are baked into the volume
+    # at first creation. If we have new credentials, we MUST reset the volume.
     import subprocess
-    existing_container = subprocess.run(
-        f"{docker_cmd} ps -q db".split() if not docker_prefix else f"sudo docker compose ps -q db".split(),
-        capture_output=True, text=True, cwd=os.getcwd(),
+    volume_check = subprocess.run(
+        f"{docker_cmd} volume ls -q".split() if not docker_prefix
+        else "sudo docker volume ls -q".split(),
+        capture_output=True, text=True,
     )
-    if existing_container.stdout.strip():
-        # Container exists — check if we can connect with current credentials
-        check = subprocess.run(
-            f"{docker_cmd} exec -T db pg_isready -U {db_user}".split() if not docker_prefix
-            else f"sudo docker compose exec -T db pg_isready -U {db_user}".split(),
+    volume_exists = "syne_syne_pgdata" in (volume_check.stdout or "")
+
+    if volume_exists:
+        # Volume exists — try actual psql connection to verify credentials match
+        # First ensure container is running for the test
+        os.system(f"{docker_cmd} up -d db > /dev/null 2>&1")
+        import time as _time
+        _time.sleep(5)  # Wait for DB to be ready
+        
+        auth_check = subprocess.run(
+            f"{docker_cmd} exec -T db psql -U {db_user} -d {db_name} -c SELECT 1".split()
+            if not docker_prefix
+            else f"sudo docker compose exec -T db psql -U {db_user} -d {db_name} -c SELECT 1".split(),
             capture_output=True, text=True, cwd=os.getcwd(),
         )
-        if check.returncode != 0:
-            console.print("[yellow]⚠️  Existing DB container has different credentials.[/yellow]")
-            console.print("[dim]  Resetting database volume to apply new credentials...[/dim]")
+        if auth_check.returncode != 0:
+            console.print("[yellow]⚠️  Existing DB volume has different credentials.[/yellow]")
+            console.print("[dim]  Resetting database to apply new credentials...[/dim]")
+            console.print("[dim]  (All previous data will be lost)[/dim]")
             os.system(f"{docker_cmd} down -v")
 
     console.print("\n[bold]Starting database...[/bold]")
