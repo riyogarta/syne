@@ -846,11 +846,18 @@ class SyneAgent:
 
         logger.info(f"Executing command: {command[:100]}")
 
+        # ── CLI mode: show command + output live in terminal ──
+        is_cli = bool(self._cli_cwd)
+        if is_cli:
+            import sys
+            sys.stdout.write(f"\033[2m$ {command}\033[0m\n")
+            sys.stdout.flush()
+
         # ── CLI PTY mode: interactive commands get a real terminal ──
         # When running from `syne cli`, commands that need user input
         # (sudo, ssh, etc.) run with PTY pass-through so the user can
         # type passwords/confirmations directly in their terminal.
-        if self._cli_cwd and self._command_needs_interactive(command_stripped):
+        if is_cli and self._command_needs_interactive(command_stripped):
             return await self._exec_pty(command, cwd, timeout)
 
         try:
@@ -867,10 +874,18 @@ class SyneAgent:
                 out = stdout.decode("utf-8", errors="replace").replace("\x00", "").strip()
                 if out:
                     parts.append(f"stdout:\n{out[:output_max]}")
+                    if is_cli:
+                        # Show output live in terminal (dimmed)
+                        display = out[:2000]  # limit display for readability
+                        sys.stdout.write(f"\033[2m{display}\033[0m\n")
+                        sys.stdout.flush()
             if stderr:
                 err = stderr.decode("utf-8", errors="replace").replace("\x00", "").strip()
                 if err:
                     parts.append(f"stderr:\n{err[:output_max // 2]}")
+                    if is_cli:
+                        sys.stdout.write(f"\033[2;33m{err[:1000]}\033[0m\n")
+                        sys.stdout.flush()
             parts.append(f"exit_code: {proc.returncode}")
 
             return "\n".join(parts) if parts else f"exit_code: {proc.returncode}"
