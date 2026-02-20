@@ -1568,32 +1568,21 @@ def update():
     syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     from . import __version__ as current_version
 
-    # Fetch latest tags from remote
+    # Fetch remote
     console.print("🔍 Checking for updates...")
-    subprocess.run(["git", "fetch", "--tags"], cwd=syne_dir, capture_output=True, text=True)
+    subprocess.run(["git", "fetch"], cwd=syne_dir, capture_output=True, text=True)
 
-    # Get latest tag
+    # Count commits behind origin/main
     result = subprocess.run(
-        ["git", "describe", "--tags", "--abbrev=0", "origin/main"],
+        ["git", "rev-list", "HEAD..origin/main", "--count"],
         cwd=syne_dir, capture_output=True, text=True,
     )
-    if result.returncode != 0:
-        # No tags — fall back to commit check
-        result = subprocess.run(
-            ["git", "rev-list", "HEAD..origin/main", "--count"],
-            cwd=syne_dir, capture_output=True, text=True,
-        )
-        behind = int(result.stdout.strip() or "0")
-        if behind == 0:
-            console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
-            return
-        console.print(f"[yellow]📦 {behind} new commits available[/yellow]")
-    else:
-        latest_tag = result.stdout.strip().lstrip("v")
-        if latest_tag == current_version:
-            console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
-            return
-        console.print(f"[yellow]📦 New version available: v{latest_tag} (current: v{current_version})[/yellow]")
+    behind = int(result.stdout.strip() or "0")
+    if behind == 0:
+        console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
+        return
+
+    console.print(f"[yellow]📦 {behind} new commit{'s' if behind > 1 else ''} available[/yellow]")
 
     console.print("📥 Pulling latest code...")
     result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
