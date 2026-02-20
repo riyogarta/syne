@@ -65,8 +65,8 @@ def _ensure_ollama():
 
     if not server_running:
         console.print("[dim]Starting Ollama server...[/dim]")
-        # Try systemd first, fallback to direct serve
-        ret = os.system("systemctl start ollama 2>/dev/null || (ollama serve &>/dev/null &)")
+        # Try systemd (with sudo fallback), then direct serve
+        ret = os.system("systemctl start ollama 2>/dev/null || sudo systemctl start ollama 2>/dev/null || (ollama serve &>/dev/null &)")
         time.sleep(3)
 
     # 3. Check if model already exists
@@ -368,7 +368,6 @@ def init():
         console.print(f"     [dim]Minimum: {min_cpu} CPU, {min_ram:.0f}GB RAM, {min_disk:.0f}GB disk[/dim]")
     console.print()
 
-    max_choice = 3 if ollama_available else 2
     embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 3), default=1)
     embedding_config = None
 
@@ -393,7 +392,7 @@ def init():
         console.print("\n[bold green]✓ OpenAI selected for embeddings[/bold green]")
         embed_api_key = click.prompt("OpenAI API key")
         embedding_config = {
-            "driver": "openai",
+            "driver": "openai_compat",
             "model": "text-embedding-3-small",
             "dimensions": 1536,
             "_api_key": embed_api_key,
