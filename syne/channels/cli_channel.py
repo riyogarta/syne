@@ -42,8 +42,6 @@ async def run_cli(debug: bool = False):
         pass
     readline.set_history_length(1000)
 
-    # Tab-completion disabled — causes input freeze on some terminals
-
     try:
         await agent.start()
 
@@ -124,38 +122,26 @@ async def run_cli(debug: bool = False):
 
             # Phase 2: Process (Ctrl+C = cancel this request)
             console.print()
-            cancelled = False
             try:
                 msg = user_input
-                try:
-                    with console.status("[bold blue]Thinking...", spinner="dots"):
-                        response = await agent.conversations.handle_message(
-                            platform="cli",
-                            chat_id=chat_id,
-                            user=user,
-                            message=msg,
-                            message_metadata={"cwd": agent._cli_cwd},
-                        )
-                except KeyboardInterrupt:
-                    cancelled = True
-                except asyncio.CancelledError:
-                    cancelled = True
-
-                if cancelled:
-                    console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
-                    continue
+                with console.status("[bold blue]Thinking...", spinner="dots"):
+                    response = await agent.conversations.handle_message(
+                        platform="cli",
+                        chat_id=chat_id,
+                        user=user,
+                        message=msg,
+                        message_metadata={"cwd": agent._cli_cwd},
+                    )
 
                 # Display response
                 if response:
                     _display_response(response)
                 console.print()
             except KeyboardInterrupt:
-                # Ctrl+C during response display → still don't exit
+                # Ctrl+C during processing → cancel, back to prompt
                 console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
-    except KeyboardInterrupt:
-        console.print("\n[dim]Goodbye![/dim]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         if debug:
