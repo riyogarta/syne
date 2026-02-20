@@ -142,6 +142,8 @@ async def run_cli(debug: bool = False):
                 console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
+    except KeyboardInterrupt:
+        console.print("\n[dim]Goodbye![/dim]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         if debug:
@@ -151,6 +153,7 @@ async def run_cli(debug: bool = False):
     finally:
         readline.write_history_file(history_file)
         await agent.stop()
+        os._exit(0)  # Force clean exit — avoids threading cleanup error from executor
 
 
 def _get_input_sync() -> str | None:
