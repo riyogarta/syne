@@ -42,6 +42,25 @@ async def run_cli(debug: bool = False):
         pass
     readline.set_history_length(1000)
 
+    # Tab-completion for / commands
+    _cli_commands = [
+        "/help", "/status", "/model", "/clear", "/compact",
+        "/think", "/exit", "/quit", "/q",
+    ]
+
+    def _completer(text, state):
+        if text.startswith("/"):
+            matches = [c for c in _cli_commands if c.startswith(text)]
+        else:
+            matches = []
+        if state < len(matches):
+            return matches[state]
+        return None
+
+    readline.set_completer(_completer)
+    readline.set_completer_delims(" \t\n")
+    readline.parse_and_bind("tab: complete")
+
     try:
         await agent.start()
 
