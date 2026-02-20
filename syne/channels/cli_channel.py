@@ -87,14 +87,21 @@ async def run_cli(debug: bool = False):
 
         # REPL loop
         chat_id = f"cli:{username}"
+        import time as _time
+        _last_ctrl_c = 0.0
         while True:
             # Phase 1: Get input (idle)
             try:
                 user_input = await _get_input()
             except (KeyboardInterrupt, asyncio.CancelledError):
-                # Ctrl+C at prompt → exit cleanly
-                console.print("\n[dim]Goodbye![/dim]")
-                break
+                # Ctrl+C at prompt → double-tap to exit
+                now = _time.time()
+                if now - _last_ctrl_c < 2.0:
+                    console.print("\n[dim]Goodbye![/dim]")
+                    break
+                _last_ctrl_c = now
+                console.print("\n[dim](Press Ctrl+C again to exit)[/dim]")
+                continue
 
             if user_input is None:
                 # EOF (Ctrl+D)
@@ -135,24 +142,22 @@ async def run_cli(debug: bool = False):
                 console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
-    except KeyboardInterrupt:
-        console.print("\n[dim]Goodbye![/dim]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         if debug:
             import traceback
             traceback.print_exc()
-        raise
-    finally:
-        readline.write_history_file(history_file)
-        await agent.stop()
-        # Restore terminal state — readline/executor can leave it corrupted
-        try:
-            os.system("stty sane 2>/dev/null")
-        except Exception:
-            pass
-        # Force exit to avoid threading cleanup error from executor thread
-        os._exit(0)
+
+    # Cleanup
+    readline.write_history_file(history_file)
+    await agent.stop()
+    # Restore terminal state — readline/executor can leave it corrupted
+    try:
+        os.system("stty sane 2>/dev/null")
+    except Exception:
+        pass
+    # Force exit to avoid threading cleanup error from executor thread
+    os._exit(0)
 
 
 def _get_input_sync() -> str | None:
