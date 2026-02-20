@@ -194,6 +194,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
                 status = console.status("[bold blue]Thinking...", spinner="dots")
                 status.start()
                 agent.conversations._active_status = status  # For approval callback to pause
+                _cli_status_callback._active_status = status  # For compaction callback to pause
 
                 # Wire tool callback to update spinner
                 _TOOL_LABELS = {
@@ -231,6 +232,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
                 finally:
                     status.stop()
                     agent.conversations._active_status = None
+                    _cli_status_callback._active_status = None
                     agent.conversations.set_tool_callback(None)
 
                 # Display response
@@ -309,7 +311,13 @@ def _display_response(response: str):
 
 async def _cli_status_callback(session_id: int, message: str):
     """Display status messages (compaction, etc.) in terminal."""
+    # Pause spinner if active so message is visible
+    _status = getattr(_cli_status_callback, '_active_status', None)
+    if _status:
+        _status.stop()
     console.print(f"\n[dim italic]{message}[/dim italic]")
+    if _status:
+        _status.start()
 
 
 async def _handle_cli_command(
