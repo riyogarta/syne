@@ -13,11 +13,13 @@ from rich.syntax import Syntax
 console = Console()
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version="0.3.0", prog_name="syne")
-def cli():
+@click.pass_context
+def cli(ctx):
     """Syne — AI Agent Framework with Unlimited Memory 🧠"""
-    pass
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
 
 
 # ── Init ─────────────────────────────────────────────────────
@@ -1605,7 +1607,7 @@ def update():
         console.print(f"[green]✅ Syne updated to v{new_ver}[/green]")
 
 
-@cli.command(name="update-dev")
+@cli.command(name="update-dev", hidden=True)
 def update_dev():
     """Pull latest code and reinstall (always, ignoring version)."""
     import subprocess
