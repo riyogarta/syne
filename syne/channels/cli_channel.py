@@ -156,6 +156,8 @@ async def run_cli(debug: bool = False):
             os.system("stty sane 2>/dev/null")
         except Exception:
             pass
+        # Force exit to avoid threading cleanup error from executor thread
+        os._exit(0)
 
 
 def _get_input_sync() -> str | None:
