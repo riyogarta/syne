@@ -18,11 +18,8 @@ pip install -e . -q
 # Ensure syne is callable from anywhere
 SYNE_BIN="$SYNE_DIR/.venv/bin/syne"
 if [ -f "$SYNE_BIN" ]; then
-    if [ -w /usr/local/bin ]; then
-        ln -sf "$SYNE_BIN" /usr/local/bin/syne
-    else
-        sudo ln -sf "$SYNE_BIN" /usr/local/bin/syne 2>/dev/null || true
-    fi
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$SYNE_BIN" "$HOME/.local/bin/syne"
 fi
 
 echo "✅ Syne updated! Run: syne cli"
