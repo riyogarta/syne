@@ -321,9 +321,6 @@ def init():
     # 2. Embedding provider (for memory)
     console.print("\n[bold]Step 2: Choose embedding provider (for memory)[/bold]")
     console.print()
-    console.print("  1. Together AI [green](recommended — ~$0.008/1M tokens)[/green]")
-    console.print("  2. OpenAI [yellow](~$0.02/1M tokens)[/yellow]")
-
     # Detect system resources for Ollama eligibility
     ollama_available = True
     ollama_reason = ""
@@ -358,17 +355,23 @@ def init():
         ollama_available = False
         ollama_reason = ", ".join(reasons)
 
+    # Show options — Ollama recommended if system supports it
     if ollama_available:
-        console.print("  3. Ollama [cyan](FREE — local, qwen3-embedding:0.6b)[/cyan]")
-        console.print("     [dim]⚠️  Requires: 2+ CPU cores, 2GB+ RAM, 2GB+ free disk[/dim]")
+        console.print("  1. Together AI [dim](~$0.008/1M tokens)[/dim]")
+        console.print("  2. OpenAI [dim](~$0.02/1M tokens)[/dim]")
+        console.print("  3. Ollama [green](recommended — FREE, local, qwen3-embedding:0.6b)[/green]")
         console.print("     [dim]Trade-off: ~1.3GB RAM when active, CPU burst during embedding[/dim]")
+        default_embed = 3
     else:
+        console.print("  1. Together AI [green](recommended — ~$0.008/1M tokens)[/green]")
+        console.print("  2. OpenAI [yellow](~$0.02/1M tokens)[/yellow]")
         console.print(f"  3. Ollama (FREE — local)  [red dim]\\[unavailable][/red dim]")
         console.print(f"     [dim]⚠️  Your system: {ollama_reason}[/dim]")
         console.print(f"     [dim]Minimum: {min_cpu} CPU, {min_ram:.0f}GB RAM, {min_disk:.0f}GB disk[/dim]")
+        default_embed = 1
     console.print()
 
-    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 3), default=1)
+    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 3), default=default_embed)
     embedding_config = None
 
     # Block unavailable Ollama selection
