@@ -458,7 +458,8 @@ def init():
     console.print("  [dim]Docker is required — PostgreSQL is bundled, not optional.[/dim]")
 
     # Reuse existing credentials if .env exists, otherwise generate new ones
-    env_path = os.path.join(os.getcwd(), ".env")
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
+    env_path = os.path.join(syne_dir, ".env")
     existing_env = {}
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -501,9 +502,9 @@ def init():
     env_lines.append(f"SYNE_DATABASE_URL={db_url}")
     console.print(f"  [green]✓ Database credentials generated (unique to this install)[/green]")
 
-    # 4. Write .env
+    # 4. Write .env (always in project root, where docker-compose.yml lives)
     env_content = "\n".join(env_lines) + "\n"
-    env_path = os.path.join(os.getcwd(), ".env")
+    env_path = os.path.join(syne_dir, ".env")
 
     with open(env_path, "w") as f:
         f.write(env_content)
@@ -513,37 +514,25 @@ def init():
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
     docker_cmd = f"{docker_prefix}docker compose"
 
-    # Check if DB container/volume already exists — credentials are baked into the volume
-    # at first creation. If we have new credentials, we MUST reset the volume.
+    # PostgreSQL bakes credentials into the volume at FIRST creation.
+    # Subsequent starts with different POSTGRES_USER/PASSWORD are IGNORED.
+    # So we must always clean up stale volumes before starting.
     import subprocess
+    
+    # Check for existing volume (docker volume, not docker compose)
+    vol_cmd = f"{docker_prefix}docker volume ls -q"
     volume_check = subprocess.run(
-        f"{docker_cmd} volume ls -q".split() if not docker_prefix
-        else "sudo docker volume ls -q".split(),
-        capture_output=True, text=True,
+        vol_cmd, shell=True, capture_output=True, text=True,
     )
     volume_exists = "syne_syne_pgdata" in (volume_check.stdout or "")
 
     if volume_exists:
-        # Volume exists — try actual psql connection to verify credentials match
-        # First ensure container is running for the test
-        os.system(f"{docker_cmd} up -d db > /dev/null 2>&1")
-        import time as _time
-        _time.sleep(5)  # Wait for DB to be ready
-        
-        auth_check = subprocess.run(
-            f"{docker_cmd} exec -T db psql -U {db_user} -d {db_name} -c SELECT 1".split()
-            if not docker_prefix
-            else f"sudo docker compose exec -T db psql -U {db_user} -d {db_name} -c SELECT 1".split(),
-            capture_output=True, text=True, cwd=os.getcwd(),
-        )
-        if auth_check.returncode != 0:
-            console.print("[yellow]⚠️  Existing DB volume has different credentials.[/yellow]")
-            console.print("[dim]  Resetting database to apply new credentials...[/dim]")
-            console.print("[dim]  (All previous data will be lost)[/dim]")
-            os.system(f"{docker_cmd} down -v")
+        console.print("[yellow]⚠️  Found existing Syne DB volume — removing to apply fresh credentials...[/yellow]")
+        # Stop container + remove volume (credentials are baked in, can't change)
+        os.system(f"cd {syne_dir} && {docker_cmd} down -v 2>/dev/null")
 
     console.print("\n[bold]Starting database...[/bold]")
-    result = os.system(f"{docker_cmd} up -d db")
+    result = os.system(f"cd {syne_dir} && {docker_cmd} up -d db")
     if result != 0:
         console.print("[red]Failed to start database.[/red]")
         return
@@ -552,7 +541,7 @@ def init():
     console.print("Waiting for PostgreSQL to be ready...")
     import time
     for _ in range(20):
-        result = os.system(f"{docker_cmd} exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
+        result = os.system(f"cd {syne_dir} && {docker_cmd} exec -T db pg_isready -U {db_user} > /dev/null 2>&1")
         if result == 0:
             break
         time.sleep(2)
