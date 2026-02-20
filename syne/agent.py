@@ -128,12 +128,14 @@ class SyneAgent:
         # Update memory engine
         self.memory = MemoryEngine(new_provider)
 
-        # Update conversation manager's provider
+        # Update conversation manager's provider + memory
         if self.conversations:
             self.conversations.provider = new_provider
+            self.conversations.memory = self.memory
             # Update all active conversations
             for conv in self.conversations._active.values():
                 conv.provider = new_provider
+                conv.memory = self.memory
 
         # Update sub-agent manager
         if self.subagents:

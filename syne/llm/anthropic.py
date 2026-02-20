@@ -75,6 +75,19 @@ class AnthropicProvider(LLMProvider):
         if token:
             return token
         
+        # Check if token exists but is expired (different message)
+        try:
+            with open(self.credentials_path) as f:
+                creds = json.load(f)
+            oauth = creds.get("claudeAiOauth", {})
+            if oauth.get("accessToken"):
+                raise RuntimeError(
+                    "Claude OAuth token expired. Run `claude` in terminal to refresh.\n"
+                    "Cloudflare blocks programmatic refresh — manual login required."
+                )
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        
         raise RuntimeError(
             "No Claude/Anthropic token found. Options:\n"
             "  1. Set ANTHROPIC_ACCESS_TOKEN or ANTHROPIC_API_KEY env var\n"
@@ -97,8 +110,10 @@ class AnthropicProvider(LLMProvider):
             self._access_token = token
             self._last_read = time.time()
             
-            if time.time() >= self._expires_at:
+            if self._expires_at > 0 and time.time() >= self._expires_at:
                 logger.warning("Claude CLI token expired. Run 'claude' to refresh.")
+                self._access_token = None
+                return None
             
             return token
         except (FileNotFoundError, json.JSONDecodeError):
