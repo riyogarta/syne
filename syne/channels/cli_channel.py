@@ -253,8 +253,10 @@ async def _handle_cli_command(
         auto_capture = await get_config("memory.auto_capture", False)
         thinking = await get_config("session.thinking_budget", "default")
 
+        from .. import __version__ as syne_version
+
         console.print(Panel(
-            f"[bold]{identity.get('name', 'Syne')}[/bold]\n"
+            f"[bold]{identity.get('name', 'Syne')}[/bold] · Syne v{syne_version}\n"
             f"🤖 Model: {model_name} ({provider_name})\n"
             f"📚 Memories: {mem_count}\n"
             f"👥 Users: {user_count} | Groups: {group_count}\n"
