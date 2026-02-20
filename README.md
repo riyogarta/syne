@@ -452,7 +452,7 @@ syne memory add "info"     # Manually add memory
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  13 tables: identity · soul · rules · users ·       |  |
+|  |  13 tables — all state in one database              |  |
 |  |  memory · sessions · messages · config · abilities · |  |
 |  |  groups · subagent_runs · capabilities ·             |  |
 |  |  scheduled_tasks                                     |  |
