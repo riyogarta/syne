@@ -1488,22 +1488,13 @@ def _get_provider(settings):
         sys.exit(1)
 
 
-@cli.command()
-def update():
-    """Pull latest code and reinstall."""
+def _do_update(syne_dir: str):
+    """Shared update logic: venv + pip install + symlink + PATH."""
     import subprocess
 
-    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     venv_dir = os.path.join(syne_dir, ".venv")
     venv_pip = os.path.join(venv_dir, "bin", "pip")
     venv_syne = os.path.join(venv_dir, "bin", "syne")
-
-    console.print("📥 Pulling latest code...")
-    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
-    if result.returncode != 0:
-        console.print(f"[red]Git pull failed: {result.stderr}[/red]")
-        return
-    console.print(f"[dim]{result.stdout.strip()}[/dim]")
 
     console.print("🔧 Setting up virtual environment...")
     subprocess.run([sys.executable, "-m", "venv", venv_dir], cwd=syne_dir)
@@ -1512,7 +1503,7 @@ def update():
     result = subprocess.run([venv_pip, "install", "-e", ".", "-q"], cwd=syne_dir, capture_output=True, text=True)
     if result.returncode != 0:
         console.print(f"[red]Install failed: {result.stderr}[/red]")
-        return
+        return False
 
     # Ensure syne is callable from anywhere
     local_bin = os.path.expanduser("~/.local/bin")
@@ -1537,7 +1528,81 @@ def update():
     except Exception:
         pass
 
-    console.print("[green]✅ Syne updated! Run: syne cli[/green]")
+    return True
+
+
+@cli.command()
+def update():
+    """Update to latest release (skip if already up to date)."""
+    import subprocess
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    from . import __version__ as current_version
+
+    # Fetch latest tags from remote
+    console.print("🔍 Checking for updates...")
+    subprocess.run(["git", "fetch", "--tags"], cwd=syne_dir, capture_output=True, text=True)
+
+    # Get latest tag
+    result = subprocess.run(
+        ["git", "describe", "--tags", "--abbrev=0", "origin/main"],
+        cwd=syne_dir, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        # No tags — fall back to commit check
+        result = subprocess.run(
+            ["git", "rev-list", "HEAD..origin/main", "--count"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        behind = int(result.stdout.strip() or "0")
+        if behind == 0:
+            console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
+            return
+        console.print(f"[yellow]📦 {behind} new commits available[/yellow]")
+    else:
+        latest_tag = result.stdout.strip().lstrip("v")
+        if latest_tag == current_version:
+            console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
+            return
+        console.print(f"[yellow]📦 New version available: v{latest_tag} (current: v{current_version})[/yellow]")
+
+    console.print("📥 Pulling latest code...")
+    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]Git pull failed: {result.stderr}[/red]")
+        return
+    console.print(f"[dim]{result.stdout.strip()}[/dim]")
+
+    if _do_update(syne_dir):
+        # Re-read version after update
+        try:
+            r = subprocess.run(
+                [os.path.join(syne_dir, ".venv", "bin", "python"), "-c",
+                 "from syne import __version__; print(__version__)"],
+                cwd=syne_dir, capture_output=True, text=True,
+            )
+            new_ver = r.stdout.strip() if r.returncode == 0 else "?"
+        except Exception:
+            new_ver = "?"
+        console.print(f"[green]✅ Syne updated to v{new_ver}! Run: syne cli[/green]")
+
+
+@cli.command(name="update-dev")
+def update_dev():
+    """Pull latest code and reinstall (always, ignoring version)."""
+    import subprocess
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    console.print("📥 Pulling latest code...")
+    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        console.print(f"[red]Git pull failed: {result.stderr}[/red]")
+        return
+    console.print(f"[dim]{result.stdout.strip()}[/dim]")
+
+    if _do_update(syne_dir):
+        console.print("[green]✅ Syne updated (dev)! Run: syne cli[/green]")
 
 
 def main():
