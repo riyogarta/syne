@@ -308,6 +308,13 @@ class Conversation:
 
                 logger.info(f"Tool call (round {round_num + 1}): {name}({args})")
 
+                # Notify channel about tool activity
+                if self._mgr and self._mgr._tool_callback:
+                    try:
+                        await self._mgr._tool_callback(name)
+                    except Exception:
+                        pass
+
                 # Check if this is a built-in tool or an ability
                 if self.tools.get(name):
                     result = await self.tools.execute(name, args, access_level)
@@ -403,6 +410,7 @@ class ConversationManager:
         self._active: dict[str, Conversation] = {}
         self._delivery_callback = None  # Set by channel for delivering sub-agent results
         self._status_callback = None  # Set by channel for status notifications (e.g., compaction)
+        self._tool_callback = None  # Set by channel for tool activity notifications
 
         # Wire up sub-agent completion callback
         if self.subagents:
@@ -437,6 +445,13 @@ class ConversationManager:
         callback(session_id: str, message: str) -> None
         """
         self._status_callback = callback
+
+    def set_tool_callback(self, callback):
+        """Set callback for tool activity notifications.
+        
+        callback(tool_name: str) -> None
+        """
+        self._tool_callback = callback
 
     def _session_key(self, platform: str, chat_id: str) -> str:
         return f"{platform}:{chat_id}"

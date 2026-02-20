@@ -68,9 +68,11 @@ async def run_cli(debug: bool = False):
             user = dict(user)
             user["access_level"] = "owner"
 
-        # Set up status callback for compaction notifications
+        # Set up callbacks
         if agent.conversations:
             agent.conversations.set_status_callback(_cli_status_callback)
+            # Tool activity indicator — will be wired to status spinner in REPL
+            agent.conversations._tool_status = None  # Rich Status object, set during processing
 
         # Display header
         identity = await get_identity()
@@ -124,7 +126,35 @@ async def run_cli(debug: bool = False):
             console.print()
             try:
                 msg = user_input
-                with console.status("[bold blue]Thinking...", spinner="dots"):
+                status = console.status("[bold blue]Thinking...", spinner="dots")
+                status.start()
+
+                # Wire tool callback to update spinner
+                _TOOL_LABELS = {
+                    "exec": "🔧 Running command...",
+                    "memory_search": "🔍 Searching memory...",
+                    "memory_store": "💾 Storing memory...",
+                    "web_search": "🌐 Searching web...",
+                    "web_fetch": "🌐 Fetching page...",
+                    "spawn_subagent": "🤖 Spawning sub-agent...",
+                    "file_read": "📖 Reading file...",
+                    "file_write": "📝 Writing file...",
+                    "read_source": "📖 Reading source...",
+                    "update_config": "⚙️ Updating config...",
+                    "update_soul": "✨ Updating soul...",
+                    "update_ability": "🧩 Updating ability...",
+                    "manage_schedule": "⏰ Managing schedule...",
+                    "manage_user": "👤 Managing user...",
+                    "manage_group": "👥 Managing group...",
+                }
+
+                async def _on_tool(name: str):
+                    label = _TOOL_LABELS.get(name, f"🔧 {name}...")
+                    status.update(f"[bold blue]{label}")
+
+                agent.conversations.set_tool_callback(_on_tool)
+
+                try:
                     response = await agent.conversations.handle_message(
                         platform="cli",
                         chat_id=chat_id,
@@ -132,6 +162,9 @@ async def run_cli(debug: bool = False):
                         message=msg,
                         message_metadata={"cwd": agent._cli_cwd},
                     )
+                finally:
+                    status.stop()
+                    agent.conversations.set_tool_callback(None)
 
                 # Display response
                 if response:
@@ -139,6 +172,10 @@ async def run_cli(debug: bool = False):
                 console.print()
             except KeyboardInterrupt:
                 # Ctrl+C during processing → cancel, back to prompt
+                try:
+                    status.stop()
+                except Exception:
+                    pass
                 console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
