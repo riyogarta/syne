@@ -9,12 +9,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.syntax import Syntax
+from . import __version__
 
 console = Console()
 
 
 @click.group(invoke_without_command=True)
-@click.version_option(version="0.3.0", prog_name="syne")
+@click.version_option(version=__version__, prog_name="syne")
 @click.pass_context
 def cli(ctx):
     """Syne — AI Agent Framework with Unlimited Memory 🧠"""
