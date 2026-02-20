@@ -151,6 +151,52 @@ def _ensure_docker() -> str:
     return prefix
 
 
+def _create_symlink():
+    """Create /usr/local/bin/syne symlink so `syne` works without activating venv."""
+    import subprocess
+    syne_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "bin", "syne")
+    target = "/usr/local/bin/syne"
+
+    if not os.path.exists(syne_bin):
+        # Fallback: find syne in the current venv
+        import sys
+        venv_bin = os.path.join(os.path.dirname(sys.executable), "syne")
+        if os.path.exists(venv_bin):
+            syne_bin = venv_bin
+        else:
+            console.print("[yellow]⚠ Could not find syne binary to create symlink[/yellow]")
+            return
+
+    # Check if symlink already exists and points to correct target
+    if os.path.islink(target) and os.readlink(target) == syne_bin:
+        return
+
+    # Try without sudo first, then with sudo
+    try:
+        os.symlink(syne_bin, target)
+        console.print(f"[green]✓[/green] Created symlink: {target} → {syne_bin}")
+    except PermissionError:
+        result = subprocess.run(
+            ["sudo", "ln", "-sf", syne_bin, target],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            console.print(f"[green]✓[/green] Created symlink: {target} → {syne_bin}")
+        else:
+            # Fallback: add shell alias
+            bashrc = os.path.expanduser("~/.bashrc")
+            alias_line = f'alias syne="{syne_bin}"'
+            try:
+                with open(bashrc, "r") as f:
+                    content = f.read()
+                if alias_line not in content:
+                    with open(bashrc, "a") as f:
+                        f.write(f"\n# Syne CLI\n{alias_line}\n")
+                    console.print(f"[green]✓[/green] Added alias to ~/.bashrc (run: source ~/.bashrc)")
+            except Exception:
+                console.print(f"[yellow]⚠ Add manually: {alias_line}[/yellow]")
+
+
 def _setup_service():
     """Setup systemd user service, enable, and start Syne."""
     import subprocess
@@ -727,10 +773,15 @@ def init():
     console.print("\n[bold]Setting up systemd service...[/bold]")
     _setup_service()
 
+    # 8. Create symlink so `syne` works globally without activating venv
+    _create_symlink()
+
     console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
     console.print()
     console.print("Commands:")
-    console.print("  [bold]systemctl --user status syne[/bold]    # Check status")
+    console.print("  [bold]syne cli[/bold]                        # Interactive chat")
+    console.print("  [bold]syne status[/bold]                     # Check agent status")
+    console.print("  [bold]systemctl --user status syne[/bold]    # Service status")
     console.print("  [bold]systemctl --user restart syne[/bold]   # Restart")
     console.print("  [bold]journalctl --user -u syne -f[/bold]   # Logs")
     console.print()
