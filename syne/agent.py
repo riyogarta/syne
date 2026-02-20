@@ -115,6 +115,30 @@ class SyneAgent:
         await close_db()
         logger.info("Syne agent stopped.")
 
+    async def reload_provider(self):
+        """Hot-reload the LLM provider from DB config.
+        
+        Called after /model switch to apply the new provider without restart.
+        Updates: self.provider, memory engine, conversation manager, sub-agents.
+        """
+        new_provider = await self._init_provider()
+        self.provider = new_provider
+        logger.info(f"Provider reloaded: {new_provider.name}")
+
+        # Update memory engine
+        self.memory = MemoryEngine(new_provider)
+
+        # Update conversation manager's provider
+        if self.conversations:
+            self.conversations.provider = new_provider
+            # Update all active conversations
+            for conv in self.conversations._active.values():
+                conv.provider = new_provider
+
+        # Update sub-agent manager
+        if self.subagents:
+            self.subagents.provider = new_provider
+
     async def _init_provider(self) -> LLMProvider:
         """Initialize the LLM provider based on config.
         

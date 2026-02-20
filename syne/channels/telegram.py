@@ -1298,6 +1298,10 @@ Or just send me a message!"""
                 await set_config("provider.embedding_model", embed_entry.get("model_id", ""))
                 await set_config("provider.embedding_dimensions", new_dims)
                 await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
+                
+                # Hot-reload provider (picks up new embedding)
+                await self.agent.reload_provider()
+                
                 return True, embed_entry.get("label", embed_key)
             else:
                 return False, f"{embed_entry.get('label', embed_key)} failed: {error}"
@@ -1351,6 +1355,9 @@ Or just send me a message!"""
                     new_threshold = int(ctx_window * 0.75 * 3.5)
                     await set_config("session.compaction_threshold", new_threshold)
                     logger.info(f"Auto-adjusted compaction threshold to {new_threshold} chars for {ctx_window} token context")
+                
+                # Hot-reload provider in the running agent
+                await self.agent.reload_provider()
                 
                 return True, model_entry.get("label", model_key)
             else:
