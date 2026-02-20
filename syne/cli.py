@@ -1566,27 +1566,34 @@ def _restart_service():
 
 @cli.command()
 def update():
-    """Update to latest release (skip if already up to date)."""
+    """Update to latest release (skip if version unchanged)."""
     import subprocess
 
     syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     from . import __version__ as current_version
 
-    # Fetch remote (explicit origin to ensure all refs are updated)
+    # Fetch remote
     console.print("🔍 Checking for updates...")
     subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
 
-    # Count commits behind origin/main
+    # Read remote __version__ to compare
     result = subprocess.run(
-        ["git", "rev-list", "HEAD..origin/main", "--count"],
+        ["git", "show", "origin/main:syne/__init__.py"],
         cwd=syne_dir, capture_output=True, text=True,
     )
-    behind = int(result.stdout.strip() or "0")
-    if behind == 0:
+    remote_version = current_version  # fallback
+    if result.returncode == 0:
+        for line in result.stdout.splitlines():
+            if line.startswith("__version__"):
+                # Extract version string from: __version__ = "x.y.z"
+                remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+
+    if remote_version == current_version:
         console.print(f"[green]✅ Already up to date (v{current_version})[/green]")
         return
 
-    console.print(f"[yellow]📦 {behind} new commit{'s' if behind > 1 else ''} available[/yellow]")
+    console.print(f"[yellow]📦 New version available: v{remote_version} (current: v{current_version})[/yellow]")
 
     console.print("📥 Pulling latest code...")
     result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
