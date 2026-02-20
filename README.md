@@ -369,11 +369,17 @@ syne init                  # Interactive setup (fully automated)
 syne start                 # Start Telegram agent
 syne start --debug         # Start with debug logging
 syne cli                   # Interactive terminal chat
+syne cli --resume          # Resume previous conversation (per directory)
+syne cli --yolo            # Skip file write approvals (auto-yes)
 syne cli --debug           # CLI with debug logging
 syne status                # Show status
 syne repair                # Diagnose and repair
 syne restart               # Restart agent
 syne stop                  # Stop agent
+
+# Updates
+syne update                # Update to latest release (skips if version unchanged)
+syne update-dev            # Force pull + reinstall (ignores version check)
 
 # Database
 syne db init               # Initialize schema
@@ -401,6 +407,15 @@ syne memory add "info"     # Manually add memory
 | `/compact` | Compact conversation |
 | `/think [level]` | Set thinking budget |
 | `/exit` | Exit CLI |
+
+### CLI Features
+
+- **Per-directory sessions** — each directory has its own conversation context
+- **`--resume`** — continue where you left off instead of starting fresh
+- **File write approval** — Syne asks before writing files (`y`es / `n`o / `a`lways). Skip with `--yolo`
+- **Tool activity indicator** — spinner shows what Syne is doing (Thinking → Searching memory → Running command...)
+- **Ctrl+C** — single tap cancels current request, double tap exits
+- **Auto-compaction** — notifies when context is compacted
 
 ---
 
