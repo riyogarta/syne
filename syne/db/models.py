@@ -110,8 +110,9 @@ async def get_or_create_user(
     """
     user = await get_user(platform, platform_id)
     if user:
-        # Auto-promote: if no owner exists yet, OR if same person is already
-        # owner on another platform, promote this user too
+        # Auto-promote: if no owner exists yet, promote this existing user.
+        # Also: if this is a fresh install (few users) and no owner exists
+        # on THIS platform yet, promote — likely same person from another channel.
         if user.get("access_level") != "owner":
             async with get_connection() as conn:
                 owner_count = await conn.fetchval(
@@ -129,12 +130,14 @@ async def get_or_create_user(
                         f"Auto-promoted user {user['name']} ({platform_id}) to owner (no owner existed)"
                     )
                 else:
-                    # Check if same person (by name) is owner on another platform
-                    same_person_owner = await conn.fetchval(
-                        "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND name = $1 AND id != $2",
-                        user.get("name"), user["id"]
+                    # Fresh install heuristic: if no owner on THIS platform
+                    # and total users <= 3, likely same person from another channel
+                    owner_on_platform = await conn.fetchval(
+                        "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND platform = $1",
+                        platform
                     )
-                    if same_person_owner > 0:
+                    total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+                    if owner_on_platform == 0 and total_users <= 3:
                         await conn.execute(
                             "UPDATE users SET access_level = 'owner' WHERE id = $1",
                             user["id"]
@@ -143,12 +146,13 @@ async def get_or_create_user(
                         user["access_level"] = "owner"
                         import logging
                         logging.getLogger("syne.db").info(
-                            f"Auto-promoted user {user['name']} ({platform_id}) to owner (same person owns on another platform)"
+                            f"Auto-promoted user {user['name']} ({platform_id}) to owner "
+                            f"(first on platform '{platform}', fresh install)"
                         )
         return user
     
     # New user — if no owner exists, this one becomes owner.
-    # Also promote if same person (by name) is already owner on another platform.
+    # Also: fresh install heuristic for cross-platform owner.
     access_level = "public"
     async with get_connection() as conn:
         owner_count = await conn.fetchval(
@@ -156,12 +160,13 @@ async def get_or_create_user(
         )
         if owner_count == 0:
             access_level = "owner"
-        elif name:
-            same_person_owner = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND name = $1",
-                name
+        else:
+            owner_on_platform = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND platform = $1",
+                platform
             )
-            if same_person_owner > 0:
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            if owner_on_platform == 0 and total_users <= 3:
                 access_level = "owner"
     
     return await create_user(name, platform, platform_id, display_name, access_level)
