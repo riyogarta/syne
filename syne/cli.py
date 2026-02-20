@@ -1572,9 +1572,9 @@ def update():
     syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     from . import __version__ as current_version
 
-    # Fetch remote
+    # Fetch remote (explicit origin to ensure all refs are updated)
     console.print("🔍 Checking for updates...")
-    subprocess.run(["git", "fetch"], cwd=syne_dir, capture_output=True, text=True)
+    subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
 
     # Count commits behind origin/main
     result = subprocess.run(
