@@ -94,7 +94,9 @@ class SyneAgent:
             provider=self.provider,
             system_prompt=system_prompt,
         )
-        logger.info("Sub-agent manager ready.")
+        self.subagents.tools = self.tools
+        self.subagents.abilities = self.abilities
+        logger.info("Sub-agent manager ready (with tool access).")
 
         # 8. Conversation Manager
         self.conversations = ConversationManager(

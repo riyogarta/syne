@@ -1,0 +1,947 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Syne — AI Agent Framework with Unlimited Memory</title>
+    <meta name="description" content="Open-source AI agent framework with unlimited persistent memory. Memory-first, self-evolving, zero-cost setup.">
+    <meta name="keywords" content="AI agent, memory, open source, self-evolving, Telegram bot, CLI">
+    <meta property="og:title" content="Syne — I remember, therefore I am">
+    <meta property="og:description" content="Open-source AI agent framework with unlimited persistent memory.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://github.com/riyogarta/syne">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
+    <style>
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a24;
+            --bg-card-hover: #22222e;
+            --text-primary: #f5f5f7;
+            --text-secondary: #a1a1aa;
+            --text-muted: #71717a;
+            --accent: #8b5cf6;
+            --accent-glow: rgba(139, 92, 246, 0.3);
+            --accent-secondary: #a78bfa;
+            --border: #27272a;
+            --success: #22c55e;
+            --gradient-start: #8b5cf6;
+            --gradient-end: #06b6d4;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        /* Gradient background effect */
+        .bg-gradient {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 100vh;
+            background: radial-gradient(ellipse 80% 50% at 50% -20%, var(--accent-glow), transparent);
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 24px;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Navigation */
+        nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .nav-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .logo-icon {
+            font-size: 1.8rem;
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 32px;
+            align-items: center;
+        }
+
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.95rem;
+            transition: color 0.2s;
+        }
+
+        .nav-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .nav-cta {
+            background: var(--accent);
+            color: white !important;
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .nav-cta:hover {
+            background: var(--accent-secondary);
+            transform: translateY(-1px);
+        }
+
+        /* Hero Section */
+        .hero {
+            padding: 160px 0 100px;
+            text-align: center;
+        }
+
+        .hero-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 100px;
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 32px;
+        }
+
+        .hero-badge-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--success);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .hero h1 {
+            font-size: clamp(3rem, 8vw, 5rem);
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 24px;
+            background: linear-gradient(135deg, var(--text-primary) 0%, var(--text-secondary) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero-tagline {
+            font-size: clamp(1.5rem, 4vw, 2.25rem);
+            font-weight: 300;
+            font-style: italic;
+            color: var(--accent-secondary);
+            margin-bottom: 24px;
+        }
+
+        .hero-description {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto 40px;
+        }
+
+        .hero-etymology {
+            font-size: 0.95rem;
+            color: var(--text-muted);
+            margin-bottom: 48px;
+        }
+
+        .hero-etymology a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .hero-etymology a:hover {
+            text-decoration: underline;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 14px 28px;
+            border-radius: 10px;
+            font-size: 1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--gradient-start), var(--gradient-end));
+            color: white;
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px var(--accent-glow);
+        }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-secondary:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent);
+        }
+
+        /* Features Section */
+        .features {
+            padding: 100px 0;
+        }
+
+        .section-header {
+            text-align: center;
+            margin-bottom: 64px;
+        }
+
+        .section-header h2 {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .section-header p {
+            font-size: 1.125rem;
+            color: var(--text-secondary);
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+        }
+
+        @media (max-width: 1024px) {
+            .features-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 640px) {
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: linear-gradient(90deg, var(--gradient-start), var(--gradient-end));
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .feature-card:hover {
+            background: var(--bg-card-hover);
+            border-color: var(--accent);
+            transform: translateY(-4px);
+        }
+
+        .feature-card:hover::before {
+            opacity: 1;
+        }
+
+        .feature-icon {
+            font-size: 2.5rem;
+            margin-bottom: 16px;
+        }
+
+        .feature-card h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }
+
+        .feature-card p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.6;
+        }
+
+        /* Quick Start Section */
+        .quickstart {
+            padding: 100px 0;
+            background: var(--bg-secondary);
+        }
+
+        .quickstart-content {
+            max-width: 700px;
+            margin: 0 auto;
+            text-align: center;
+        }
+
+        .code-block {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 32px;
+            margin: 32px 0;
+            text-align: left;
+            position: relative;
+            overflow-x: auto;
+        }
+
+        .code-block pre {
+            font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+            font-size: 0.95rem;
+            line-height: 1.8;
+            color: var(--text-primary);
+        }
+
+        .code-block .comment {
+            color: var(--text-muted);
+        }
+
+        .code-block .command {
+            color: var(--accent-secondary);
+        }
+
+        .copy-btn {
+            position: absolute;
+            top: 16px;
+            right: 16px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: var(--bg-card-hover);
+            color: var(--text-primary);
+        }
+
+        .quickstart-note {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-top: 24px;
+        }
+
+        /* Cost Section */
+        .cost {
+            padding: 100px 0;
+        }
+
+        .cost-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 32px;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        @media (max-width: 768px) {
+            .cost-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .cost-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+        }
+
+        .cost-card.highlight {
+            border-color: var(--accent);
+            position: relative;
+        }
+
+        .cost-card.highlight::before {
+            content: 'Recommended';
+            position: absolute;
+            top: -12px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--accent);
+            color: white;
+            padding: 4px 16px;
+            border-radius: 100px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .cost-label {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 8px;
+        }
+
+        .cost-price {
+            font-size: 3.5rem;
+            font-weight: 800;
+            color: var(--text-primary);
+            line-height: 1;
+            margin-bottom: 8px;
+        }
+
+        .cost-price span {
+            font-size: 1.25rem;
+            font-weight: 400;
+            color: var(--text-secondary);
+        }
+
+        .cost-desc {
+            color: var(--text-secondary);
+            margin-bottom: 24px;
+        }
+
+        .cost-list {
+            text-align: left;
+            list-style: none;
+        }
+
+        .cost-list li {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 8px 0;
+            font-size: 0.95rem;
+            color: var(--text-secondary);
+        }
+
+        .cost-list li::before {
+            content: '✓';
+            color: var(--success);
+            font-weight: 700;
+        }
+
+        /* Architecture Section */
+        .architecture {
+            padding: 80px 0;
+            background: var(--bg-secondary);
+        }
+
+        .arch-diagram {
+            background: var(--bg-primary);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 800px;
+            margin: 32px auto 0;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            overflow-x: auto;
+            color: var(--text-secondary);
+        }
+
+        .arch-diagram .highlight {
+            color: var(--accent-secondary);
+        }
+
+        /* Footer */
+        footer {
+            padding: 60px 0;
+            border-top: 1px solid var(--border);
+        }
+
+        .footer-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 24px;
+        }
+
+        .footer-left {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .footer-logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-decoration: none;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 24px;
+        }
+
+        .footer-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+
+        .footer-links a:hover {
+            color: var(--text-primary);
+        }
+
+        .footer-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            color: var(--text-muted);
+            font-size: 0.875rem;
+        }
+
+        .footer-right a {
+            color: var(--text-secondary);
+            text-decoration: none;
+        }
+
+        .footer-right a:hover {
+            color: var(--accent);
+        }
+
+        /* Mobile adjustments */
+        @media (max-width: 768px) {
+            .nav-links {
+                display: none;
+            }
+
+            .hero {
+                padding: 120px 0 80px;
+            }
+
+            .hero h1 {
+                font-size: 2.5rem;
+            }
+
+            .hero-tagline {
+                font-size: 1.25rem;
+            }
+
+            .hero-buttons {
+                flex-direction: column;
+                align-items: center;
+            }
+
+            .btn {
+                width: 100%;
+                max-width: 280px;
+                justify-content: center;
+            }
+
+            .section-header h2 {
+                font-size: 2rem;
+            }
+
+            .features {
+                padding: 60px 0;
+            }
+
+            .quickstart {
+                padding: 60px 0;
+            }
+
+            .cost {
+                padding: 60px 0;
+            }
+
+            .code-block {
+                padding: 20px;
+            }
+
+            .code-block pre {
+                font-size: 0.85rem;
+            }
+
+            .footer-content {
+                flex-direction: column;
+                text-align: center;
+            }
+
+            .footer-left {
+                flex-direction: column;
+            }
+        }
+
+        /* Animations */
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .animate-in {
+            animation: fadeInUp 0.6s ease-out forwards;
+        }
+
+        .delay-1 { animation-delay: 0.1s; }
+        .delay-2 { animation-delay: 0.2s; }
+        .delay-3 { animation-delay: 0.3s; }
+        .delay-4 { animation-delay: 0.4s; }
+    </style>
+</head>
+<body>
+    <div class="bg-gradient"></div>
+
+    <nav>
+        <div class="nav-content">
+            <a href="#" class="logo">
+                <span class="logo-icon">🧠</span>
+                <span>Syne</span>
+            </a>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#quickstart">Quick Start</a>
+                <a href="#cost">Cost</a>
+                <a href="https://github.com/riyogarta/syne" class="nav-cta" target="_blank">GitHub</a>
+            </div>
+        </div>
+    </nav>
+
+    <main>
+        <!-- Hero Section -->
+        <section class="hero">
+            <div class="container">
+                <div class="hero-badge">
+                    <span class="hero-badge-dot"></span>
+                    Open Source · Apache 2.0
+                </div>
+                <h1>Syne</h1>
+                <p class="hero-tagline">"I remember, therefore I am"</p>
+                <p class="hero-description">
+                    AI agent framework with <strong>unlimited persistent memory</strong>. 
+                    Self-evolving, zero-cost setup, and it never forgets.
+                </p>
+                <p class="hero-etymology">
+                    Named after <a href="https://en.wikipedia.org/wiki/Mnemosyne" target="_blank">Mnemosyne</a>, 
+                    the Greek goddess of memory and mother of the Muses.
+                </p>
+                <div class="hero-buttons">
+                    <a href="#quickstart" class="btn btn-primary">
+                        Get Started
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                            <path d="M3.33 8h9.34M8.67 4l4 4-4 4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </a>
+                    <a href="https://github.com/riyogarta/syne" class="btn btn-secondary" target="_blank">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                        </svg>
+                        View on GitHub
+                    </a>
+                </div>
+            </div>
+        </section>
+
+        <!-- Features Section -->
+        <section class="features" id="features">
+            <div class="container">
+                <div class="section-header">
+                    <h2>Memory-First Architecture</h2>
+                    <p>Built from the ground up with persistent memory as the core principle, not an afterthought.</p>
+                </div>
+                <div class="features-grid">
+                    <div class="feature-card">
+                        <div class="feature-icon">🧠</div>
+                        <h3>Unlimited Persistent Memory</h3>
+                        <p>Semantic search over millions of memories. Never forgets, even across sessions.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🛡️</div>
+                        <h3>Smart Memory — Anti-Hallucination & Auto-Dedup</h3>
+                        <p>Only user-confirmed facts stored. 3-layer filter + similarity-based insert/update/skip. Memory stays clean, never bloated.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🧬</div>
+                        <h3>Self-Evolution</h3>
+                        <p>Creates new abilities at runtime — no restart, no redeploy. You ask, it builds.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">💬</div>
+                        <h3>No Config Files</h3>
+                        <p>Everything lives in the database. Change behavior, personality, rules — all through conversation.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">💸</div>
+                        <h3>True Zero-Cost Setup</h3>
+                        <p>Free OAuth chat + local embedding + Docker DB + Telegram. $0/month, no credit card needed.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🤖</div>
+                        <h3>Multi-Model Freedom</h3>
+                        <p>Switch between Gemini, ChatGPT, Claude, Groq — mid-conversation. No redeploy.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🧑‍💻</div>
+                        <h3>Interactive — Telegram & CLI</h3>
+                        <p>Chat via Telegram bot or terminal. Same memory, same tools, same agent.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🧵</div>
+                        <h3>Sub-Agents</h3>
+                        <p>Spawn background agents for parallel tasks. Isolated sessions, shared memory.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Quick Start Section -->
+        <section class="quickstart" id="quickstart">
+            <div class="container">
+                <div class="quickstart-content">
+                    <div class="section-header">
+                        <h2>Get Started in 60 Seconds</h2>
+                        <p>One command to clone, one command to configure. That's it.</p>
+                    </div>
+                    <div class="code-block">
+                        <button class="copy-btn" onclick="copyCode()">Copy</button>
+                        <pre><span class="comment"># Clone the repo</span>
+<span class="command">git clone</span> https://github.com/riyogarta/syne.git
+<span class="command">cd</span> syne
+
+<span class="comment"># Create virtual environment</span>
+<span class="command">python3 -m venv</span> .venv
+<span class="command">source</span> .venv/bin/activate
+<span class="command">pip install</span> -e .
+
+<span class="comment"># Interactive setup — handles everything</span>
+<span class="command">syne init</span></pre>
+                    </div>
+                    <p class="quickstart-note">
+                        <code>syne init</code> guides you through provider selection, Telegram bot setup, 
+                        and automatically starts PostgreSQL via Docker. No manual steps.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Cost Section -->
+        <section class="cost" id="cost">
+            <div class="container">
+                <div class="section-header">
+                    <h2>True Zero-Cost is Possible</h2>
+                    <p>Use free OAuth providers and local embedding for a completely free setup.</p>
+                </div>
+                <div class="cost-grid">
+                    <div class="cost-card highlight">
+                        <div class="cost-label">Minimum Setup</div>
+                        <div class="cost-price">$0<span>/month</span></div>
+                        <div class="cost-desc">Gemini OAuth + Ollama</div>
+                        <ul class="cost-list">
+                            <li>Google Gemini 2.5 Pro (free OAuth)</li>
+                            <li>Ollama embedding (local, free)</li>
+                            <li>PostgreSQL + pgvector (Docker)</li>
+                            <li>Telegram Bot API (free)</li>
+                            <li>No credit card required</li>
+                        </ul>
+                    </div>
+                    <div class="cost-card">
+                        <div class="cost-label">With Cloud Embedding</div>
+                        <div class="cost-price">~$0<span>.01/day</span></div>
+                        <div class="cost-desc">For low-resource systems</div>
+                        <ul class="cost-list">
+                            <li>Same free OAuth chat</li>
+                            <li>Together AI embedding (~$0.008/1M tokens)</li>
+                            <li>Works on 1GB RAM systems</li>
+                            <li>$5 free credit on signup</li>
+                            <li>Optional image generation</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Architecture Section -->
+        <section class="architecture">
+            <div class="container">
+                <div class="section-header">
+                    <h2>Clean Architecture</h2>
+                    <p>Protected core, pluggable abilities, single-database truth.</p>
+                </div>
+                <div class="arch-diagram">
+<pre>
+┌──────────────────────────────────────────────────────────────┐
+│                        <span class="highlight">SYNE AGENT</span>                           │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                   CORE (Protected)                     │  │
+│  │                                                        │  │
+│  │   [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]    │  │
+│  │   (LLM)   (pgvec)    (context)   (TG + CLI)   agent    │  │
+│  │                                                        │  │
+│  │   Core Tools (18):                                     │  │
+│  │   exec · memory · web · config · files · cron · voice  │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │                ABILITIES (Pluggable)                   │  │
+│  │                                                        │  │
+│  │   [image_gen]  [image_analysis]  [maps]  [custom...]   │  │
+│  │                                                        │  │
+│  │   <span class="highlight">Self-Created: Syne adds new abilities at runtime</span>      │  │
+│  └────────────────────────────────────────────────────────┘  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │              PostgreSQL + pgvector                     │  │
+│  │   13 tables: identity · soul · rules · users ·         │  │
+│  │   memory · sessions · messages · config · abilities    │  │
+│  └────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
+</pre>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <!-- Footer -->
+    <footer>
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-left">
+                    <a href="#" class="footer-logo">
+                        <span>🧠</span>
+                        <span>Syne</span>
+                    </a>
+                    <div class="footer-links">
+                        <a href="https://github.com/riyogarta/syne" target="_blank">GitHub</a>
+                        <a href="https://github.com/riyogarta/syne/blob/main/README.md" target="_blank">Documentation</a>
+                        <a href="https://github.com/riyogarta/syne/blob/main/CONTRIBUTING.md" target="_blank">Contribute</a>
+                    </div>
+                </div>
+                <div class="footer-right">
+                    <span>Apache 2.0 License</span>
+                    <span>·</span>
+                    <span>Built by <a href="https://github.com/riyogarta" target="_blank">Riyogarta</a></span>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        function copyCode() {
+            const code = `git clone https://github.com/riyogarta/syne.git
+cd syne
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+syne init`;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = document.querySelector('.copy-btn');
+                btn.textContent = 'Copied!';
+                setTimeout(() => btn.textContent = 'Copy', 2000);
+            });
+        }
+
+        // Smooth scroll for anchor links
+        document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+            anchor.addEventListener('click', function (e) {
+                e.preventDefault();
+                const target = document.querySelector(this.getAttribute('href'));
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            });
+        });
+
+        // Add animation on scroll
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('animate-in');
+                }
+            });
+        }, { threshold: 0.1 });
+
+        document.querySelectorAll('.feature-card, .cost-card').forEach(el => {
+            observer.observe(el);
+        });
+    </script>
+</body>
+</html>

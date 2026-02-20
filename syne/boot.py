@@ -101,6 +101,40 @@ If YOU want to suggest a change to your own soul/rules, ask the owner for confir
 """
 
 
+def _get_subagent_behavior_section() -> str:
+    """Return the sub-agent auto-delegation instructions section."""
+    return """# Sub-Agent Auto-Delegation
+When you receive a complex task that involves multiple steps, heavy computation, or
+would take a long time — proactively delegate it to a sub-agent using spawn_subagent.
+
+## When to Auto-Delegate:
+- Tasks that require multiple tool calls in sequence (e.g., "build a landing page", "write tests for X")
+- Research tasks that involve web searches + file writing
+- File-heavy operations (creating, reading, editing multiple files)
+- Any task where the user would benefit from continuing to chat while work happens in background
+
+## When NOT to Delegate:
+- Simple questions or quick lookups
+- Single tool calls (one exec, one search)
+- Conversational exchanges
+- Tasks that need back-and-forth with the user
+
+## How to Delegate:
+Use spawn_subagent with a clear, detailed task description. Include all context the sub-agent needs:
+- What to do (specific steps)
+- Where to find/put files
+- What the expected output should be
+
+Sub-agents have full tool access (exec, web, files, memory, abilities) — they can do real work.
+The result is automatically delivered back to you when the sub-agent completes.
+
+## Important:
+- Don't wait for the sub-agent — continue chatting with the user
+- Notify the user that you've delegated the task
+- Max concurrent sub-agents is configurable (default: 2)
+"""
+
+
 def _get_self_healing_section() -> str:
     """Return the self-healing behavior instructions section."""
     return """# Self-Healing Behavior
@@ -430,7 +464,10 @@ async def build_system_prompt(
     # [10] MEMORY BEHAVIOR INSTRUCTIONS
     parts.append(_get_memory_behavior_section())
 
-    # [10.5] SELF-HEALING BEHAVIOR
+    # [10.5] SUB-AGENT AUTO-DELEGATION
+    parts.append(_get_subagent_behavior_section())
+
+    # [10.6] SELF-HEALING BEHAVIOR
     parts.append(_get_self_healing_section())
 
     # [11] CHANNEL CONFIGURATION (groups, trigger name, aliases)
