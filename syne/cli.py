@@ -268,9 +268,6 @@ def init():
     console.print(Panel("[bold]Welcome to Syne 🧠[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
     console.print()
 
-    # Pre-check: Docker (install + start + determine sudo prefix)
-    docker_prefix = _ensure_docker()
-
     # 1. Provider selection
     console.print("[bold]Step 1: Choose your chat AI provider[/bold]")
     console.print()
@@ -557,7 +554,8 @@ def init():
     os.chmod(env_path, 0o600)
     console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
-    # 5. Start DB (Docker — uses prefix from _ensure_docker)
+    # 5. Start DB (Docker — install + start + determine sudo prefix)
+    docker_prefix = _ensure_docker()
     docker_cmd = f"{docker_prefix}docker compose"
 
     # PostgreSQL bakes credentials into the volume at FIRST creation.
