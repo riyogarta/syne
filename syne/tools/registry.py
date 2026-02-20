@@ -24,6 +24,15 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        self._approval_callback = None  # Optional async callback for interactive approval
+
+    def set_approval_callback(self, callback):
+        """Set approval callback for tools that need user confirmation.
+        
+        callback(tool_name: str, args: dict) -> tuple[bool, str]
+        Returns (approved, reason).
+        """
+        self._approval_callback = callback
 
     def register(
         self,
@@ -108,6 +117,15 @@ class ToolRegistry:
 
         if current < required:
             return f"Error: Insufficient permissions for tool '{name}'."
+
+        # Interactive approval (e.g., CLI file write confirmation)
+        if self._approval_callback:
+            try:
+                approved, reason = await self._approval_callback(name, arguments)
+                if not approved:
+                    return f"Cancelled: {reason}" if reason else "Cancelled by user."
+            except Exception as e:
+                logger.error(f"Approval callback error: {e}")
 
         try:
             result = await tool.handler(**arguments)

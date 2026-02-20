@@ -806,10 +806,11 @@ def start(debug):
 
 @cli.command(name="cli")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
-def cli_mode(debug):
+@click.option("--yolo", is_flag=True, help="Skip file write approvals (auto-yes)")
+def cli_mode(debug, yolo):
     """Interactive CLI chat."""
     from .channels.cli_channel import run_cli
-    asyncio.run(run_cli(debug=debug))
+    asyncio.run(run_cli(debug=debug, yolo=yolo))
 
 
 # ── Status ───────────────────────────────────────────────────

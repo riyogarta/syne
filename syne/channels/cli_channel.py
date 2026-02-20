@@ -20,7 +20,7 @@ logger = logging.getLogger("syne.cli_channel")
 console = Console()
 
 
-async def run_cli(debug: bool = False):
+async def run_cli(debug: bool = False, yolo: bool = False):
     """Run Syne in interactive CLI mode."""
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
@@ -73,6 +73,54 @@ async def run_cli(debug: bool = False):
             agent.conversations.set_status_callback(_cli_status_callback)
             # Tool activity indicator — will be wired to status spinner in REPL
             agent.conversations._tool_status = None  # Rich Status object, set during processing
+
+        # File write approval (unless --yolo)
+        if not yolo:
+            _always_allowed: set[str] = set()  # paths auto-approved for this session
+
+            async def _approval_callback(tool_name: str, args: dict) -> tuple[bool, str]:
+                """Ask user for approval before file writes. Returns (approved, reason)."""
+                if tool_name != "file_write":
+                    return True, ""
+
+                file_path = args.get("path", "?")
+                resolved = os.path.abspath(file_path)
+
+                if resolved in _always_allowed:
+                    return True, ""
+
+                # Pause spinner if active
+                _status_ref = getattr(agent.conversations, '_active_status', None)
+                if _status_ref:
+                    _status_ref.stop()
+
+                content = args.get("content", "")
+                lines = content.count("\n") + 1
+                size = len(content.encode("utf-8"))
+
+                console.print(f"\n[bold yellow]📝 Write to {file_path}?[/bold yellow] ({lines} lines, {size:,} bytes)")
+                console.print("[dim]  [y] Yes  [n] No  [a] Always allow this file[/dim]")
+
+                try:
+                    choice = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: input("  > ").strip().lower()
+                    )
+                except (EOFError, KeyboardInterrupt):
+                    choice = "n"
+
+                # Resume spinner
+                if _status_ref:
+                    _status_ref.start()
+
+                if choice == "a":
+                    _always_allowed.add(resolved)
+                    return True, ""
+                elif choice in ("y", "yes"):
+                    return True, ""
+                else:
+                    return False, "User declined file write."
+
+            agent.tools.set_approval_callback(_approval_callback)
 
         # Display header
         identity = await get_identity()
@@ -128,6 +176,7 @@ async def run_cli(debug: bool = False):
                 msg = user_input
                 status = console.status("[bold blue]Thinking...", spinner="dots")
                 status.start()
+                agent.conversations._active_status = status  # For approval callback to pause
 
                 # Wire tool callback to update spinner
                 _TOOL_LABELS = {
@@ -164,6 +213,7 @@ async def run_cli(debug: bool = False):
                     )
                 finally:
                     status.stop()
+                    agent.conversations._active_status = None
                     agent.conversations.set_tool_callback(None)
 
                 # Display response
