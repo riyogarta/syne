@@ -133,6 +133,16 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
             style="blue",
             subtitle=f"Model: {agent.provider.name} | Tools: {len(agent.tools.list_tools('owner'))} | Type /help for commands",
         ))
+
+        # Check for pending update notice
+        try:
+            from ..update_checker import get_pending_update_notice
+            update_notice = await get_pending_update_notice()
+            if update_notice:
+                console.print(f"[bold yellow]{update_notice}[/bold yellow]")
+        except Exception:
+            pass
+
         console.print()
 
         # REPL loop — session is per-directory

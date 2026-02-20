@@ -62,12 +62,29 @@ async def _auto_migrate_google_oauth():
 async def _scheduler_callback(task_id: int, payload: str, created_by: int):
     """Callback for scheduler — injects payload as message via Telegram.
     
+    Special payloads:
+        __syne_update_check__: Check for Syne updates and notify owner.
+    
     Args:
         task_id: Scheduled task ID
         payload: Message payload to inject
         created_by: Telegram user ID of task creator
     """
     global _telegram_channel
+    
+    # ── System tasks ──
+    if payload == "__syne_update_check__":
+        try:
+            from .update_checker import check_and_notify
+            message = await check_and_notify()
+            if message and _telegram_channel and created_by:
+                await _telegram_channel._bot.send_message(
+                    chat_id=created_by, text=message, parse_mode="Markdown",
+                )
+                logger.info(f"Update notification sent to {created_by}")
+        except Exception as e:
+            logger.error(f"Update check failed: {e}")
+        return
     
     if not _telegram_channel:
         logger.warning(f"Scheduler: No Telegram channel for task {task_id}")

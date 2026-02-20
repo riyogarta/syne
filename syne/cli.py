@@ -199,6 +199,60 @@ def _create_symlink():
         console.print(f"[yellow]⚠ Add to your shell rc: {path_line}[/yellow]")
 
 
+def _setup_update_check():
+    """Create weekly update check scheduled task in DB."""
+    import subprocess
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
+
+    # Run a small Python script to create the task via DB
+    script = """
+import asyncio
+async def setup():
+    from syne.db.connection import init_db, close_db
+    from syne.db.models import get_config
+    await init_db()
+
+    # Check if task already exists
+    from syne.scheduler import list_tasks
+    tasks = await list_tasks()
+    for t in tasks:
+        if t.get("name") == "_syne_update_check":
+            await close_db()
+            return  # Already exists
+
+    # Get owner user ID for notifications
+    from syne.db.connection import get_connection
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT platform_id FROM users WHERE access_level = 'owner' AND platform = 'telegram' LIMIT 1"
+        )
+    created_by = int(row["platform_id"]) if row else None
+
+    # Create weekly cron task (every Monday at 9:00 AM)
+    from syne.scheduler import create_task
+    result = await create_task(
+        name="_syne_update_check",
+        schedule_type="cron",
+        schedule_value="0 9 * * 1",
+        payload="__syne_update_check__",
+        created_by=created_by,
+    )
+    await close_db()
+
+asyncio.run(setup())
+"""
+    result = subprocess.run(
+        [venv_python, "-c", script],
+        cwd=syne_dir, capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        console.print("[green]✓[/green] Weekly update check scheduled")
+    else:
+        console.print(f"[yellow]⚠ Could not setup update check: {result.stderr.strip()[:100]}[/yellow]")
+
+
 def _setup_service():
     """Setup systemd user service, enable, and start Syne."""
     import subprocess
@@ -777,6 +831,9 @@ def init():
 
     # 8. Create symlink so `syne` works globally without activating venv
     _create_symlink()
+
+    # 9. Setup weekly update check
+    _setup_update_check()
 
     console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
     console.print()
