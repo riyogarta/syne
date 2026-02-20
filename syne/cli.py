@@ -14,7 +14,7 @@ console = Console()
 
 
 @click.group()
-@click.version_option(version="0.2.0", prog_name="syne")
+@click.version_option(version="0.3.0", prog_name="syne")
 def cli():
     """Syne — AI Agent Framework with Unlimited Memory 🧠"""
     pass
