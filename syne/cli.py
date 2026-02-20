@@ -1489,7 +1489,7 @@ def _get_provider(settings):
 
 
 def _do_update(syne_dir: str):
-    """Shared update logic: venv + pip install + symlink + PATH."""
+    """Shared update logic: venv + pip install + symlink + PATH + restart service."""
     import subprocess
 
     venv_dir = os.path.join(syne_dir, ".venv")
@@ -1528,7 +1528,36 @@ def _do_update(syne_dir: str):
     except Exception:
         pass
 
+    # Restart systemd service if active
+    _restart_service()
+
     return True
+
+
+def _restart_service():
+    """Restart syne systemd service if it's running."""
+    import subprocess
+
+    # Try user service first, then system
+    for cmd_prefix in [["systemctl", "--user"], ["sudo", "systemctl"]]:
+        try:
+            result = subprocess.run(
+                cmd_prefix + ["is-active", "syne"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.stdout.strip() == "active":
+                console.print("🔄 Restarting syne service...")
+                restart = subprocess.run(
+                    cmd_prefix + ["restart", "syne"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if restart.returncode == 0:
+                    console.print("[green]✅ Service restarted[/green]")
+                else:
+                    console.print(f"[yellow]⚠️ Service restart failed: {restart.stderr.strip()}[/yellow]")
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
 
 
 @cli.command()
@@ -1584,7 +1613,7 @@ def update():
             new_ver = r.stdout.strip() if r.returncode == 0 else "?"
         except Exception:
             new_ver = "?"
-        console.print(f"[green]✅ Syne updated to v{new_ver}! Run: syne cli[/green]")
+        console.print(f"[green]✅ Syne updated to v{new_ver}[/green]")
 
 
 @cli.command(name="update-dev")
@@ -1602,7 +1631,7 @@ def update_dev():
     console.print(f"[dim]{result.stdout.strip()}[/dim]")
 
     if _do_update(syne_dir):
-        console.print("[green]✅ Syne updated (dev)! Run: syne cli[/green]")
+        console.print("[green]✅ Syne updated (dev)[/green]")
 
 
 def main():
