@@ -18,7 +18,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
 - **No config files** — Everything lives in PostgreSQL. Change behavior through conversation, not YAML
-- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding via Together AI (~$0.008/1M tokens)
+- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding via Ollama (local, $0) or Together AI (~$0.008/1M tokens)
 - **Interactive CLI** — Code like Claude Code, but with persistent memory and tools
 
 ---
@@ -27,16 +27,16 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 The table below shows the **minimum cost** setup using free OAuth providers. During `syne init`, you choose your own chat LLM and embedding provider — costs vary depending on your choice.
 
-**Minimum cost setup (Google Gemini + Together AI):**
+**Minimum cost setup (Google Gemini + Ollama):**
 
 | Component | Model | Cost | Notes |
 |-----------|-------|------|-------|
 | Chat LLM | Gemini 2.5 Pro (Google OAuth) | **$0** | Free, rate-limited |
-| Embedding | bge-base-en-v1.5 (Together AI) | **~$0.008/1M tokens** | $5 free credit on signup |
+| Embedding | qwen3-embedding:0.6b (Ollama) | **$0** | Local, requires 2GB+ RAM |
 | Image Gen | FLUX.1-schnell (Together AI) | **~$0.003/image** | Optional ability |
 | PostgreSQL | Self-hosted (Docker) | **$0** | |
 | Telegram Bot | Telegram Bot API | **$0** | |
-| **Typical monthly** | | **< $1** | |
+| **Typical monthly** | | **$0** | With Ollama embedding |
 
 **Other provider options available during install:**
 
@@ -44,9 +44,10 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 |------|-----------|
 | Chat (OAuth, free) | Google Gemini, ChatGPT, Claude |
 | Chat (API key, paid) | OpenAI, Anthropic, Together AI, Groq |
-| Embedding (paid) | Together AI, OpenAI |
+| Embedding (local, free) | **Ollama** (qwen3-embedding:0.6b) |
+| Embedding (cloud, paid) | Together AI, OpenAI |
 
-> Costs depend entirely on which providers you choose. The free OAuth + Together AI combo above is the cheapest path. See [Roadmap](#roadmap) for upcoming Ollama support (local embedding, $0 cost).
+> Costs depend entirely on which providers you choose. The free OAuth + Ollama combo above gives you a **completely free** setup.
 
 ---
 
@@ -54,13 +55,13 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 
 | Requirement | Details |
 |-------------|---------|
-| **CPU** | 1 vCPU minimum (2+ recommended) |
+| **CPU** | 1 vCPU minimum (2+ for Ollama embedding) |
 | **OS** | Linux (Ubuntu 22.04+, Debian 12+) |
 | **Python** | 3.11+ |
-| **RAM** | 1 GB minimum with 1 GB swap (2 GB recommended) |
-| **Storage** | 500 MB (excluding Docker images) |
+| **RAM** | 1 GB + 1 GB swap minimum. 2 GB+ recommended (Ollama adds ~1.3 GB when active) |
+| **Storage** | 500 MB + ~700 MB for Ollama model (if using local embedding) |
 | **Docker** | Required — PostgreSQL 16 + pgvector runs in Docker |
-| **Network** | Access to: Together AI (embedding), Google OAuth (chat), Telegram API (bot), Brave Search (optional) |
+| **Network** | Google OAuth (chat), Telegram API (bot), Brave Search (optional). Cloud embedding requires Together AI or OpenAI access |
 
 ---
 
@@ -82,12 +83,13 @@ syne init
 `syne init` is fully automated — no manual steps mid-install:
 
 1. **Choose AI provider** — OAuth (free) or API key (paid)
-2. **Choose embedding provider**
+2. **Choose embedding provider** — Ollama (free, local), Together AI, or OpenAI
 3. **Enter Telegram bot token** — from @BotFather
 4. **Web search API key** (optional) — Brave Search, free tier 2,000 queries/month. Can be added later via chat.
 5. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
-6. **Initialize database** — Schema, identity, credentials saved to DB
-7. **Setup systemd service** — Auto-start on boot, linger enabled
+6. **Install Ollama** (if selected) — Auto-install binary + pull qwen3-embedding model
+7. **Initialize database** — Schema, identity, credentials saved to DB
+8. **Setup systemd service** — Auto-start on boot, linger enabled
 
 When init finishes, Syne is running.
 
@@ -168,11 +170,25 @@ Syne: Removed from memory. ✅
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
 
+### Embedding Providers
+
+During `syne init`, you choose one of three embedding providers:
+
+| Provider | Model | Dimensions | Cost | Requirements |
+|----------|-------|------------|------|-------------|
+| **Ollama** (recommended) | qwen3-embedding:0.6b | 1024 | **$0** | 2+ CPU cores, 2 GB+ RAM, 2 GB disk |
+| Together AI | bge-base-en-v1.5 | 768 | ~$0.008/1M tokens | API key ($5 free credit) |
+| OpenAI | text-embedding-3-small | 1536 | ~$0.02/1M tokens | API key |
+
+**Ollama** is auto-installed during `syne init` if selected — binary, server, and model are all set up automatically. If your system doesn't meet the minimum requirements (2 CPU, 2 GB RAM, 2 GB disk), the Ollama option is shown but blocked.
+
+> ⚠️ **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces — there is no migration path. Use the `/embedding` command in Telegram to switch.
+
 ---
 
 ## Ability System
 
-### Core Tools (13 — Always Available)
+### Core Tools (18 — Always Available)
 
 | Tool | Description |
 |------|-------------|
@@ -189,6 +205,11 @@ Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "in
 | `web_search` | Search the web (Brave Search API) |
 | `web_fetch` | Fetch and extract content from URLs |
 | `read_source` | Read Syne's own source code (for self-healing) |
+| `file_read` | Read files with offset/limit (max 100KB) |
+| `file_write` | Write files (restricted to safe directories) |
+| `manage_schedule` | Create/list/delete cron jobs and scheduled tasks |
+| `send_reaction` | Send emoji reactions to messages |
+| `send_voice` | Send voice messages (STT via Groq Whisper) |
 
 ### Bundled Abilities
 
@@ -308,8 +329,9 @@ All configuration lives in the `config` table. Defaults below reflect the recomm
 |-----|---------|-------------|
 | `provider.primary` | `google` | LLM provider |
 | `provider.chat_model` | `gemini-2.5-pro` | Chat model |
-| `provider.embedding_model` | `BAAI/bge-base-en-v1.5` | Embedding model (Together AI) |
-| `provider.embedding_dimensions` | `768` | Vector dimensions |
+| `provider.embedding_model` | Depends on init choice | Embedding model |
+| `provider.embedding_dimensions` | `1024` (Ollama) / `768` (Together AI) | Vector dimensions |
+| `provider.embedding_driver` | `ollama` / `together` / `openai` | Embedding provider driver |
 
 ### Memory Settings
 
@@ -414,8 +436,9 @@ syne memory add "info"     # Manually add memory
 |  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
 |  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
 |  |                                                      |  |
-|  |  Core Tools (13):                                    |  |
+|  |  Core Tools (18):                                    |  |
 |  |  exec · memory · web · config · source · sub-agents  |  |
+|  |  files · cron · reactions · voice                     |  |
 |  +------------------------------------------------------+  |
 |                                                            |
 |  +------------------------------------------------------+  |
@@ -428,9 +451,10 @@ syne memory add "info"     # Manually add memory
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  12 tables: identity · soul · rules · users ·       |  |
+|  |  13 tables: identity · soul · rules · users ·       |  |
 |  |  memory · sessions · messages · config · abilities · |  |
-|  |  groups · subagent_runs · capabilities               |  |
+|  |  groups · subagent_runs · capabilities ·             |  |
+|  |  scheduled_tasks                                     |  |
 |  +------------------------------------------------------+  |
 +------------------------------------------------------------+
 ```
@@ -452,6 +476,7 @@ syne memory add "info"     # Manually add memory
 | `abilities` | Registered abilities + config |
 | `config` | Runtime configuration (key-value) |
 | `subagent_runs` | Sub-agent execution history |
+| `scheduled_tasks` | Cron jobs and scheduled task definitions |
 | `capabilities` | System capabilities registry |
 
 ---
@@ -462,8 +487,8 @@ syne memory add "info"     # Manually add memory
 |-----------|-----------|
 | Language | Python 3.12 |
 | Database | PostgreSQL 16 + pgvector |
-| Chat LLM | Google Gemini 2.5 Pro (OAuth), Claude, GPT (multi-driver) |
-| Embedding | Together AI (bge-base-en-v1.5) |
+| Chat LLM | Google Gemini 2.5 Pro (OAuth), Claude, GPT (6 drivers) |
+| Embedding | Ollama (qwen3-embedding, local) or Together AI / OpenAI (cloud) |
 | Telegram | python-telegram-bot |
 | HTTP | httpx (async) |
 | CLI | Click + Rich |
@@ -494,6 +519,7 @@ syne/
 │   │   ├── openai.py        # OpenAI-compatible (Groq, etc.)
 │   │   ├── anthropic.py     # Claude (OAuth)
 │   │   ├── together.py      # Together AI (embedding)
+│   │   ├── ollama.py        # Ollama (local embedding)
 │   │   └── hybrid.py        # Chat + Embed from different providers
 │   ├── memory/
 │   │   ├── engine.py        # Store, recall, dedup, conflict resolution
@@ -501,13 +527,14 @@ syne/
 │   ├── channels/
 │   │   ├── telegram.py      # Telegram bot adapter
 │   │   └── cli_channel.py   # Interactive CLI (REPL)
-│   ├── tools/               # 13 core tools
+│   ├── tools/               # 18 core tools
 │   ├── abilities/           # Bundled + self-created abilities
+│   ├── scheduler.py         # Cron/scheduled task runner
 │   └── db/
-│       ├── schema.sql       # Database schema (12 tables)
+│       ├── schema.sql       # Database schema (13 tables)
 │       ├── connection.py    # Async connection pool
 │       └── models.py        # Data access layer
-├── tests/                   # 247 tests
+├── tests/                   # 362 tests
 ├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
@@ -539,13 +566,17 @@ pytest
 - [x] Conflict resolution (3-zone similarity)
 - [x] Ability system (bundled + self-created)
 - [x] Self-modification (abilities only)
-- [x] Multi-model support (5 drivers: Google, OpenAI, Anthropic, Groq, Together AI)
+- [x] Multi-model support (6 drivers: Google, OpenAI, Anthropic, Groq, Together AI, Ollama)
 - [x] Interactive CLI mode
 - [x] Source code introspection (read_source)
 - [x] Systemd service auto-setup
 - [x] Sub-agents
 - [x] Multi-user access control
-- [ ] Ollama support (local embedding — zero cost, but requires more CPU/RAM)
+- [x] File operations (read/write with security enforcement)
+- [x] Cron scheduler (DB-backed, once/interval/cron expressions)
+- [x] Telegram reactions (send/receive, 71 emojis)
+- [x] Voice message support (STT via Groq Whisper)
+- [x] Ollama embedding (local, $0 — qwen3-embedding with auto-install)
 - [ ] Ability marketplace
 - [ ] Web UI
 
