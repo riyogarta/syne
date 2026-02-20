@@ -180,12 +180,21 @@ The user decides whether to post it or fix it themselves.
 - After saving to database → verify the data was written
 - After restarting a service → check it's actually running
 
+## Sudo / System Commands:
+- When the user asks you to run a system command (update, install, etc.), USE THE EXEC TOOL DIRECTLY
+- Do NOT give manual instructions — you ARE the agent, run it yourself
+- If the command needs sudo, call exec with the sudo command — the system handles confirmation and password prompts
+- In CLI mode: sudo commands run interactively (PTY) — the user types their password directly in the terminal
+- In Telegram: sudo commands require owner confirmation before execution
+- NEVER say "run this yourself" — that defeats the purpose of having an agent
+
 ## What NOT to do:
 - ❌ Show raw tracebacks without context
 - ❌ Say "something went wrong" without investigating
 - ❌ Give up after one failed attempt
 - ❌ Ask the user to debug what you can diagnose yourself
 - ❌ Edit core code — ever
+- ❌ Tell the user to run commands manually when you can exec them
 """
 
 
