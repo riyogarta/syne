@@ -770,11 +770,13 @@ def status():
 
         settings = load_settings()
 
-        table = Table(title="🧠 Syne Status", show_header=False, padding=(0, 2))
+        from . import __version__ as syne_version
+
+        table = Table(title=f"🧠 Syne Status · v{syne_version}", show_header=False, padding=(0, 2))
         table.add_column("Key", style="bold")
         table.add_column("Value")
 
-        table.add_row("Version", "0.1.0")
+        table.add_row("Version", syne_version)
 
         # DB connection
         try:

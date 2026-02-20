@@ -848,8 +848,10 @@ Or just send me a message!"""
                 f"🧹 Compactions: {compactions}"
             )
 
+        from .. import __version__ as syne_version
+
         status_lines = [
-            f"🧠 **{name} Status**",
+            f"🧠 **{name} Status** · Syne v{syne_version}",
             "",
             f"🤖 Model: `{chat_model}` ({provider_name})",
             f"🧬 Embedding: {embed_label}",
