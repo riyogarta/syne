@@ -33,6 +33,64 @@ def _docker_ok(use_sudo=False) -> bool:
         return False
 
 
+def _ensure_ollama():
+    """Ensure Ollama is installed and qwen3-embedding model is pulled.
+
+    Skips download if already present.
+    """
+    import shutil
+    import subprocess
+    import time
+
+    model_name = "qwen3-embedding:0.6b"
+
+    # 1. Install Ollama if missing
+    if not shutil.which("ollama"):
+        console.print("[bold yellow]Ollama is not installed — installing now...[/bold yellow]")
+        ret = os.system("curl -fsSL https://ollama.com/install.sh | sh")
+        if ret != 0:
+            console.print("[red]Ollama installation failed.[/red]")
+            console.print("[dim]Install manually: https://ollama.com/download[/dim]")
+            raise SystemExit(1)
+        console.print("[green]✓ Ollama installed[/green]")
+
+    # 2. Ensure Ollama server is running
+    try:
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, text=True, timeout=5,
+        )
+        server_running = result.returncode == 0
+    except Exception:
+        server_running = False
+
+    if not server_running:
+        console.print("[dim]Starting Ollama server...[/dim]")
+        # Try systemd first, fallback to direct serve
+        ret = os.system("systemctl start ollama 2>/dev/null || (ollama serve &>/dev/null &)")
+        time.sleep(3)
+
+    # 3. Check if model already exists
+    try:
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, text=True, timeout=10,
+        )
+        if model_name.split(":")[0] in result.stdout:
+            console.print(f"[green]✓ Ollama model {model_name} already available[/green]")
+            return
+    except Exception:
+        pass
+
+    # 4. Pull model
+    console.print(f"[bold]Downloading {model_name} (~700MB)...[/bold]")
+    console.print("[dim]This may take a few minutes depending on your connection.[/dim]")
+    ret = os.system(f"ollama pull {model_name}")
+    if ret != 0:
+        console.print(f"[red]Failed to pull {model_name}.[/red]")
+        console.print("[dim]Try manually: ollama pull qwen3-embedding:0.6b[/dim]")
+        raise SystemExit(1)
+    console.print(f"[green]✓ Model {model_name} ready[/green]")
+
+
 def _ensure_docker() -> str:
     """Ensure Docker is installed, running, and accessible.
 
@@ -265,10 +323,60 @@ def init():
     console.print()
     console.print("  1. Together AI [green](recommended — ~$0.008/1M tokens)[/green]")
     console.print("  2. OpenAI [yellow](~$0.02/1M tokens)[/yellow]")
+
+    # Detect system resources for Ollama eligibility
+    ollama_available = True
+    ollama_reason = ""
+    sys_cpu = os.cpu_count() or 1
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    sys_ram_gb = int(line.split()[1]) / (1024 * 1024)
+                    break
+            else:
+                sys_ram_gb = 0
+    except Exception:
+        sys_ram_gb = 0
+    sys_disk_gb = 0
+    try:
+        import shutil as _shutil
+        disk = _shutil.disk_usage("/")
+        sys_disk_gb = disk.free / (1024 ** 3)
+    except Exception:
+        pass
+
+    min_cpu, min_ram, min_disk = 2, 2.0, 2.0
+    reasons = []
+    if sys_cpu < min_cpu:
+        reasons.append(f"{sys_cpu} CPU (need {min_cpu}+)")
+    if sys_ram_gb < min_ram:
+        reasons.append(f"{sys_ram_gb:.1f}GB RAM (need {min_ram:.0f}GB+)")
+    if sys_disk_gb < min_disk:
+        reasons.append(f"{sys_disk_gb:.1f}GB disk (need {min_disk:.0f}GB+)")
+    if reasons:
+        ollama_available = False
+        ollama_reason = ", ".join(reasons)
+
+    if ollama_available:
+        console.print("  3. Ollama [cyan](FREE — local, qwen3-embedding:0.6b)[/cyan]")
+        console.print("     [dim]⚠️  Requires: 2+ CPU cores, 2GB+ RAM, 2GB+ free disk[/dim]")
+        console.print("     [dim]Trade-off: ~1.3GB RAM when active, CPU burst during embedding[/dim]")
+    else:
+        console.print(f"  3. Ollama (FREE — local)  [red dim]\\[unavailable][/red dim]")
+        console.print(f"     [dim]⚠️  Your system: {ollama_reason}[/dim]")
+        console.print(f"     [dim]Minimum: {min_cpu} CPU, {min_ram:.0f}GB RAM, {min_disk:.0f}GB disk[/dim]")
     console.print()
 
-    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 2), default=1)
+    max_choice = 3 if ollama_available else 2
+    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 3), default=1)
     embedding_config = None
+
+    # Block unavailable Ollama selection
+    if embed_choice == 3 and not ollama_available:
+        console.print(f"\n[red]Ollama not available on this system: {ollama_reason}[/red]")
+        console.print("[dim]Please select option 1 or 2.[/dim]")
+        embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 2), default=1)
 
     if embed_choice == 1:
         console.print("\n[bold green]✓ Together AI selected for embeddings[/bold green]")
@@ -290,6 +398,15 @@ def init():
             "dimensions": 1536,
             "_api_key": embed_api_key,
             "_credential_key": "credential.openai_compat_api_key",
+        }
+    elif embed_choice == 3:
+        console.print("\n[bold green]✓ Ollama selected for embeddings (FREE, local)[/bold green]")
+        _ensure_ollama()
+        embedding_config = {
+            "driver": "ollama",
+            "model": "qwen3-embedding:0.6b",
+            "dimensions": 1024,
+            "_ollama": True,  # Flag: no API key needed
         }
 
     # 3. Telegram bot
@@ -515,10 +632,51 @@ def init():
             await set_config("provider.embedding_model", embedding_config["model"])
             await set_config("provider.embedding_dimensions", embedding_config["dimensions"])
             await set_config("provider.embedding_driver", embedding_config["driver"])
-            # Save embedding API key
+            # Save embedding API key (not needed for Ollama)
             if embedding_config.get("_api_key"):
                 cred_key = embedding_config["_credential_key"]
                 await set_config(cred_key, embedding_config["_api_key"])
+
+            # Build and save embedding model registry entry
+            driver = embedding_config["driver"]
+            if driver == "ollama":
+                embed_entry = {
+                    "key": "ollama-qwen3",
+                    "label": "Ollama — qwen3-embedding:0.6b (local, FREE)",
+                    "driver": "ollama",
+                    "model_id": embedding_config["model"],
+                    "auth": "none",
+                    "base_url": "http://localhost:11434",
+                    "dimensions": embedding_config["dimensions"],
+                    "cost": "FREE (local CPU)",
+                }
+                active_key = "ollama-qwen3"
+            elif driver == "together":
+                embed_entry = {
+                    "key": "together-bge",
+                    "label": "Together AI — bge-base-en-v1.5",
+                    "driver": "together",
+                    "model_id": embedding_config["model"],
+                    "auth": "api_key",
+                    "credential_key": "credential.together_api_key",
+                    "dimensions": embedding_config["dimensions"],
+                    "cost": "~$0.008/1M tokens",
+                }
+                active_key = "together-bge"
+            else:
+                embed_entry = {
+                    "key": "openai-small",
+                    "label": "OpenAI — text-embedding-3-small",
+                    "driver": "openai_compat",
+                    "model_id": embedding_config["model"],
+                    "auth": "api_key",
+                    "credential_key": "credential.openai_compat_api_key",
+                    "dimensions": embedding_config["dimensions"],
+                    "cost": "$0.02/1M tokens",
+                }
+                active_key = "openai-small"
+            await set_config("provider.embedding_models", [embed_entry])
+            await set_config("provider.active_embedding", active_key)
             console.print(f"[green]✓ Embedding config saved to database[/green]")
         await close_db()
 

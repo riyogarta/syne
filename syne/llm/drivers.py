@@ -18,6 +18,7 @@ from .openai import OpenAIProvider
 from .together import TogetherProvider
 from .hybrid import HybridProvider
 from .anthropic import AnthropicProvider
+from .ollama import OllamaProvider
 
 logger = logging.getLogger("syne.llm.drivers")
 
@@ -163,11 +164,20 @@ async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
         logger.error(f"Embedding entry missing driver/model_id: {embed_entry}")
         return None
     
+    if driver_name == "ollama":
+        # Ollama needs no API key — local only
+        base_url = embed_entry.get("base_url", "http://localhost:11434")
+        return OllamaProvider(
+            embedding_model=model_id,
+            base_url=base_url,
+        )
+    
+    # API-key-based providers need a key
     api_key = await _load_api_key(credential_key)
     if not api_key:
         logger.error(f"No API key for embedding provider {embed_entry.get('label', model_id)}")
         return None
-    
+
     if driver_name == "together":
         return TogetherProvider(
             api_key=api_key,
@@ -318,8 +328,8 @@ async def test_embedding(embed_entry: dict, timeout: int = 10) -> tuple[bool, st
             timeout=timeout,
         )
         
-        if result and result.embedding and len(result.embedding) > 0:
-            logger.info(f"Embedding test passed: {embed_entry.get('label')} → {len(result.embedding)} dims")
+        if result and result.vector and len(result.vector) > 0:
+            logger.info(f"Embedding test passed: {embed_entry.get('label')} → {len(result.vector)} dims")
             return True, ""
         else:
             return False, "Empty embedding response"
