@@ -79,8 +79,9 @@ CREATE TABLE IF NOT EXISTS memory (
     expires_at TIMESTAMPTZ                -- NULL = never expires
 );
 
-CREATE INDEX IF NOT EXISTS idx_memory_embedding ON memory USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+-- NOTE: Vector index is created dynamically after embedding provider is selected
+-- (dimensions must be known). See _ensure_vector_index() in telegram.py / cli.py.
+-- Example: CREATE INDEX idx_memory_embedding ON memory USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
 CREATE INDEX IF NOT EXISTS idx_memory_category ON memory (category);
 CREATE INDEX IF NOT EXISTS idx_memory_user ON memory (user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory (importance DESC);

@@ -125,7 +125,14 @@ class TestUserAutoDiscovery:
 
     @pytest.mark.asyncio
     async def test_auto_create_user(self, clean_test_users):
-        """Test auto-creating a user."""
+        """Test auto-creating a user (non-first user gets 'public')."""
+        # First user auto-becomes owner, so create a dummy owner first
+        await get_or_create_user(
+            name="Owner",
+            platform="telegram",
+            platform_id="test_owner_00000",
+        )
+        
         user = await get_or_create_user(
             name="Test User",
             platform="telegram",
@@ -136,7 +143,7 @@ class TestUserAutoDiscovery:
         assert user is not None
         assert user["name"] == "Test User"
         assert user["platform_id"] == "test_12345"
-        assert user.get("access_level") == "public"  # Default for auto-created
+        assert user.get("access_level") == "public"  # Default for auto-created (non-first)
 
     @pytest.mark.asyncio
     async def test_get_existing_user(self, clean_test_users):

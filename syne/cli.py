@@ -473,6 +473,20 @@ def init():
         db_password = existing_env["SYNE_DB_PASSWORD"]
         db_name = existing_env.get("SYNE_DB_NAME", "mnemosyne")
         console.print(f"  [dim]Reusing existing DB credentials from .env ({db_user})[/dim]")
+    elif existing_env.get("SYNE_DATABASE_URL"):
+        # Parse credentials from DATABASE_URL (legacy .env without separate DB_USER/PASSWORD)
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(existing_env["SYNE_DATABASE_URL"])
+            db_user = parsed.username or f"syne_{secrets.token_hex(4)}"
+            db_password = parsed.password or secrets.token_hex(16)
+            db_name = (parsed.path or "/mnemosyne").lstrip("/") or "mnemosyne"
+            console.print(f"  [dim]Reusing DB credentials from DATABASE_URL ({db_user})[/dim]")
+        except Exception:
+            db_suffix = secrets.token_hex(4)
+            db_user = f"syne_{db_suffix}"
+            db_password = secrets.token_hex(16)
+            db_name = "mnemosyne"
     else:
         db_suffix = secrets.token_hex(4)
         db_user = f"syne_{db_suffix}"
@@ -498,6 +512,24 @@ def init():
 
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
     docker_cmd = f"{docker_prefix}docker compose"
+
+    # Check if DB container already exists with potentially different credentials
+    import subprocess
+    existing_container = subprocess.run(
+        f"{docker_cmd} ps -q db".split() if not docker_prefix else f"sudo docker compose ps -q db".split(),
+        capture_output=True, text=True, cwd=os.getcwd(),
+    )
+    if existing_container.stdout.strip():
+        # Container exists — check if we can connect with current credentials
+        check = subprocess.run(
+            f"{docker_cmd} exec -T db pg_isready -U {db_user}".split() if not docker_prefix
+            else f"sudo docker compose exec -T db pg_isready -U {db_user}".split(),
+            capture_output=True, text=True, cwd=os.getcwd(),
+        )
+        if check.returncode != 0:
+            console.print("[yellow]⚠️  Existing DB container has different credentials.[/yellow]")
+            console.print("[dim]  Resetting database volume to apply new credentials...[/dim]")
+            os.system(f"{docker_cmd} down -v")
 
     console.print("\n[bold]Starting database...[/bold]")
     result = os.system(f"{docker_cmd} up -d db")
