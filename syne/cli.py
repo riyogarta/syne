@@ -152,10 +152,8 @@ def _ensure_docker() -> str:
 
 
 def _create_symlink():
-    """Create /usr/local/bin/syne symlink so `syne` works without activating venv."""
-    import subprocess
+    """Create ~/.local/bin/syne symlink so `syne` works without activating venv."""
     syne_bin = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv", "bin", "syne")
-    target = "/usr/local/bin/syne"
 
     if not os.path.exists(syne_bin):
         # Fallback: find syne in the current venv
@@ -167,34 +165,35 @@ def _create_symlink():
             console.print("[yellow]⚠ Could not find syne binary to create symlink[/yellow]")
             return
 
+    local_bin = os.path.expanduser("~/.local/bin")
+    os.makedirs(local_bin, exist_ok=True)
+    target = os.path.join(local_bin, "syne")
+
     # Check if symlink already exists and points to correct target
     if os.path.islink(target) and os.readlink(target) == syne_bin:
-        return
-
-    # Try without sudo first, then with sudo
-    try:
+        pass  # Already correct
+    else:
+        # Remove old symlink/file if exists
+        if os.path.exists(target) or os.path.islink(target):
+            os.remove(target)
         os.symlink(syne_bin, target)
         console.print(f"[green]✓[/green] Created symlink: {target} → {syne_bin}")
-    except PermissionError:
-        result = subprocess.run(
-            ["sudo", "ln", "-sf", syne_bin, target],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0:
-            console.print(f"[green]✓[/green] Created symlink: {target} → {syne_bin}")
-        else:
-            # Fallback: add shell alias
-            bashrc = os.path.expanduser("~/.bashrc")
-            alias_line = f'alias syne="{syne_bin}"'
-            try:
-                with open(bashrc, "r") as f:
-                    content = f.read()
-                if alias_line not in content:
-                    with open(bashrc, "a") as f:
-                        f.write(f"\n# Syne CLI\n{alias_line}\n")
-                    console.print(f"[green]✓[/green] Added alias to ~/.bashrc (run: source ~/.bashrc)")
-            except Exception:
-                console.print(f"[yellow]⚠ Add manually: {alias_line}[/yellow]")
+
+    # Ensure ~/.local/bin is in PATH
+    path_line = 'export PATH="$HOME/.local/bin:$PATH"'
+    shell_rc = os.path.expanduser("~/.bashrc")
+    if os.path.exists(os.path.expanduser("~/.zshrc")):
+        shell_rc = os.path.expanduser("~/.zshrc")
+
+    try:
+        with open(shell_rc, "r") as f:
+            content = f.read()
+        if path_line not in content and ".local/bin" not in content:
+            with open(shell_rc, "a") as f:
+                f.write(f"\n# Syne CLI\n{path_line}\n")
+            console.print(f"[green]✓[/green] Added ~/.local/bin to PATH in {os.path.basename(shell_rc)}")
+    except Exception:
+        console.print(f"[yellow]⚠ Add to your shell rc: {path_line}[/yellow]")
 
 
 def _setup_service():
