@@ -151,6 +151,11 @@ async def run_cli(debug: bool = False):
     finally:
         readline.write_history_file(history_file)
         await agent.stop()
+        # Restore terminal state — readline/executor can leave it corrupted
+        try:
+            os.system("stty sane 2>/dev/null")
+        except Exception:
+            pass
 
 
 def _get_input_sync() -> str | None:
