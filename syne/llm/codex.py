@@ -227,8 +227,6 @@ class CodexProvider(LLMProvider):
             "input": input_msgs,
             "stream": True,
             "store": False,
-            "tool_choice": "auto",
-            "parallel_tool_calls": True,
         }
 
         # Note: Codex backend does NOT support temperature parameter
@@ -236,6 +234,8 @@ class CodexProvider(LLMProvider):
             body["max_output_tokens"] = max_tokens
         if tools:
             body["tools"] = self._format_tools(tools)
+            body["tool_choice"] = "auto"
+            body["parallel_tool_calls"] = True
 
         url = f"{self.base_url}/codex/responses"
         headers = self._get_headers()
