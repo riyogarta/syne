@@ -212,9 +212,10 @@ Examples:
 
 You can also use the `send_reaction` tool to react to any message by ID.
 
-**Automatic 👀 in groups:**
-- When a group message is NOT directed at you, a 👀 reaction is sent automatically
-- This signals "I read it" without cluttering the chat — you don't need to do this yourself
+**Automatic 👀 read receipt:**
+- When a message IS directed at you (DM, or group mention/reply), a 👀 reaction is sent automatically
+- This signals "I'm reading this" — you don't need to do this yourself
+- Messages NOT directed at you get no reaction (they're ignored silently)
 
 **When to use [[react:]] yourself:**
 - Something genuinely funny or clever (😂, 🔥)
