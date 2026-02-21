@@ -18,7 +18,6 @@ import logging
 import os
 import secrets
 import time
-import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Thread
 from typing import Optional
@@ -111,18 +110,12 @@ async def login_codex() -> dict:
 
         _headless = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
 
+        print("\n🔐 Open this URL in your browser to sign in with ChatGPT:")
+        print(f"\n   {auth_url}\n")
         if _headless:
-            print("\n🔐 Headless server detected — SSH tunnel required for OAuth.")
-            print("   On your local machine, run:")
+            print("   (Headless server? Run this on your local machine first:)")
             print(f"   ssh -L 1455:localhost:1455 {os.environ.get('USER', 'user')}@<your-server-ip>")
             print()
-            print("   Then open this URL in your local browser:")
-            print(f"   {auth_url}")
-            print()
-        else:
-            print("\n🔐 Opening browser for ChatGPT sign-in...")
-            print(f"   If the browser doesn't open, visit:\n   {auth_url}\n")
-            webbrowser.open(auth_url)
 
         print("⏳ Waiting for sign-in...")
         for _ in range(300):
