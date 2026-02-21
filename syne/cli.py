@@ -1600,26 +1600,38 @@ def _restart_service():
     """Restart syne systemd service if it's running."""
     import subprocess
 
-    # Try user service first, then system
-    for cmd_prefix in [["systemctl", "--user"], ["sudo", "systemctl"]]:
-        try:
-            result = subprocess.run(
-                cmd_prefix + ["is-active", "syne"],
-                capture_output=True, text=True, timeout=5,
+    # Try user service first (no sudo needed)
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "is-active", "syne"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip() == "active":
+            console.print("🔄 Restarting syne service...")
+            restart = subprocess.run(
+                ["systemctl", "--user", "restart", "syne"],
+                capture_output=True, text=True, timeout=15,
             )
-            if result.stdout.strip() == "active":
-                console.print("🔄 Restarting syne service...")
-                restart = subprocess.run(
-                    cmd_prefix + ["restart", "syne"],
-                    capture_output=True, text=True, timeout=15,
-                )
-                if restart.returncode == 0:
-                    console.print("[green]✅ Service restarted[/green]")
-                else:
-                    console.print(f"[yellow]⚠️ Service restart failed: {restart.stderr.strip()}[/yellow]")
-                return
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
+            if restart.returncode == 0:
+                console.print("[green]✅ Service restarted[/green]")
+            else:
+                console.print(f"[yellow]⚠️ Service restart failed: {restart.stderr.strip()}[/yellow]")
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Check system service (without sudo — just check status)
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "syne"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip() == "active":
+            console.print("[yellow]⚠️ Syne runs as system service. Restart manually:[/yellow]")
+            console.print("[dim]  sudo systemctl restart syne[/dim]")
+            return
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
 
 @cli.command()
