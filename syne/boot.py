@@ -222,15 +222,6 @@ The user decides whether to post it or fix it themselves.
 - For `playwright install-deps`, use: `.venv/bin/python3 -m playwright install-deps chromium`
 - The venv path is relative to your project root (where the service runs from)
 
-## System Package Installation (CRITICAL):
-- You have passwordless sudo for apt-get (configured in /etc/sudoers.d/)
-- You CAN and SHOULD install OS-level dependencies yourself when needed
-- Do NOT ask the user to install system packages — just do it:
-  - ✅ `sudo apt-get update && sudo apt-get install -y libnspr4 libnss3`
-  - ✅ `sudo .venv/bin/python3 -m playwright install-deps chromium`
-  - ✅ `sudo apt-get install -y <any-package-you-need>`
-- This applies to ALL system library dependencies (e.g., Chromium deps, build tools, etc.)
-- If a command fails with "library not found" or "cannot open shared object", install the missing OS package yourself
 """
 
 
