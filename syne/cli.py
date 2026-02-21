@@ -1703,6 +1703,79 @@ def update_dev():
         console.print("[green]✅ Syne updated (dev)[/green]")
 
 
+# ── Uninstall ────────────────────────────────────────────────
+
+@cli.command()
+def uninstall():
+    """Completely remove Syne — service, containers, data, source code."""
+    import subprocess
+    import shutil
+    from pathlib import Path
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    compose_file = os.path.join(syne_dir, "docker-compose.yml")
+    service_file = Path.home() / ".config" / "systemd" / "user" / "syne.service"
+    symlink_path = os.path.expanduser("~/.local/bin/syne")
+
+    console.print()
+    console.print("[bold red]⚠️  Syne Uninstall[/bold red]")
+    console.print()
+    console.print("This will permanently remove:")
+    console.print(f"  • Systemd service (stop, disable, delete)")
+    console.print(f"  • Docker containers and database volume (ALL DATA LOST)")
+    console.print(f"  • CLI symlink ({symlink_path})")
+    console.print(f"  • Source code ({syne_dir})")
+    console.print()
+
+    confirm = input("Type 'yes' to confirm uninstall: ").strip().lower()
+    if confirm != "yes":
+        console.print("[dim]Cancelled.[/dim]")
+        return
+
+    console.print()
+
+    # 1. Stop and remove systemd service
+    console.print("[bold]1/4[/bold] Removing systemd service...")
+    subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
+    if service_file.exists():
+        service_file.unlink()
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    console.print("  [green]✓ Service removed[/green]")
+
+    # 2. Stop and remove Docker containers + volume
+    console.print("[bold]2/4[/bold] Removing Docker containers and data...")
+    if os.path.isfile(compose_file):
+        subprocess.run(
+            ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
+            capture_output=True, cwd=syne_dir,
+        )
+    # Also clean up any leftover containers
+    for name in ["syne-db", "syne-agent"]:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    console.print("  [green]✓ Containers and data removed[/green]")
+
+    # 3. Remove CLI symlink
+    console.print("[bold]3/4[/bold] Removing CLI symlink...")
+    if os.path.islink(symlink_path) or os.path.exists(symlink_path):
+        os.remove(symlink_path)
+        console.print(f"  [green]✓ Removed {symlink_path}[/green]")
+    else:
+        console.print(f"  [dim]Not found: {symlink_path}[/dim]")
+
+    # 4. Remove source code (self-destruct — must be last)
+    console.print("[bold]4/4[/bold] Removing source code...")
+    try:
+        shutil.rmtree(syne_dir)
+        console.print(f"  [green]✓ Removed {syne_dir}[/green]")
+    except Exception as e:
+        console.print(f"  [yellow]⚠️ Could not fully remove {syne_dir}: {e}[/yellow]")
+        console.print(f"  [dim]Remove manually: rm -rf {syne_dir}[/dim]")
+
+    console.print()
+    console.print("[bold green]✅ Syne has been completely uninstalled.[/bold green]")
+
+
 def main():
     """CLI entry point."""
     cli()
