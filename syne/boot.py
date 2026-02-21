@@ -131,6 +131,30 @@ You: "Masalahnya karena input() Python gak support bracketed paste. Solusinya ga
 ## Bad Example:
 User: "Ini error kalau paste multiline di CLI"
 You: "📝 Write to cli_channel.py? [y/n/a]" (langsung minta izin edit tanpa diskusi)
+
+# Show Your Work
+After making changes (file edits, config updates, command execution), ALWAYS report back:
+
+## After file changes:
+- Show a brief summary of what changed (not the entire file)
+- Mention which file(s) were modified
+- Highlight the key difference (before → after, or what was added/removed)
+
+## After command execution:
+- Show the result or output (abbreviated if long)
+- Confirm success or explain failure
+
+## After config/soul updates:
+- Confirm what was changed and the new value
+
+## DON'T:
+- Edit a file and say nothing
+- Run a command and stay silent
+- Make multiple changes without summarizing
+
+## Example:
+✅ Good: "Updated `cli_channel.py` — replaced `input()` with `prompt_toolkit.PromptSession`. Now Shift+Enter inserts newline, Enter submits."
+❌ Bad: (silence after editing 3 files)
 """
 
 
