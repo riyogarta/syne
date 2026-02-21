@@ -379,7 +379,7 @@ syne stop                  # Stop agent
 
 # Updates
 syne update                # Update to latest release (skips if version unchanged)
-syne update-dev            # Force pull + reinstall (ignores version check)
+syne updatedev             # Force pull + reinstall (ignores version check)
 
 # Database
 syne db init               # Initialize schema

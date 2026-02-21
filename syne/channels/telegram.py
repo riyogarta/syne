@@ -108,7 +108,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
         self.app.add_handler(CommandHandler("update", self._cmd_update))
-        self.app.add_handler(CommandHandler("update_dev", self._cmd_updatedev))
+        self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(

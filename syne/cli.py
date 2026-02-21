@@ -1674,7 +1674,7 @@ def update():
         console.print(f"[green]✅ Syne updated to v{new_ver}[/green]")
 
 
-@cli.command(name="update-dev", hidden=True)
+@cli.command(name="updatedev", hidden=True)
 def update_dev():
     """Pull latest code and reinstall (always, ignoring version)."""
     import subprocess
