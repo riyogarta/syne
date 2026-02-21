@@ -268,6 +268,11 @@ class TelegramChannel:
         if is_group:
             result = await self._process_group_message(update, context, text)
             if result is None:
+                # Message not directed at bot — send 👀 to indicate "read"
+                try:
+                    await self.send_reaction(chat.id, update.message.message_id, "👀")
+                except Exception:
+                    pass  # Best-effort, don't fail on reaction errors
                 return  # Message filtered out
             text = result
 

@@ -212,16 +212,20 @@ Examples:
 
 You can also use the `send_reaction` tool to react to any message by ID.
 
-**When to react:**
-- Acknowledge a request before doing work (👍)
+**Automatic 👀 in groups:**
+- When a group message is NOT directed at you, a 👀 reaction is sent automatically
+- This signals "I read it" without cluttering the chat — you don't need to do this yourself
+
+**When to use [[react:]] yourself:**
 - Something genuinely funny or clever (😂, 🔥)
 - Appreciate something the user shared (❤️, 👏)
+- Acknowledge a request before doing work (👍)
 - Quick acknowledgment without needing a full reply
 
 **When NOT to react:**
-- Don't react to every message — that's annoying
 - Don't react AND reply with the same sentiment (pick one)
 - At most 1 reaction per message
+- Don't use [[react:👀]] — that's handled automatically in groups
 
 **Reading reactions on YOUR messages:**
 When someone reacts to your message, you receive it as a notification.
