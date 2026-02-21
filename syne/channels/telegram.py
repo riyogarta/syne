@@ -1462,53 +1462,76 @@ Or just send me a message!"""
         await self._run_update(msg, context, dev=True)
 
     async def _run_update(self, msg, context, dev: bool = False):
-        """Run update by calling syne CLI command (same environment as user shell)."""
+        """Run update directly (git + pip) then self-restart."""
         import asyncio
         import subprocess
         import os
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        syne_bin = os.path.join(syne_dir, ".venv", "bin", "syne")
         loop = asyncio.get_event_loop()
 
+        # Ensure HOME is set for git credentials
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "HOME": os.path.expanduser("~")}
+
         def _do():
-            """Run syne update/updatedev CLI in subprocess."""
-            cmd = [syne_bin, "updatedev"] if dev else [syne_bin, "update"]
-            # Inherit full user environment including HOME, git credentials, etc.
-            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "HOME": os.path.expanduser("~")}
+            """Blocking update logic."""
+            from . import __version__ as current_version
+
+            # Git fetch
+            try:
+                subprocess.run(
+                    ["git", "fetch", "origin"], cwd=syne_dir,
+                    capture_output=True, text=True, timeout=30, env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return "error", "❌ Git fetch timed out."
+
+            if not dev:
+                # Check remote version
+                result = subprocess.run(
+                    ["git", "show", "origin/main:syne/__init__.py"],
+                    cwd=syne_dir, capture_output=True, text=True, env=env,
+                )
+                remote_version = current_version
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if line.startswith("__version__"):
+                            remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+                if remote_version == current_version:
+                    return "up_to_date", f"✅ Already up to date (v{current_version})"
+
+            # Git pull
             try:
                 result = subprocess.run(
-                    cmd, cwd=syne_dir,
-                    capture_output=True, text=True, timeout=180, env=env,
+                    ["git", "pull"], cwd=syne_dir,
+                    capture_output=True, text=True, timeout=60, env=env,
                 )
-                output = result.stdout.strip()
-                # Parse output for status
-                if "Already up to date" in output:
-                    return "up_to_date", output
-                elif "updated" in output.lower() or "Updated" in output:
-                    return "restart", output
-                elif result.returncode != 0:
-                    err = result.stderr.strip() or output
-                    return "error", f"❌ {err}"
-                else:
-                    return "done", output or "✅ Done"
             except subprocess.TimeoutExpired:
-                return "error", "❌ Update timed out (180s)."
+                return "error", "❌ Git pull timed out."
+            if result.returncode != 0:
+                return "error", f"❌ Git pull failed: {result.stderr.strip()}"
+
+            # Pip install
+            venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
+            try:
+                result = subprocess.run(
+                    [venv_pip, "install", "-e", ".", "-q"],
+                    cwd=syne_dir, capture_output=True, text=True, timeout=120, env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return "error", "❌ pip install timed out."
+            if result.returncode != 0:
+                return "error", f"❌ Install failed: {result.stderr.strip()}"
+
+            label = "dev" if dev else "latest"
+            return "restart", f"✅ Updated ({label}). Restarting..."
 
         status, text = await loop.run_in_executor(None, _do)
-
-        # Clean ANSI codes and Rich markup from CLI output for Telegram
-        import re
-        text = re.sub(r'\x1b\[[0-9;]*m', '', text)  # ANSI escape codes
-        text = re.sub(r'\[/?[a-z ]+\]', '', text)  # Rich markup like [green], [/green]
-        text = text.strip()
-        if not text:
-            text = "✅ Done"
-
         await msg.edit_text(text)
 
         if status == "restart":
-            # Restart the process — systemd will auto-restart
+            # Self-restart via SIGTERM — systemd auto-restarts
             import signal
             await asyncio.sleep(1)
             os.kill(os.getpid(), signal.SIGTERM)
