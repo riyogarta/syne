@@ -1590,13 +1590,10 @@ Or just send me a message!"""
             actions.append(InlineKeyboardButton("🏠 Back to default", callback_data="brw:reset"))
         buttons.append(actions)
 
-        # Status text
+        # Header text — just show current path being browsed
+        text = f"📂 `{path}`"
         if current_browse:
-            status = f"📁 Active: `{current_browse}`\n\n"
-        else:
-            status = "📁 No directory selected (default Telegram session)\n\n"
-
-        text = f"{status}📂 `{path}`"
+            text = f"✅ Active: `{current_browse}`\n\n{text}"
 
         markup = InlineKeyboardMarkup(buttons)
 
