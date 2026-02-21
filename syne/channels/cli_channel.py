@@ -197,14 +197,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
                 if handled:
                     continue
 
-            # Phase 2: Process (Ctrl+C = cancel this request)
+            # Phase 2: Process (Ctrl+C or Esc = cancel this request)
             console.print()
+            status = None
             try:
                 msg = user_input
                 status = console.status("[bold blue]Thinking...", spinner="dots")
                 status.start()
-                agent.conversations._active_status = status  # For approval callback to pause
-                _cli_status_callback._active_status = status  # For compaction callback to pause
+                agent.conversations._active_status = status
+                _cli_status_callback._active_status = status
 
                 # Wire tool callback to update spinner
                 _TOOL_LABELS = {
@@ -231,30 +232,26 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
 
                 agent.conversations.set_tool_callback(_on_tool)
 
-                try:
-                    response = await agent.conversations.handle_message(
-                        platform="cli",
-                        chat_id=chat_id,
-                        user=user,
-                        message=msg,
-                        message_metadata={"cwd": agent._cli_cwd},
-                    )
-                finally:
-                    status.stop()
-                    agent.conversations._active_status = None
-                    _cli_status_callback._active_status = None
-                    agent.conversations.set_tool_callback(None)
+                response = await agent.conversations.handle_message(
+                    platform="cli",
+                    chat_id=chat_id,
+                    user=user,
+                    message=msg,
+                    message_metadata={"cwd": agent._cli_cwd},
+                )
+
+                # Cleanup spinner
+                _stop_status(status, agent)
+                status = None
 
                 # Display response
                 if response:
                     _display_response(response)
                 console.print()
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, asyncio.CancelledError):
                 # Ctrl+C during processing → cancel, back to prompt
-                try:
-                    status.stop()
-                except Exception:
-                    pass
+                _stop_status(status, agent)
+                status = None
                 console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
                 continue
 
@@ -274,6 +271,21 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
         pass
     # Force exit to avoid threading cleanup error from executor thread
     os._exit(0)
+
+
+def _stop_status(status, agent):
+    """Safely stop spinner and clean up callbacks."""
+    try:
+        if status:
+            status.stop()
+    except Exception:
+        pass
+    try:
+        agent.conversations._active_status = None
+        _cli_status_callback._active_status = None
+        agent.conversations.set_tool_callback(None)
+    except Exception:
+        pass
 
 
 def _get_input_sync() -> str | None:
