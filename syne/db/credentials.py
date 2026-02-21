@@ -24,6 +24,12 @@ CRED_GOOGLE_EXPIRES_AT = "credential.google_oauth_expires_at"
 CRED_GOOGLE_PROJECT_ID = "credential.google_oauth_project_id"
 CRED_GOOGLE_EMAIL = "credential.google_oauth_email"
 
+# Claude OAuth
+CRED_CLAUDE_ACCESS_TOKEN = "credential.claude_oauth_access_token"
+CRED_CLAUDE_REFRESH_TOKEN = "credential.claude_oauth_refresh_token"
+CRED_CLAUDE_EXPIRES_AT = "credential.claude_oauth_expires_at"
+CRED_CLAUDE_EMAIL = "credential.claude_oauth_email"
+
 
 # ============================================================
 # GENERIC CREDENTIAL FUNCTIONS
@@ -131,3 +137,57 @@ async def update_google_access_token(access_token: str, expires_at: float, refre
     if refresh_token:
         await set_credential(CRED_GOOGLE_REFRESH_TOKEN, refresh_token)
     logger.debug("Google access token updated in DB")
+
+
+# ============================================================
+# CLAUDE OAUTH CREDENTIALS
+# ============================================================
+
+async def get_claude_oauth_credentials() -> Optional[dict]:
+    """Get Claude OAuth credentials from DB.
+    
+    Returns dict with: access_token, refresh_token, expires_at, email
+    or None if not found.
+    """
+    refresh = await get_credential(CRED_CLAUDE_REFRESH_TOKEN)
+    if not refresh:
+        return None
+    
+    return {
+        "access_token": await get_credential(CRED_CLAUDE_ACCESS_TOKEN, ""),
+        "refresh_token": refresh,
+        "expires_at": await get_credential(CRED_CLAUDE_EXPIRES_AT, 0),
+        "email": await get_credential(CRED_CLAUDE_EMAIL),
+    }
+
+
+async def set_claude_oauth_credentials(
+    access_token: str,
+    refresh_token: str,
+    expires_at: float,
+    email: Optional[str] = None,
+) -> None:
+    """Store Claude OAuth credentials in DB."""
+    await set_credential(
+        CRED_CLAUDE_ACCESS_TOKEN,
+        access_token,
+        "Claude OAuth access token"
+    )
+    await set_credential(
+        CRED_CLAUDE_REFRESH_TOKEN,
+        refresh_token,
+        "Claude OAuth refresh token"
+    )
+    await set_credential(
+        CRED_CLAUDE_EXPIRES_AT,
+        expires_at,
+        "Claude OAuth token expiry (epoch seconds)"
+    )
+    if email:
+        await set_credential(
+            CRED_CLAUDE_EMAIL,
+            email,
+            "Claude account email"
+        )
+    
+    logger.info(f"Claude OAuth credentials stored in DB for {email or 'unknown'}")

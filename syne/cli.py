@@ -472,51 +472,21 @@ def init():
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
         
-        # Check if Claude CLI credentials exist
-        cred_path = os.path.expanduser("~/.claude/.credentials.json")
-        if os.path.exists(cred_path):
-            console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
-        else:
-            import shutil
-            import subprocess
-
-            console.print("\n  [dim]Setting up Claude CLI authentication...[/dim]")
-
-            # Install Claude CLI if missing
-            if not shutil.which("claude"):
-                # Ensure npm is available
-                if not shutil.which("npm"):
-                    console.print("  [dim]Installing Node.js...[/dim]")
-                    ret = os.system("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y -qq nodejs")
-                    if ret != 0:
-                        console.print("  [red]Failed to install Node.js.[/red]")
-                        console.print("  [dim]Install manually: https://nodejs.org/[/dim]")
-                        raise SystemExit(1)
-
-                console.print("  [dim]Installing Claude CLI...[/dim]")
-                ret = os.system("npm install -g @anthropic-ai/claude-code 2>/dev/null")
-                if ret != 0:
-                    console.print("  [red]Failed to install Claude CLI.[/red]")
-                    raise SystemExit(1)
-                console.print("  [green]✓ Claude CLI installed[/green]")
-
-            # Run claude login
-            console.print("\n  [bold]Running 'claude login'...[/bold]")
-            console.print("  [dim]Follow the instructions below to authenticate.[/dim]\n")
-            ret = os.system("claude login")
-            if ret != 0:
-                console.print("  [red]Claude login failed.[/red]")
-                raise SystemExit(1)
-
-            # Re-check credentials
-            if not os.path.exists(cred_path):
-                console.print(f"  [red]✗ Credentials not found after login: {cred_path}[/red]")
-                console.print("  [dim]Try running 'claude login' manually.[/dim]")
-                raise SystemExit(1)
-
-            console.print(f"  [green]✓ Claude authenticated successfully[/green]")
+        # Standalone OAuth flow — no Claude CLI dependency
+        from .auth.claude_oauth import login_claude
+        try:
+            claude_creds = asyncio.get_event_loop().run_until_complete(login_claude())
+        except RuntimeError:
+            # No running loop — create one
+            claude_creds = asyncio.run(login_claude())
         
-        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
+        # Credentials will be saved to DB after DB is initialized
+        provider_config = {
+            "driver": "anthropic",
+            "model": "claude-sonnet-4-20250514",
+            "auth": "oauth",
+            "_claude_creds": claude_creds.to_dict(),
+        }
 
     elif choice == 4:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
@@ -820,6 +790,18 @@ def init():
             await set_config("credential.codex_refresh_token", codex_creds["refresh_token"])
             await set_config("credential.codex_expires_at", codex_creds["expires_at"])
             console.print("[green]✓ ChatGPT OAuth credentials saved to database[/green]")
+        # Save Claude OAuth credentials to DB if collected
+        if provider_config and provider_config.get("_claude_creds"):
+            from .auth.claude_oauth import ClaudeCredentials
+            from .db.credentials import set_claude_oauth_credentials
+            cdata = provider_config["_claude_creds"]
+            await set_claude_oauth_credentials(
+                access_token=cdata["access_token"],
+                refresh_token=cdata["refresh_token"],
+                expires_at=cdata["expires_at"],
+                email=cdata.get("email"),
+            )
+            console.print(f"[green]✓ Claude OAuth credentials saved to database ({cdata.get('email', 'unknown')})[/green]")
         # Save API key to DB if provided (not in .env!)
         if provider_config and provider_config.get("_api_key"):
             from .db.models import set_config
