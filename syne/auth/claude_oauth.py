@@ -19,7 +19,6 @@ import base64
 import hashlib
 import json
 import logging
-import os
 import secrets
 import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -242,28 +241,16 @@ async def login_claude() -> ClaudeCredentials:
         })
         auth_url = f"{_AUTHORIZE_URL}?{params}"
 
-        _headless = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
-
         print("\n🔐 Open this URL in your browser to sign in with Claude:")
         print(f"\n   {auth_url}\n")
-        if _headless:
-            print(f"   (Headless server? Run this on your local machine first:)")
-            print(f"   ssh -L {_REDIRECT_PORT}:localhost:{_REDIRECT_PORT} {os.environ.get('USER', 'user')}@<your-server-ip>")
-            print()
-
         print("⏳ Waiting for sign-in...")
-        for _ in range(300):
-            await asyncio.sleep(1)
-            if _OAuthCallbackHandler.code:
-                break
-        else:
-            raise TimeoutError("OAuth callback timed out (5 minutes)")
+        print("   After login, if the page shows an error, copy the full URL")
+        print("   from your browser's address bar and paste it here:\n")
 
-        code = _OAuthCallbackHandler.code
-        callback_state = _OAuthCallbackHandler.state
-
-        if callback_state != state:
-            raise ValueError("OAuth state mismatch — possible CSRF attack")
+        from ._oauth_helpers import wait_for_auth_code
+        code = await wait_for_auth_code(
+            _OAuthCallbackHandler, "/oauth/callback", timeout_seconds=300
+        )
 
         print("🔄 Exchanging authorization code...")
         async with httpx.AsyncClient(timeout=30) as client:
