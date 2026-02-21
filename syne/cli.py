@@ -472,15 +472,9 @@ def init():
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
         
-        # Standalone OAuth flow — no Claude CLI dependency
         from .auth.claude_oauth import login_claude
-        try:
-            claude_creds = asyncio.get_event_loop().run_until_complete(login_claude())
-        except RuntimeError:
-            # No running loop — create one
-            claude_creds = asyncio.run(login_claude())
+        claude_creds = asyncio.run(login_claude())
         
-        # Credentials will be saved to DB after DB is initialized
         provider_config = {
             "driver": "anthropic",
             "model": "claude-sonnet-4-20250514",
