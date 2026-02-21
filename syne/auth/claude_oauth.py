@@ -243,10 +243,13 @@ async def login_claude() -> ClaudeCredentials:
 
         print("\n🔐 Open this URL in your browser to sign in with Claude:")
         print(f"\n   {auth_url}\n")
-        print("⏳ Waiting for sign-in...")
-        print('   After login, your browser will show "This site can\'t be reached".')
-        print("   That's normal! Copy the ENTIRE URL from the address bar and paste it here.")
-        print(f"   (It looks like: http://localhost:{_REDIRECT_PORT}/oauth/callback?code=...)\n")
+        print("Steps:")
+        print("   1. Open the URL above in your browser")
+        print("   2. Click 'Authorize' to grant access")
+        print('   3. Browser will show "This site can\'t be reached" — that\'s normal!')
+        print("   4. Copy the ENTIRE URL from the browser address bar")
+        print(f"      (looks like: http://localhost:{_REDIRECT_PORT}/oauth/callback?code=...)")
+        print("   5. Paste it below\n")
 
         from ._oauth_helpers import wait_for_auth_code
         code = await wait_for_auth_code(
