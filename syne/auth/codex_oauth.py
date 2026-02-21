@@ -110,8 +110,8 @@ async def login_codex() -> dict:
         print("\n🔐 Open this URL in your browser to sign in with ChatGPT:")
         print(f"\n   {auth_url}\n")
         print("⏳ Waiting for sign-in...")
-        print("   After login, your browser will redirect to a localhost URL.")
-        print("   Copy the ENTIRE URL from your browser's address bar and paste it here.")
+        print('   After login, your browser will show "This site can\'t be reached".')
+        print("   That's normal! Copy the ENTIRE URL from the address bar and paste it here.")
         print("   (It looks like: http://localhost:1455/auth/callback?code=...)\n")
 
         from ._oauth_helpers import wait_for_auth_code
