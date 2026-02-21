@@ -147,6 +147,46 @@ def _ensure_ollama():
     console.print(f"[green]✓ Model {model_name} ready[/green]")
 
 
+def _ensure_system_deps():
+    """Ensure python3-venv and pip are available. Install via apt if missing."""
+    import shutil
+    import subprocess
+
+    missing = []
+
+    # Check venv module
+    try:
+        import venv  # noqa: F401
+    except ImportError:
+        missing.append("python3-venv")
+
+    # Check pip
+    if not shutil.which("pip") and not shutil.which("pip3"):
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "--version"],
+                capture_output=True, timeout=5,
+            )
+        except Exception:
+            missing.append("python3-pip")
+
+    if not missing:
+        return
+
+    pkg_list = " ".join(missing)
+    console.print(f"[bold yellow]Missing system packages: {pkg_list}[/bold yellow]")
+    console.print("[dim]Installing via apt (sudo required)...[/dim]")
+
+    ret = os.system(f"sudo apt-get update -qq && sudo apt-get install -y -qq {pkg_list}")
+    if ret != 0:
+        console.print(f"[red]Failed to install {pkg_list}.[/red]")
+        console.print(f"[dim]Install manually: sudo apt install {pkg_list}[/dim]")
+        raise SystemExit(1)
+
+    console.print(f"[green]✓ Installed {pkg_list}[/green]")
+    console.print()
+
+
 def _ensure_docker() -> str:
     """Ensure Docker is installed, running, and accessible.
 
@@ -379,6 +419,9 @@ def init():
     """Initialize Syne: authenticate, setup database, configure."""
     console.print(Panel("[bold]Welcome to Syne 🧠[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
     console.print()
+
+    # Pre-check: system dependencies (pip, venv)
+    _ensure_system_deps()
 
     # Pre-check: Docker (install + start + determine sudo prefix)
     docker_prefix = _ensure_docker()
