@@ -356,6 +356,12 @@ def _get_function_calling_section() -> str:
 - NEVER respond with placeholder text like "!image" or "[image]" — either call the function or explain you can't.
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
+
+# Image Analysis (IMPORTANT)
+- When the user sends an image/photo, ALWAYS use the imageanalysis ability to analyze it.
+- Do NOT try to analyze images directly from the chat — your chat model may not support vision.
+- The imageanalysis ability uses a dedicated vision model (e.g. Together AI) that CAN see images.
+- Flow: user sends photo → you receive it as base64 → call imageanalysis ability → report results.
 """
 
 

@@ -152,6 +152,22 @@ class Conversation:
         self._message_metadata = message_metadata
         self._processing = True
 
+        # If image metadata present but provider can't see it natively,
+        # auto-analyze the image via ability and inject result as context
+        if message_metadata and message_metadata.get("image"):
+            if not self.provider.supports_vision:
+                img_data = message_metadata["image"]
+                analysis_result = await self._auto_analyze_image(
+                    img_data.get("base64", ""),
+                    img_data.get("mime_type", "image/jpeg"),
+                    user_message,
+                )
+                if analysis_result:
+                    user_message = (
+                        f"{user_message}\n\n"
+                        f"[Image analysis result: {analysis_result}]"
+                    )
+
         # Save user message
         await self.save_message("user", user_message)
 
@@ -387,6 +403,49 @@ class Conversation:
                 )
 
         return current
+
+
+    async def _auto_analyze_image(
+        self, image_base64: str, mime_type: str, user_prompt: str
+    ) -> Optional[str]:
+        """Auto-analyze image via imageanalysis ability when provider lacks vision.
+        
+        Returns analysis text or None if ability unavailable/failed.
+        """
+        try:
+            if not self.abilities:
+                logger.debug("No abilities registry for auto image analysis")
+                return None
+
+            # Try to find image_analysis ability
+            registered = self.abilities.get("image_analysis")
+            if not registered or not registered.instance:
+                logger.debug("No image_analysis ability available for auto-analysis")
+                return None
+
+            prompt = user_prompt if user_prompt and user_prompt.lower() not in (
+                "what's in this image?", "describe this image"
+            ) else "Describe this image in detail. If there is text, transcribe it."
+
+            result = await registered.instance.execute(
+                params={
+                    "image_base64": image_base64,
+                    "mime_type": mime_type,
+                    "prompt": prompt,
+                },
+                context={"config": {}},
+            )
+
+            if result.get("success"):
+                logger.info(f"Auto image analysis: {len(result.get('result', ''))} chars")
+                return result["result"]
+            else:
+                logger.warning(f"Image analysis failed: {result.get('error')}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Auto image analysis error: {e}")
+            return None
 
 
 class ConversationManager:
