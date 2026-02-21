@@ -35,68 +35,57 @@ async def cli_select(options: list[str], default: int = 0) -> int:
     Returns:
         Index of chosen option
     """
-    selected = default
-    total = len(options)
-
-    def _render():
-        # Move cursor up to overwrite previous render (except first time)
-        for line in options:
-            label = line
-            idx = options.index(line)
-            if idx == selected:
-                console.print(f"  [bold cyan]> {label}[/bold cyan]")
-            else:
-                console.print(f"    {label}")
-
-    def _clear_and_render():
-        # Move up by total lines and re-render
-        sys.stdout.write(f"\033[{total}A\033[J")
-        sys.stdout.flush()
-        _render()
-
-    # First render
-    _render()
-
-    # Read keys in executor to avoid blocking asyncio
-    loop = asyncio.get_event_loop()
-
     import termios
     import tty
 
+    selected = default
+    total = len(options)
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
+    def _draw(first: bool = False):
+        """Draw all options. If not first, move cursor up first."""
+        if not first:
+            # Move cursor up to start of option list and clear
+            sys.stdout.write(f"\033[{total}A")
+        for i, label in enumerate(options):
+            # Clear entire line, carriage return, then write
+            sys.stdout.write(f"\033[2K\r")
+            if i == selected:
+                sys.stdout.write(f"  \033[1;36m> {label}\033[0m")
+            else:
+                sys.stdout.write(f"    {label}")
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
     def _read_selection() -> int:
         nonlocal selected
+        # Initial render in normal mode
+        _draw(first=True)
         try:
             tty.setraw(fd)
             while True:
                 ch = sys.stdin.read(1)
                 if ch == "\r" or ch == "\n":
                     return selected
+                elif ch == "\x03":  # Ctrl+C
+                    return default
                 elif ch == "\x1b":  # Escape sequence
                     seq = sys.stdin.read(2)
                     if seq == "[A":  # Up arrow
                         selected = (selected - 1) % total
                     elif seq == "[B":  # Down arrow
                         selected = (selected + 1) % total
-                    # Re-render
-                    sys.stdout.write(f"\033[{total}A\033[J")
-                    sys.stdout.flush()
-                elif ch == "\x03":  # Ctrl+C
-                    return default
-                else:
-                    continue
-                # Render with raw mode — use direct writes
-                for i, label in enumerate(options):
-                    if i == selected:
-                        sys.stdout.write(f"  \033[1;36m> {label}\033[0m\n")
                     else:
-                        sys.stdout.write(f"    {label}\n")
-                sys.stdout.flush()
+                        continue
+                    # Re-render — temporarily restore cooked mode for cursor control
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _draw(first=False)
+                    tty.setraw(fd)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
+    loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(None, _read_selection)
     return result
 _prompt_session: PromptSession | None = None
