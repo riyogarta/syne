@@ -477,24 +477,44 @@ def init():
         if os.path.exists(cred_path):
             console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
         else:
-            console.print("\n  [yellow]⚠ Claude credentials not found.[/yellow]")
-            console.print("  [dim]You need to install Claude CLI and login first:[/dim]")
-            console.print("  [bold]1.[/bold] npm install -g @anthropic-ai/claude-code")
-            console.print("  [bold]2.[/bold] claude login")
-            console.print(f"  [dim]Syne reads tokens from {cred_path}[/dim]")
-            
-            proceed = click.confirm("\n  Have you completed claude login?", default=False)
-            if not proceed:
-                console.print("  [dim]Run 'claude login' first, then re-run 'syne init'.[/dim]")
+            import shutil
+            import subprocess
+
+            console.print("\n  [dim]Setting up Claude CLI authentication...[/dim]")
+
+            # Install Claude CLI if missing
+            if not shutil.which("claude"):
+                # Ensure npm is available
+                if not shutil.which("npm"):
+                    console.print("  [dim]Installing Node.js...[/dim]")
+                    ret = os.system("curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y -qq nodejs")
+                    if ret != 0:
+                        console.print("  [red]Failed to install Node.js.[/red]")
+                        console.print("  [dim]Install manually: https://nodejs.org/[/dim]")
+                        raise SystemExit(1)
+
+                console.print("  [dim]Installing Claude CLI...[/dim]")
+                ret = os.system("npm install -g @anthropic-ai/claude-code 2>/dev/null")
+                if ret != 0:
+                    console.print("  [red]Failed to install Claude CLI.[/red]")
+                    raise SystemExit(1)
+                console.print("  [green]✓ Claude CLI installed[/green]")
+
+            # Run claude login
+            console.print("\n  [bold]Running 'claude login'...[/bold]")
+            console.print("  [dim]Follow the instructions below to authenticate.[/dim]\n")
+            ret = os.system("claude login")
+            if ret != 0:
+                console.print("  [red]Claude login failed.[/red]")
                 raise SystemExit(1)
-            
-            # Re-check after user says yes
+
+            # Re-check credentials
             if not os.path.exists(cred_path):
-                console.print(f"  [red]✗ Still not found: {cred_path}[/red]")
-                console.print("  [dim]Please run 'claude login' and try again.[/dim]")
+                console.print(f"  [red]✗ Credentials not found after login: {cred_path}[/red]")
+                console.print("  [dim]Try running 'claude login' manually.[/dim]")
                 raise SystemExit(1)
-            
-            console.print(f"  [green]✓ Found credentials at {cred_path}[/green]")
+
+            console.print(f"  [green]✓ Claude authenticated successfully[/green]")
         
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "oauth"}
 

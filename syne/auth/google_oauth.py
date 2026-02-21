@@ -18,6 +18,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 import webbrowser
@@ -317,9 +318,21 @@ async def login_google() -> GoogleCredentials:
         })
         auth_url = f"{_AUTH_URL}?{params}"
 
-        print("\n🔐 Opening browser for Google sign-in...")
-        print(f"   If the browser doesn't open, visit:\n   {auth_url}\n")
-        webbrowser.open(auth_url)
+        # Detect headless (no DISPLAY/WAYLAND and not macOS)
+        _headless = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+
+        if _headless:
+            print("\n🔐 Headless server detected — SSH tunnel required for OAuth.")
+            print("   On your local machine, run:")
+            print(f"   [bold]ssh -L 8085:localhost:8085 {os.environ.get('USER', 'user')}@<your-server-ip>[/bold]")
+            print()
+            print("   Then open this URL in your local browser:")
+            print(f"   {auth_url}")
+            print()
+        else:
+            print("\n🔐 Opening browser for Google sign-in...")
+            print(f"   If the browser doesn't open, visit:\n   {auth_url}\n")
+            webbrowser.open(auth_url)
 
         print("⏳ Waiting for sign-in...")
         for _ in range(300):

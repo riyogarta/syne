@@ -15,6 +15,7 @@ import hashlib
 import base64
 import json
 import logging
+import os
 import secrets
 import time
 import webbrowser
@@ -108,9 +109,20 @@ async def login_codex() -> dict:
         })
         auth_url = f"{_AUTHORIZE_URL}?{params}"
 
-        print("\n🔐 Opening browser for ChatGPT sign-in...")
-        print(f"   If the browser doesn't open, visit:\n   {auth_url}\n")
-        webbrowser.open(auth_url)
+        _headless = not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY")
+
+        if _headless:
+            print("\n🔐 Headless server detected — SSH tunnel required for OAuth.")
+            print("   On your local machine, run:")
+            print(f"   ssh -L 1455:localhost:1455 {os.environ.get('USER', 'user')}@<your-server-ip>")
+            print()
+            print("   Then open this URL in your local browser:")
+            print(f"   {auth_url}")
+            print()
+        else:
+            print("\n🔐 Opening browser for ChatGPT sign-in...")
+            print(f"   If the browser doesn't open, visit:\n   {auth_url}\n")
+            webbrowser.open(auth_url)
 
         print("⏳ Waiting for sign-in...")
         for _ in range(300):
