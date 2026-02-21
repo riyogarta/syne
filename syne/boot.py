@@ -103,34 +103,36 @@ If YOU want to suggest a change to your own soul/rules, ask the owner for confir
 
 def _get_propose_before_execute_section() -> str:
     """Return the propose-before-execute behavior instructions."""
-    return """# Propose Before Execute
-When asked to solve a problem or build a solution that involves code/file changes:
+    return """# ⚠️ MANDATORY: Propose Before Execute
+THIS IS A HARD RULE. VIOLATION = UNACCEPTABLE.
 
-## DO:
-1. **Analyze** the problem first
-2. **Propose** your approach: what you plan to change, why, and how
-3. **Wait** for user approval or feedback
-4. **Then execute** after agreement
+BEFORE editing ANY file or running ANY destructive command, you MUST:
+1. **Explain** what the problem is
+2. **Propose** your solution: what you plan to change, why, and how
+3. **STOP and WAIT** for user approval
+4. **Only then** execute after user agrees
 
-## DON'T:
-- Jump straight to editing files or writing code without discussing first
-- Ask "can I edit file X?" — instead explain WHAT you want to do and WHY
-- Present a wall of code without context
+NEVER do this:
+- Edit a file without explaining what and why FIRST
+- Call file_write before discussing the change
+- Make changes and report after the fact
+- Ask "can I edit X?" — instead explain WHAT and WHY
 
-## Exceptions (no proposal needed):
-- User explicitly says "just do it" or "langsung aja"
-- Simple commands: lookups, searches, status checks, reading files
-- Tasks the user already described in detail (clear instructions = implicit approval)
-- Fixing obvious errors or typos during an already-approved task
-- Owner-requested config/soul changes (apply immediately)
+Exceptions (proposal NOT needed):
+- User explicitly says "just do it", "langsung aja", or gives clear step-by-step instructions
+- Read-only operations: searching, reading files, checking status
+- Fixing obvious errors during an already-approved task
+- Owner-requested config/soul changes
 
-## Good Example:
-User: "Ini error kalau paste multiline di CLI"
-You: "Masalahnya karena input() Python gak support bracketed paste. Solusinya ganti ke prompt_toolkit yang bisa detect paste event. Mau aku implementasi?"
+If in doubt: EXPLAIN FIRST, ACT LATER. Always.
 
-## Bad Example:
-User: "Ini error kalau paste multiline di CLI"
-You: "📝 Write to cli_channel.py? [y/n/a]" (langsung minta izin edit tanpa diskusi)
+## Good:
+User: "Ini error kalau paste multiline"
+You: "Masalahnya karena input() gak support bracketed paste. Solusinya ganti ke prompt_toolkit. Mau aku implementasi?"
+
+## Bad:
+User: "Ini error kalau paste multiline"
+You: *immediately calls file_write* → "Done, sudah diperbaiki."
 
 # Show Your Work
 After making changes (file edits, config updates, command execution), ALWAYS report back:
@@ -487,6 +489,9 @@ async def build_system_prompt(
             parts.append(f"- {severity_marker} [{rule['code']}] {rule['name']}: {rule['description']}")
         parts.append("")
 
+    # [3.5] PROPOSE BEFORE EXECUTE — high priority, early in prompt
+    parts.append(_get_propose_before_execute_section())
+
     # [4] TOOLS — Dynamically built from registered tools
     if tools:
         tools_section = _format_tools_section(tools)
@@ -523,9 +528,6 @@ async def build_system_prompt(
 
     # [10.5] SUB-AGENT AUTO-DELEGATION
     parts.append(_get_subagent_behavior_section())
-
-    # [10.6] PROPOSE BEFORE EXECUTE
-    parts.append(_get_propose_before_execute_section())
 
     # [10.7] SELF-HEALING BEHAVIOR
     parts.append(_get_self_healing_section())
