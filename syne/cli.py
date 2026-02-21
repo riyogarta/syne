@@ -68,9 +68,44 @@ def _ensure_ollama():
 
     if not server_running:
         console.print("[dim]Starting Ollama server...[/dim]")
-        # Try systemd (with sudo fallback), then direct serve
-        ret = os.system("systemctl start ollama 2>/dev/null || sudo systemctl start ollama 2>/dev/null || (ollama serve &>/dev/null &)")
-        time.sleep(3)
+        # Try systemd first (may work if ollama was installed via official script)
+        started = False
+        try:
+            r = subprocess.run(
+                ["systemctl", "start", "ollama"],
+                capture_output=True, timeout=5,
+            )
+            if r.returncode == 0:
+                started = True
+        except Exception:
+            pass
+
+        if not started:
+            # Fallback: start ollama serve directly in background
+            subprocess.Popen(
+                ["ollama", "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+        # Wait until server is actually ready (up to 15s)
+        for _ in range(15):
+            time.sleep(1)
+            try:
+                r = subprocess.run(
+                    ["ollama", "list"], capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    server_running = True
+                    break
+            except Exception:
+                pass
+
+        if not server_running:
+            console.print("[red]Could not start Ollama server.[/red]")
+            console.print("[dim]Try manually: ollama serve[/dim]")
+            raise SystemExit(1)
 
     # 3. Check if model already exists
     try:
