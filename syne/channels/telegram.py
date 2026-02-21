@@ -347,8 +347,14 @@ class TelegramChannel:
                             thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
                             response = thinking_block + response
 
-                    # Parse reply tags from LLM response
+                    # Parse reply and react tags from LLM response
                     response, reply_to = self._parse_reply_tag(response, message_id)
+                    response, react_emojis = self._parse_react_tags(response)
+
+                    # Send reaction to incoming message if requested
+                    for emoji in react_emojis:
+                        await self.send_reaction(chat.id, message_id, emoji)
+
                     sent = await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
                     # Track bot's response for reaction context
                     if sent:
@@ -555,6 +561,9 @@ class TelegramChannel:
 
                 if response:
                     response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    response, react_emojis = self._parse_react_tags(response)
+                    for emoji in react_emojis:
+                        await self.send_reaction(chat.id, update.message.message_id, emoji)
                     await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
 
             except Exception as e:
@@ -646,6 +655,9 @@ class TelegramChannel:
 
                 if response:
                     response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    response, react_emojis = self._parse_react_tags(response)
+                    for emoji in react_emojis:
+                        await self.send_reaction(chat.id, update.message.message_id, emoji)
                     sent = await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
                     # Track bot's response message ID
                     if sent:
@@ -694,12 +706,36 @@ class TelegramChannel:
         
         if added_emojis:
             emoji_str = " ".join(added_emojis)
-            event_text = f"[Reaction: {emoji_str} from {user_name} on message '{msg_preview}']"
+            event_text = f"[Reaction: {emoji_str} from {user_name} on your message: '{msg_preview}']"
             logger.info(f"Reaction received: {emoji_str} from {user_id} on msg {message_id}")
 
-            # Only process reactions on bot's own messages or if configured to
-            # For now, just log — could pass to agent as system event
-            # await self.agent.handle_system_event(event_text, chat_id=str(chat.id))
+            # Route reaction to agent so it can decide to respond
+            try:
+                metadata = {
+                    "message_id": message_id,
+                    "chat_id": str(chat.id),
+                    "is_reaction": True,
+                    "reaction_emojis": added_emojis,
+                }
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user_name,
+                    user_platform_id=user_id,
+                    message=event_text,
+                    display_name=user_name,
+                    is_group=(chat.type != "private"),
+                    message_metadata=metadata,
+                )
+                if response and response.strip().upper() != "NO_REPLY":
+                    response, reply_to = self._parse_reply_tag(response, message_id)
+                    sent = await self._send_response_with_media(
+                        chat.id, response, context, reply_to_message_id=reply_to
+                    )
+                    if sent:
+                        self._track_message(chat.id, sent.message_id, response[:100])
+            except Exception as e:
+                logger.error(f"Error handling reaction event: {e}", exc_info=True)
 
     def _track_message(self, chat_id: int, message_id: int, preview: str):
         """Track a message ID for reaction context."""
@@ -1798,6 +1834,21 @@ Or just send me a message!"""
             text = re.sub(r'\[\[\s*reply_to:\s*\d+\s*\]\]', '', text).strip()
             return text, int(m.group(1))
         return text, None
+
+    @staticmethod
+    def _parse_react_tags(text: str) -> tuple[str, list[str]]:
+        """Parse [[react:<emoji>]] tags from response text.
+
+        Returns:
+            Tuple of (cleaned_text, list_of_emojis_to_react_with)
+        """
+        import re
+        emojis = []
+        for m in re.finditer(r'\[\[\s*react:\s*(.+?)\s*\]\]', text):
+            emojis.append(m.group(1).strip())
+        if emojis:
+            text = re.sub(r'\[\[\s*react:\s*.+?\s*\]\]', '', text).strip()
+        return text, emojis
 
     async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, handling MEDIA: paths as photos/documents.

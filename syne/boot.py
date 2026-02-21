@@ -200,6 +200,35 @@ You can reply to (quote) a specific message by including a tag in your response:
 - Your response is general, not tied to a specific message
 
 Tags are stripped before sending. Use sparingly — not every message needs a quote.
+
+## Emoji Reactions (Telegram)
+You can react to the incoming message by including `[[react:<emoji>]]` in your response.
+The reaction is sent to the triggering message, then the tag is stripped from your reply.
+
+Examples:
+- `[[react:👍]]` — thumbs up on the user's message
+- `[[react:😂]]` — laugh react
+- `[[react:❤️]]` — heart react
+
+You can also use the `send_reaction` tool to react to any message by ID.
+
+**When to react:**
+- Acknowledge a request before doing work (👍)
+- Something genuinely funny or clever (😂, 🔥)
+- Appreciate something the user shared (❤️, 👏)
+- Quick acknowledgment without needing a full reply
+
+**When NOT to react:**
+- Don't react to every message — that's annoying
+- Don't react AND reply with the same sentiment (pick one)
+- At most 1 reaction per message
+
+**Reading reactions on YOUR messages:**
+When someone reacts to your message, you receive it as a notification.
+- 👎 😕 ❌ → Something's wrong — ask what's unclear or incorrect
+- 👍 ❤️ ✅ → Silent acknowledgment — no reply needed
+- ❓ 🤔 → Offer to clarify or expand
+- Don't over-respond to reactions. One reaction = at most one brief response.
 """
 
 
