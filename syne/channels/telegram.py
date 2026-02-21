@@ -107,6 +107,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("model", self._cmd_model))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
+        self.app.add_handler(CommandHandler("update", self._cmd_update))
+        self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -772,6 +774,7 @@ class TelegramChannel:
 /forget — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
+/update — Check and install updates
 
 Or just send me a message!"""
 
@@ -1429,6 +1432,115 @@ Or just send me a message!"""
         short = hashlib.md5(path.encode()).hexdigest()[:8]
         self._browse_paths[short] = path
         return short
+
+    # ── Update commands ────────────────────────────────────────
+
+    async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /update — check and install updates (version-based)."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Owner only.")
+            return
+
+        msg = await update.message.reply_text("🔍 Checking for updates...")
+        await self._run_update(msg, context, dev=False)
+
+    async def _cmd_updatedev(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /updatedev — force pull and reinstall (hidden command)."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Owner only.")
+            return
+
+        msg = await update.message.reply_text("📥 Pulling latest code (dev)...")
+        await self._run_update(msg, context, dev=True)
+
+    async def _run_update(self, msg, context, dev: bool = False):
+        """Run update in background thread and report progress."""
+        import asyncio
+        import subprocess
+        import os
+
+        syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        loop = asyncio.get_event_loop()
+
+        def _do():
+            """Blocking update logic — runs in executor."""
+            from . import __version__ as current_version
+            steps = []
+
+            # Git fetch
+            subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
+
+            if not dev:
+                # Check remote version
+                result = subprocess.run(
+                    ["git", "show", "origin/main:syne/__init__.py"],
+                    cwd=syne_dir, capture_output=True, text=True,
+                )
+                remote_version = current_version
+                if result.returncode == 0:
+                    for line in result.stdout.splitlines():
+                        if line.startswith("__version__"):
+                            remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            break
+
+                if remote_version == current_version:
+                    return "up_to_date", f"✅ Already up to date (v{current_version})"
+
+                steps.append(f"📦 v{current_version} → v{remote_version}")
+
+            # Git pull
+            result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+            if result.returncode != 0:
+                return "error", f"❌ Git pull failed: {result.stderr.strip()}"
+
+            # Install
+            venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
+            result = subprocess.run(
+                [venv_pip, "install", "-e", ".", "-q"],
+                cwd=syne_dir, capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return "error", f"❌ Install failed: {result.stderr.strip()}"
+
+            # Symlink
+            venv_syne = os.path.join(syne_dir, ".venv", "bin", "syne")
+            local_bin = os.path.expanduser("~/.local/bin")
+            os.makedirs(local_bin, exist_ok=True)
+            target = os.path.join(local_bin, "syne")
+            if os.path.exists(venv_syne):
+                if os.path.exists(target) or os.path.islink(target):
+                    os.remove(target)
+                os.symlink(venv_syne, target)
+
+            # Read new version
+            try:
+                r = subprocess.run(
+                    [os.path.join(syne_dir, ".venv", "bin", "python"), "-c",
+                     "from syne import __version__; print(__version__)"],
+                    cwd=syne_dir, capture_output=True, text=True,
+                )
+                new_ver = r.stdout.strip() if r.returncode == 0 else "?"
+            except Exception:
+                new_ver = "?"
+
+            label = "dev" if dev else new_ver
+            return "restart", f"✅ Updated to v{label}. Restarting..."
+
+        status, text = await loop.run_in_executor(None, _do)
+
+        await msg.edit_text(text)
+
+        if status == "restart":
+            # Restart the process — systemd will auto-restart
+            import signal
+            await asyncio.sleep(1)
+            os.kill(os.getpid(), signal.SIGTERM)
 
     # ── Browse (directory picker) ──────────────────────────────
 
