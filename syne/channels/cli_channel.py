@@ -42,7 +42,13 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
     # Build prompt_toolkit keybindings: Enter=submit, Shift+Enter / Esc+Enter=newline
     _kb = KeyBindings()
 
-    @_kb.add(Keys.Enter)
+    @_kb.add(Keys.BracketedPaste)
+    def _paste(event):
+        """Paste inserts text as-is (newlines preserved, no submit)."""
+        data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+        event.current_buffer.insert_text(data)
+
+    @_kb.add(Keys.Enter, eager=True)
     def _submit(event):
         """Enter submits the input."""
         event.current_buffer.validate_and_handle()
