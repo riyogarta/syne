@@ -962,6 +962,9 @@ def init():
 
     # Check if service actually started OK
     import subprocess as _sp
+    # Give service a moment to start
+    import time as _time
+    _time.sleep(3)
     _svc_check = _sp.run(
         ["systemctl", "--user", "is-active", "syne"],
         capture_output=True, text=True,
@@ -971,9 +974,19 @@ def init():
     if _svc_ok:
         console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
     else:
-        # Service failed — likely docker group not yet active in systemd session
+        # Service failed — check if docker group issue
         docker_group_added = os.environ.get("_SYNE_DOCKER_GROUP_ADDED") == "1"
-        if docker_group_added:
+
+        # Check if systemd user session has docker group by testing ExecStartPre
+        # The service just failed, so check if it's specifically a docker permission issue
+        _journal = _sp.run(
+            ["journalctl", "--user", "-u", "syne", "-n", "5", "--no-pager", "-o", "cat"],
+            capture_output=True, text=True,
+        )
+        _is_docker_perm = "permission denied" in (_journal.stdout or "").lower() and "docker" in (_journal.stdout or "").lower()
+
+        if _is_docker_perm and docker_group_added:
+            # Docker group added but systemd session doesn't have it yet
             console.print("\n[bold yellow]⚠️  Setup complete, but the service needs a session restart.[/bold yellow]")
             console.print()
             console.print("[bold]Docker group was just added to your user.[/bold]")
@@ -984,7 +997,15 @@ def init():
             console.print("  [bold]2.[/bold] Log back in")
             console.print("  [bold]3.[/bold] [bold]systemctl --user restart syne[/bold]")
             console.print()
+        elif _is_docker_perm:
+            # Docker permission issue but we didn't add group (pre-existing problem)
+            console.print("\n[bold yellow]⚠️  Setup complete, but the service can't access Docker.[/bold yellow]")
+            console.print()
+            console.print("Try logging out and back in, then:")
+            console.print("  [bold]systemctl --user restart syne[/bold]")
+            console.print()
         else:
+            # Some other error
             console.print("\n[bold yellow]⚠️  Setup complete, but the service failed to start.[/bold yellow]")
             console.print("[dim]Check logs: journalctl --user -u syne -n 20 --no-pager[/dim]")
             console.print()
