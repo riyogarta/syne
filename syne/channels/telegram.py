@@ -1583,12 +1583,12 @@ Or just send me a message!"""
             buttons.append(row)
 
         # Action buttons
-        actions = []
         sel_id = self._path_id(path)
-        actions.append(InlineKeyboardButton("✅ Select this directory", callback_data=f"brw:s:{sel_id}"))
-        if current_browse:
-            actions.append(InlineKeyboardButton("🏠 Back to default", callback_data="brw:reset"))
-        buttons.append(actions)
+        buttons.append([InlineKeyboardButton("✅ Select this directory", callback_data=f"brw:s:{sel_id}")])
+        buttons.append([InlineKeyboardButton(
+            "💬 Back to Telegram session" if current_browse else "❌ Cancel",
+            callback_data="brw:reset",
+        )])
 
         # Header text — just show current path being browsed
         text = f"📂 `{path}`"
@@ -1822,12 +1822,19 @@ Or just send me a message!"""
 
             elif action == "reset":
                 # Back to default Telegram session
+                was_active = user.id in self._browse_cwd
                 self._browse_cwd.pop(user.id, None)
-                await query.edit_message_text(
-                    "🏠 **Back to default session**\n\n"
-                    "Messages now use your regular Telegram session.",
-                    parse_mode="Markdown",
-                )
+                if was_active:
+                    await query.edit_message_text(
+                        "💬 **Back to Telegram session**\n\n"
+                        "Messages now use your regular Telegram session.",
+                        parse_mode="Markdown",
+                    )
+                else:
+                    await query.edit_message_text(
+                        "👌 Cancelled.",
+                        parse_mode="Markdown",
+                    )
 
     def _get_display_name(self, user) -> str:
         """Get a display name for a Telegram user."""
