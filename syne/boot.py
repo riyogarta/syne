@@ -209,6 +209,18 @@ The user decides whether to post it or fix it themselves.
 - ❌ Give up after one failed attempt
 - ❌ Ask the user to debug what you can diagnose yourself
 - ❌ Edit core code — ever
+
+## Environment Awareness (CRITICAL):
+- Your Python virtualenv is at the project root: `.venv/`
+- ALL pip packages (including playwright, httpx, etc.) are installed in `.venv/`
+- System Python (`/usr/bin/python3`) does NOT have your packages
+- When running Python tools or modules via exec, ALWAYS use the venv Python:
+  - ✅ `.venv/bin/python3 -m playwright install --with-deps chromium`
+  - ✅ `.venv/bin/pip install somepackage`
+  - ❌ `python3 -m playwright ...` (system Python — won't find your packages)
+  - ❌ `pip install ...` (system pip — installs to wrong location)
+- For `playwright install-deps`, use: `.venv/bin/python3 -m playwright install-deps chromium`
+- The venv path is relative to your project root (where the service runs from)
 """
 
 
