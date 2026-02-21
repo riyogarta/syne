@@ -34,17 +34,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
     settings = load_settings()
     agent = SyneAgent(settings)
 
-    # Setup readline history
-    # History per directory — hash CWD to avoid path characters in filename
-    import hashlib
-    cwd_hash = hashlib.md5(os.getcwd().encode()).hexdigest()[:8]
-    history_dir = os.path.expanduser("~/.syne/history")
-    os.makedirs(history_dir, exist_ok=True)
-    history_file = os.path.join(history_dir, f"cli_{cwd_hash}")
-    try:
-        readline.read_history_file(history_file)
-    except FileNotFoundError:
-        pass
     readline.set_history_length(1000)
 
     try:
@@ -169,6 +158,26 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
                 del agent.conversations._active[key]
         else:
             console.print("[dim]Resuming previous session...[/dim]")
+
+        # Load readline history from DB (user messages for this directory)
+        readline.clear_history()
+        try:
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                rows = await conn.fetch("""
+                    SELECT m.content FROM messages m
+                    JOIN sessions s ON m.session_id = s.id
+                    WHERE s.platform = 'cli' AND s.platform_chat_id = $1
+                      AND m.role = 'user'
+                    ORDER BY m.created_at ASC
+                    LIMIT 500
+                """, chat_id)
+            for row in rows:
+                content = row["content"].strip()
+                if content and not content.startswith("/"):
+                    readline.add_history(content)
+        except Exception:
+            pass
         import time as _time
         _last_ctrl_c = 0.0
         while True:
@@ -267,7 +276,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
             traceback.print_exc()
 
     # Cleanup
-    readline.write_history_file(history_file)
     await agent.stop()
     # Restore terminal state — readline/executor can leave it corrupted
     try:
