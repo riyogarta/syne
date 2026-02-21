@@ -380,14 +380,15 @@ def _setup_service():
     docker_bin = _shutil.which("docker") or "/usr/bin/docker"
 
     # Create a helper script for ExecStartPre that handles docker group issues
+    # NOTE: No sudo — systemd services can't prompt for password.
+    # User must be in docker group (handled by _ensure_docker + re-login).
     helper_script = os.path.join(syne_dir, "start-db.sh")
     helper_content = f"""#!/bin/bash
-# Start DB container — try without sudo first, then with sudo
+# Start DB container (no sudo — systemd can't prompt for password)
 {docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db 2>/dev/null && exit 0
-sudo {docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db 2>/dev/null && exit 0
-# If both fail, check if DB is already running
+# If start failed, check if DB is already running
 {docker_bin} compose -f {syne_dir}/docker-compose.yml ps db 2>/dev/null | grep -q running && exit 0
-sudo {docker_bin} compose -f {syne_dir}/docker-compose.yml ps db 2>/dev/null | grep -q running && exit 0
+echo "ERROR: Cannot start DB container. Is user in docker group? Try: sudo usermod -aG docker $USER && logout" >&2
 exit 1
 """
     with open(helper_script, "w") as f:
