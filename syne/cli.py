@@ -267,6 +267,10 @@ def _setup_service():
 
     service_dir.mkdir(parents=True, exist_ok=True)
 
+    # Find docker binary path (may be /usr/bin/docker or /usr/local/bin/docker)
+    import shutil as _shutil
+    docker_bin = _shutil.which("docker") or "/usr/bin/docker"
+
     service_content = f"""[Unit]
 Description=Syne AI Agent
 After=network.target docker.service
@@ -275,7 +279,7 @@ After=network.target docker.service
 Type=simple
 WorkingDirectory={syne_dir}
 EnvironmentFile={env_file}
-ExecStartPre=/usr/bin/docker compose -f {syne_dir}/docker-compose.yml up -d db
+ExecStartPre={docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db
 ExecStart={venv_python} -m syne.main
 Restart=on-failure
 RestartSec=10
@@ -1735,7 +1739,7 @@ def uninstall():
     console.print()
 
     # 1. Stop and remove systemd service
-    console.print("[bold]1/4[/bold] Removing systemd service...")
+    console.print("[bold]1/5[/bold] Removing systemd service...")
     subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
     subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
     if service_file.exists():
@@ -1744,7 +1748,7 @@ def uninstall():
     console.print("  [green]✓ Service removed[/green]")
 
     # 2. Stop and remove Docker containers + volume
-    console.print("[bold]2/4[/bold] Removing Docker containers and data...")
+    console.print("[bold]2/5[/bold] Removing Docker containers and data...")
     if os.path.isfile(compose_file):
         subprocess.run(
             ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
@@ -1755,16 +1759,42 @@ def uninstall():
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
     console.print("  [green]✓ Containers and data removed[/green]")
 
-    # 3. Remove CLI symlink
-    console.print("[bold]3/4[/bold] Removing CLI symlink...")
+    # 3. Remove CLI symlink + PATH entry
+    console.print("[bold]3/5[/bold] Removing CLI symlink...")
     if os.path.islink(symlink_path) or os.path.exists(symlink_path):
         os.remove(symlink_path)
         console.print(f"  [green]✓ Removed {symlink_path}[/green]")
     else:
         console.print(f"  [dim]Not found: {symlink_path}[/dim]")
 
-    # 4. Remove source code (self-destruct — must be last)
-    console.print("[bold]4/4[/bold] Removing source code...")
+    # 4. Clean up shell rc (remove Syne CLI PATH line)
+    console.print("[bold]4/5[/bold] Cleaning shell config...")
+    for rc_file in [os.path.expanduser("~/.bashrc"), os.path.expanduser("~/.zshrc")]:
+        if os.path.exists(rc_file):
+            try:
+                with open(rc_file, "r") as f:
+                    lines = f.readlines()
+                new_lines = []
+                skip_next = False
+                for line in lines:
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    if "# Syne CLI" in line:
+                        skip_next = True  # Skip the PATH export line after comment
+                        continue
+                    if ".local/bin" in line and "syne" in line.lower():
+                        continue
+                    new_lines.append(line)
+                if len(new_lines) != len(lines):
+                    with open(rc_file, "w") as f:
+                        f.writelines(new_lines)
+                    console.print(f"  [green]✓ Cleaned {os.path.basename(rc_file)}[/green]")
+            except Exception:
+                pass
+
+    # 5. Remove source code (self-destruct — must be last)
+    console.print("[bold]5/5[/bold] Removing source code...")
     try:
         shutil.rmtree(syne_dir)
         console.print(f"  [green]✓ Removed {syne_dir}[/green]")
