@@ -213,7 +213,8 @@ def _ensure_docker() -> str:
         console.print(f"[green]✓ Docker installed, {current_user} added to docker group[/green]")
         # Re-exec syne init with docker group active
         console.print("[dim]Activating docker group and restarting init...[/dim]\n")
-        os.execvp("sg", ["sg", "docker", "-c", "syne init"])
+        os.environ["_SYNE_DOCKER_GROUP_ADDED"] = "1"
+        os.execvp("sg", ["sg", "docker", "-c", "_SYNE_DOCKER_GROUP_ADDED=1 syne init"])
         # execvp replaces current process — code below won't run
 
     # 1b. Docker exists but user not in docker group
@@ -227,9 +228,8 @@ def _ensure_docker() -> str:
         console.print(f"[dim]Adding {current_user} to docker group...[/dim]")
         os.system(f"sudo usermod -aG docker {current_user}")
         console.print("[dim]Activating docker group...[/dim]\n")
-        # Set env flag so we can warn about logout at the end
         os.environ["_SYNE_DOCKER_GROUP_ADDED"] = "1"
-        os.execvp("sg", ["sg", "docker", "-c", "syne init"])
+        os.execvp("sg", ["sg", "docker", "-c", "_SYNE_DOCKER_GROUP_ADDED=1 syne init"])
 
     # 2. Start daemon if not running
     if not _docker_ok() and not _docker_ok(use_sudo=True):
@@ -379,16 +379,26 @@ def _setup_service():
     import shutil as _shutil
     docker_bin = _shutil.which("docker") or "/usr/bin/docker"
 
-    # Create a helper script for ExecStartPre that handles docker group issues
-    # NOTE: No sudo — systemd services can't prompt for password.
-    # User must be in docker group (handled by _ensure_docker + re-login).
+    # Create a helper script for ExecStartPre
+    # Try direct docker first. If that fails (docker group not in systemd session),
+    # try via 'sg docker' which activates the group for the subprocess.
+    # Last resort: check if DB is already running.
     helper_script = os.path.join(syne_dir, "start-db.sh")
     helper_content = f"""#!/bin/bash
-# Start DB container (no sudo — systemd can't prompt for password)
-{docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db 2>/dev/null && exit 0
-# If start failed, check if DB is already running
-{docker_bin} compose -f {syne_dir}/docker-compose.yml ps db 2>/dev/null | grep -q running && exit 0
-echo "ERROR: Cannot start DB container. Is user in docker group? Try: sudo usermod -aG docker $USER && logout" >&2
+# Start DB container for Syne service
+COMPOSE="{docker_bin} compose -f {syne_dir}/docker-compose.yml"
+
+# 1. Try direct (works if systemd session has docker group)
+$COMPOSE up -d db 2>/dev/null && exit 0
+
+# 2. Try via sg (activates docker group for this subprocess)
+sg docker -c "$COMPOSE up -d db" 2>/dev/null && exit 0
+
+# 3. Check if DB is already running anyway
+$COMPOSE ps db 2>/dev/null | grep -q running && exit 0
+sg docker -c "$COMPOSE ps db" 2>/dev/null | grep -q running && exit 0
+
+echo "ERROR: Cannot start DB container. Try: logout, login, then: systemctl --user restart syne" >&2
 exit 1
 """
     with open(helper_script, "w") as f:
@@ -727,6 +737,11 @@ def init():
     with open(env_path, "w") as f:
         f.write(env_content)
     os.chmod(env_path, 0o600)
+    # Also set in current process environment so subprocesses (_setup_update_check) can use them
+    for line in env_lines:
+        if "=" in line:
+            k, v = line.split("=", 1)
+            os.environ[k] = v
     console.print(f"[green]✓ .env written (chmod 600)[/green]")
 
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
@@ -974,12 +989,17 @@ def init():
     )
     _svc_ok = _svc_check.stdout.strip() == "active"
 
+    docker_group_added = os.environ.get("_SYNE_DOCKER_GROUP_ADDED") == "1"
+
     if _svc_ok:
         console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
+        if docker_group_added:
+            console.print()
+            console.print("[yellow]Note: Docker group was just added to your user.[/yellow]")
+            console.print("[yellow]Service works now via workaround, but for reliability:[/yellow]")
+            console.print("[yellow]  → Log out and back in when convenient, then:[/yellow]")
+            console.print("[yellow]    systemctl --user restart syne[/yellow]")
     else:
-        # Service failed — check if docker group issue
-        docker_group_added = os.environ.get("_SYNE_DOCKER_GROUP_ADDED") == "1"
-
         if docker_group_added:
             # Docker group was just added — most likely cause of service failure
             # systemd user session inherits groups from login, so new group
