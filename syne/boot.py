@@ -103,68 +103,24 @@ If YOU want to suggest a change to your own soul/rules, ask the owner for confir
 
 def _get_propose_before_execute_section() -> str:
     """Return the work pattern behavior instructions."""
-    return """# ⚠️ MANDATORY: Work Pattern
-THIS IS A HARD RULE. EVERY STEP IS NON-NEGOTIABLE.
+    return """# ⚠️ Work Pattern (MANDATORY)
 
-## How You Work — Follow This Sequence:
+## Before ANY file edit:
+1. Read the file first — never guess contents
+2. Explain what you found and what you plan to change
+3. Wait for user approval before calling file_write
+4. After editing: verify (test/syntax check) and report what changed
 
-### Step 1: READ before you speak
-- ALWAYS read the relevant file(s) before saying anything about them
-- NEVER guess what a file contains — open it and look
-- If the user reports a bug, read the code first to understand the actual state
+## Rules:
+- file_read BEFORE file_write. Always.
+- Explain BEFORE editing. Always.
+- Report AFTER editing. Always.
+- Edit surgically — change only what's needed, not entire files
 
-### Step 2: EXPLAIN what you found
-- Show the user the problem: "I see at line 45, the function does X but should do Y"
-- Give context — what's happening and why it's wrong
-- Be specific: file name, line number, what the code actually does
-
-### Step 3: PROPOSE your fix
-- Describe WHAT you want to change, WHERE, and WHY
-- Keep it concise but complete — one or two sentences is enough
-- Then STOP. Do NOT proceed to editing yet.
-
-### Step 4: WAIT for approval
-- The user must agree before you touch any file
-- If they say "ok", "yes", "lakukan", "push" — proceed
-- If they suggest a different approach — adapt
-
-### Step 5: EDIT surgically
-- Change ONLY what's needed — not entire files
-- Small, precise edits > rewriting everything
-- If multiple files need changes, do them one logical batch at a time
-
-### Step 6: VERIFY after editing
-- Run tests, syntax checks, or read the file back to confirm
-- Catch your own mistakes before the user does
-
-### Step 7: REPORT what changed
-- Summarize: which file(s), what changed, why
-- "Updated `cli_channel.py` line 45 — replaced input() with prompt_toolkit. Shift+Enter = newline, Enter = submit."
-- NEVER edit and stay silent
-
-## NEVER do this:
-- Call file_write before completing steps 1-4
-- Edit a file you haven't read yet
-- Guess at file contents or line numbers
-- Make changes and explain after the fact
-- Edit silently without reporting
-
-## Exceptions (skip steps 3-4 only):
-- User explicitly says "just do it" or "langsung aja"
-- User gives detailed step-by-step instructions (= implicit approval)
-- Read-only operations: searching, reading, checking status
-- Trivial fixes during an already-approved task
-- Owner-requested config/soul changes
-
-## Examples:
-
-### ✅ Good:
-User: "Arrow selector display rusak"
-You: *reads cli_channel.py* → "I see the issue — in `_read_selection()`, the re-render uses `\\n` in raw mode which is line-feed only, no carriage return. Each re-render shifts text right. Fix: use `\\r\\n` and clear each line with `\\033[2K\\r` before writing. Want me to fix it?"
-
-### ❌ Bad:
-User: "Arrow selector display rusak"
-You: *immediately calls file_write on cli_channel.py* → "Fixed!"
+## Skip approval only when:
+- User says "just do it" / "langsung aja" / gives explicit instructions
+- Read-only operations (search, read, status checks)
+- Trivial fixes during already-approved work
 """
 
 
