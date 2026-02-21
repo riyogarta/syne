@@ -463,6 +463,8 @@ def init():
     console.print("  1. Google Gemini [green](recommended — free via OAuth)[/green]")
     console.print("  2. ChatGPT / GPT [green](free via Codex OAuth)[/green]")
     console.print("  3. Claude [green](free via claude.ai OAuth)[/green]")
+    console.print("  [dim]     ⚠ OAuth requires a browser. On headless servers, you'll need[/dim]")
+    console.print("  [dim]       SSH port forwarding (e.g. ssh -L 8085:localhost:8085 server)[/dim]")
     console.print()
     console.print("  [bold yellow]API Key (paid per token):[/bold yellow]")
     console.print("  4. OpenAI [yellow](API key, paid)[/yellow]")
