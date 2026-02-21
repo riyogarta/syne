@@ -194,9 +194,55 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                 lines = content.count("\n") + 1
                 size = len(content.encode("utf-8"))
 
-                console.print(f"\n[bold yellow]📝 Write to {file_path}?[/bold yellow] ({lines} lines, {size:,} bytes)")
+                # Show diff if file exists, otherwise show snippet of new content
+                console.print()
+                if os.path.isfile(resolved):
+                    try:
+                        import difflib
+                        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                            old_lines = f.readlines()
+                        new_lines = content.splitlines(keepends=True)
+                        diff = list(difflib.unified_diff(
+                            old_lines, new_lines,
+                            fromfile=file_path, tofile=file_path,
+                            lineterm=""
+                        ))
+                        if diff:
+                            console.print(f"[bold]Edit file[/bold] {file_path}")
+                            # Show max 30 diff lines to avoid flooding
+                            shown = 0
+                            for line in diff:
+                                if line.startswith("@@"):
+                                    console.print(f"[cyan]{line.rstrip()}[/cyan]")
+                                elif line.startswith("-") and not line.startswith("---"):
+                                    console.print(f"[red]{line.rstrip()}[/red]")
+                                elif line.startswith("+") and not line.startswith("+++"):
+                                    console.print(f"[green]{line.rstrip()}[/green]")
+                                else:
+                                    console.print(f"[dim]{line.rstrip()}[/dim]")
+                                shown += 1
+                                if shown >= 30:
+                                    remaining = len(diff) - shown
+                                    if remaining > 0:
+                                        console.print(f"[dim]  ... {remaining} more lines[/dim]")
+                                    break
+                        else:
+                            console.print(f"[bold]Write to[/bold] {file_path} [dim](no changes)[/dim]")
+                    except Exception:
+                        console.print(f"[bold]Write to[/bold] {file_path} ({lines} lines, {size:,} bytes)")
+                else:
+                    console.print(f"[bold]New file[/bold] {file_path} ({lines} lines, {size:,} bytes)")
+                    # Show first few lines of new file
+                    preview = content.split("\n")[:10]
+                    for pline in preview:
+                        console.print(f"[green]+ {pline}[/green]")
+                    if lines > 10:
+                        console.print(f"[dim]  ... {lines - 10} more lines[/dim]")
 
-                choices = ["Yes", "No", "Always allow this file"]
+                console.print()
+                console.print(f"[bold]Do you want to make this edit to {os.path.basename(file_path)}?[/bold]")
+
+                choices = ["Yes", "Yes, always allow this file", "No"]
                 try:
                     chosen = await cli_select(choices, default=0)
                 except (EOFError, KeyboardInterrupt):
@@ -206,12 +252,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                 if _status_ref:
                     _status_ref.start()
 
-                if chosen == 2:  # Always allow
+                if chosen == 0:  # Yes
+                    return True, ""
+                elif chosen == 1:  # Always allow
                     _always_allowed.add(resolved)
                     return True, ""
-                elif chosen == 0:  # Yes
-                    return True, ""
-                else:
+                else:  # No
                     return False, "User declined file write."
 
             agent.tools.set_approval_callback(_approval_callback)
