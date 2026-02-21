@@ -979,38 +979,40 @@ def init():
         # Service failed — check if docker group issue
         docker_group_added = os.environ.get("_SYNE_DOCKER_GROUP_ADDED") == "1"
 
-        # Check if systemd user session has docker group by testing ExecStartPre
-        # The service just failed, so check if it's specifically a docker permission issue
-        _journal = _sp.run(
-            ["journalctl", "--user", "-u", "syne", "-n", "5", "--no-pager", "-o", "cat"],
-            capture_output=True, text=True,
-        )
-        _is_docker_perm = "permission denied" in (_journal.stdout or "").lower() and "docker" in (_journal.stdout or "").lower()
-
-        if _is_docker_perm and docker_group_added:
-            # Docker group added but systemd session doesn't have it yet
+        if docker_group_added:
+            # Docker group was just added — most likely cause of service failure
+            # systemd user session inherits groups from login, so new group
+            # won't take effect until user logs out and back in
             console.print("\n[bold yellow]⚠️  Setup complete, but the service needs a session restart.[/bold yellow]")
             console.print()
             console.print("[bold]Docker group was just added to your user.[/bold]")
             console.print("The systemd service can't access Docker until you log out and back in.")
             console.print()
             console.print("Please run:")
-            console.print("  [bold]1.[/bold] Log out (exit SSH)")
+            console.print("  [bold]1.[/bold] Log out (exit SSH / close terminal)")
             console.print("  [bold]2.[/bold] Log back in")
             console.print("  [bold]3.[/bold] [bold]systemctl --user restart syne[/bold]")
             console.print()
-        elif _is_docker_perm:
-            # Docker permission issue but we didn't add group (pre-existing problem)
-            console.print("\n[bold yellow]⚠️  Setup complete, but the service can't access Docker.[/bold yellow]")
-            console.print()
-            console.print("Try logging out and back in, then:")
-            console.print("  [bold]systemctl --user restart syne[/bold]")
-            console.print()
         else:
-            # Some other error
-            console.print("\n[bold yellow]⚠️  Setup complete, but the service failed to start.[/bold yellow]")
-            console.print("[dim]Check logs: journalctl --user -u syne -n 20 --no-pager[/dim]")
-            console.print()
+            # Check journal for docker permission issues (pre-existing problem)
+            _journal = _sp.run(
+                ["journalctl", "--user", "-u", "syne", "-n", "10", "--no-pager", "-o", "cat"],
+                capture_output=True, text=True,
+            )
+            _jout = (_journal.stdout or "").lower()
+            _is_docker_perm = ("permission denied" in _jout or "connect: no such file" in _jout) and "docker" in _jout
+
+            if _is_docker_perm:
+                console.print("\n[bold yellow]⚠️  Setup complete, but the service can't access Docker.[/bold yellow]")
+                console.print()
+                console.print("Try logging out and back in, then:")
+                console.print("  [bold]systemctl --user restart syne[/bold]")
+                console.print()
+            else:
+                # Some other error
+                console.print("\n[bold yellow]⚠️  Setup complete, but the service failed to start.[/bold yellow]")
+                console.print("[dim]Check logs: journalctl --user -u syne -n 20 --no-pager[/dim]")
+                console.print()
 
     console.print("Commands:")
     console.print("  [bold]syne cli[/bold]                        # Interactive chat")
