@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Syne installer — handles all dependencies automatically.
-# Usage: curl -fsSL https://raw.githubusercontent.com/riyogarta/syne/main/install.sh | bash
-#   or:  bash install.sh  (from inside the cloned repo)
+# Usage: bash install.sh  (from inside the cloned repo)
 set -e
 
 SYNE_DIR="${SYNE_DIR:-$HOME/syne}"
@@ -9,6 +8,21 @@ REPO_URL="https://github.com/riyogarta/syne.git"
 
 echo "🧠 Syne Installer"
 echo ""
+
+# ── 0. Pre-cache sudo credentials ─────────────────────────
+# Some system packages need sudo. Ask for password upfront
+# so it doesn't surprise the user mid-install.
+if command -v sudo &>/dev/null; then
+    echo "Some system packages may need to be installed."
+    echo "Please enter your sudo password if prompted:"
+    echo ""
+    sudo -v || { echo "sudo failed. Run as a user with sudo access."; exit 1; }
+    echo ""
+    # Keep sudo alive in background
+    ( while true; do sudo -n true; sleep 50; done 2>/dev/null ) &
+    SUDO_KEEPALIVE_PID=$!
+    trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
+fi
 
 # ── 1. Ensure git ──────────────────────────────────────────
 if ! command -v git &>/dev/null; then
@@ -50,11 +64,25 @@ fi
 
 echo "Using Python: $PY ($($PY --version 2>&1))"
 
-# ── 4. Ensure python3-venv ────────────────────────────────
+# ── 4. Ensure python3-venv and pip ────────────────────────
+NEED_APT=0
+PKGS=""
+
 if ! $PY -m venv --help &>/dev/null 2>&1; then
     PY_VER=$($PY -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-    echo "Installing python${PY_VER}-venv..."
-    sudo apt-get update -qq && sudo apt-get install -y -qq "python${PY_VER}-venv"
+    PKGS="python${PY_VER}-venv"
+    NEED_APT=1
+fi
+
+if ! $PY -m pip --version &>/dev/null 2>&1; then
+    PKGS="$PKGS python3-pip"
+    NEED_APT=1
+fi
+
+if [ "$NEED_APT" -eq 1 ]; then
+    echo "Installing system packages: $PKGS"
+    sudo apt-get update -qq && sudo apt-get install -y -qq $PKGS
+    echo "✓ System packages installed"
 fi
 
 # ── 5. Create venv ────────────────────────────────────────
@@ -70,12 +98,11 @@ echo "Installing Syne..."
 echo ""
 echo "✓ Syne installed successfully!"
 echo ""
-echo "Next: run syne init"
-echo ""
 
-# Activate venv for the current shell if interactive
+# Run syne init if interactive terminal
 if [ -t 0 ]; then
-    echo "Activating virtual environment..."
     source .venv/bin/activate
     exec syne init
+else
+    echo "Next: source .venv/bin/activate && syne init"
 fi
