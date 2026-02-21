@@ -865,21 +865,15 @@
                     </div>
                     <div class="code-block">
                         <button class="copy-btn" onclick="copyCode()">Copy</button>
-                        <pre><span class="comment"># Clone the repo</span>
+                        <pre><span class="comment"># Clone and install</span>
 <span class="command">git clone</span> https://github.com/riyogarta/syne.git
 <span class="command">cd</span> syne
-
-<span class="comment"># Create virtual environment</span>
-<span class="command">python3 -m venv</span> .venv
-<span class="command">source</span> .venv/bin/activate
-<span class="command">pip install</span> -e .
-
-<span class="comment"># Interactive setup — handles everything</span>
-<span class="command">syne init</span></pre>
+<span class="command">bash</span> install.sh</pre>
                     </div>
                     <p class="quickstart-note">
-                        <code>syne init</code> guides you through provider selection, Telegram bot setup, 
-                        and automatically starts PostgreSQL via Docker. No manual steps.
+                        <code>install.sh</code> handles all dependencies, creates a virtual environment,
+                        and runs <code>syne init</code> — which guides you through provider selection,
+                        Telegram bot setup, and starts PostgreSQL via Docker. No manual steps.
                     </p>
                 </div>
             </div>
@@ -989,10 +983,7 @@
         function copyCode() {
             const code = `git clone https://github.com/riyogarta/syne.git
 cd syne
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-syne init`;
+bash install.sh`;
             navigator.clipboard.writeText(code).then(() => {
                 const btn = document.querySelector('.copy-btn');
                 btn.textContent = 'Copied!';
