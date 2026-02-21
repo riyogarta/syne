@@ -1475,8 +1475,15 @@ Or just send me a message!"""
             from . import __version__ as current_version
             steps = []
 
-            # Git fetch
-            subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
+            # Git fetch (with timeout and no-prompt to avoid hanging on credentials)
+            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+            try:
+                subprocess.run(
+                    ["git", "fetch", "origin"], cwd=syne_dir,
+                    capture_output=True, text=True, timeout=30, env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return "error", "❌ Git fetch timed out (30s). Check network or git credentials."
 
             if not dev:
                 # Check remote version
@@ -1497,16 +1504,25 @@ Or just send me a message!"""
                 steps.append(f"📦 v{current_version} → v{remote_version}")
 
             # Git pull
-            result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+            try:
+                result = subprocess.run(
+                    ["git", "pull"], cwd=syne_dir,
+                    capture_output=True, text=True, timeout=60, env=env,
+                )
+            except subprocess.TimeoutExpired:
+                return "error", "❌ Git pull timed out (60s)."
             if result.returncode != 0:
                 return "error", f"❌ Git pull failed: {result.stderr.strip()}"
 
             # Install
             venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
-            result = subprocess.run(
-                [venv_pip, "install", "-e", ".", "-q"],
-                cwd=syne_dir, capture_output=True, text=True,
-            )
+            try:
+                result = subprocess.run(
+                    [venv_pip, "install", "-e", ".", "-q"],
+                    cwd=syne_dir, capture_output=True, text=True, timeout=120,
+                )
+            except subprocess.TimeoutExpired:
+                return "error", "❌ pip install timed out (120s)."
             if result.returncode != 0:
                 return "error", f"❌ Install failed: {result.stderr.strip()}"
 
