@@ -68,20 +68,37 @@ def _ensure_ollama():
 
     if not server_running:
         console.print("[dim]Starting Ollama server...[/dim]")
-        # Try systemd first (may work if ollama was installed via official script)
-        started = False
+
+        # Try multiple strategies in order
+        strategies = [
+            # 1. systemctl without sudo (user may have permissions)
+            ["systemctl", "start", "ollama"],
+            # 2. sudo systemctl (ollama official install = root systemd service)
+            ["sudo", "systemctl", "start", "ollama"],
+        ]
+
+        for cmd in strategies:
+            try:
+                r = subprocess.run(cmd, capture_output=True, timeout=10)
+                if r.returncode == 0:
+                    time.sleep(2)
+                    break
+            except Exception:
+                continue
+
+        # 3. Final fallback: ollama serve directly in background
+        # Check if server is up after systemctl attempts
         try:
             r = subprocess.run(
-                ["systemctl", "start", "ollama"],
-                capture_output=True, timeout=5,
+                ["ollama", "list"], capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0:
-                started = True
+                server_running = True
         except Exception:
             pass
 
-        if not started:
-            # Fallback: start ollama serve directly in background
+        if not server_running:
+            # Direct serve as background process
             subprocess.Popen(
                 ["ollama", "serve"],
                 stdout=subprocess.DEVNULL,
@@ -89,22 +106,23 @@ def _ensure_ollama():
                 start_new_session=True,
             )
 
-        # Wait until server is actually ready (up to 15s)
-        for _ in range(15):
-            time.sleep(1)
-            try:
-                r = subprocess.run(
-                    ["ollama", "list"], capture_output=True, text=True, timeout=5,
-                )
-                if r.returncode == 0:
-                    server_running = True
-                    break
-            except Exception:
-                pass
+        # Wait until server is actually ready (up to 20s)
+        if not server_running:
+            for i in range(20):
+                time.sleep(1)
+                try:
+                    r = subprocess.run(
+                        ["ollama", "list"], capture_output=True, text=True, timeout=5,
+                    )
+                    if r.returncode == 0:
+                        server_running = True
+                        break
+                except Exception:
+                    pass
 
         if not server_running:
             console.print("[red]Could not start Ollama server.[/red]")
-            console.print("[dim]Try manually: ollama serve[/dim]")
+            console.print("[dim]Try: sudo systemctl start ollama[/dim]")
             raise SystemExit(1)
 
     # 3. Check if model already exists
