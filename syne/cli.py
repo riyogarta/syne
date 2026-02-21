@@ -227,6 +227,8 @@ def _ensure_docker() -> str:
         console.print(f"[dim]Adding {current_user} to docker group...[/dim]")
         os.system(f"sudo usermod -aG docker {current_user}")
         console.print("[dim]Activating docker group...[/dim]\n")
+        # Set env flag so we can warn about logout at the end
+        os.environ["_SYNE_DOCKER_GROUP_ADDED"] = "1"
         os.execvp("sg", ["sg", "docker", "-c", "syne init"])
 
     # 2. Start daemon if not running
@@ -958,8 +960,35 @@ def init():
     # 9. Setup weekly update check
     _setup_update_check()
 
-    console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
-    console.print()
+    # Check if service actually started OK
+    import subprocess as _sp
+    _svc_check = _sp.run(
+        ["systemctl", "--user", "is-active", "syne"],
+        capture_output=True, text=True,
+    )
+    _svc_ok = _svc_check.stdout.strip() == "active"
+
+    if _svc_ok:
+        console.print("\n[bold green]✅ Setup complete! Syne is running.[/bold green]")
+    else:
+        # Service failed — likely docker group not yet active in systemd session
+        docker_group_added = os.environ.get("_SYNE_DOCKER_GROUP_ADDED") == "1"
+        if docker_group_added:
+            console.print("\n[bold yellow]⚠️  Setup complete, but the service needs a session restart.[/bold yellow]")
+            console.print()
+            console.print("[bold]Docker group was just added to your user.[/bold]")
+            console.print("The systemd service can't access Docker until you log out and back in.")
+            console.print()
+            console.print("Please run:")
+            console.print("  [bold]1.[/bold] Log out (exit SSH)")
+            console.print("  [bold]2.[/bold] Log back in")
+            console.print("  [bold]3.[/bold] [bold]systemctl --user restart syne[/bold]")
+            console.print()
+        else:
+            console.print("\n[bold yellow]⚠️  Setup complete, but the service failed to start.[/bold yellow]")
+            console.print("[dim]Check logs: journalctl --user -u syne -n 20 --no-pager[/dim]")
+            console.print()
+
     console.print("Commands:")
     console.print("  [bold]syne cli[/bold]                        # Interactive chat")
     console.print("  [bold]syne status[/bold]                     # Check agent status")
