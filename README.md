@@ -69,9 +69,16 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 
 ### Installation
 
+**One-line install** (handles all dependencies automatically):
+```bash
+git clone https://github.com/riyogarta/syne.git && cd syne && bash install.sh
+```
+
+**Manual install** (if you prefer):
 ```bash
 git clone https://github.com/riyogarta/syne.git
 cd syne
+sudo apt install -y python3-venv python3-pip  # if not already installed
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
