@@ -377,6 +377,21 @@ def _setup_service():
     import shutil as _shutil
     docker_bin = _shutil.which("docker") or "/usr/bin/docker"
 
+    # Create a helper script for ExecStartPre that handles docker group issues
+    helper_script = os.path.join(syne_dir, "start-db.sh")
+    helper_content = f"""#!/bin/bash
+# Start DB container — try without sudo first, then with sudo
+{docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db 2>/dev/null && exit 0
+sudo {docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db 2>/dev/null && exit 0
+# If both fail, check if DB is already running
+{docker_bin} compose -f {syne_dir}/docker-compose.yml ps db 2>/dev/null | grep -q running && exit 0
+sudo {docker_bin} compose -f {syne_dir}/docker-compose.yml ps db 2>/dev/null | grep -q running && exit 0
+exit 1
+"""
+    with open(helper_script, "w") as f:
+        f.write(helper_content)
+    os.chmod(helper_script, 0o755)
+
     service_content = f"""[Unit]
 Description=Syne AI Agent
 After=network.target docker.service
@@ -385,7 +400,7 @@ After=network.target docker.service
 Type=simple
 WorkingDirectory={syne_dir}
 EnvironmentFile={env_file}
-ExecStartPre={docker_bin} compose -f {syne_dir}/docker-compose.yml up -d db
+ExecStartPre=/bin/bash {helper_script}
 ExecStart={venv_python} -m syne.main
 Restart=on-failure
 RestartSec=10
