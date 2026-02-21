@@ -159,6 +159,8 @@ class TelegramChannel:
             BotCommand("model", "Switch LLM model (owner only)"),
             BotCommand("embedding", "Switch embedding model (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
+            BotCommand("browse", "Browse directories (share session with CLI)"),
+            BotCommand("update", "Check and install updates"),
         ])
 
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
