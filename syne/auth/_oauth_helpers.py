@@ -40,76 +40,81 @@ async def wait_for_auth_code(
     2. User prompt to paste the redirect URL (works on headless/remote)
 
     Whichever arrives first wins.
-
-    Args:
-        handler_class: The HTTP handler class (must have .code class attribute)
-        callback_path: The path portion of callback URL (e.g. "/oauth2callback")
-        timeout_seconds: Max wait time
-
-    Returns:
-        Authorization code string
-
-    Raises:
-        TimeoutError if neither method produces a code in time
     """
-    code_event = asyncio.Event()
+    code_event = threading.Event()  # Use threading.Event, not asyncio.Event
     result_code: list[str] = []
+    paste_result: list[str] = []
 
-    # Task 1: Poll callback server for code (set by browser redirect)
+    # Thread 1 (via asyncio): Poll callback server for code
     async def wait_callback():
         for _ in range(timeout_seconds):
             await asyncio.sleep(1)
+            if code_event.is_set():
+                return
             if handler_class.code:
-                if not result_code:  # Don't override paste result
+                if not result_code:
                     result_code.append(handler_class.code)
                 code_event.set()
                 return
 
-    # Task 2: Prompt user to paste redirect URL
-    paste_result: list[str] = []
-
+    # Thread 2: Read stdin directly (blocking, in a real thread)
     def _read_stdin():
-        """Prompt and read from stdin in a thread (blocking)."""
+        """Read from stdin using low-level read to avoid input() issues."""
+        sys.stdout.write(">>> Paste URL: ")
+        sys.stdout.flush()
+
+        buf = ""
         while not code_event.is_set():
             try:
-                line = input(">>> Paste URL: ")
-                line = line.strip()
-                if not line:
-                    continue
+                ch = sys.stdin.read(1)
+                if not ch:  # EOF
+                    break
+                if ch in ("\n", "\r"):
+                    line = buf.strip()
+                    buf = ""
+                    if not line:
+                        sys.stdout.write(">>> Paste URL: ")
+                        sys.stdout.flush()
+                        continue
 
-                code = _extract_code_from_url(line)
-                if code:
-                    paste_result.append(code)
-                    code_event.set()
-                    return
-                else:
-                    # Maybe they pasted the authorize URL instead of callback
-                    if "/authorize" in line or "oauth2/v2/auth" in line:
-                        print(
-                            "\n⚠  That's the authorize URL. You need the REDIRECT URL instead."
-                        )
-                        print("   Click 'Authorize' in the browser first, then copy the URL")
-                        print("   from the address bar (even if the page shows an error).\n")
+                    code = _extract_code_from_url(line)
+                    if code:
+                        paste_result.append(code)
+                        code_event.set()
+                        return
                     else:
-                        print(
-                            "\n⚠  Could not find authorization code in that URL."
-                        )
-                        print("   The URL should contain '?code=...' in it.\n")
+                        if "/authorize" in line or "oauth2/v2/auth" in line:
+                            sys.stdout.write(
+                                "\n⚠  That's the authorize URL. You need the REDIRECT URL.\n"
+                                "   Click 'Authorize' first, then copy the URL from the\n"
+                                "   address bar (even if the page shows an error).\n\n"
+                            )
+                        else:
+                            sys.stdout.write(
+                                "\n⚠  Could not find authorization code in that URL.\n"
+                                "   The URL should contain '?code=...' in it.\n\n"
+                            )
+                        sys.stdout.write(">>> Paste URL: ")
+                        sys.stdout.flush()
+                else:
+                    buf += ch
             except (EOFError, OSError, KeyboardInterrupt):
                 return
 
-    async def wait_paste():
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, _read_stdin)
+    # Start stdin reader thread
+    stdin_thread = threading.Thread(target=_read_stdin, daemon=True)
+    stdin_thread.start()
 
-    # Run both concurrently
+    # Wait for either method
     try:
-        await asyncio.wait_for(
-            asyncio.gather(wait_callback(), wait_paste(), return_exceptions=True),
-            timeout=timeout_seconds,
-        )
+        await asyncio.wait_for(wait_callback(), timeout=timeout_seconds)
     except asyncio.TimeoutError:
         pass
+
+    # Also check if paste got it while we were waiting
+    if not result_code and not paste_result:
+        # Give stdin thread a moment
+        code_event.wait(timeout=2)
 
     if result_code:
         return result_code[0]
