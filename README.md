@@ -368,8 +368,8 @@ All configuration lives in the `config` table. Defaults below reflect the recomm
 syne init                  # Interactive setup (fully automated)
 syne start                 # Start Telegram agent
 syne start --debug         # Start with debug logging
-syne cli                   # Interactive terminal chat
-syne cli --resume          # Resume previous conversation (per directory)
+syne cli                   # Interactive terminal chat (resumes by default)
+syne cli --new             # Start fresh conversation (clear history)
 syne cli --yolo            # Skip file write approvals (auto-yes)
 syne cli --debug           # CLI with debug logging
 syne status                # Show status
@@ -410,8 +410,9 @@ syne memory add "info"     # Manually add memory
 
 ### CLI Features
 
-- **Per-directory sessions** — each directory has its own conversation context
-- **`--resume`** — continue where you left off instead of starting fresh
+- **Per-directory sessions** — each directory has its own conversation context, auto-resumed
+- **`--new`** — start fresh conversation (clears history for this directory)
+- **Multiline input** — Shift+Enter for new line, Enter to submit, paste preserved
 - **File write approval** — Syne asks before writing files (`y`es / `n`o / `a`lways). Skip with `--yolo`
 - **Tool activity indicator** — spinner shows what Syne is doing (Thinking → Searching memory → Running command...)
 - **Ctrl+C** — single tap cancels current request, double tap exits

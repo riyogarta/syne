@@ -864,11 +864,11 @@ def start(debug):
 @cli.command(name="cli")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 @click.option("--yolo", is_flag=True, help="Skip file write approvals (auto-yes)")
-@click.option("--resume", "-r", is_flag=True, help="Resume previous conversation in this directory")
-def cli_mode(debug, yolo, resume):
-    """Interactive CLI chat."""
+@click.option("--new", "-n", is_flag=True, help="Start fresh conversation (clear history in this directory)")
+def cli_mode(debug, yolo, new):
+    """Interactive CLI chat (resumes previous conversation by default)."""
     from .channels.cli_channel import run_cli
-    asyncio.run(run_cli(debug=debug, yolo=yolo, resume=resume))
+    asyncio.run(run_cli(debug=debug, yolo=yolo, fresh=new))
 
 
 # ── Status ───────────────────────────────────────────────────

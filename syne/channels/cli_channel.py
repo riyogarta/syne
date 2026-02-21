@@ -23,8 +23,8 @@ console = Console()
 _prompt_session: PromptSession | None = None
 
 
-async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False):
-    """Run Syne in interactive CLI mode."""
+async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
+    """Run Syne in interactive CLI mode (resumes previous session by default)."""
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
     else:
@@ -177,21 +177,27 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
         cwd = agent._cli_cwd or os.getcwd()
         chat_id = f"cli:{username}:{cwd}"
 
-        # Clear previous session if not resuming
-        if not resume:
+        # Fresh start: close old session and clear history
+        if fresh:
             from ..db.connection import get_connection
             async with get_connection() as conn:
-                # Close old sessions for this chat_id so a fresh one is created
-                await conn.execute("""
+                # Close old sessions and delete messages for this chat_id
+                result = await conn.fetch("""
                     UPDATE sessions SET status = 'closed'
                     WHERE platform = 'cli' AND platform_chat_id = $1 AND status = 'active'
+                    RETURNING id
                 """, chat_id)
+                if result:
+                    session_ids = [r["id"] for r in result]
+                    await conn.execute(
+                        "DELETE FROM messages WHERE session_id = ANY($1::int[])",
+                        session_ids,
+                    )
             # Also clear in-memory cache
             key = f"cli:{chat_id}"
             if key in agent.conversations._active:
                 del agent.conversations._active[key]
-        else:
-            console.print("[dim]Resuming previous session...[/dim]")
+            console.print("[dim]Starting fresh conversation...[/dim]")
 
         # Load input history from DB (user messages for this directory)
         try:
