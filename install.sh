@@ -65,22 +65,22 @@ fi
 echo "Using Python: $PY ($($PY --version 2>&1))"
 
 # ── 4. Ensure python3-venv and pip ────────────────────────
-NEED_APT=0
+PY_VER=$($PY -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 PKGS=""
 
-if ! $PY -m venv --help &>/dev/null 2>&1; then
-    PY_VER=$($PY -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+# Test venv by actually trying to create one (--help lies about ensurepip)
+TEST_VENV=$(mktemp -d)
+if ! $PY -m venv "$TEST_VENV/test" &>/dev/null 2>&1; then
     PKGS="python${PY_VER}-venv"
-    NEED_APT=1
 fi
+rm -rf "$TEST_VENV"
 
 if ! $PY -m pip --version &>/dev/null 2>&1; then
     PKGS="$PKGS python3-pip"
-    NEED_APT=1
 fi
 
-if [ "$NEED_APT" -eq 1 ]; then
-    echo "Installing system packages: $PKGS"
+if [ -n "$PKGS" ]; then
+    echo "Installing system packages:$PKGS"
     sudo apt-get update -qq && sudo apt-get install -y -qq $PKGS
     echo "✓ System packages installed"
 fi
