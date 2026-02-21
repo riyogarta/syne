@@ -1472,25 +1472,46 @@ Or just send me a message!"""
         import asyncio
         import subprocess
         import os
+        import pwd
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         loop = asyncio.get_event_loop()
 
-        # Ensure HOME is set for git credentials
-        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "HOME": os.path.expanduser("~")}
+        # Resolve HOME from passwd entry (systemd may not have HOME set)
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except Exception:
+            home = os.path.expanduser("~")
+
+        env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": home,
+            "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
+        }
 
         def _do():
             """Blocking update logic."""
             from . import __version__ as current_version
 
+            # Check git remote for debugging
+            remote_check = subprocess.run(
+                ["git", "remote", "get-url", "origin"], cwd=syne_dir,
+                capture_output=True, text=True, env=env,
+            )
+            remote_url = remote_check.stdout.strip() if remote_check.returncode == 0 else "unknown"
+
             # Git fetch
             try:
-                subprocess.run(
+                result = subprocess.run(
                     ["git", "fetch", "origin"], cwd=syne_dir,
                     capture_output=True, text=True, timeout=30, env=env,
                 )
+                if result.returncode != 0:
+                    stderr = result.stderr.strip()
+                    return "error", f"❌ Git fetch failed: {stderr}\nRemote: {remote_url}\nHOME: {home}"
             except subprocess.TimeoutExpired:
-                return "error", "❌ Git fetch timed out."
+                return "error", f"❌ Git fetch timed out (30s).\nRemote: {remote_url}\nHOME: {home}\n\nFix: run `git config credential.helper store` then `git pull` manually."
 
             if not dev:
                 # Check remote version
