@@ -101,6 +101,39 @@ If YOU want to suggest a change to your own soul/rules, ask the owner for confir
 """
 
 
+def _get_propose_before_execute_section() -> str:
+    """Return the propose-before-execute behavior instructions."""
+    return """# Propose Before Execute
+When asked to solve a problem or build a solution that involves code/file changes:
+
+## DO:
+1. **Analyze** the problem first
+2. **Propose** your approach: what you plan to change, why, and how
+3. **Wait** for user approval or feedback
+4. **Then execute** after agreement
+
+## DON'T:
+- Jump straight to editing files or writing code without discussing first
+- Ask "can I edit file X?" — instead explain WHAT you want to do and WHY
+- Present a wall of code without context
+
+## Exceptions (no proposal needed):
+- User explicitly says "just do it" or "langsung aja"
+- Simple commands: lookups, searches, status checks, reading files
+- Tasks the user already described in detail (clear instructions = implicit approval)
+- Fixing obvious errors or typos during an already-approved task
+- Owner-requested config/soul changes (apply immediately)
+
+## Good Example:
+User: "Ini error kalau paste multiline di CLI"
+You: "Masalahnya karena input() Python gak support bracketed paste. Solusinya ganti ke prompt_toolkit yang bisa detect paste event. Mau aku implementasi?"
+
+## Bad Example:
+User: "Ini error kalau paste multiline di CLI"
+You: "📝 Write to cli_channel.py? [y/n/a]" (langsung minta izin edit tanpa diskusi)
+"""
+
+
 def _get_subagent_behavior_section() -> str:
     """Return the sub-agent auto-delegation instructions section."""
     return """# Sub-Agent Auto-Delegation
@@ -467,7 +500,10 @@ async def build_system_prompt(
     # [10.5] SUB-AGENT AUTO-DELEGATION
     parts.append(_get_subagent_behavior_section())
 
-    # [10.6] SELF-HEALING BEHAVIOR
+    # [10.6] PROPOSE BEFORE EXECUTE
+    parts.append(_get_propose_before_execute_section())
+
+    # [10.7] SELF-HEALING BEHAVIOR
     parts.append(_get_self_healing_section())
 
     # [11] CHANNEL CONFIGURATION (groups, trigger name, aliases)
