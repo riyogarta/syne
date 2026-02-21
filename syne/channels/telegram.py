@@ -78,6 +78,10 @@ class TelegramChannel:
         # Track recent message IDs per chat for reaction context
         # Format: {chat_id: deque([(message_id, preview_text), ...], maxlen=10)}
         self._recent_messages: dict[int, deque] = {}
+        # Browse mode: {telegram_user_id: path_string} — when set, messages use CLI session
+        self._browse_cwd: dict[int, str] = {}
+        # Path lookup for browse callbacks (short hash → full path)
+        self._browse_paths: dict[str, str] = {}
 
     async def start(self):
         """Start the Telegram bot."""
@@ -102,6 +106,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("model", self._cmd_model))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
+        self.app.add_handler(CommandHandler("browse", self._cmd_browse))
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -285,22 +290,48 @@ class TelegramChannel:
                     "chat_id": str(chat.id),
                 }
 
-                response = await self.agent.handle_message(
-                    platform="telegram",
-                    chat_id=str(chat.id),
-                    user_name=user.first_name or user.username or str(user.id),
-                    user_platform_id=str(user.id),
-                    message=text,
-                    display_name=self._get_display_name(user),
-                    is_group=is_group,  # Pass group flag for security restrictions
-                    message_metadata=metadata,
-                )
+                # Browse mode: route to CLI-compatible session with cwd
+                browse_cwd = self._browse_cwd.get(user.id) if not is_group else None
+                if browse_cwd:
+                    import getpass
+                    username = getpass.getuser()
+                    cli_chat_id = f"cli:{username}:{browse_cwd}"
+                    metadata["cwd"] = browse_cwd
+
+                    # Get the existing Telegram user (don't create a CLI user)
+                    tg_user = await get_user("telegram", str(user.id))
+                    if tg_user:
+                        response = await self.agent.conversations.handle_message(
+                            platform="cli",
+                            chat_id=cli_chat_id,
+                            user=tg_user,
+                            message=text,
+                            is_group=False,
+                            message_metadata=metadata,
+                        )
+                    else:
+                        response = "⚠️ User not found. Send any message first to register."
+                else:
+                    response = await self.agent.handle_message(
+                        platform="telegram",
+                        chat_id=str(chat.id),
+                        user_name=user.first_name or user.username or str(user.id),
+                        user_platform_id=str(user.id),
+                        message=text,
+                        display_name=self._get_display_name(user),
+                        is_group=is_group,
+                        message_metadata=metadata,
+                    )
 
                 if response:
                     # Check if reasoning visibility is ON — prepend thinking if available
                     reasoning_visible = await get_config("session.reasoning_visible", False)
                     if reasoning_visible:
-                        key = f"telegram:{chat.id}"
+                        if browse_cwd:
+                            import getpass as _gp
+                            key = f"cli:cli:{_gp.getuser()}:{browse_cwd}"
+                        else:
+                            key = f"telegram:{chat.id}"
                         conv = self.agent.conversations._active.get(key)
                         thinking = getattr(conv, '_last_thinking', None) if conv else None
                         if thinking:
@@ -740,6 +771,7 @@ class TelegramChannel:
 /autocapture — Toggle auto memory capture (on/off)
 /forget — Clear conversation history
 /identity — Show agent identity
+/browse — Browse directories (share session with CLI)
 
 Or just send me a message!"""
 
@@ -862,6 +894,11 @@ Or just send me a message!"""
             f"💭 Thinking: {self._format_thinking_level(thinking_budget)} | Reasoning: {'ON' if reasoning_visible else 'OFF'}",
             f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
         ]
+
+        # Browse mode indicator
+        browse_cwd = self._browse_cwd.get(update.effective_user.id)
+        if browse_cwd:
+            status_lines.append(f"📂 Browse: `{browse_cwd}`")
 
         if session_info:
             status_lines.append("")
@@ -1386,6 +1423,120 @@ Or just send me a message!"""
         # Send SIGTERM to self — systemd will auto-restart (Restart=always)
         os.kill(os.getpid(), signal.SIGTERM)
 
+    def _path_id(self, path: str) -> str:
+        """Generate a short ID for a path (for callback_data 64-byte limit)."""
+        import hashlib
+        short = hashlib.md5(path.encode()).hexdigest()[:8]
+        self._browse_paths[short] = path
+        return short
+
+    # ── Browse (directory picker) ──────────────────────────────
+
+    async def _cmd_browse(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /browse — interactive directory picker for CLI session sharing."""
+        user = update.effective_user
+        chat = update.effective_chat
+
+        # Owner-only, DM-only
+        if chat.type in ("group", "supergroup"):
+            await update.message.reply_text("⚠️ /browse only works in DM.")
+            return
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Owner only.")
+            return
+
+        # Get Syne project root as default
+        import os
+        syne_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        current_browse = self._browse_cwd.get(user.id)
+
+        # Start path = current browse dir, or home
+        start_path = current_browse or os.path.expanduser("~")
+
+        await self._send_browse_picker(chat.id, user.id, start_path, context)
+
+    async def _send_browse_picker(
+        self, chat_id: int, user_id: int, path: str, context, message_id: int | None = None
+    ):
+        """Send or edit the directory picker inline keyboard."""
+        import os
+
+        path = os.path.realpath(path)
+        current_browse = self._browse_cwd.get(user_id)
+
+        # List directory entries
+        try:
+            entries = sorted(os.listdir(path))
+        except PermissionError:
+            entries = []
+
+        # Separate dirs and show only dirs (this is a directory picker)
+        dirs = []
+        for e in entries:
+            full = os.path.join(path, e)
+            if os.path.isdir(full) and not e.startswith("."):
+                dirs.append(e)
+
+        # Build buttons — max 30 dirs shown
+        buttons = []
+
+        # Parent directory (if not root)
+        if path != "/":
+            parent_id = self._path_id(os.path.dirname(path))
+            buttons.append([InlineKeyboardButton("📁 ..", callback_data=f"brw:n:{parent_id}")])
+
+        # Directory entries (2 per row)
+        row = []
+        for d in dirs[:30]:
+            label = f"📂 {d}"
+            pid = self._path_id(os.path.join(path, d))
+            row.append(InlineKeyboardButton(label, callback_data=f"brw:n:{pid}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+        # Action buttons
+        actions = []
+        sel_id = self._path_id(path)
+        actions.append(InlineKeyboardButton("✅ Select this directory", callback_data=f"brw:s:{sel_id}"))
+        if current_browse:
+            actions.append(InlineKeyboardButton("🏠 Back to default", callback_data="brw:reset"))
+        buttons.append(actions)
+
+        # Status text
+        if current_browse:
+            status = f"📁 Active: `{current_browse}`\n\n"
+        else:
+            status = "📁 No directory selected (default Telegram session)\n\n"
+
+        text = f"{status}📂 `{path}`"
+
+        markup = InlineKeyboardMarkup(buttons)
+
+        if message_id:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                return
+            except Exception:
+                pass
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=markup,
+        )
+
     # ── Helpers ───────────────────────────────────────────────
 
     @staticmethod
@@ -1559,6 +1710,44 @@ Or just send me a message!"""
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
+
+        elif data.startswith("brw:"):
+            # Browse directory picker callbacks
+            import os
+            parts = data.split(":", 2)  # brw:action:id
+            action = parts[1] if len(parts) > 1 else ""
+            path_hash = parts[2] if len(parts) > 2 else ""
+
+            if action == "n":
+                # Navigate to directory
+                target = self._browse_paths.get(path_hash, "")
+                if target and os.path.isdir(target):
+                    await self._send_browse_picker(
+                        query.message.chat_id, user.id, target, context,
+                        message_id=query.message.message_id,
+                    )
+
+            elif action == "s":
+                # Select directory as working directory
+                target = self._browse_paths.get(path_hash, "")
+                if target and os.path.isdir(target):
+                    self._browse_cwd[user.id] = target
+                    await query.edit_message_text(
+                        f"📂 **Browse mode active**\n\n"
+                        f"Working directory: `{target}`\n"
+                        f"Session shared with CLI in this directory.\n\n"
+                        f"Use /browse to change or go back to default.",
+                        parse_mode="Markdown",
+                    )
+
+            elif action == "reset":
+                # Back to default Telegram session
+                self._browse_cwd.pop(user.id, None)
+                await query.edit_message_text(
+                    "🏠 **Back to default session**\n\n"
+                    "Messages now use your regular Telegram session.",
+                    parse_mode="Markdown",
+                )
 
     def _get_display_name(self, user) -> str:
         """Get a display name for a Telegram user."""
