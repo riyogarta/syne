@@ -216,6 +216,19 @@ def _ensure_docker() -> str:
         os.execvp("sg", ["sg", "docker", "-c", "syne init"])
         # execvp replaces current process — code below won't run
 
+    # 1b. Docker exists but user not in docker group
+    current_user = getpass.getuser()
+    import grp
+    try:
+        docker_members = grp.getgrnam("docker").gr_mem
+    except KeyError:
+        docker_members = []
+    if current_user not in docker_members and not _docker_ok():
+        console.print(f"[dim]Adding {current_user} to docker group...[/dim]")
+        os.system(f"sudo usermod -aG docker {current_user}")
+        console.print("[dim]Activating docker group...[/dim]\n")
+        os.execvp("sg", ["sg", "docker", "-c", "syne init"])
+
     # 2. Start daemon if not running
     if not _docker_ok() and not _docker_ok(use_sudo=True):
         console.print("[dim]Starting Docker daemon...[/dim]")
