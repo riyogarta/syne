@@ -191,6 +191,14 @@ class CodexProvider(LLMProvider):
                     "output": msg.content,
                 })
 
+        # Validate: remove function_call_output entries without matching function_call
+        # This can happen after compaction removes part of the conversation
+        fc_ids = {m["call_id"] for m in input_msgs if m.get("type") == "function_call"}
+        input_msgs = [
+            m for m in input_msgs
+            if m.get("type") != "function_call_output" or m.get("call_id") in fc_ids
+        ]
+
         return instructions, input_msgs
 
     def _format_tools(self, tools: list[dict]) -> list[dict]:
@@ -229,9 +237,8 @@ class CodexProvider(LLMProvider):
             "store": False,
         }
 
-        # Note: Codex backend does NOT support temperature parameter
-        if max_tokens:
-            body["max_output_tokens"] = max_tokens
+        # Note: Codex backend does NOT support temperature or max_output_tokens
+        # max_tokens is silently ignored for Codex
         if tools:
             body["tools"] = self._format_tools(tools)
             body["tool_choice"] = "auto"
