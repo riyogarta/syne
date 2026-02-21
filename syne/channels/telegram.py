@@ -1462,95 +1462,48 @@ Or just send me a message!"""
         await self._run_update(msg, context, dev=True)
 
     async def _run_update(self, msg, context, dev: bool = False):
-        """Run update in background thread and report progress."""
+        """Run update by calling syne CLI command (same environment as user shell)."""
         import asyncio
         import subprocess
         import os
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        syne_bin = os.path.join(syne_dir, ".venv", "bin", "syne")
         loop = asyncio.get_event_loop()
 
         def _do():
-            """Blocking update logic — runs in executor."""
-            from . import __version__ as current_version
-            steps = []
-
-            # Git fetch (with timeout and no-prompt to avoid hanging on credentials)
-            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-            try:
-                subprocess.run(
-                    ["git", "fetch", "origin"], cwd=syne_dir,
-                    capture_output=True, text=True, timeout=30, env=env,
-                )
-            except subprocess.TimeoutExpired:
-                return "error", "❌ Git fetch timed out (30s). Check network or git credentials."
-
-            if not dev:
-                # Check remote version
-                result = subprocess.run(
-                    ["git", "show", "origin/main:syne/__init__.py"],
-                    cwd=syne_dir, capture_output=True, text=True,
-                )
-                remote_version = current_version
-                if result.returncode == 0:
-                    for line in result.stdout.splitlines():
-                        if line.startswith("__version__"):
-                            remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
-
-                if remote_version == current_version:
-                    return "up_to_date", f"✅ Already up to date (v{current_version})"
-
-                steps.append(f"📦 v{current_version} → v{remote_version}")
-
-            # Git pull
+            """Run syne update/updatedev CLI in subprocess."""
+            cmd = [syne_bin, "updatedev"] if dev else [syne_bin, "update"]
+            # Inherit full user environment including HOME, git credentials, etc.
+            env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "HOME": os.path.expanduser("~")}
             try:
                 result = subprocess.run(
-                    ["git", "pull"], cwd=syne_dir,
-                    capture_output=True, text=True, timeout=60, env=env,
+                    cmd, cwd=syne_dir,
+                    capture_output=True, text=True, timeout=180, env=env,
                 )
+                output = result.stdout.strip()
+                # Parse output for status
+                if "Already up to date" in output:
+                    return "up_to_date", output
+                elif "updated" in output.lower() or "Updated" in output:
+                    return "restart", output
+                elif result.returncode != 0:
+                    err = result.stderr.strip() or output
+                    return "error", f"❌ {err}"
+                else:
+                    return "done", output or "✅ Done"
             except subprocess.TimeoutExpired:
-                return "error", "❌ Git pull timed out (60s)."
-            if result.returncode != 0:
-                return "error", f"❌ Git pull failed: {result.stderr.strip()}"
-
-            # Install
-            venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
-            try:
-                result = subprocess.run(
-                    [venv_pip, "install", "-e", ".", "-q"],
-                    cwd=syne_dir, capture_output=True, text=True, timeout=120,
-                )
-            except subprocess.TimeoutExpired:
-                return "error", "❌ pip install timed out (120s)."
-            if result.returncode != 0:
-                return "error", f"❌ Install failed: {result.stderr.strip()}"
-
-            # Symlink
-            venv_syne = os.path.join(syne_dir, ".venv", "bin", "syne")
-            local_bin = os.path.expanduser("~/.local/bin")
-            os.makedirs(local_bin, exist_ok=True)
-            target = os.path.join(local_bin, "syne")
-            if os.path.exists(venv_syne):
-                if os.path.exists(target) or os.path.islink(target):
-                    os.remove(target)
-                os.symlink(venv_syne, target)
-
-            # Read new version
-            try:
-                r = subprocess.run(
-                    [os.path.join(syne_dir, ".venv", "bin", "python"), "-c",
-                     "from syne import __version__; print(__version__)"],
-                    cwd=syne_dir, capture_output=True, text=True,
-                )
-                new_ver = r.stdout.strip() if r.returncode == 0 else "?"
-            except Exception:
-                new_ver = "?"
-
-            label = "dev" if dev else new_ver
-            return "restart", f"✅ Updated to v{label}. Restarting..."
+                return "error", "❌ Update timed out (180s)."
 
         status, text = await loop.run_in_executor(None, _do)
+
+        # Clean ANSI codes and Rich markup from CLI output for Telegram
+        import re
+        text = re.sub(r'\x1b\[[0-9;]*m', '', text)  # ANSI escape codes
+        text = re.sub(r'\[/?[a-z ]+\]', '', text)  # Rich markup like [green], [/green]
+        text = text.strip()
+        if not text:
+            text = "✅ Done"
 
         await msg.edit_text(text)
 
