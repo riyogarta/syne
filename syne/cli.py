@@ -1726,8 +1726,10 @@ def uninstall():
     console.print()
     console.print("This will permanently remove:")
     console.print(f"  • Systemd service (stop, disable, delete)")
-    console.print(f"  • Docker containers and database volume (ALL DATA LOST)")
+    console.print(f"  • Docker containers, volume, and image (ALL DATA LOST)")
     console.print(f"  • CLI symlink ({symlink_path})")
+    console.print(f"  • Shell PATH entry (bashrc/zshrc)")
+    console.print(f"  • Ollama embedding model (if installed)")
     console.print(f"  • Source code ({syne_dir})")
     console.print()
 
@@ -1739,7 +1741,7 @@ def uninstall():
     console.print()
 
     # 1. Stop and remove systemd service
-    console.print("[bold]1/5[/bold] Removing systemd service...")
+    console.print("[bold]1/6[/bold] Removing systemd service...")
     subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
     subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
     if service_file.exists():
@@ -1747,8 +1749,8 @@ def uninstall():
     subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
     console.print("  [green]✓ Service removed[/green]")
 
-    # 2. Stop and remove Docker containers + volume
-    console.print("[bold]2/5[/bold] Removing Docker containers and data...")
+    # 2. Stop and remove Docker containers + volume + image
+    console.print("[bold]2/6[/bold] Removing Docker containers and data...")
     if os.path.isfile(compose_file):
         subprocess.run(
             ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
@@ -1757,10 +1759,12 @@ def uninstall():
     # Also clean up any leftover containers
     for name in ["syne-db", "syne-agent"]:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    console.print("  [green]✓ Containers and data removed[/green]")
+    # Remove Docker image
+    subprocess.run(["docker", "rmi", "pgvector/pgvector:pg16"], capture_output=True)
+    console.print("  [green]✓ Containers, data, and images removed[/green]")
 
-    # 3. Remove CLI symlink + PATH entry
-    console.print("[bold]3/5[/bold] Removing CLI symlink...")
+    # 3. Remove CLI symlink
+    console.print("[bold]3/6[/bold] Removing CLI symlink...")
     if os.path.islink(symlink_path) or os.path.exists(symlink_path):
         os.remove(symlink_path)
         console.print(f"  [green]✓ Removed {symlink_path}[/green]")
@@ -1768,7 +1772,7 @@ def uninstall():
         console.print(f"  [dim]Not found: {symlink_path}[/dim]")
 
     # 4. Clean up shell rc (remove Syne CLI PATH line)
-    console.print("[bold]4/5[/bold] Cleaning shell config...")
+    console.print("[bold]4/6[/bold] Cleaning shell config...")
     for rc_file in [os.path.expanduser("~/.bashrc"), os.path.expanduser("~/.zshrc")]:
         if os.path.exists(rc_file):
             try:
@@ -1793,8 +1797,19 @@ def uninstall():
             except Exception:
                 pass
 
-    # 5. Remove source code (self-destruct — must be last)
-    console.print("[bold]5/5[/bold] Removing source code...")
+    # 5. Remove Ollama embedding model if present
+    console.print("[bold]5/6[/bold] Cleaning up Ollama models...")
+    result = subprocess.run(
+        ["ollama", "rm", "qwen3-embedding:0.6b"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        console.print("  [green]✓ Removed qwen3-embedding:0.6b[/green]")
+    else:
+        console.print("  [dim]No Ollama model to remove[/dim]")
+
+    # 6. Remove source code (self-destruct — must be last)
+    console.print("[bold]6/6[/bold] Removing source code...")
     try:
         shutil.rmtree(syne_dir)
         console.print(f"  [green]✓ Removed {syne_dir}[/green]")
