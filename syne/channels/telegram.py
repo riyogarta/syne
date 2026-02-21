@@ -107,8 +107,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("model", self._cmd_model))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
-        self.app.add_handler(CommandHandler("update", self._cmd_update))
-        self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))
+        # Update commands removed — use `syne update` / `syne updatedev` from CLI
 
         # Message handler — catch all text messages
         self.app.add_handler(MessageHandler(
@@ -160,7 +159,6 @@ class TelegramChannel:
             BotCommand("embedding", "Switch embedding model (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
-            BotCommand("update", "Check and install updates"),
         ])
 
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
@@ -782,7 +780,6 @@ class TelegramChannel:
 /forget — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
-/update — Check and install updates
 
 Or just send me a message!"""
 
@@ -1440,128 +1437,6 @@ Or just send me a message!"""
         short = hashlib.md5(path.encode()).hexdigest()[:8]
         self._browse_paths[short] = path
         return short
-
-    # ── Update commands ────────────────────────────────────────
-
-    async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /update — check and install updates (version-based)."""
-        user = update.effective_user
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Owner only.")
-            return
-
-        msg = await update.message.reply_text("🔍 Checking for updates...")
-        await self._run_update(msg, context, dev=False)
-
-    async def _cmd_updatedev(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /updatedev — force pull and reinstall (hidden command)."""
-        user = update.effective_user
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Owner only.")
-            return
-
-        msg = await update.message.reply_text("📥 Pulling latest code (dev)...")
-        await self._run_update(msg, context, dev=True)
-
-    async def _run_update(self, msg, context, dev: bool = False):
-        """Run update directly (git + pip) then self-restart."""
-        import asyncio
-        import subprocess
-        import os
-        import pwd
-
-        syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        loop = asyncio.get_event_loop()
-
-        # Resolve HOME from passwd entry (systemd may not have HOME set)
-        try:
-            home = pwd.getpwuid(os.getuid()).pw_dir
-        except Exception:
-            home = os.path.expanduser("~")
-
-        env = {
-            **os.environ,
-            "GIT_TERMINAL_PROMPT": "0",
-            "HOME": home,
-            "GIT_SSH_COMMAND": "ssh -o BatchMode=yes -o StrictHostKeyChecking=no",
-        }
-
-        def _do():
-            """Blocking update logic."""
-            from . import __version__ as current_version
-
-            # Check git remote for debugging
-            remote_check = subprocess.run(
-                ["git", "remote", "get-url", "origin"], cwd=syne_dir,
-                capture_output=True, text=True, env=env,
-            )
-            remote_url = remote_check.stdout.strip() if remote_check.returncode == 0 else "unknown"
-
-            # Git fetch
-            try:
-                result = subprocess.run(
-                    ["git", "fetch", "origin"], cwd=syne_dir,
-                    capture_output=True, text=True, timeout=30, env=env,
-                )
-                if result.returncode != 0:
-                    stderr = result.stderr.strip()
-                    return "error", f"❌ Git fetch failed: {stderr}\nRemote: {remote_url}\nHOME: {home}"
-            except subprocess.TimeoutExpired:
-                return "error", f"❌ Git fetch timed out (30s).\nRemote: {remote_url}\nHOME: {home}\n\nFix: run `git config credential.helper store` then `git pull` manually."
-
-            if not dev:
-                # Check remote version
-                result = subprocess.run(
-                    ["git", "show", "origin/main:syne/__init__.py"],
-                    cwd=syne_dir, capture_output=True, text=True, env=env,
-                )
-                remote_version = current_version
-                if result.returncode == 0:
-                    for line in result.stdout.splitlines():
-                        if line.startswith("__version__"):
-                            remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
-                            break
-                if remote_version == current_version:
-                    return "up_to_date", f"✅ Already up to date (v{current_version})"
-
-            # Git pull
-            try:
-                result = subprocess.run(
-                    ["git", "pull"], cwd=syne_dir,
-                    capture_output=True, text=True, timeout=60, env=env,
-                )
-            except subprocess.TimeoutExpired:
-                return "error", "❌ Git pull timed out."
-            if result.returncode != 0:
-                return "error", f"❌ Git pull failed: {result.stderr.strip()}"
-
-            # Pip install
-            venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
-            try:
-                result = subprocess.run(
-                    [venv_pip, "install", "-e", ".", "-q"],
-                    cwd=syne_dir, capture_output=True, text=True, timeout=120, env=env,
-                )
-            except subprocess.TimeoutExpired:
-                return "error", "❌ pip install timed out."
-            if result.returncode != 0:
-                return "error", f"❌ Install failed: {result.stderr.strip()}"
-
-            label = "dev" if dev else "latest"
-            return "restart", f"✅ Updated ({label}). Restarting..."
-
-        status, text = await loop.run_in_executor(None, _do)
-        await msg.edit_text(text)
-
-        if status == "restart":
-            # Self-restart via SIGTERM — systemd auto-restarts
-            import signal
-            await asyncio.sleep(1)
-            os.kill(os.getpid(), signal.SIGTERM)
 
     # ── Browse (directory picker) ──────────────────────────────
 
