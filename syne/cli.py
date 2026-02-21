@@ -267,8 +267,6 @@ def _setup_service():
 
     service_dir.mkdir(parents=True, exist_ok=True)
 
-    # DB container has restart: unless-stopped — Docker auto-starts it.
-    # No ExecStartPre needed (avoids sudo/docker-group issues on fresh install).
     service_content = f"""[Unit]
 Description=Syne AI Agent
 After=network.target docker.service
@@ -277,6 +275,7 @@ After=network.target docker.service
 Type=simple
 WorkingDirectory={syne_dir}
 EnvironmentFile={env_file}
+ExecStartPre=/usr/bin/docker compose -f {syne_dir}/docker-compose.yml up -d
 ExecStart={venv_python} -m syne.main
 Restart=on-failure
 RestartSec=10
