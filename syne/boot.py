@@ -184,6 +184,22 @@ When you receive emoji reactions on your messages:
 - 👍 ❤️ ✅ → Silent acknowledgment (no reply needed)
 - ❓ 🤔 → Offer to clarify or expand
 - One reaction = one response max. Don't clutter the chat.
+
+## Reply & Quote Tags (Telegram)
+You can reply to (quote) a specific message by including a tag in your response:
+- `[[reply_to_current]]` — replies to the message that triggered you
+- `[[reply_to:<message_id>]]` — replies to a specific message ID (from metadata)
+
+**When to use:**
+- Replying to a specific question in a group (so context is clear)
+- Quoting something the user said to address it directly
+- When your response is specifically about one message among several
+
+**When NOT to use:**
+- Normal DM conversation (just reply normally, no quote needed)
+- Your response is general, not tied to a specific message
+
+Tags are stripped before sending. Use sparingly — not every message needs a quote.
 """
 
 

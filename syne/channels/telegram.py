@@ -225,8 +225,9 @@ class TelegramChannel:
             )
             
             if response:
-                # Send response back to user
-                await self._send_response_with_media(chat_id, response, None)
+                # Parse reply tags (no incoming message for cron)
+                response, reply_to = self._parse_reply_tag(response)
+                await self._send_response_with_media(chat_id, response, None, reply_to_message_id=reply_to)
         
         except Exception as e:
             logger.error(f"Error processing scheduled message: {e}", exc_info=True)
@@ -346,7 +347,9 @@ class TelegramChannel:
                             thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
                             response = thinking_block + response
 
-                    sent = await self._send_response_with_media(chat.id, response, context)
+                    # Parse reply tags from LLM response
+                    response, reply_to = self._parse_reply_tag(response, message_id)
+                    sent = await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
                     # Track bot's response for reaction context
                     if sent:
                         self._track_message(chat.id, sent.message_id, response[:100])
@@ -551,7 +554,8 @@ class TelegramChannel:
                 )
 
                 if response:
-                    await self._send_response_with_media(chat.id, response, context)
+                    response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
 
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
@@ -641,7 +645,8 @@ class TelegramChannel:
                 )
 
                 if response:
-                    sent = await self._send_response_with_media(chat.id, response, context)
+                    response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    sent = await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
                     # Track bot's response message ID
                     if sent:
                         self._track_message(chat.id, sent.message_id, response[:50])
@@ -1775,7 +1780,26 @@ Or just send me a message!"""
                 return True
         return False
 
-    async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None):
+    @staticmethod
+    def _parse_reply_tag(text: str, incoming_message_id: int | None = None) -> tuple[str, int | None]:
+        """Parse [[reply_to_current]] or [[reply_to:<id>]] tags from response text.
+
+        Returns:
+            Tuple of (cleaned_text, reply_to_message_id or None)
+        """
+        import re
+        # Match [[reply_to_current]] or [[ reply_to_current ]]
+        if re.search(r'\[\[\s*reply_to_current\s*\]\]', text):
+            text = re.sub(r'\[\[\s*reply_to_current\s*\]\]', '', text).strip()
+            return text, incoming_message_id
+        # Match [[reply_to:<id>]] or [[ reply_to: <id> ]]
+        m = re.search(r'\[\[\s*reply_to:\s*(\d+)\s*\]\]', text)
+        if m:
+            text = re.sub(r'\[\[\s*reply_to:\s*\d+\s*\]\]', '', text).strip()
+            return text, int(m.group(1))
+        return text, None
+
+    async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, handling MEDIA: paths as photos/documents.
         
         If response contains 'MEDIA: /path/to/file', send the file as a photo
@@ -1785,6 +1809,7 @@ Or just send me a message!"""
             chat_id: Telegram chat ID
             text: Response text (may contain MEDIA: path)
             context: Telegram context (optional — uses self.app.bot if None)
+            reply_to_message_id: Optional message ID to reply/quote to
         
         Returns:
             The sent Message object, or None if send failed.
@@ -1815,6 +1840,7 @@ Or just send me a message!"""
 
                 ext = os.path.splitext(media_path)[1].lower()
                 sent_msg = None
+                reply_params = {"message_id": reply_to_message_id} if reply_to_message_id else None
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
                     with open(media_path, "rb") as f:
                         try:
@@ -1823,6 +1849,7 @@ Or just send me a message!"""
                                 photo=f,
                                 caption=caption_text or None,
                                 parse_mode="Markdown" if caption_text else None,
+                                reply_parameters=reply_params,
                             )
                         except Exception:
                             # Markdown parse failed — retry without parse_mode
@@ -1831,6 +1858,7 @@ Or just send me a message!"""
                                 chat_id=chat_id,
                                 photo=f,
                                 caption=caption_text or None,
+                                reply_parameters=reply_params,
                             )
                 else:
                     with open(media_path, "rb") as f:
@@ -1840,6 +1868,7 @@ Or just send me a message!"""
                                 document=f,
                                 caption=caption_text or None,
                                 parse_mode="Markdown" if caption_text else None,
+                                reply_parameters=reply_params,
                             )
                         except Exception:
                             f.seek(0)
@@ -1847,6 +1876,7 @@ Or just send me a message!"""
                                 chat_id=chat_id,
                                 document=f,
                                 caption=caption_text or None,
+                                reply_parameters=reply_params,
                             )
                 logger.info(f"Sent media: {media_path} to {chat_id}")
                 return sent_msg
@@ -1856,9 +1886,9 @@ Or just send me a message!"""
                 caption_text = text  # Send full text as fallback
 
         # No media or media send failed — send as text
-        return await self._send_response(chat_id, caption_text, context)
+        return await self._send_response(chat_id, caption_text, context, reply_to_message_id=reply_to_message_id)
 
-    async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None):
+    async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, splitting if too long for Telegram.
         Falls back to plain text if Markdown parsing fails.
         
@@ -1866,6 +1896,7 @@ Or just send me a message!"""
             chat_id: Telegram chat ID
             text: Response text
             context: Telegram context (optional — uses self.app.bot if None)
+            reply_to_message_id: Optional message ID to reply/quote to
         
         Returns:
             The last sent Message object, or None if send failed.
@@ -1892,18 +1923,23 @@ Or just send me a message!"""
             chunks.append(remaining[:split_at])
             remaining = remaining[split_at:].lstrip()
 
-        for chunk in chunks:
+        # Only apply reply_to on the FIRST chunk
+        reply_params = {"message_id": reply_to_message_id} if reply_to_message_id else None
+        for i, chunk in enumerate(chunks):
+            rp = reply_params if i == 0 else None
             try:
                 last_msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
                     parse_mode="Markdown",
+                    reply_parameters=rp,
                 )
             except Exception:
                 # Markdown parse failed — send as plain text
                 last_msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
+                    reply_parameters=rp,
                 )
 
         return last_msg
