@@ -35,7 +35,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
     agent = SyneAgent(settings)
 
     # Setup readline history
-    history_file = os.path.expanduser("~/.syne_cli_history")
+    # History per directory — hash CWD to avoid path characters in filename
+    import hashlib
+    cwd_hash = hashlib.md5(os.getcwd().encode()).hexdigest()[:8]
+    history_dir = os.path.expanduser("~/.syne/history")
+    os.makedirs(history_dir, exist_ok=True)
+    history_file = os.path.join(history_dir, f"cli_{cwd_hash}")
     try:
         readline.read_history_file(history_file)
     except FileNotFoundError:
