@@ -20,6 +20,85 @@ from ..db.models import get_or_create_user, get_identity
 
 logger = logging.getLogger("syne.cli_channel")
 console = Console()
+
+
+async def cli_select(options: list[str], default: int = 0) -> int:
+    """Arrow-key selector for CLI choices.
+    
+    Displays options vertically. User navigates with ↑/↓ and confirms with Enter.
+    Selected option is marked with '>'.
+    
+    Args:
+        options: List of option labels (e.g. ["Yes", "No", "Always allow"])
+        default: Index of initially selected option (0-based)
+        
+    Returns:
+        Index of chosen option
+    """
+    selected = default
+    total = len(options)
+
+    def _render():
+        # Move cursor up to overwrite previous render (except first time)
+        for line in options:
+            label = line
+            idx = options.index(line)
+            if idx == selected:
+                console.print(f"  [bold cyan]> {label}[/bold cyan]")
+            else:
+                console.print(f"    {label}")
+
+    def _clear_and_render():
+        # Move up by total lines and re-render
+        sys.stdout.write(f"\033[{total}A\033[J")
+        sys.stdout.flush()
+        _render()
+
+    # First render
+    _render()
+
+    # Read keys in executor to avoid blocking asyncio
+    loop = asyncio.get_event_loop()
+
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    def _read_selection() -> int:
+        nonlocal selected
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == "\r" or ch == "\n":
+                    return selected
+                elif ch == "\x1b":  # Escape sequence
+                    seq = sys.stdin.read(2)
+                    if seq == "[A":  # Up arrow
+                        selected = (selected - 1) % total
+                    elif seq == "[B":  # Down arrow
+                        selected = (selected + 1) % total
+                    # Re-render
+                    sys.stdout.write(f"\033[{total}A\033[J")
+                    sys.stdout.flush()
+                elif ch == "\x03":  # Ctrl+C
+                    return default
+                else:
+                    continue
+                # Render with raw mode — use direct writes
+                for i, label in enumerate(options):
+                    if i == selected:
+                        sys.stdout.write(f"  \033[1;36m> {label}\033[0m\n")
+                    else:
+                        sys.stdout.write(f"    {label}\n")
+                sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    result = await loop.run_in_executor(None, _read_selection)
+    return result
 _prompt_session: PromptSession | None = None
 
 
@@ -127,23 +206,21 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                 size = len(content.encode("utf-8"))
 
                 console.print(f"\n[bold yellow]📝 Write to {file_path}?[/bold yellow] ({lines} lines, {size:,} bytes)")
-                console.print("[dim]  [y] Yes  [n] No  [a] Always allow this file[/dim]")
 
+                choices = ["Yes", "No", "Always allow this file"]
                 try:
-                    choice = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: input("  > ").strip().lower()
-                    )
+                    chosen = await cli_select(choices, default=0)
                 except (EOFError, KeyboardInterrupt):
-                    choice = "n"
+                    chosen = 1  # No
 
                 # Resume spinner
                 if _status_ref:
                     _status_ref.start()
 
-                if choice == "a":
+                if chosen == 2:  # Always allow
                     _always_allowed.add(resolved)
                     return True, ""
-                elif choice in ("y", "yes"):
+                elif chosen == 0:  # Yes
                     return True, ""
                 else:
                     return False, "User declined file write."
