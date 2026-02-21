@@ -305,14 +305,20 @@ class TelegramChannel:
                     # Get the existing Telegram user (don't create a CLI user)
                     tg_user = await get_user("telegram", str(user.id))
                     if tg_user:
-                        response = await self.agent.conversations.handle_message(
-                            platform="cli",
-                            chat_id=cli_chat_id,
-                            user=tg_user,
-                            message=text,
-                            is_group=False,
-                            message_metadata=metadata,
-                        )
+                        # Set exec working directory to browse path
+                        prev_cwd = self.agent._cli_cwd
+                        self.agent._cli_cwd = browse_cwd
+                        try:
+                            response = await self.agent.conversations.handle_message(
+                                platform="cli",
+                                chat_id=cli_chat_id,
+                                user=tg_user,
+                                message=text,
+                                is_group=False,
+                                message_metadata=metadata,
+                            )
+                        finally:
+                            self.agent._cli_cwd = prev_cwd
                     else:
                         response = "⚠️ User not found. Send any message first to register."
                 else:
