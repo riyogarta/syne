@@ -4,9 +4,11 @@ import asyncio
 import getpass
 import logging
 import os
-import readline  # noqa: F401 — enables arrow keys, history in input()
 import sys
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -18,6 +20,7 @@ from ..db.models import get_or_create_user, get_identity
 
 logger = logging.getLogger("syne.cli_channel")
 console = Console()
+_prompt_session: PromptSession | None = None
 
 
 async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False):
@@ -34,7 +37,32 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
     settings = load_settings()
     agent = SyneAgent(settings)
 
-    readline.set_history_length(1000)
+    global _prompt_session
+
+    # Build prompt_toolkit keybindings: Enter=submit, Shift+Enter / Esc+Enter=newline
+    _kb = KeyBindings()
+
+    @_kb.add(Keys.Enter)
+    def _submit(event):
+        """Enter submits the input."""
+        event.current_buffer.validate_and_handle()
+
+    @_kb.add(Keys.Escape, Keys.Enter)
+    def _newline_esc(event):
+        """Esc + Enter inserts a newline (fallback for terminals without Shift+Enter)."""
+        event.current_buffer.insert_text("\n")
+
+    # Some terminals send Shift+Enter as Escape [13;2u or just \x1b\r
+    # prompt_toolkit maps this to s-enter on supported terminals
+    try:
+        @_kb.add("s-enter")
+        def _newline_shift(event):
+            """Shift+Enter inserts a newline."""
+            event.current_buffer.insert_text("\n")
+    except Exception:
+        pass  # Terminal doesn't support — Esc+Enter still works
+
+    _prompt_session = PromptSession(key_bindings=_kb, multiline=True)
 
     try:
         await agent.start()
@@ -159,9 +187,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
         else:
             console.print("[dim]Resuming previous session...[/dim]")
 
-        # Load readline history from DB (user messages for this directory)
-        readline.clear_history()
+        # Load input history from DB (user messages for this directory)
         try:
+            from prompt_toolkit.history import InMemoryHistory
+            _history = InMemoryHistory()
             from ..db.connection import get_connection
             async with get_connection() as conn:
                 rows = await conn.fetch("""
@@ -175,7 +204,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
             for row in rows:
                 content = row["content"].strip()
                 if content and not content.startswith("/"):
-                    readline.add_history(content)
+                    _history.append_string(content)
+            _prompt_session.history = _history
         except Exception:
             pass
         import time as _time
@@ -277,7 +307,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, resume: bool = False)
 
     # Cleanup
     await agent.stop()
-    # Restore terminal state — readline/executor can leave it corrupted
+    # Restore terminal state — prompt_toolkit/executor can leave it corrupted
     try:
         os.system("stty sane 2>/dev/null")
     except Exception:
@@ -301,33 +331,17 @@ def _stop_status(status, agent):
         pass
 
 
-def _get_input_sync() -> str | None:
-    """Get user input (blocking), supporting multiline with \\\\ continuation."""
+async def _get_input() -> str | None:
+    """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
     try:
-        lines = []
-        
-        while True:
-            if not lines:
-                line = input("> ")
-            else:
-                line = input("... ")
-
-            if line.endswith("\\"):
-                lines.append(line[:-1])
-                continue
-            else:
-                lines.append(line)
-                break
-
-        return "\n".join(lines)
+        result = await _prompt_session.prompt_async(
+            "> ",
+            multiline=True,
+            prompt_continuation="… ",
+        )
+        return result
     except EOFError:
         return None
-
-
-async def _get_input() -> str | None:
-    """Run blocking input() in a thread so asyncio event loop stays free."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_input_sync)
 
 
 def _display_response(response: str):
@@ -384,7 +398,7 @@ async def _handle_cli_command(
             "/think [level] — Set thinking budget\n"
             "/exit          — Exit CLI\n"
             "\n[dim]All other messages are sent to the agent.[/dim]\n"
-            "[dim]Use \\\\ at end of line for multiline input.[/dim]",
+            "[dim]Shift+Enter or Esc+Enter for new line.[/dim]",
             style="blue",
         ))
         return True

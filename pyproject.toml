@@ -33,6 +33,7 @@ dependencies = [
     "rich>=13.0",
     "pyyaml>=6.0",
     "croniter>=2.0",
+    "prompt_toolkit>=3.0",
 ]
 
 [project.optional-dependencies]
