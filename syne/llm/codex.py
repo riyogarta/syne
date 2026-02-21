@@ -159,7 +159,19 @@ class CodexProvider(LLMProvider):
             if msg.role == "system":
                 instructions = msg.content
             elif msg.role == "user":
-                input_msgs.append({"role": "user", "content": msg.content})
+                # Check for image metadata (vision)
+                if msg.metadata and msg.metadata.get("image"):
+                    img = msg.metadata["image"]
+                    content_parts = [
+                        {"type": "input_text", "text": msg.content},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:{img.get('mime_type', 'image/jpeg')};base64,{img['base64']}",
+                        },
+                    ]
+                    input_msgs.append({"role": "user", "content": content_parts})
+                else:
+                    input_msgs.append({"role": "user", "content": msg.content})
             elif msg.role == "assistant":
                 if msg.metadata and msg.metadata.get("tool_calls"):
                     # Assistant with tool calls — add as function_call items
