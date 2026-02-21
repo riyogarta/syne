@@ -1426,10 +1426,10 @@ Or just send me a message!"""
         await update.message.reply_text("🔄 Restarting Syne...")
         logger.info(f"Restart requested by {user.id}")
 
-        import os
-        import signal
-        # Send SIGTERM to self — systemd will auto-restart (Restart=always)
-        os.kill(os.getpid(), signal.SIGTERM)
+        import sys
+        # Exit with non-zero code so systemd (Restart=on-failure) will restart us
+        # SIGTERM = exit 0 = clean exit = no restart. sys.exit(1) = failure = restart.
+        sys.exit(1)
 
     def _path_id(self, path: str) -> str:
         """Generate a short ID for a path (for callback_data 64-byte limit)."""
