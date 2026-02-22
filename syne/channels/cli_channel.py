@@ -323,7 +323,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                     WHERE s.platform = 'cli' AND s.platform_chat_id = $1
                       AND m.role = 'user'
                     ORDER BY m.created_at ASC
-                    LIMIT 500
                 """, chat_id)
             for row in rows:
                 content = row["content"].strip()

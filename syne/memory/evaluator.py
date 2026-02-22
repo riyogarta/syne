@@ -100,7 +100,7 @@ async def evaluate_message(
                 ChatMessage(role="user", content=f"User message: \"{user_message}\""),
             ],
             temperature=0.1,
-            max_tokens=150,
+            max_tokens=None,
         )
 
         result = response.content.strip()

@@ -102,9 +102,8 @@ def _serialize_messages(rows: list) -> str:
     for row in rows:
         role = row["role"]
         content = row["content"]
-        # Truncate very long individual messages
-        if len(content) > 800:
-            content = content[:800] + "..."
+        # No truncation — let the summarizer see full messages
+        # (OpenClaw sends all messages to summarizer without truncation)
 
         if role == "user":
             parts.append(f"[User]: {content}")
@@ -204,9 +203,8 @@ async def compact_session(
         summarized_chars = sum(len(r["content"]) for r in old_rows)
         conv_text = _serialize_messages(old_rows)
 
-        # Cap input to summarizer
-        if len(conv_text) > 30000:
-            conv_text = conv_text[:30000] + "\n\n[...truncated...]"
+        # No cap — send full conversation to summarizer
+        # Context limit of the summarizer model is the natural constraint
 
         logger.info(
             f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary"
@@ -233,7 +231,7 @@ async def compact_session(
                 ChatMessage(role="user", content=prompt_text),
             ],
             temperature=0.1,
-            max_tokens=2000,
+            max_tokens=16384,
         )
 
         summary = summary_response.content
