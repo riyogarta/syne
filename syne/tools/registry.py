@@ -17,6 +17,11 @@ class Tool:
     handler: Callable                   # async function to execute
     requires_access_level: str = "public"
     enabled: bool = True
+    scrub_level: str = "aggressive"     # "aggressive" | "safe" | "none"
+    # aggressive: full regex scrub (Cookie, PEM, querystring, etc.)
+    # safe: high-confidence patterns only (JWT, sk-*, bot tokens, etc.)
+    #        Won't corrupt regex/code in output
+    # none: tool has its own dedicated scrubber (e.g. exec)
 
 
 class ToolRegistry:
@@ -41,14 +46,23 @@ class ToolRegistry:
         parameters: dict,
         handler: Callable,
         requires_access_level: str = "public",
+        scrub_level: str = "aggressive",
     ):
-        """Register a new tool."""
+        """Register a new tool.
+        
+        Args:
+            scrub_level: Credential scrubbing level for tool output.
+                "aggressive" — full regex scrub (default, safest)
+                "safe" — high-confidence patterns only (for code/content output)
+                "none" — tool has its own dedicated scrubber
+        """
         self._tools[name] = Tool(
             name=name,
             description=description,
             parameters=parameters,
             handler=handler,
             requires_access_level=requires_access_level,
+            scrub_level=scrub_level,
         )
 
     def unregister(self, name: str):

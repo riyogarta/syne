@@ -330,6 +330,7 @@ class SyneAgent:
             parameters=WEB_SEARCH_TOOL["parameters"],
             handler=WEB_SEARCH_TOOL["handler"],
             requires_access_level=WEB_SEARCH_TOOL["requires_access_level"],
+            scrub_level="safe",  # search snippets may contain code
         )
 
         # ── Web Fetch (Core) ──
@@ -340,6 +341,7 @@ class SyneAgent:
             parameters=WEB_FETCH_TOOL["parameters"],
             handler=WEB_FETCH_TOOL["handler"],
             requires_access_level=WEB_FETCH_TOOL["requires_access_level"],
+            scrub_level="safe",  # web content may contain code/docs
         )
 
         # ── Read Source (Core) ──
@@ -350,6 +352,7 @@ class SyneAgent:
             parameters=READ_SOURCE_TOOL["parameters"],
             handler=READ_SOURCE_TOOL["handler"],
             requires_access_level=READ_SOURCE_TOOL["requires_access_level"],
+            scrub_level="safe",  # source code — must not corrupt regex/patterns
         )
 
         # ── File Operations (Core) ──
@@ -360,6 +363,7 @@ class SyneAgent:
             parameters=FILE_READ_TOOL["parameters"],
             handler=FILE_READ_TOOL["handler"],
             requires_access_level=FILE_READ_TOOL["requires_access_level"],
+            scrub_level="safe",  # files may contain code/configs
         )
         self.tools.register(
             name=FILE_WRITE_TOOL["name"],
@@ -433,6 +437,7 @@ class SyneAgent:
             },
             handler=self._tool_exec,
             requires_access_level="owner",
+            scrub_level="none",  # exec has dedicated redact_exec_output()
         )
 
         # Memory search tool

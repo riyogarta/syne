@@ -42,8 +42,9 @@ _BLOCKED_PATTERNS = [
     "node_modules",
 ]
 
-# Max lines per read to prevent context flooding
-_MAX_LINES = 200
+# Max lines per read — high enough to read most files in 1-2 calls
+# (largest file agent.py ~1500 lines, security.py ~660 lines)
+_MAX_LINES = 500
 
 
 def _is_allowed_path(rel_path: str) -> bool:
@@ -235,7 +236,7 @@ def _action_search(path: str, pattern: str) -> str:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
                 for lineno, line in enumerate(f, 1):
                     if regex.search(line):
-                        results.append(f"{rel_str}:{lineno}: {line.rstrip()[:120]}")
+                        results.append(f"{rel_str}:{lineno}: {line.rstrip()[:200]}")
                         if len(results) >= max_results:
                             break
         except Exception:
@@ -283,7 +284,7 @@ READ_SOURCE_TOOL = {
             },
             "limit": {
                 "type": "integer",
-                "description": f"Max lines to read (default/max {_MAX_LINES})",
+                "description": f"Max lines to read (default/max {_MAX_LINES}). Most files fit in 1-2 reads.",
             },
             "pattern": {
                 "type": "string",

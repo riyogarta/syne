@@ -358,30 +358,21 @@ class Conversation:
                     result = f"Error: Unknown tool or ability '{name}'"
 
                 # ═══════════════════════════════════════════════════════
-                # GLOBAL TOOL RESULT SCRUBBER (two levels)
-                #
-                # Level 1 (SAFE): For content tools that may return code,
-                #   docs, regex patterns — only high-confidence patterns
-                #   (bot tokens, JWT, sk-*, AKIA, long hex, GitHub tokens).
-                #   Won't false-positive on Cookie regex or PEM in code.
-                #
-                # Level 2 (AGGRESSIVE): For all other tools — full regex
-                #   scrub including Cookie headers, querystrings, PEM, etc.
-                #
-                # SKIP entirely: exec (has dedicated redact_exec_output),
-                #   read_source (returns own source code, already blocks
-                #   .env/secrets — even safe patterns could mangle regex).
+                # GLOBAL TOOL RESULT SCRUBBER
+                # Each tool declares its own scrub_level:
+                #   "aggressive" — full regex (Cookie, PEM, querystring...)
+                #   "safe" — high-confidence only (JWT, sk-*, bot tokens)
+                #   "none" — tool has its own dedicated scrubber
+                # Default = "aggressive" (safest for new tools)
                 # ═══════════════════════════════════════════════════════
-                _SCRUBBER_SKIP = frozenset({"exec", "read_source"})
-                _SCRUBBER_SAFE = frozenset({
-                    "file_read", "web_fetch", "web_search",
-                })
-                if name in _SCRUBBER_SKIP:
-                    pass  # exec has its own; read_source is safe
-                elif name in _SCRUBBER_SAFE:
+                tool_obj = self.tools.get(name)
+                scrub = tool_obj.scrub_level if tool_obj else "aggressive"
+                if scrub == "none":
+                    pass  # tool handles its own scrubbing
+                elif scrub == "safe":
                     from .security import redact_content_output
                     result = redact_content_output(str(result))
-                else:
+                else:  # "aggressive" (default)
                     from .security import redact_secrets_in_text
                     result = redact_secrets_in_text(str(result))
 
