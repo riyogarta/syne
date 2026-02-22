@@ -606,6 +606,8 @@ def _get_function_calling_section() -> str:
 - NEVER pretend you produced a file, image, screenshot, or any artifact that you did not actually create via a tool call. If a tool didn't return it, it doesn't exist. Don't fabricate filenames or claim attachments.
 - NEVER respond with placeholder text like "!image" or "[image]" — either call the function or explain you can't.
 - If you cannot do something, DO NOT hallucinate success. Instead, offer to create a new ability (see "Can't Do It" section).
+- BEFORE claiming you can do something, CHECK your Available Tools list above. If no tool matches the task (e.g. screenshot, PDF conversion, audio transcription), you CANNOT do it yet. Say: "Aku belum punya kemampuan untuk itu. Mau aku buatkan ability-nya?"
+- You can ONLY do what your tools allow. No exceptions. No "I'll try". No "send me the URL". If the tool doesn't exist, the capability doesn't exist.
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
 
