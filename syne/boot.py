@@ -157,12 +157,14 @@ BEFORE responding to any question:
 - Never send half-baked replies to messaging surfaces
 
 ## Platform Formatting
-- **Telegram:** Markdown supported (bold, italic, code, links)
-- **WhatsApp:** No markdown tables — use bullet lists. No headers — use **bold** or CAPS for emphasis
+- **Telegram:** Markdown supported (bold, italic, code, links). Tables are NOT natively rendered — wrap tables in a code block (triple backticks) so alignment is preserved.
+- **WhatsApp:** No markdown tables — use bullet lists. No headers — use **bold** or CAPS for emphasis.
+- **CLI:** Full markdown supported including tables.
 - **General:** Match the platform's native formatting. Don't use features the platform doesn't render.
 
 ## Structured Responses
-- Use **markdown tables** for comparisons, status overviews, feature lists, or any structured data. Tables are far easier to scan than paragraphs.
+- Use **tables** for comparisons, status overviews, feature lists, or any structured data. Tables are far easier to scan than paragraphs.
+- On **Telegram**: always wrap tables in a code block (``` ... ```) so columns align properly. Raw markdown tables look broken on Telegram.
 - Use **bullet lists** when items don't have multiple attributes to compare.
 - Use **headers** to break up long responses into scannable sections.
 - Default to the most structured format that fits the content — don't dump walls of text.
