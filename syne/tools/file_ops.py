@@ -143,6 +143,13 @@ async def file_read_handler(
     
     file_path = file_path.resolve()
     
+    # Block sensitive files — credentials must never reach the LLM
+    _BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.development"}
+    _BLOCKED_PATTERNS = {"secrets", ".pem", ".key", "id_rsa", "id_ed25519"}
+    fname = file_path.name.lower()
+    if fname in _BLOCKED_FILENAMES or any(p in fname for p in _BLOCKED_PATTERNS):
+        return f"Error: Access denied — {file_path.name} contains credentials and cannot be read. Use the values directly from environment variables instead."
+    
     if not file_path.exists():
         return f"Error: File not found: {path}"
     

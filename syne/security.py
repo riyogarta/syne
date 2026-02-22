@@ -538,6 +538,16 @@ _SAFE_REDACT_PATTERNS = [
     (re.compile(r'AKIA[A-Z0-9]{16}'), '***'),
     # Long hex strings (40+ chars — likely API keys/tokens)
     (re.compile(r'\b[0-9a-f]{40,}\b', re.IGNORECASE), '***'),
+    # postgresql:// connection strings (contain credentials)
+    (re.compile(r'postgresql://\S+'), 'postgresql://***'),
+    # .env-style sensitive var assignments (DB creds, API keys, tokens)
+    (re.compile(
+        r'((?:SYNE_)?(?:DATABASE_URL|DB_PASSWORD|DB_USER|DB_NAME'
+        r'|PROVIDER_API_KEY|TELEGRAM_TOKEN|DISCORD_TOKEN|TOGETHER_API_KEY'
+        r'|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GROQ_API_KEY'
+        r'|EMBEDDING_API_KEY)\s*=\s*)\S+',
+        re.IGNORECASE
+    ), r'\1***'),
 ]
 
 # LEVEL 2: Aggressive patterns — full exec output redaction
@@ -581,6 +591,17 @@ _EXEC_REDACT_PATTERNS = [
         r'-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
         re.IGNORECASE
     ), '***PEM_PRIVATE_KEY***'),
+    # .env-style lines: DATABASE_URL=..., DB_PASSWORD=..., etc.
+    # Catches full connection strings and sensitive env var values
+    (re.compile(
+        r'((?:SYNE_)?(?:DATABASE_URL|DB_PASSWORD|DB_USER|DB_NAME|DB_HOST|DB_PORT'
+        r'|PROVIDER_API_KEY|TELEGRAM_TOKEN|DISCORD_TOKEN|TOGETHER_API_KEY'
+        r'|GOOGLE_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|GROQ_API_KEY'
+        r'|EMBEDDING_API_KEY)\s*=\s*)\S+',
+        re.IGNORECASE
+    ), r'\1***'),
+    # postgresql:// connection strings anywhere in text
+    (re.compile(r'postgresql://\S+'), 'postgresql://***'),
 ]
 
 
