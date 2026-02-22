@@ -411,14 +411,32 @@ def is_sensitive_key(key: str) -> bool:
     return any(p in key_lower for p in SENSITIVE_KEY_PATTERNS)
 
 
+def redact_secrets_in_text(text: str) -> str:
+    """Scrub inline secrets from arbitrary text using regex patterns.
+    
+    Reuses the same patterns as redact_exec_output(). Use this for
+    string values where the key isn't sensitive but the value might
+    contain embedded credentials (e.g. headers, URLs with tokens).
+    """
+    if not text or len(text) < 8:
+        return text
+    result = text
+    for pattern, replacement in _EXEC_REDACT_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
+
+
 def redact_value(value, key: str = "") -> str:
     """Mask a single value if its key looks sensitive.
     
     Shows first 4 and last 4 chars for strings > 12 chars.
     Always masks if key matches sensitive patterns.
+    For non-sensitive keys, still scrub inline secrets via regex.
     """
     if key and not is_sensitive_key(key):
-        return str(value)
+        # Key isn't sensitive, but value string might contain inline secrets
+        # e.g. {"headers": "Authorization: Bearer <token>"}
+        return redact_secrets_in_text(str(value))
     s = str(value)
     if len(s) > 12:
         return f"{s[:4]}...{s[-4:]}"
