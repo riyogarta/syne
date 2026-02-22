@@ -147,8 +147,9 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
-        # Reset media collector for this turn
+        # Reset per-turn state
         self._pending_media: list[str] = []
+        self._cached_input_data: dict = {}  # For ability-first retry via tool call
         self._message_metadata = message_metadata
         self._processing = True
 
@@ -332,6 +333,30 @@ class Conversation:
                 if self.tools.get(name):
                     result = await self.tools.execute(name, args, access_level)
                 elif self.abilities and self.abilities.get(name):
+                    # Inject cached input data if ability needs it
+                    # (e.g. image_analysis retry after pre-process failed)
+                    cached = getattr(self, '_cached_input_data', {})
+                    if cached:
+                        registered = self.abilities.get(name)
+                        if registered and registered.instance:
+                            for itype, idata in cached.items():
+                                if registered.instance.handles_input_type(itype):
+                                    # Auto-fill missing params from cache
+                                    if itype == "image":
+                                        if not args.get("image_base64") and not args.get("image_url"):
+                                            args["image_base64"] = idata.get("base64", "")
+                                            args.setdefault("mime_type", idata.get("mime_type", "image/jpeg"))
+                                    elif itype == "audio":
+                                        if not args.get("audio_base64"):
+                                            args["audio_base64"] = idata.get("base64", "")
+                                            args.setdefault("mime_type", idata.get("mime_type", "audio/ogg"))
+                                    elif itype == "document":
+                                        if not args.get("document_base64"):
+                                            args["document_base64"] = idata.get("base64", "")
+                                            args.setdefault("mime_type", idata.get("mime_type", "application/pdf"))
+                                    logger.debug(f"Injected cached {itype} data into ability '{name}' tool call")
+                                    break
+                    
                     # Execute ability with context
                     ability_context = {
                         "user_id": self.user.get("id"),
@@ -493,17 +518,31 @@ class Conversation:
                     logger.error(f"Ability '{registered.name}' pre_process error: {e}")
                     continue
             
+            # ALWAYS strip raw input from metadata — ability-first means
+            # LLM never sees raw data directly, regardless of native capability.
             if result_text:
-                # Ability succeeded — inject result, strip raw input
+                # Ability succeeded — inject result
                 user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
-                metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
-                self._message_metadata = metadata if metadata else None
-            elif not spec["native_check"]():
-                # No ability AND no native LLM support
-                logger.warning(
-                    f"{input_type} received but no handler available "
-                    f"(no ability, no native LLM support)"
+            else:
+                # Ability failed or unavailable — cache raw data for tool call retry,
+                # strip from metadata so LLM never processes it natively
+                if not hasattr(self, '_cached_input_data'):
+                    self._cached_input_data = {}
+                self._cached_input_data[input_type] = input_data
+                
+                user_message = (
+                    f"{user_message}\n\n"
+                    f"[{spec['label']}: {input_type} received but auto-analysis failed. "
+                    f"Use the appropriate ability tool to analyze if the user is asking about it.]"
                 )
+                logger.warning(
+                    f"{input_type} pre-process failed — raw input cached for tool retry, "
+                    f"stripped from LLM context"
+                )
+            
+            # Always remove raw input from metadata
+            metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+            self._message_metadata = metadata if metadata else None
         
         return user_message, metadata if metadata else None
 

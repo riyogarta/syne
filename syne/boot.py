@@ -607,36 +607,44 @@ def _get_function_calling_section() -> str:
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
 
-# Ability-First Principle (IMPORTANT)
-- Abilities are ALWAYS prioritized over native LLM capabilities.
-- When input data arrives (image, audio, document, etc.), the engine automatically
-  runs matching abilities BEFORE the LLM sees the raw data.
-- For images: the image_analysis ability processes the photo first. You receive the
-  result as "[Image analysis result: ...]" in the message — just use it directly.
-  Do NOT call image_analysis again unless the user asks for re-analysis.
-- For any input type: if you see "[... result: ...]" injected in the message,
-  that means an ability already handled it. Use the result, don't re-process.
-- This applies to ALL abilities — bundled and ones you create yourself.
+# Ability-First Principle (CRITICAL)
+Abilities are ALWAYS prioritized over native LLM capabilities. The LLM NEVER
+receives raw input data (images, audio, documents) directly.
 
-## Creating New Abilities
-When creating a new ability that should pre-process input data:
-1. Set `priority = True` (default) in your Ability subclass
-2. Override `handles_input_type(input_type)` → return True for types you handle
-3. Override `pre_process(input_type, input_data, user_prompt)` → return processed text
-4. The engine will automatically call your ability before the LLM sees raw input
-5. To opt OUT of priority: set `priority = False` in the class
+## How it works:
+1. Input arrives (image/audio/document) → engine runs matching ability FIRST
+2. Ability succeeds → you see "[... result: ...]" in the message. Use it directly.
+3. Ability fails → you see "[... auto-analysis failed. Use the appropriate ability tool...]"
+   In this case, call the ability via tool call to retry. The raw data is cached
+   and will be auto-injected into the ability params.
+4. You NEVER see raw image/audio/document data in messages — always processed by ability.
 
-Example ability that processes audio:
+## Rules:
+- If you see "[Image analysis result: ...]" → use it, do NOT call image_analysis again
+  (unless user explicitly asks for re-analysis or different perspective)
+- If you see "[... auto-analysis failed...]" → call the ability tool to retry
+- NEVER try to analyze raw data with your native capabilities — always use abilities
+- This applies to ALL abilities: bundled, installed, and self-created
+
+## Creating New Abilities with Pre-Processing
+ALL new abilities are priority by default. To handle input pre-processing:
+1. Override `handles_input_type(input_type)` → return True for types you handle
+   Supported types: "image", "audio", "document" (extensible)
+2. Override `pre_process(input_type, input_data, user_prompt)` → return processed text
+3. The engine automatically calls your ability before LLM sees the raw input
+4. To opt OUT of priority (rare): set `priority = False` in the class
+
 ```python
 class AudioTranscriptionAbility(Ability):
     name = "audio_transcription"
-    priority = True  # default, but explicit for clarity
+    # priority = True is the default
     
     def handles_input_type(self, input_type):
         return input_type == "audio"
     
     async def pre_process(self, input_type, input_data, user_prompt):
-        # Transcribe audio, return text
+        # input_data = {"base64": "...", "mime_type": "audio/ogg"}
+        # Transcribe and return text
         ...
 ```
 """
