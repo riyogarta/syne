@@ -426,6 +426,10 @@ def redact_secrets_in_text(text: str) -> str:
     return result
 
 
+# Convenience alias — intuitive name for general-purpose text redaction
+redact_text = redact_secrets_in_text
+
+
 def redact_value(value, key: str = "") -> str:
     """Mask a single value if its key looks sensitive.
     
