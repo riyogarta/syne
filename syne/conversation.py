@@ -519,31 +519,21 @@ class Conversation:
                     logger.error(f"Ability '{registered.name}' pre_process error: {e}")
                     continue
             
-            # ALWAYS strip raw input from metadata — ability-first means
-            # LLM never sees raw data directly, regardless of native capability.
             if result_text:
-                # Ability succeeded — inject result
+                # Ability succeeded — inject result, strip raw input
                 user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
+                metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                self._message_metadata = metadata if metadata else None
+            elif spec["native_check"]():
+                # Ability failed but provider has native capability — let it through
+                logger.info(
+                    f"{input_type} ability failed, falling back to native LLM"
+                )
             else:
-                # Ability failed or unavailable — cache raw data for tool call retry,
-                # strip from metadata so LLM never processes it natively
-                if not hasattr(self, '_cached_input_data'):
-                    self._cached_input_data = {}
-                self._cached_input_data[input_type] = input_data
-                
-                user_message = (
-                    f"{user_message}\n\n"
-                    f"[{spec['label']}: {input_type} received but auto-analysis failed. "
-                    f"Use the appropriate ability tool to analyze if the user is asking about it.]"
-                )
+                # Ability failed AND no native support — nothing we can do
                 logger.warning(
-                    f"{input_type} pre-process failed — raw input cached for tool retry, "
-                    f"stripped from LLM context"
+                    f"{input_type} received but no handler available"
                 )
-            
-            # Always remove raw input from metadata
-            metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
-            self._message_metadata = metadata if metadata else None
         
         return user_message, metadata if metadata else None
 
