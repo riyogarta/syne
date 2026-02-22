@@ -361,9 +361,14 @@ class Conversation:
                 # GLOBAL TOOL RESULT SCRUBBER
                 # Last line of defense: scrub any credentials that slip
                 # through individual tool handlers before LLM sees them.
+                # Skip for read_source: it only returns source code (no
+                # credentials), and regex patterns IN source code get
+                # falsely redacted (e.g. Cookie regex → "Cookie:***").
+                # read_source already blocks .env/secrets files.
                 # ═══════════════════════════════════════════════════════
-                from .security import redact_secrets_in_text
-                result = redact_secrets_in_text(str(result))
+                if name != "read_source":
+                    from .security import redact_secrets_in_text
+                    result = redact_secrets_in_text(str(result))
 
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
