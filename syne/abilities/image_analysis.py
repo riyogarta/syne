@@ -1,8 +1,8 @@
 """Image Analysis Ability — analyze images via multiple vision backends.
 
-Backends (tried in order):
-1. Google Gemini via OAuth (free, rate-limited)
-2. Together AI via API key (paid, from ability config)
+Backends (priority: what owner configured first):
+1. Together AI via API key (from ability config in DB)
+2. Google Gemini via OAuth (fallback, free, rate-limited)
 """
 
 import base64
@@ -215,7 +215,7 @@ class ImageAnalysisAbility(Ability):
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "meta-llama/Llama-Vision-Free",
+                        "model": "Qwen/Qwen2.5-VL-72B-Instruct",
                         "messages": [{
                             "role": "user",
                             "content": [
