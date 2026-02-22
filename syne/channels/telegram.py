@@ -26,6 +26,7 @@ from ..db.models import (
     get_identity,
     get_user_alias,
     set_config,
+    update_user,
 )
 from ..ratelimit import check_rate_limit
 
@@ -2027,7 +2028,6 @@ Or just send me a message!"""
                 await query.edit_message_text("❌ Invalid user ID.")
                 return
             
-            from ..db.models import get_user, update_user
             target_user = await get_user("telegram", target_user_id)
             
             if not target_user:
