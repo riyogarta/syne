@@ -115,6 +115,46 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     return False, f"Path must be inside working directory or syne/abilities/."
 
 
+def _read_env_redacted(file_path: Path) -> str:
+    """Read .env file with all values redacted.
+    
+    Shows KEY=*** for each variable so the agent can diagnose
+    which variables are set without seeing actual credentials.
+    """
+    import re
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except PermissionError:
+        return f"Error: Permission denied: {file_path}"
+    except Exception as e:
+        return f"Error reading {file_path.name}: {e}"
+    
+    redacted = []
+    for line in lines:
+        stripped = line.strip()
+        # Preserve empty lines and comments
+        if not stripped or stripped.startswith("#"):
+            redacted.append(stripped)
+            continue
+        # KEY=VALUE → KEY=***
+        match = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)=(.*)$', stripped)
+        if match:
+            key = match.group(1)
+            val = match.group(2)
+            # Show value length hint for debugging
+            clean_val = val.strip().strip("'\"")
+            if clean_val:
+                redacted.append(f"{key}=***({len(clean_val)} chars)")
+            else:
+                redacted.append(f"{key}=(empty)")
+        else:
+            redacted.append("# (non-standard line redacted)")
+    
+    header = f"📄 {file_path.name} (values redacted for security):\n"
+    return header + "\n".join(redacted)
+
+
 async def file_read_handler(
     path: str,
     offset: int = 1,
@@ -147,8 +187,11 @@ async def file_read_handler(
     _BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.development"}
     _BLOCKED_PATTERNS = {"secrets", ".pem", ".key", "id_rsa", "id_ed25519"}
     fname = file_path.name.lower()
-    if fname in _BLOCKED_FILENAMES or any(p in fname for p in _BLOCKED_PATTERNS):
-        return f"Error: Access denied — {file_path.name} contains credentials and cannot be read. Use the values directly from environment variables instead."
+    if fname in _BLOCKED_FILENAMES:
+        # Allow reading key names only (values redacted) for self-diagnosis
+        return _read_env_redacted(file_path)
+    if any(p in fname for p in _BLOCKED_PATTERNS):
+        return f"Error: Access denied — {file_path.name} contains credentials and cannot be read."
     
     if not file_path.exists():
         return f"Error: File not found: {path}"
