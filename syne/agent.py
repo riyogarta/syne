@@ -393,6 +393,16 @@ class SyneAgent:
             requires_access_level=MANAGE_SCHEDULE_TOOL["requires_access_level"],
         )
 
+        # ── Send Message (Core) ──
+        from .tools.send_message import SEND_MESSAGE_TOOL
+        self.tools.register(
+            name=SEND_MESSAGE_TOOL["name"],
+            description=SEND_MESSAGE_TOOL["description"],
+            parameters=SEND_MESSAGE_TOOL["parameters"],
+            handler=SEND_MESSAGE_TOOL["handler"],
+            requires_access_level=SEND_MESSAGE_TOOL["requires_access_level"],
+        )
+
         # ── Send Reaction (Core) ──
         from .tools.reactions import SEND_REACTION_TOOL
         self.tools.register(

@@ -171,6 +171,10 @@ class TelegramChannel:
         from ..tools.reactions import set_telegram_channel
         set_telegram_channel(self)
 
+        # Wire up send_message tool with this channel reference
+        from ..tools.send_message import set_telegram_channel as set_msg_channel
+        set_msg_channel(self)
+
         logger.info("Telegram bot started.")
 
     async def stop(self):
