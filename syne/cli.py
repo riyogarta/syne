@@ -1838,10 +1838,18 @@ def reauth():
     import asyncio
 
     async def _reauth():
-        from .db.connection import get_connection, get_pool
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+        dsn = os.environ.get("SYNE_DATABASE_URL", "")
+        if not dsn:
+            console.print("[red]❌ SYNE_DATABASE_URL not set. Is .env configured?[/red]")
+            return
+
+        from .db.connection import init_db
         from .db.models import get_config, set_config
 
-        await get_pool()
+        await init_db(dsn)
 
         # Determine current provider
         primary = await get_config("provider.primary", None)
