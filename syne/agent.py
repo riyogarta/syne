@@ -1032,22 +1032,9 @@ class SyneAgent:
 
     @staticmethod
     def _mask_sensitive_value(key: str, value) -> str:
-        """Mask credential values to prevent prompt injection exposure.
-        
-        Keys containing these patterns get masked: api_key, token, secret, password, credential.
-        Shows first 4 and last 4 chars: 'sk-abc...xyz9'
-        """
-        sensitive_patterns = ("api_key", "token", "secret", "password", "credential", "_key")
-        key_lower = key.lower()
-        if any(p in key_lower for p in sensitive_patterns):
-            s = str(value)
-            if len(s) > 12:
-                return f"{s[:4]}...{s[-4:]}"
-            elif len(s) > 4:
-                return f"{s[:2]}...{s[-2:]}"
-            else:
-                return "***"
-        return str(value)
+        """Mask credential values to prevent prompt injection exposure."""
+        from .security import redact_config_value
+        return redact_config_value(key, value)
 
     async def _tool_update_config(self, action: str, key: str = "", value: str = "") -> str:
         """Tool handler: read/write config."""
@@ -1096,7 +1083,7 @@ class SyneAgent:
                         await set_config("provider.active_model", m["key"])
                         break
             
-            return f"Config updated: `{key}` = {parsed}"
+            return f"Config updated: `{key}` = {self._mask_sensitive_value(key, parsed)}"
 
         return f"Unknown action: {action}"
 
@@ -1109,10 +1096,13 @@ class SyneAgent:
             lines = ["**Abilities:**"]
             for ab in all_abilities:
                 status = "✅" if ab.enabled else "❌"
-                cfg_preview = str(ab.config)[:80] if ab.config else "{}"
                 lines.append(f"- {status} **{ab.name}** v{ab.version} ({ab.source}) — {ab.description}")
-                if ab.config:
-                    lines.append(f"  Config: `{cfg_preview}`")
+                if ab.config and isinstance(ab.config, dict):
+                    # Show only key names — never raw values (prompt injection defense)
+                    config_keys = list(ab.config.keys())
+                    has_values = any(v for v in ab.config.values() if v)
+                    status_str = "configured" if has_values else "needs setup"
+                    lines.append(f"  Config keys: {config_keys} ({status_str})")
             return "\n".join(lines)
 
         if not name:

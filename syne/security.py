@@ -388,6 +388,74 @@ def is_tool_allowed_for_subagent(tool_name: str) -> bool:
 # SECURITY LOGGING
 # ============================================================
 
+# ============================================================
+# CREDENTIAL REDACTION (Prompt Injection Defense)
+# ============================================================
+# LLM should NEVER see raw credentials. These functions mask
+# sensitive values in all output surfaces: tool results, system
+# prompt, logs. Owner can view raw values via direct DB access.
+
+SENSITIVE_KEY_PATTERNS = frozenset({
+    "api_key", "token", "secret", "password", "credential",
+    "_key", "authorization", "bearer", "cookie", "jwt",
+    "refresh_token", "access_token", "session_key",
+})
+
+
+def is_sensitive_key(key: str) -> bool:
+    """Check if a config/dict key likely contains a credential."""
+    key_lower = key.lower()
+    return any(p in key_lower for p in SENSITIVE_KEY_PATTERNS)
+
+
+def redact_value(value, key: str = "") -> str:
+    """Mask a single value if its key looks sensitive.
+    
+    Shows first 4 and last 4 chars for strings > 12 chars.
+    Always masks if key matches sensitive patterns.
+    """
+    if key and not is_sensitive_key(key):
+        return str(value)
+    s = str(value)
+    if len(s) > 12:
+        return f"{s[:4]}...{s[-4:]}"
+    elif len(s) > 4:
+        return f"{s[:2]}...{s[-2:]}"
+    else:
+        return "***"
+
+
+def redact_dict(obj) -> dict | list | str:
+    """Recursively redact sensitive values in a dict/list structure.
+    
+    Returns a new structure with sensitive values masked.
+    """
+    if isinstance(obj, dict):
+        return {k: redact_value(v, k) if not isinstance(v, (dict, list)) else redact_dict(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [redact_dict(item) for item in obj]
+    else:
+        return obj
+
+
+def redact_config_value(key: str, value) -> str:
+    """Mask a config value based on its key. For use in tool output and system prompt.
+    
+    - Sensitive keys → masked
+    - Dict/list values → recursively masked
+    - Other values → returned as-is
+    """
+    if isinstance(value, dict):
+        import json
+        return json.dumps(redact_dict(value), ensure_ascii=False)
+    if isinstance(value, list):
+        import json
+        return json.dumps(redact_dict(value), ensure_ascii=False)
+    if is_sensitive_key(key):
+        return redact_value(value, key)
+    return str(value)
+
+
 def log_security_event(
     event_type: str,
     details: str,
