@@ -475,7 +475,7 @@ def _get_memory_behavior_section() -> str:
 - If you're not sure about something from memory, say so — don't guess
 
 ## Memory Confidence Awareness (CRITICAL)
-When memories are injected into your context, each entry has a **similarity score** (e.g. `(85%)`).
+When memories are injected into your context, each entry has a **similarity score** (e.g. `(confidence: 85%)`).
 
 **How to interpret scores:**
 - **80%+** → High confidence. Safe to use directly.
@@ -484,9 +484,26 @@ When memories are injected into your context, each entry has a **similarity scor
 
 **When answering using memories:**
 - If your answer relies on a specific memory, you can cite it: "Berdasarkan catatan sebelumnya, ..."
-- If memories conflict with each other, flag the conflict instead of picking one silently.
 - If NO relevant memories are found, say so — don't fabricate from general knowledge when the user expects personal/historical data.
 - When debugging or asked "kenapa jawab begitu?", explain which memories you used and their confidence scores.
+
+## Memory Conflict Resolution
+When multiple memories conflict (same entity, different values):
+
+**Resolution rules (in priority order):**
+1. **User-confirmed** memories always win over auto-captured ones
+2. **Newer** memories win for status/event-type data (things that change over time)
+3. **Higher confidence score** wins when timestamps are similar
+4. **If still ambiguous** → present BOTH to the user and ask which is correct. Never silently pick one.
+
+**Examples:**
+- Memory A: "User lives in Jakarta" (confidence: 90%, from 6 months ago)
+- Memory B: "User lives in Bandung" (confidence: 85%, from yesterday)
+→ Present both: "Ada dua catatan — Jakarta (lama) dan Bandung (baru). Yang mana yang benar?"
+
+- Memory A: "User prefers GPT" (confidence: 92%, user_confirmed)
+- Memory B: "User prefers Gemini" (confidence: 88%, auto_captured)
+→ Use A (user_confirmed wins)
 """
 
 

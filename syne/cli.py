@@ -1116,16 +1116,67 @@ def status():
         # Provider (from DB)
         try:
             from .db.models import get_config
-            async def _get_prov():
-                p = await get_config("provider.primary")
-                return p if p else "not configured"
-            provider = asyncio.run(_get_prov())
-            if isinstance(provider, dict):
-                table.add_row("Provider", f"{provider.get('driver', '?')} ({provider.get('auth', '?')})")
+            pool2 = await init_db(settings.database_url)
+
+            provider_cfg = await get_config("provider.primary")
+            if isinstance(provider_cfg, dict):
+                table.add_row("Provider", f"{provider_cfg.get('driver', '?')} ({provider_cfg.get('auth', '?')})")
+            elif provider_cfg:
+                table.add_row("Provider", str(provider_cfg))
             else:
-                table.add_row("Provider", str(provider))
-        except Exception:
-            table.add_row("Provider", "not configured")
+                table.add_row("Provider", "not configured")
+
+            # OAuth token status
+            import time as _time
+            driver = provider_cfg.get("driver", "") if isinstance(provider_cfg, dict) else ""
+            auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
+            if auth_type == "oauth" and driver in ("codex", "google", "anthropic"):
+                if driver == "codex":
+                    expires_at = await get_config("credential.codex_expires_at", 0)
+                elif driver == "google":
+                    expires_at_str = await get_config("credential.google_token_expiry", "")
+                    try:
+                        from datetime import datetime
+                        expires_at = datetime.fromisoformat(expires_at_str).timestamp() if expires_at_str else 0
+                    except Exception:
+                        expires_at = 0
+                else:
+                    expires_at = 0
+
+                expires_at = float(expires_at or 0)
+                now = _time.time()
+                if expires_at <= 0:
+                    table.add_row("OAuth Token", "[yellow]Unknown expiry[/yellow]")
+                elif now >= expires_at:
+                    elapsed = int(now - expires_at)
+                    table.add_row("OAuth Token", f"[red]EXPIRED ({elapsed}s ago)[/red]")
+                else:
+                    remaining = int(expires_at - now)
+                    hours = remaining // 3600
+                    mins = (remaining % 3600) // 60
+                    table.add_row("OAuth Token", f"[green]Valid ({hours}h {mins}m remaining)[/green]")
+
+            # Embedding provider
+            embed_cfg = await get_config("provider.embedding")
+            if isinstance(embed_cfg, dict):
+                table.add_row("Embedding", f"{embed_cfg.get('driver', '?')} ({embed_cfg.get('model', '?')})")
+            elif embed_cfg:
+                table.add_row("Embedding", str(embed_cfg))
+            else:
+                table.add_row("Embedding", "same as chat provider")
+
+            # Scheduler/cron
+            from .db.connection import get_connection
+            async with get_connection() as conn:
+                sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM schedules WHERE enabled = true")
+            if sched_count and sched_count["c"] > 0:
+                table.add_row("Scheduled Jobs", f"{sched_count['c']} active")
+            else:
+                table.add_row("Scheduled Jobs", "none")
+
+            await close_db()
+        except Exception as e:
+            table.add_row("Provider", f"[red]Error: {e}[/red]")
 
         # Telegram
         tg = "✓ Configured" if settings.telegram_bot_token else "Not configured"
