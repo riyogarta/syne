@@ -1,6 +1,7 @@
 """Telegram channel adapter."""
 
 import asyncio
+import httpx
 import logging
 import re
 from collections import deque
@@ -784,7 +785,7 @@ class TelegramChannel:
                 await update.message.reply_text("Sorry, something went wrong processing that voice message.")
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle location messages — extract coordinates and pass to LLM."""
+        """Handle location messages — reverse geocode and pass address to LLM."""
         if not update.message or not update.message.location:
             return
 
@@ -806,6 +807,9 @@ class TelegramChannel:
         if update.message.caption:
             caption = update.message.caption
 
+        # Reverse geocode to get actual address — don't trust LLM with raw coords
+        address = await self._reverse_geocode(lat, lng)
+
         # Build message with location data
         if venue:
             location_text = (
@@ -813,6 +817,8 @@ class TelegramChannel:
                 f"{f' — {venue.address}' if venue.address else ''}"
                 f" (lat: {lat}, lng: {lng})]"
             )
+        elif address:
+            location_text = f"[Location shared: {address} (lat: {lat}, lng: {lng})]"
         else:
             location_text = f"[Location shared: lat: {lat}, lng: {lng}]"
 
@@ -860,6 +866,43 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling location: {e}", exc_info=True)
+
+    async def _reverse_geocode(self, lat: float, lng: float) -> str | None:
+        """Reverse geocode coordinates to address using Google Maps API."""
+        try:
+            api_key = None
+            # Try to get API key from maps ability config
+            if self.agent and hasattr(self.agent, 'db'):
+                row = await self.agent.db.fetchrow(
+                    "SELECT config FROM abilities WHERE name = 'maps' AND enabled = true"
+                )
+                if row and row['config']:
+                    import json
+                    config = json.loads(row['config']) if isinstance(row['config'], str) else row['config']
+                    api_key = (
+                        config.get('api_key')
+                        or config.get('GOOGLE_MAPS_API_KEY')
+                        or config.get('GOOGLE_PLACES_API_KEY')
+                    )
+            # Fallback to environment
+            if not api_key:
+                import os
+                api_key = os.environ.get('GOOGLE_PLACES_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY')
+            if not api_key:
+                return None
+
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"latlng": f"{lat},{lng}", "key": api_key, "language": "id"},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if data.get("status") == "OK" and data.get("results"):
+                        return data["results"][0].get("formatted_address", None)
+        except Exception as e:
+            logger.warning(f"Reverse geocode failed: {e}")
+        return None
 
     async def _handle_reaction_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle reaction updates on messages."""
