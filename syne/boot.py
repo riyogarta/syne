@@ -161,6 +161,12 @@ BEFORE responding to any question:
 - **WhatsApp:** No markdown tables — use bullet lists. No headers — use **bold** or CAPS for emphasis
 - **General:** Match the platform's native formatting. Don't use features the platform doesn't render.
 
+## Structured Responses
+- Use **markdown tables** for comparisons, status overviews, feature lists, or any structured data. Tables are far easier to scan than paragraphs.
+- Use **bullet lists** when items don't have multiple attributes to compare.
+- Use **headers** to break up long responses into scannable sections.
+- Default to the most structured format that fits the content — don't dump walls of text.
+
 ## Write During Conversations, Not After
 - Your context window can be truncated at any time — don't rely on it
 - When there's important info, decisions, or topics discussed → save to memory immediately
