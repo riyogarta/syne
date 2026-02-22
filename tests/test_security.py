@@ -475,5 +475,179 @@ class TestSecurityEdgeCases:
         assert allowed is False
 
 
+class TestCredentialRedaction:
+    """Tests for two-level credential scrubbing system."""
+
+    def test_safe_scrub_does_not_corrupt_regex_source(self):
+        """Safe level must NOT corrupt regex patterns in source code."""
+        from syne.security import redact_content_output
+        # This exact line exists in security.py — must survive safe scrub
+        code = """(re.compile(r'((?:Set-)?Cookie:\\s*).{20,}', re.IGNORECASE), r'\\1***'),"""
+        result = redact_content_output(code)
+        assert "Cookie" in result
+        assert "re.compile" in result
+        # Should be unchanged (no false-positive redaction)
+        assert result == code
+
+    def test_safe_scrub_does_not_corrupt_pem_in_code(self):
+        """PEM pattern in source code comments should survive safe scrub."""
+        from syne.security import redact_content_output
+        code = "# Matches: -----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----"
+        result = redact_content_output(code)
+        assert "BEGIN PRIVATE KEY" in result
+
+    def test_safe_scrub_catches_real_tokens(self):
+        """Safe level must catch high-confidence credential patterns."""
+        from syne.security import redact_content_output
+        # Telegram bot token
+        assert "***" in redact_content_output("7891302833:AAG0PD_7GdS7ZsHAk_Qr2szfO8eGQ9jen3U")
+        # sk-* token
+        assert "***" in redact_content_output("sk-ant-api03-abc123def456ghi789jkl012mno345")
+        # GitHub token
+        assert "***" in redact_content_output("ghp_abc123def456ghi789jkl012mno345pqr")
+        # JWT
+        assert "***" in redact_content_output(
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XljN3xxTGrss3MuHyoRo"
+        )
+        # Long hex (API key)
+        assert "***" in redact_content_output("a" * 40)
+        # AWS key
+        assert "***" in redact_content_output("AKIAIOSFODNN7EXAMPLE")
+
+    def test_safe_scrub_leaves_normal_text(self):
+        """Safe level must not touch normal text."""
+        from syne.security import redact_content_output
+        normal = "This is a completely normal output with no secrets at all."
+        assert redact_content_output(normal) == normal
+
+    def test_aggressive_scrub_catches_cookie_headers(self):
+        """Aggressive level should catch Cookie/Set-Cookie headers."""
+        from syne.security import redact_secrets_in_text
+        assert "***" in redact_secrets_in_text("Cookie: session=abc123def456ghi789jkl012")
+        assert "***" in redact_secrets_in_text("Set-Cookie: token=xyz789abc123def456ghi")
+
+    def test_aggressive_scrub_catches_bearer(self):
+        """Aggressive level should catch Bearer tokens."""
+        from syne.security import redact_secrets_in_text
+        result = redact_secrets_in_text("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123")
+        assert "Authorization: Bearer ***" in result
+
+    def test_aggressive_scrub_catches_querystring_tokens(self):
+        """Aggressive level should catch URL querystring tokens."""
+        from syne.security import redact_secrets_in_text
+        result = redact_secrets_in_text("https://api.example.com/callback?token=abc123def456ghi789")
+        assert "?token=***" in result
+
+    def test_exec_redaction_covers_all_aggressive_patterns(self):
+        """Exec dedicated scrubber should catch everything aggressive does."""
+        from syne.security import redact_exec_output
+        assert "***" in redact_exec_output("Cookie: session=abc123def456ghi789jkl012")
+        assert "***" in redact_exec_output("7891302833:AAG0PD_7GdS7ZsHAk_Qr2szfO8eGQ9jen3U")
+        assert "***" in redact_exec_output("password=hunter2butlongenoughtodetect")
+
+    def test_redact_dict_scrubs_list_strings(self):
+        """redact_dict must scrub primitive strings in lists."""
+        from syne.security import redact_dict
+        result = redact_dict({"tokens": ["sk-ant-test12345678901234567890", "normal"]})
+        assert "***" in str(result["tokens"][0])
+        assert result["tokens"][1] == "normal"
+
+    def test_redact_dict_nested(self):
+        """redact_dict must handle nested structures."""
+        from syne.security import redact_dict
+        data = {
+            "outer": {
+                "api_key": "supersecretkey123456",
+                "name": "safe_value"
+            }
+        }
+        result = redact_dict(data)
+        # api_key is sensitive → masked (first4...last4 format)
+        masked = str(result["outer"]["api_key"])
+        assert masked != "supersecretkey123456"  # must be changed
+        assert "..." in masked  # redact_value uses "..." format
+        assert result["outer"]["name"] == "safe_value"
+
+
+class TestToolScrubLevel:
+    """Tests for tool-declared scrub_level in registry."""
+
+    def test_default_scrub_level_is_aggressive(self):
+        """New tools without explicit scrub_level must default to aggressive."""
+        from syne.tools.registry import Tool
+        tool = Tool(name="new_tool", description="", parameters={}, handler=lambda: None)
+        assert tool.scrub_level == "aggressive"
+
+    def test_custom_scrub_level(self):
+        """Tools can declare custom scrub_level."""
+        from syne.tools.registry import Tool
+        safe_tool = Tool(name="t", description="", parameters={}, handler=lambda: None, scrub_level="safe")
+        none_tool = Tool(name="t", description="", parameters={}, handler=lambda: None, scrub_level="none")
+        assert safe_tool.scrub_level == "safe"
+        assert none_tool.scrub_level == "none"
+
+    def test_registry_register_with_scrub_level(self):
+        """ToolRegistry.register must accept and store scrub_level."""
+        from syne.tools.registry import ToolRegistry
+        reg = ToolRegistry()
+        reg.register(
+            name="test_tool",
+            description="test",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+            scrub_level="safe",
+        )
+        tool = reg.get("test_tool")
+        assert tool is not None
+        assert tool.scrub_level == "safe"
+
+    def test_registry_register_default_scrub_level(self):
+        """ToolRegistry.register without scrub_level defaults to aggressive."""
+        from syne.tools.registry import ToolRegistry
+        reg = ToolRegistry()
+        reg.register(
+            name="test_tool2",
+            description="test",
+            parameters={"type": "object", "properties": {}},
+            handler=lambda: None,
+        )
+        tool = reg.get("test_tool2")
+        assert tool.scrub_level == "aggressive"
+
+
+class TestSSRF:
+    """Tests for SSRF protection."""
+
+    def test_blocks_localhost(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("http://localhost:8080/admin")
+        assert safe is False
+
+    def test_blocks_private_ip(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("http://192.168.1.1/config")
+        assert safe is False
+
+    def test_blocks_metadata(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("http://169.254.169.254/latest/meta-data/")
+        assert safe is False
+
+    def test_blocks_file_scheme(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("file:///etc/passwd")
+        assert safe is False
+
+    def test_allows_public_https(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("https://example.com/image.png")
+        assert safe is True
+
+    def test_blocks_internal_hostname(self):
+        from syne.security import is_url_safe
+        safe, _ = is_url_safe("http://metadata.google.internal/v1/")
+        assert safe is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
