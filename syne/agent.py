@@ -1,5 +1,6 @@
 """Syne Agent — ties everything together."""
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
@@ -113,11 +114,21 @@ class SyneAgent:
         )
 
         self._running = True
+
+        # 9. Background token refresh task
+        self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
+
         logger.info("Syne agent started.")
 
     async def stop(self):
         """Stop the agent gracefully."""
         self._running = False
+        if hasattr(self, '_token_refresh_task') and self._token_refresh_task:
+            self._token_refresh_task.cancel()
+            try:
+                await self._token_refresh_task
+            except asyncio.CancelledError:
+                pass
         await close_db()
         logger.info("Syne agent stopped.")
 
@@ -175,6 +186,34 @@ class SyneAgent:
                     self.provider._refresh_token()
         except Exception as e:
             logger.warning(f"Startup token check failed: {e}")
+
+    async def _periodic_token_refresh(self):
+        """Background task: check and refresh OAuth token every 10 minutes.
+        
+        Runs as long as the agent is running. If the token is expired or
+        about to expire (within 5 min buffer), triggers a refresh.
+        If refresh fails, sets _auth_failure on the provider so the
+        conversation engine can notify the owner.
+        """
+        import time
+        while self._running:
+            try:
+                await asyncio.sleep(600)  # Check every 10 minutes
+                provider = self.provider
+                if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
+                    now = time.time()
+                    expires = provider._token_expires_at
+                    if expires > 0 and now >= (expires - 300):
+                        logger.info("Periodic check: token expired/expiring, refreshing...")
+                        result = provider._refresh_token()
+                        if result:
+                            logger.info("Periodic token refresh successful.")
+                        else:
+                            logger.warning("Periodic token refresh failed. User needs `syne reauth`.")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"Periodic token refresh check error: {e}")
 
     async def _init_provider(self) -> LLMProvider:
         """Initialize the LLM provider based on config.
