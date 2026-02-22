@@ -98,7 +98,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("version", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
-        self.app.add_handler(CommandHandler("forget", self._cmd_forget))
         self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("think", self._cmd_think))
@@ -161,7 +160,7 @@ class TelegramChannel:
             BotCommand("think", "Set thinking level"),
             BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
-            BotCommand("forget", "Clear current conversation"),
+            BotCommand("clear", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
             BotCommand("model", "Switch LLM model (owner only)"),
             BotCommand("embedding", "Switch embedding model (owner only)"),
@@ -400,7 +399,7 @@ class TelegramChannel:
                 # Provide more useful error context
                 error_msg = str(e)
                 if "400" in error_msg:
-                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /forget to start fresh.")
+                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
                 elif "429" in error_msg:
                     await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
                 elif "401" in error_msg or "403" in error_msg:
@@ -1073,8 +1072,7 @@ class TelegramChannel:
 /think — Set thinking level (off/low/medium/high/max)
 /reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
-/forget — Clear conversation history
-/clear — Clear conversation history (same as /forget)
+/clear — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
 
@@ -1305,8 +1303,8 @@ Or just send me a message!"""
             logger.error(f"Compaction failed: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Compaction failed: {str(e)[:200]}")
 
-    async def _cmd_forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /forget command — archive current session."""
+    async def _cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /clear command — archive current session and start fresh."""
         from ..db.connection import get_connection
 
         chat_id = str(update.effective_chat.id)
@@ -1322,10 +1320,6 @@ Or just send me a message!"""
         self.agent.conversations._active.pop(key, None)
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
-
-    async def _cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /clear command — alias for /forget."""
-        await self._cmd_forget(update, context)
 
     # Shared thinking level definitions
     THINK_LEVELS = {
