@@ -198,7 +198,7 @@ class SyneAgent:
         import time
         while self._running:
             try:
-                await asyncio.sleep(600)  # Check every 10 minutes
+                await asyncio.sleep(1800)  # Check every 30 minutes
                 provider = self.provider
                 if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
                     now = time.time()
