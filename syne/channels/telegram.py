@@ -800,6 +800,7 @@ class TelegramChannel:
         location = update.message.location
         lat = location.latitude
         lng = location.longitude
+        logger.info(f"Location received from Telegram API: lat={lat}, lng={lng}")
 
         # Check for venue (location with name/address)
         venue = update.message.venue
@@ -809,6 +810,7 @@ class TelegramChannel:
 
         # Reverse geocode to get actual address — don't trust LLM with raw coords
         address = await self._reverse_geocode(lat, lng)
+        logger.info(f"Reverse geocode result: {address}")
 
         # Build message with location data
         if venue:
