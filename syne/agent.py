@@ -158,6 +158,16 @@ class SyneAgent:
         if self.subagents:
             self.subagents.provider = new_provider
 
+    def _get_oauth_provider(self):
+        """Get the actual OAuth-capable provider (unwrap HybridProvider if needed)."""
+        provider = self.provider
+        # HybridProvider wraps chat + embed providers; OAuth tokens live on the chat provider
+        if hasattr(provider, '_chat'):
+            provider = provider._chat
+        if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
+            return provider
+        return None
+
     async def _ensure_token_fresh(self):
         """Proactive OAuth token refresh at startup.
         
@@ -170,12 +180,13 @@ class SyneAgent:
         """
         import time
         try:
-            if hasattr(self.provider, '_refresh_token') and hasattr(self.provider, '_token_expires_at'):
+            oauth = self._get_oauth_provider()
+            if oauth:
                 now = time.time()
-                expires = self.provider._token_expires_at
+                expires = oauth._token_expires_at
                 if expires > 0 and now >= (expires - 300):
                     logger.info(f"OAuth token expired or expiring soon (expires_at={expires}, now={now}). Refreshing...")
-                    result = self.provider._refresh_token()
+                    result = oauth._refresh_token()
                     if result:
                         logger.info("OAuth token refreshed successfully at startup.")
                     else:
@@ -183,7 +194,7 @@ class SyneAgent:
                 elif expires == 0:
                     # No expiry recorded — try refresh to establish baseline
                     logger.info("No token expiry recorded. Attempting proactive refresh...")
-                    self.provider._refresh_token()
+                    oauth._refresh_token()
         except Exception as e:
             logger.warning(f"Startup token check failed: {e}")
 
@@ -202,13 +213,13 @@ class SyneAgent:
             try:
                 interval = await get_config("auth.refresh_interval_seconds", 1800)
                 await asyncio.sleep(int(interval))
-                provider = self.provider
-                if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
+                oauth = self._get_oauth_provider()
+                if oauth:
                     now = time.time()
-                    expires = provider._token_expires_at
+                    expires = oauth._token_expires_at
                     if expires > 0 and now >= (expires - 300):
                         logger.info("Periodic check: token expired/expiring, refreshing...")
-                        result = provider._refresh_token()
+                        result = oauth._refresh_token()
                         if result:
                             logger.info("Periodic token refresh successful.")
                         else:
@@ -807,12 +818,12 @@ class SyneAgent:
         """Check OAuth token status without exposing credentials."""
         import time
         lines = []
-        provider = self.provider
         
-        lines.append(f"Provider: {provider.name}")
+        lines.append(f"Provider: {self.provider.name}")
         
-        if hasattr(provider, '_token_expires_at'):
-            expires = provider._token_expires_at
+        oauth = self._get_oauth_provider()
+        if oauth:
+            expires = oauth._token_expires_at
             now = time.time()
             if expires <= 0:
                 lines.append("Token expiry: unknown (not recorded)")
@@ -824,14 +835,14 @@ class SyneAgent:
                 hours = remaining // 3600
                 mins = (remaining % 3600) // 60
                 lines.append(f"Token: valid (expires in {hours}h {mins}m)")
+            
+            if hasattr(oauth, '_auth_failure') and oauth._auth_failure:
+                lines.append(f"⚠️ Auth failure: {oauth._auth_failure}")
+            
+            if hasattr(oauth, 'refresh_token'):
+                lines.append(f"Refresh token: {'present' if oauth.refresh_token else 'MISSING'}")
         else:
-            lines.append("Token expiry: N/A (provider does not use OAuth tokens)")
-        
-        if hasattr(provider, '_auth_failure') and provider._auth_failure:
-            lines.append(f"⚠️ Auth failure: {provider._auth_failure}")
-        
-        if hasattr(provider, 'refresh_token'):
-            lines.append(f"Refresh token: {'present' if provider.refresh_token else 'MISSING'}")
+            lines.append("Token: N/A (provider does not use OAuth)")
         
         return "\n".join(lines)
 
