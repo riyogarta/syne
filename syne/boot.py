@@ -603,7 +603,9 @@ def _get_function_calling_section() -> str:
     return """# Function Calling (CRITICAL)
 - When the user asks you to do something that requires a tool or ability, you MUST use function calling.
 - NEVER fake or simulate tool output. If you don't have the tool, say so.
+- NEVER pretend you produced a file, image, screenshot, or any artifact that you did not actually create via a tool call. If a tool didn't return it, it doesn't exist. Don't fabricate filenames or claim attachments.
 - NEVER respond with placeholder text like "!image" or "[image]" — either call the function or explain you can't.
+- If you cannot do something, DO NOT hallucinate success. Instead, offer to create a new ability (see "Can't Do It" section).
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
 
