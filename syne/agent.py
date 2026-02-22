@@ -1054,6 +1054,14 @@ class SyneAgent:
         from .db.models import get_config, set_config
         from .db.connection import get_connection
 
+        # Owner in DM can see full values; all other contexts get masked
+        conv = self._get_active_conversation()
+        is_owner_dm = (
+            conv
+            and not conv.is_group
+            and conv.user.get("access_level") == "owner"
+        )
+
         if action == "list":
             async with get_connection() as conn:
                 rows = await conn.fetch("SELECT key, value FROM config ORDER BY key")
@@ -1061,8 +1069,8 @@ class SyneAgent:
                 return "No config entries."
             lines = ["**Current Configuration:**"]
             for row in rows:
-                masked = self._mask_sensitive_value(row['key'], row['value'])
-                lines.append(f"- `{row['key']}`: {masked}")
+                val = row['value'] if is_owner_dm else self._mask_sensitive_value(row['key'], row['value'])
+                lines.append(f"- `{row['key']}`: {val}")
             return "\n".join(lines)
 
         if action == "get":
@@ -1071,8 +1079,8 @@ class SyneAgent:
             val = await get_config(key)
             if val is None:
                 return f"Config key '{key}' not found."
-            masked = self._mask_sensitive_value(key, val)
-            return f"`{key}` = {masked}"
+            display = val if is_owner_dm else self._mask_sensitive_value(key, val)
+            return f"`{key}` = {display}"
 
         if action == "set":
             if not key or not value:
