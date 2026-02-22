@@ -43,6 +43,7 @@ class CodexProvider(LLMProvider):
         self._auth_cache: Optional[dict] = None
         self._auth_cache_time: float = 0
         self._token_expires_at: float = 0  # Unix timestamp
+        self._auth_failure: Optional[str] = None  # Set when token refresh fails
 
     @property
     def name(self) -> str:
@@ -86,6 +87,7 @@ class CodexProvider(LLMProvider):
                 
                 if not resp.is_success:
                     logger.error(f"Codex token refresh failed: {resp.status_code} {resp.text[:200]}")
+                    self._auth_failure = f"Codex OAuth token refresh failed ({resp.status_code}). Re-auth needed: run `syne init` and re-authenticate."
                     return False
                 
                 data = resp.json()

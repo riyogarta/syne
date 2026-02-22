@@ -205,6 +205,15 @@ class Conversation:
             thinking_budget=self.thinking_budget,
         )
 
+        # Check for auth failures (expired OAuth tokens etc.)
+        auth_failure = getattr(self.provider, '_auth_failure', None)
+        if auth_failure:
+            logger.warning(f"Provider auth failure: {auth_failure}")
+            # Notify once, then clear
+            self.provider._auth_failure = None
+            await self.save_message("assistant", f"⚠️ {auth_failure}")
+            return f"⚠️ {auth_failure}"
+
         # Handle tool calls
         if response.tool_calls:
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
