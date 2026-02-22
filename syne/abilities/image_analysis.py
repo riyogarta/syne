@@ -107,14 +107,14 @@ class ImageAnalysisAbility(Ability):
         
         # 1. Together AI — if key exists, use it first (owner configured it)
         if together_key:
-            result = await self._try_together(image_base64, mime_type, prompt, together_key)
+            result = await self._try_together(image_base64, mime_type, prompt, together_key, config)
             if result.get("success"):
                 return result
             errors.append(f"Together: {result.get('error', 'unknown')}")
         
         # 2. Google Gemini via OAuth — fallback
         if google_available:
-            result = await self._try_gemini(image_base64, mime_type, prompt)
+            result = await self._try_gemini(image_base64, mime_type, prompt, config)
             if result.get("success"):
                 return result
             errors.append(f"Gemini: {result.get('error', 'unknown')}")
@@ -155,7 +155,7 @@ class ImageAnalysisAbility(Ability):
         
         return image_base64, default_mime
     
-    async def _try_gemini(self, image_b64: str, mime_type: str, prompt: str) -> dict:
+    async def _try_gemini(self, image_b64: str, mime_type: str, prompt: str, config: dict = None) -> dict:
         """Try Google Gemini via OAuth."""
         try:
             from ..auth.google_oauth import get_credentials
@@ -167,9 +167,11 @@ class ImageAnalysisAbility(Ability):
             return {"success": False, "error": f"Google auth failed: {str(e)}"}
         
         try:
+            config = config or {}
+            gemini_model = config.get("gemini_model", "gemini-2.0-flash")
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
-                    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{gemini_model}:generateContent",
                     headers={
                         "Authorization": f"Bearer {access_token}",
                         "Content-Type": "application/json",
@@ -203,7 +205,8 @@ class ImageAnalysisAbility(Ability):
             return {"success": False, "error": str(e)}
     
     async def _try_together(
-        self, image_b64: str, mime_type: str, prompt: str, api_key: str
+        self, image_b64: str, mime_type: str, prompt: str, api_key: str,
+        config: dict = None
     ) -> dict:
         """Try Together AI vision model."""
         try:
@@ -215,7 +218,7 @@ class ImageAnalysisAbility(Ability):
                         "Content-Type": "application/json",
                     },
                     json={
-                        "model": "Qwen/Qwen2.5-VL-72B-Instruct",
+                        "model": (config or {}).get("model", "Qwen/Qwen2.5-VL-72B-Instruct"),
                         "messages": [{
                             "role": "user",
                             "content": [
