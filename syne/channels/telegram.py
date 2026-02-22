@@ -994,11 +994,14 @@ Or just send me a message!"""
             session_count = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions")
             message_count = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
 
-        lines = [f"🧠 **Memory: {total['c']} items**\n"]
-        for row in by_cat:
-            lines.append(f"• {row['category']}: {row['c']}")
-        
-        lines.append(f"\n💬 **History: {session_count['c']} sessions • {message_count['c']} messages**")
+        cat_parts = " • ".join(f"{row['category']}: {row['c']}" for row in by_cat)
+        lines = [
+            f"🧠 Memory: {total['c']} items",
+            cat_parts,
+            "",
+            f"💬 Sessions: {session_count['c']}",
+            f"📨 Messages: {message_count['c']}",
+        ]
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
