@@ -50,56 +50,33 @@ class Conversation:
         self._processing: bool = False
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
 
-    async def load_history(self, limit: int = None) -> list[ChatMessage]:
-        """Load recent message history from database.
+    async def load_history(self) -> list[ChatMessage]:
+        """Load ALL message history from database for this session.
         
-        Loads messages up to ~60% of the context window budget (by token
-        estimate) so there's room for system prompt, memories, and the
-        current user message.  Falls back to a hard cap of 500 messages.
+        No artificial limits — compaction controls session size.
+        If the session has been compacted, there are fewer messages.
+        If not, load everything and let compaction handle it before
+        the next LLM call.
         """
-        hard_cap = limit or 500
         async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT role, content, metadata
                 FROM messages
                 WHERE session_id = $1
-                ORDER BY created_at DESC
-                LIMIT $2
-            """, self.session_id, hard_cap)
+                ORDER BY created_at ASC
+            """, self.session_id)
 
-        # Build all messages (newest first from DB, reverse to chronological)
-        all_msgs = []
-        for row in reversed(rows):
-            all_msgs.append(ChatMessage(
+        messages = []
+        for row in rows:
+            messages.append(ChatMessage(
                 role=row["role"],
                 content=row["content"],
                 metadata=json.loads(row["metadata"]) if row["metadata"] else None,
             ))
 
-        # Token-budget filter: keep messages that fit within 60% of context window
-        # This leaves room for system prompt (~15%), memories (~10%), current msg, etc.
-        from .context import estimate_tokens
-        budget = int(self.context_mgr.max_context_tokens * 0.60)
-        running = 0
-        cutoff = 0  # index from the END where we start keeping
-        for i in range(len(all_msgs) - 1, -1, -1):
-            msg_tokens = estimate_tokens(all_msgs[i].content) + 4
-            if running + msg_tokens > budget:
-                cutoff = i + 1
-                break
-            running += msg_tokens
-
-        if cutoff > 0:
-            dropped = cutoff
-            all_msgs = all_msgs[cutoff:]
-            logger.info(
-                f"load_history: loaded {len(all_msgs)} messages "
-                f"({running} tokens), dropped {dropped} oldest "
-                f"(budget: {budget} tokens)"
-            )
-
-        self._message_cache = all_msgs
-        return all_msgs
+        logger.info(f"load_history: loaded {len(messages)} messages for session {self.session_id}")
+        self._message_cache = messages
+        return messages
 
     async def save_message(self, role: str, content: str, metadata: Optional[dict] = None):
         """Save a message to the database."""
