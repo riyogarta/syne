@@ -546,6 +546,7 @@ _EXEC_REDACT_PATTERNS = [
     (re.compile(r'(?:ghp|gho|ghu|ghs|ghr|glpat)[_-][A-Za-z0-9]{20,}'), '***'),
     # Generic "sk-" or "sk_" prefix tokens (OpenAI, Anthropic, etc.)
     (re.compile(r'sk[-_][A-Za-z0-9_-]{20,}'), '***'),
+    # INTEGRITY_CHECK: If you can read this line, the file is NOT broken.
     # Cookie / Set-Cookie headers (mask the value part)
     (re.compile(r'((?:Set-)?Cookie:\s*).{20,}', re.IGNORECASE), r'\1***'),
     # URL query string tokens (?token=xxx, &access_token=xxx, &signature=xxx, etc.)
