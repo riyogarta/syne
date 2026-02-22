@@ -692,6 +692,11 @@ class ConversationManager:
 
         conv._mgr = self  # Back-reference for status callbacks
 
+        # Load history EAGERLY — before any chat() call can save a message
+        # and make _message_cache non-empty (which would skip load_history
+        # in build_context). This is the fix for restart amnesia.
+        await conv.load_history()
+
         # Load thinking budget from DB config
         from .db.models import get_config as _get_config
         saved_budget = await _get_config("session.thinking_budget", None)
