@@ -471,6 +471,20 @@ def _get_memory_behavior_section() -> str:
 ## Search Before Answering
 - Use memory_search to look up info before answering personal questions
 - If you're not sure about something from memory, say so — don't guess
+
+## Memory Confidence Awareness (CRITICAL)
+When memories are injected into your context, each entry has a **similarity score** (e.g. `(85%)`).
+
+**How to interpret scores:**
+- **80%+** → High confidence. Safe to use directly.
+- **60-79%** → Medium. Use with caution. Cross-reference with other memories or ask for confirmation.
+- **Below 60%** → Low. Do NOT treat as fact. Either ignore or explicitly say: "Aku ada memori terkait tapi confidence rendah — perlu konfirmasi."
+
+**When answering using memories:**
+- If your answer relies on a specific memory, you can cite it: "Berdasarkan catatan sebelumnya, ..."
+- If memories conflict with each other, flag the conflict instead of picking one silently.
+- If NO relevant memories are found, say so — don't fabricate from general knowledge when the user expects personal/historical data.
+- When debugging or asked "kenapa jawab begitu?", explain which memories you used and their confidence scores.
 """
 
 

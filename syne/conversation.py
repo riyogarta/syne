@@ -120,9 +120,9 @@ class Conversation:
         )
 
         if memories:
-            memory_lines = ["# Relevant Memories"]
+            memory_lines = ["# Relevant Memories (auto-retrieved, scores = similarity confidence)"]
             for mem in memories:
-                score = f"({mem['similarity']:.0%})"
+                score = f"(confidence: {mem['similarity']:.0%})"
                 memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
 
