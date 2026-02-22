@@ -45,6 +45,7 @@ class SyneAgent:
         self.subagents: Optional[SubAgentManager] = None
         self._running = False
         self._pending_sudo_command: Optional[str] = None
+        self._pending_sudo_at: float = 0.0  # timestamp when pending was set
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
 
     async def start(self):
@@ -775,7 +776,22 @@ class SyneAgent:
         return active[-1] if active else None
 
     def _sudo_confirmed_recently(self, conv) -> bool:
-        """Check if user explicitly confirmed sudo in recent messages."""
+        """Check if user explicitly confirmed sudo in recent messages.
+        
+        Confirmation is only valid if:
+        - There IS a pending sudo command
+        - The pending command was set within the last 120 seconds (TTL)
+        - The user replied with a confirmation word
+        """
+        import time as _time
+        # TTL check: pending sudo expires after 120 seconds
+        if self._pending_sudo_command and self._pending_sudo_at:
+            if _time.time() - self._pending_sudo_at > 120:
+                logger.info("Sudo confirmation expired (TTL 120s)")
+                self._pending_sudo_command = None
+                self._pending_sudo_at = 0.0
+                return False
+
         if not hasattr(conv, '_message_cache') or not conv._message_cache:
             return False
         # Check last 3 user messages for confirmation
@@ -783,6 +799,9 @@ class SyneAgent:
         for msg in reversed(user_msgs[-3:]):
             content = (msg.content or "").strip().lower()
             if content in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
+                # Clear pending after confirmation is consumed
+                self._pending_sudo_command = None
+                self._pending_sudo_at = 0.0
                 return True
         return False
 
@@ -829,8 +848,10 @@ class SyneAgent:
 
             # Check if user explicitly confirmed in recent messages
             if active_conv and not self._sudo_confirmed_recently(active_conv):
+                import time as _time
                 logger.info(f"Sudo requires confirmation: {command[:100]}")
                 self._pending_sudo_command = command
+                self._pending_sudo_at = _time.time()
                 return (
                     "⚠️ This command requires sudo (root access). "
                     "Please confirm you want to run this command by replying 'ya' or 'yes'.\n\n"
@@ -881,7 +902,10 @@ class SyneAgent:
                     parts.append(f"stderr:\n{err[:output_max // 2]}")
             parts.append(f"exit_code: {proc.returncode}")
 
-            return "\n".join(parts) if parts else f"exit_code: {proc.returncode}"
+            output = "\n".join(parts) if parts else f"exit_code: {proc.returncode}"
+            # Redact any credentials that may appear in command output
+            from .security import redact_exec_output
+            return redact_exec_output(output)
 
         except asyncio.TimeoutError:
             try:
@@ -1264,7 +1288,10 @@ class SyneAgent:
 
     async def _tool_memory_search(self, query: str, limit: int = 5) -> str:
         """Tool handler: search memories."""
-        results = await self.memory.recall(query, limit=limit)
+        # Pass requester access level for Rule 760 filtering
+        conv = self._get_active_conversation()
+        access = conv.user.get("access_level", "public") if conv else "public"
+        results = await self.memory.recall(query, limit=limit, requester_access_level=access)
         if not results:
             return "No relevant memories found."
 

@@ -399,6 +399,9 @@ SENSITIVE_KEY_PATTERNS = frozenset({
     "api_key", "token", "secret", "password", "credential",
     "_key", "authorization", "bearer", "cookie", "jwt",
     "refresh_token", "access_token", "session_key",
+    "client_secret", "clientsecret", "private_key", "privatekey",
+    "auth", "passwd", "apikey", "x-api-key", "ssh_key",
+    "signing_key", "encryption_key", "master_key",
 })
 
 
@@ -480,3 +483,58 @@ def log_security_event(
         logger.error(log_msg)
     else:
         logger.warning(log_msg)
+
+
+# ============================================================
+# EXEC OUTPUT REDACTION
+# ============================================================
+# Sanitize shell command output before returning to LLM.
+# Catches credential patterns that slip through env, logs, etc.
+
+import re
+
+_EXEC_REDACT_PATTERNS = [
+    # Telegram bot tokens (digits:alphanumeric) — must be first (before key=value catches partial)
+    (re.compile(r'\d{7,}:[A-Za-z0-9_-]{20,}'), '***'),
+    # Bearer / Authorization headers
+    (re.compile(r'(Authorization:\s*Bearer\s+)\S+', re.IGNORECASE), r'\1***'),
+    (re.compile(r'(Bearer\s+)[A-Za-z0-9_.~+/=-]{20,}', re.IGNORECASE), r'\1***'),
+    # Generic key=value patterns for known sensitive keys
+    (re.compile(
+        r'((?:api[_-]?key|token|secret|password|credential|auth|passwd|private[_-]?key'
+        r'|access[_-]?token|refresh[_-]?token|client[_-]?secret|session[_-]?key'
+        r'|signing[_-]?key|master[_-]?key|ssh[_-]?key|apikey)'
+        r'\s*[=:]\s*)["\']?([A-Za-z0-9_.~+/=-]{8,})["\']?',
+        re.IGNORECASE
+    ), r'\1***'),
+    # AWS-style keys (AKIA...)
+    (re.compile(r'AKIA[A-Z0-9]{16}'), '***'),
+    # Long hex strings that look like tokens/keys (40+ hex chars)
+    (re.compile(r'\b[0-9a-f]{40,}\b', re.IGNORECASE), '***'),
+    # JWT tokens (xxx.yyy.zzz with base64 segments)
+    (re.compile(r'eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'), '***'),
+    # GitHub/GitLab tokens
+    (re.compile(r'(?:ghp|gho|ghu|ghs|ghr|glpat)[_-][A-Za-z0-9]{20,}'), '***'),
+    # Generic "sk-" or "sk_" prefix tokens (OpenAI, Anthropic, etc.)
+    (re.compile(r'sk[-_][A-Za-z0-9_-]{20,}'), '***'),
+]
+
+
+def redact_exec_output(output: str) -> str:
+    """Redact credentials from shell command output.
+    
+    Applies regex patterns to mask tokens, keys, and secrets
+    that may appear in stdout/stderr before returning to LLM.
+    
+    Args:
+        output: Raw command output string
+        
+    Returns:
+        Sanitized output with credentials masked
+    """
+    if not output:
+        return output
+    result = output
+    for pattern, replacement in _EXEC_REDACT_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
