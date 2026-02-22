@@ -30,6 +30,7 @@ OWNER_ONLY_TOOLS = frozenset({
     "file_read",
     "file_write",
     "manage_schedule",
+    "db_query",
 })
 
 

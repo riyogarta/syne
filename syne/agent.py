@@ -481,6 +481,17 @@ class SyneAgent:
             scrub_level="safe",  # source code — must not corrupt regex/patterns
         )
 
+        # ── DB Query (Core — read-only introspection) ──
+        from .tools.db_query import DB_QUERY_TOOL
+        self.tools.register(
+            name=DB_QUERY_TOOL["name"],
+            description=DB_QUERY_TOOL["description"],
+            parameters=DB_QUERY_TOOL["parameters"],
+            handler=DB_QUERY_TOOL["handler"],
+            requires_access_level=DB_QUERY_TOOL["requires_access_level"],
+            scrub_level="safe",  # query results may contain config values
+        )
+
         # ── File Operations (Core) ──
         from .tools.file_ops import FILE_READ_TOOL, FILE_WRITE_TOOL
         self.tools.register(
