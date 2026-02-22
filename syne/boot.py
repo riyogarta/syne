@@ -498,6 +498,25 @@ async def _build_channel_context_section() -> str:
         return f"# Channel Configuration\n(Error loading: {e})\n"
 
 
+def _mask_sensitive_config(key: str, value: str) -> str:
+    """Mask credential values in config output to prevent prompt injection exposure.
+    
+    Keys containing api_key, token, secret, password, credential get masked.
+    Shows first 4 and last 4 chars: 'sk-abc...xyz9'
+    """
+    sensitive_patterns = ("api_key", "token", "secret", "password", "credential", "_key")
+    key_lower = key.lower()
+    if any(p in key_lower for p in sensitive_patterns):
+        s = str(value)
+        if len(s) > 12:
+            return f"{s[:4]}...{s[-4:]}"
+        elif len(s) > 4:
+            return f"{s[:2]}...{s[-2:]}"
+        else:
+            return "***"
+    return str(value)
+
+
 async def _build_config_section() -> str:
     """Build a config section showing all current settings from the database."""
     try:
@@ -522,13 +541,15 @@ async def _build_config_section() -> str:
                     import json
                     parsed = json.loads(value)
                     if isinstance(parsed, dict):
-                        value = ", ".join(f"{k}={v}" for k, v in parsed.items())
+                        value = ", ".join(f"{k}={_mask_sensitive_config(k, v)}" for k, v in parsed.items())
                     elif isinstance(parsed, str):
                         value = parsed
                     else:
                         value = str(parsed)
                 except (json.JSONDecodeError, TypeError):
                     pass
+            # Mask the final value based on the config key
+            value = _mask_sensitive_config(key, value)
             lines.append(f"- `{key}`: {value}")
         
         lines.append("")

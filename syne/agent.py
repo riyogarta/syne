@@ -1030,6 +1030,25 @@ class SyneAgent:
         parts.append(f"exit_code: {exit_code}")
         return "\n".join(parts)
 
+    @staticmethod
+    def _mask_sensitive_value(key: str, value) -> str:
+        """Mask credential values to prevent prompt injection exposure.
+        
+        Keys containing these patterns get masked: api_key, token, secret, password, credential.
+        Shows first 4 and last 4 chars: 'sk-abc...xyz9'
+        """
+        sensitive_patterns = ("api_key", "token", "secret", "password", "credential", "_key")
+        key_lower = key.lower()
+        if any(p in key_lower for p in sensitive_patterns):
+            s = str(value)
+            if len(s) > 12:
+                return f"{s[:4]}...{s[-4:]}"
+            elif len(s) > 4:
+                return f"{s[:2]}...{s[-2:]}"
+            else:
+                return "***"
+        return str(value)
+
     async def _tool_update_config(self, action: str, key: str = "", value: str = "") -> str:
         """Tool handler: read/write config."""
         from .db.models import get_config, set_config
@@ -1042,7 +1061,8 @@ class SyneAgent:
                 return "No config entries."
             lines = ["**Current Configuration:**"]
             for row in rows:
-                lines.append(f"- `{row['key']}`: {row['value']}")
+                masked = self._mask_sensitive_value(row['key'], row['value'])
+                lines.append(f"- `{row['key']}`: {masked}")
             return "\n".join(lines)
 
         if action == "get":
@@ -1051,7 +1071,8 @@ class SyneAgent:
             val = await get_config(key)
             if val is None:
                 return f"Config key '{key}' not found."
-            return f"`{key}` = {val}"
+            masked = self._mask_sensitive_value(key, val)
+            return f"`{key}` = {masked}"
 
         if action == "set":
             if not key or not value:
