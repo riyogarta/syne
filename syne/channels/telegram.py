@@ -982,7 +982,7 @@ Or just send me a message!"""
         await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
 
     async def _cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /memory command — show memory stats."""
+        """Handle /memory command — show memory and session stats."""
         from ..db.connection import get_connection
 
         async with get_connection() as conn:
@@ -991,10 +991,14 @@ Or just send me a message!"""
                 SELECT category, COUNT(*) as c
                 FROM memory GROUP BY category ORDER BY c DESC
             """)
+            session_count = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions")
+            message_count = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
 
         lines = [f"🧠 **Memory: {total['c']} items**\n"]
         for row in by_cat:
             lines.append(f"• {row['category']}: {row['c']}")
+        
+        lines.append(f"\n💬 **History: {session_count['c']} sessions • {message_count['c']} messages**")
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 

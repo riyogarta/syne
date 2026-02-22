@@ -544,6 +544,7 @@ async def _handle_cli_command(
             session_count = await conn.fetchval(
                 "SELECT COUNT(*) FROM sessions WHERE status = 'active'"
             )
+            total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
 
         tool_count = len(agent.tools.list_tools("owner"))
         ability_count = len(agent.abilities.list_all()) if agent.abilities else 0
@@ -558,7 +559,7 @@ async def _handle_cli_command(
             f"🤖 Model: {model_name} ({provider_name})\n"
             f"📚 Memories: {mem_count}\n"
             f"👥 Users: {user_count} | Groups: {group_count}\n"
-            f"💬 Active sessions: {session_count}\n"
+            f"💬 Sessions: {session_count} active • {total_messages} messages\n"
             f"🔧 Tools: {tool_count} | Abilities: {ability_count}\n"
             f"💭 Thinking: {thinking}\n"
             f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
