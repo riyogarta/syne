@@ -1833,6 +1833,65 @@ def _restart_service():
 
 
 @cli.command()
+def reauth():
+    """Re-authenticate OAuth provider (refresh expired tokens)."""
+    import asyncio
+
+    async def _reauth():
+        from .db.connection import get_connection, init_pool
+        from .db.models import get_config, set_config
+
+        await init_pool()
+
+        # Determine current provider
+        primary = await get_config("provider.primary", None)
+        if not primary:
+            console.print("[red]❌ No provider configured. Run `syne init` first.[/red]")
+            return
+
+        driver = primary.get("driver", "") if isinstance(primary, dict) else ""
+
+        if driver == "codex":
+            console.print("[bold]🔄 Re-authenticating Codex (GPT) OAuth...[/bold]")
+            from .auth.codex_oauth import login_codex
+            try:
+                creds = await login_codex()
+                await set_config("credential.codex_access_token", creds["access_token"])
+                await set_config("credential.codex_refresh_token", creds["refresh_token"])
+                await set_config("credential.codex_expires_at", creds["expires_at"])
+                console.print("[green]✅ Codex OAuth tokens refreshed.[/green]")
+            except Exception as e:
+                console.print(f"[red]❌ Codex re-auth failed: {e}[/red]")
+                return
+
+        elif driver == "google":
+            console.print("[bold]🔄 Re-authenticating Google Gemini OAuth...[/bold]")
+            from .auth.google_oauth import login_google
+            try:
+                creds = login_google()
+                await set_config("credential.google_access_token", creds.token)
+                await set_config("credential.google_refresh_token", creds.refresh_token)
+                if creds.expiry:
+                    await set_config("credential.google_token_expiry", creds.expiry.isoformat())
+                console.print("[green]✅ Google OAuth tokens refreshed.[/green]")
+            except Exception as e:
+                console.print(f"[red]❌ Google re-auth failed: {e}[/red]")
+                return
+
+        else:
+            console.print(f"[yellow]⚠️ Provider '{driver}' doesn't use OAuth. No re-auth needed.[/yellow]")
+            return
+
+        # Restart service to pick up new tokens
+        console.print("[dim]Restarting Syne service...[/dim]")
+        import subprocess
+        subprocess.run(["systemctl", "--user", "restart", "syne"], capture_output=True)
+        console.print("[green]✅ Service restarted with new tokens.[/green]")
+
+    asyncio.run(_reauth())
+
+
+@cli.command()
 def update():
     """Update to latest release (skip if version unchanged)."""
     import subprocess
