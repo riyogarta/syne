@@ -190,7 +190,9 @@ def _action_read(path: str, offset: int, limit: int) -> str:
 
     header = f"📄 {path} (lines {offset}-{end_idx} of {total})"
     if end_idx < total:
-        header += f" — use offset={end_idx + 1} to continue"
+        remaining = total - end_idx
+        header += f"\n⚠️ TRUNCATED — {remaining} more lines. Use offset={end_idx + 1} to continue."
+        header += "\n⚠️ Do NOT assume anything about unread lines. Read them before drawing conclusions."
 
     numbered = []
     for i, line in enumerate(selected, start=offset):
@@ -234,11 +236,22 @@ def _action_search(path: str, pattern: str) -> str:
 
         try:
             with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                for lineno, line in enumerate(f, 1):
-                    if regex.search(line):
-                        results.append(f"{rel_str}:{lineno}: {line.rstrip()[:200]}")
-                        if len(results) >= max_results:
-                            break
+                all_file_lines = f.readlines()
+            for lineno_idx, line in enumerate(all_file_lines):
+                lineno = lineno_idx + 1
+                if regex.search(line):
+                    # Show match with ±1 context lines for multi-line patterns
+                    context_parts = []
+                    for ctx_offset in range(-1, 2):  # -1, 0, +1
+                        ctx_idx = lineno_idx + ctx_offset
+                        if 0 <= ctx_idx < len(all_file_lines):
+                            ctx_lineno = ctx_idx + 1
+                            marker = ">" if ctx_offset == 0 else " "
+                            ctx_line = all_file_lines[ctx_idx].rstrip()[:200]
+                            context_parts.append(f"  {marker} {ctx_lineno:4d} | {ctx_line}")
+                    results.append(f"{rel_str}:{lineno}:\n" + "\n".join(context_parts))
+                    if len(results) >= max_results:
+                        break
         except Exception:
             continue
 
