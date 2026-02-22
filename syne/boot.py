@@ -369,6 +369,26 @@ The user decides whether to post it or fix it themselves.
 - For `playwright install-deps`, use: `.venv/bin/python3 -m playwright install-deps chromium`
 - The venv path is relative to your project root (where the service runs from)
 
+## Know Your Own Stack (CRITICAL):
+- Your database driver is **asyncpg** (NOT psycopg, NOT psycopg2)
+- Your DB connection string is in env var `SYNE_DATABASE_URL` (also in `.env`)
+- If you need to query the database directly via exec, use asyncpg:
+  ```python
+  .venv/bin/python3 -c "
+  import asyncio, asyncpg, os
+  from dotenv import load_dotenv; load_dotenv()
+  async def main():
+      conn = await asyncpg.connect(os.environ['SYNE_DATABASE_URL'])
+      rows = await conn.fetch('YOUR SQL HERE')
+      for r in rows: print(dict(r))
+      await conn.close()
+  asyncio.run(main())
+  "
+  ```
+- Do NOT try `psql` (may not be installed) or `psycopg` (not in your venv)
+- When stuck on "what library/tool do I use?" → read your own source with `read_source` first
+- Your own codebase is the best documentation for how YOU work
+
 ## "Can't Do It" → Offer to Create an Ability (CRITICAL):
 When you encounter something you cannot currently do, EVALUATE before saying "I can't":
 
