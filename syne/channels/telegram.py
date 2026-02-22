@@ -294,6 +294,11 @@ class TelegramChannel:
         message_id = update.message.message_id
         self._track_message(chat.id, message_id, text[:100])
 
+        # Extract reply/quote context and prepend to message
+        reply_context = self._extract_reply_context(update)
+        if reply_context:
+            text = f"{reply_context}\n\n{text}"
+
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -531,6 +536,11 @@ class TelegramChannel:
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [photo] {caption[:100]}")
 
+        # Extract reply/quote context
+        reply_context = self._extract_reply_context(update)
+        if reply_context:
+            caption = f"{reply_context}\n\n{caption}" if caption else reply_context
+
         # Keep typing indicator alive throughout photo processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -642,9 +652,14 @@ class TelegramChannel:
                 # Track this message ID
                 self._track_message(chat.id, update.message.message_id, f"[voice] {transcribed_text[:50]}")
 
+                # Extract reply/quote context for voice replies
+                reply_context = self._extract_reply_context(update)
+
                 # Process the transcribed text as a normal message
                 # Include transcription indicator so agent knows it's from voice
                 user_message = f"[Voice message transcription]: {transcribed_text}"
+                if reply_context:
+                    user_message = f"{reply_context}\n\n{user_message}"
                 
                 metadata = {
                     "message_id": update.message.message_id,
@@ -1817,6 +1832,42 @@ Or just send me a message!"""
         if user.first_name and user.last_name:
             return f"{user.first_name} {user.last_name}"
         return user.first_name or user.username or str(user.id)
+
+    @staticmethod
+    def _extract_reply_context(update: Update) -> str | None:
+        """Extract quoted/replied message content for LLM context.
+        
+        When a user replies to a message, include the original message text
+        so the LLM understands what's being referenced.
+        
+        Returns:
+            Context string to prepend to message, or None if no reply.
+        """
+        if not update.message or not update.message.reply_to_message:
+            return None
+        
+        reply = update.message.reply_to_message
+        if not reply.text and not reply.caption:
+            return None  # Skip media-only replies without text
+        
+        reply_text = reply.text or reply.caption or ""
+        if not reply_text.strip():
+            return None
+        
+        # Identify who sent the original message
+        sender = "Unknown"
+        if reply.from_user:
+            if reply.from_user.is_bot:
+                sender = reply.from_user.first_name or "Bot"
+            else:
+                sender = reply.from_user.first_name or reply.from_user.username or str(reply.from_user.id)
+        
+        # Truncate very long quoted messages
+        max_quote = 500
+        if len(reply_text) > max_quote:
+            reply_text = reply_text[:max_quote] + "…"
+        
+        return f"[Replying to {sender}: \"{reply_text}\"]"
 
     def _is_reply_to_bot(self, update: Update) -> bool:
         """Check if message is a reply to the bot."""
