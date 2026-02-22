@@ -35,6 +35,12 @@ class ImageAnalysisAbility(Ability):
         try:
             # Get image data
             if image_url:
+                # SSRF protection: block internal/private URLs
+                from ..security import is_url_safe
+                safe, reason = is_url_safe(image_url)
+                if not safe:
+                    return {"success": False, "error": f"URL blocked: {reason}"}
+
                 async with httpx.AsyncClient(timeout=30) as client:
                     img_response = await client.get(image_url)
                     if img_response.status_code != 200:

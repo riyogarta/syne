@@ -73,7 +73,11 @@ class ImageGenAbility(Ability):
                     import base64
                     image_bytes = base64.b64decode(image_data["b64_json"])
                 elif "url" in image_data:
-                    # Download from URL
+                    # Download from URL (SSRF check even for API responses)
+                    from ..security import is_url_safe
+                    safe, reason = is_url_safe(image_data["url"])
+                    if not safe:
+                        return {"success": False, "error": f"Image URL blocked: {reason}"}
                     img_response = await client.get(image_data["url"])
                     if img_response.status_code != 200:
                         return {"success": False, "error": "Failed to download generated image"}

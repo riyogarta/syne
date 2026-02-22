@@ -59,6 +59,12 @@ async def web_fetch_handler(url: str, max_chars: int = 4000) -> str:
     if not url.startswith(('http://', 'https://')):
         return "Error: URL must start with http:// or https://"
     
+    # SSRF protection: block internal/private URLs
+    from ..security import is_url_safe
+    safe, reason = is_url_safe(url)
+    if not safe:
+        return f"Error: URL blocked ({reason})"
+    
     # Get timeout from config
     timeout_seconds = await get_config("web_fetch.timeout", 30)
     

@@ -450,11 +450,21 @@ def redact_dict(obj) -> dict | list | str:
     """Recursively redact sensitive values in a dict/list structure.
     
     Returns a new structure with sensitive values masked.
+    Primitive strings in lists are scrubbed for inline secrets.
     """
     if isinstance(obj, dict):
         return {k: redact_value(v, k) if not isinstance(v, (dict, list)) else redact_dict(v) for k, v in obj.items()}
     elif isinstance(obj, list):
-        return [redact_dict(item) for item in obj]
+        result = []
+        for item in obj:
+            if isinstance(item, (dict, list)):
+                result.append(redact_dict(item))
+            elif isinstance(item, str):
+                # Primitive strings in lists: scrub inline secrets
+                result.append(redact_secrets_in_text(item))
+            else:
+                result.append(item)
+        return result
     else:
         return obj
 
@@ -474,7 +484,8 @@ def redact_config_value(key: str, value) -> str:
         return json.dumps(redact_dict(value), ensure_ascii=False)
     if is_sensitive_key(key):
         return redact_value(value, key)
-    return str(value)
+    # Non-sensitive key but value might contain inline secrets
+    return redact_secrets_in_text(str(value))
 
 
 def log_security_event(
@@ -535,7 +546,100 @@ _EXEC_REDACT_PATTERNS = [
     (re.compile(r'(?:ghp|gho|ghu|ghs|ghr|glpat)[_-][A-Za-z0-9]{20,}'), '***'),
     # Generic "sk-" or "sk_" prefix tokens (OpenAI, Anthropic, etc.)
     (re.compile(r'sk[-_][A-Za-z0-9_-]{20,}'), '***'),
+    # Cookie / Set-Cookie headers (mask the value part)
+    (re.compile(r'((?:Set-)?Cookie:\s*).{20,}', re.IGNORECASE), r'\1***'),
+    # URL query string tokens (?token=xxx, &access_token=xxx, &signature=xxx, etc.)
+    (re.compile(
+        r'([?&](?:token|access_token|refresh_token|api_key|key|signature|secret|auth)'
+        r'=)[^&\s]{8,}',
+        re.IGNORECASE
+    ), r'\1***'),
+    # PEM private key blocks
+    (re.compile(
+        r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+        r'[\s\S]*?'
+        r'-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----',
+        re.IGNORECASE
+    ), '***PEM_PRIVATE_KEY***'),
 ]
+
+
+# ============================================================
+# SSRF PROTECTION
+# ============================================================
+# Block requests to internal/private IPs, localhost, metadata
+# endpoints, and non-HTTP schemes.
+
+import ipaddress
+from urllib.parse import urlparse
+
+
+def is_url_safe(url: str) -> tuple[bool, str]:
+    """Check if a URL is safe to fetch (no SSRF to internal networks).
+    
+    Blocks:
+    - Non-HTTP(S) schemes (file://, ftp://, gopher://, etc.)
+    - Localhost / 127.x.x.x / ::1
+    - Private IP ranges (10.x, 172.16-31.x, 192.168.x)
+    - Link-local (169.254.x.x — cloud metadata)
+    - .local / .internal hostnames
+    
+    Args:
+        url: URL to validate
+        
+    Returns:
+        Tuple of (safe: bool, reason: str)
+    """
+    if not url:
+        return False, "Empty URL"
+    
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL"
+    
+    # Scheme check
+    if parsed.scheme not in ("http", "https"):
+        return False, f"Blocked scheme: {parsed.scheme}:// (only http/https allowed)"
+    
+    hostname = (parsed.hostname or "").lower().strip()
+    if not hostname:
+        return False, "No hostname in URL"
+    
+    # Localhost variants
+    if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"):
+        return False, "Blocked: localhost"
+    
+    # .local / .internal hostnames
+    if hostname.endswith((".local", ".internal", ".localhost")):
+        return False, f"Blocked hostname suffix: {hostname}"
+    
+    # IP address checks
+    try:
+        ip = ipaddress.ip_address(hostname)
+        if ip.is_private:
+            return False, f"Blocked: private IP {ip}"
+        if ip.is_loopback:
+            return False, f"Blocked: loopback IP {ip}"
+        if ip.is_link_local:
+            return False, f"Blocked: link-local IP {ip} (cloud metadata)"
+        if ip.is_reserved:
+            return False, f"Blocked: reserved IP {ip}"
+    except ValueError:
+        # Not an IP — hostname. Check for cloud metadata IP in hostname
+        pass
+    
+    # Cloud metadata endpoints (AWS, GCP, Azure)
+    blocked_hosts = {
+        "169.254.169.254",  # AWS/GCP metadata
+        "metadata.google.internal",  # GCP
+        "metadata.google.com",
+        "100.100.100.200",  # Alibaba Cloud metadata
+    }
+    if hostname in blocked_hosts:
+        return False, f"Blocked: cloud metadata endpoint {hostname}"
+    
+    return True, ""
 
 
 def redact_exec_output(output: str) -> str:

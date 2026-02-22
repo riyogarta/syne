@@ -357,6 +357,14 @@ class Conversation:
                 else:
                     result = f"Error: Unknown tool or ability '{name}'"
 
+                # ═══════════════════════════════════════════════════════
+                # GLOBAL TOOL RESULT SCRUBBER
+                # Last line of defense: scrub any credentials that slip
+                # through individual tool handlers before LLM sees them.
+                # ═══════════════════════════════════════════════════════
+                from .security import redact_secrets_in_text
+                result = redact_secrets_in_text(str(result))
+
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
