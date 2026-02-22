@@ -506,7 +506,8 @@ class Conversation:
                 
                 try:
                     result_text = await registered.instance.pre_process(
-                        input_type, input_data, user_message
+                        input_type, input_data, user_message,
+                        config=registered.config,
                     )
                     if result_text:
                         logger.info(

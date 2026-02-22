@@ -54,7 +54,10 @@ class Ability(ABC):
         """
         return False
     
-    async def pre_process(self, input_type: str, input_data: dict, user_prompt: str) -> Optional[str]:
+    async def pre_process(
+        self, input_type: str, input_data: dict, user_prompt: str,
+        config: Optional[dict] = None
+    ) -> Optional[str]:
         """Pre-process an input before it reaches the LLM.
         
         Called by the engine when `handles_input_type()` returns True.
@@ -68,6 +71,7 @@ class Ability(ABC):
                 - audio: {"base64": str, "mime_type": str, "duration": float}
                 - document: {"base64": str, "mime_type": str, "filename": str}
             user_prompt: The user's message text (for context-aware processing)
+            config: Ability config from DB (API keys, settings, etc.)
             
         Returns:
             Processed text result, or None if pre-processing failed.

@@ -34,7 +34,10 @@ class ImageAnalysisAbility(Ability):
         """This ability handles image inputs."""
         return input_type == "image"
     
-    async def pre_process(self, input_type: str, input_data: dict, user_prompt: str) -> Optional[str]:
+    async def pre_process(
+        self, input_type: str, input_data: dict, user_prompt: str,
+        config: Optional[dict] = None
+    ) -> Optional[str]:
         """Pre-process image before LLM sees it."""
         prompt = user_prompt if user_prompt and user_prompt.lower() not in (
             "what's in this image?", "describe this image"
@@ -46,7 +49,7 @@ class ImageAnalysisAbility(Ability):
                 "mime_type": input_data.get("mime_type", "image/jpeg"),
                 "prompt": prompt,
             },
-            context={"config": {}},
+            context={"config": config or {}},
         )
         
         if result.get("success"):
