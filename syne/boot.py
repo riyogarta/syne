@@ -93,7 +93,11 @@ def _format_abilities_section(abilities: list[dict]) -> str:
 def _get_soul_management_section() -> str:
     """Return the soul management instructions section."""
     return """# Soul & Configuration
-Everything about your personality, rules, and behavior is stored in the database.
+Everything about you runs on **PostgreSQL** (NOT SQLite, NOT file-based).
+Your database: PostgreSQL with pgvector extension, connected via `asyncpg`.
+Connection string: environment variable `SYNE_DATABASE_URL` (also in `.env`).
+Your identity, rules, memories, sessions, messages, config, abilities — all in PostgreSQL.
+
 Users can change your personality, rules, and settings by simply asking in conversation.
 When a user asks you to change your behavior, tone, rules, or identity — update the database directly.
 You do not need approval for owner-requested changes. Apply them immediately.
