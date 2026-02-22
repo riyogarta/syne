@@ -794,8 +794,23 @@ class TelegramChannel:
         chat = update.message.chat
         is_group = chat.type in ("group", "supergroup")
 
-        # Access control
-        if not await self._check_access(update, user, chat, is_group):
+        # Rate limiting
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
+        if not allowed:
+            await update.message.reply_text(f"⏱️ {rate_msg}")
+            return
+
+        # Group checks
+        if is_group and not self._is_reply_to_bot(update):
+            return  # Ignore location in groups without reply to bot
+
+        db_user = await self._ensure_user(user)
+
+        # Block pending users
+        if not is_group and db_user.get("access_level") == "pending":
+            await self._handle_pending_user(update, db_user)
             return
 
         location = update.message.location
