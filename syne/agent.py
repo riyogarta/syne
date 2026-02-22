@@ -184,7 +184,8 @@ class SyneAgent:
             if oauth:
                 now = time.time()
                 expires = oauth._token_expires_at
-                if expires > 0 and now >= (expires - 300):
+                buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
+                if expires > 0 and now >= (expires - buffer):
                     logger.info(f"OAuth token expired or expiring soon (expires_at={expires}, now={now}). Refreshing...")
                     result = oauth._refresh_token()
                     if result:
@@ -201,29 +202,57 @@ class SyneAgent:
     async def _periodic_token_refresh(self):
         """Background task: periodically check and refresh OAuth tokens.
         
-        Runs as long as the agent is running. If the token is expired or
-        about to expire (within 5 min buffer), triggers a refresh.
-        If refresh fails, sets _auth_failure on the provider so the
-        conversation engine can notify the owner.
+        Configurable via DB:
+        - `auth.refresh_interval_seconds` (default: 1800 = 30 min)
+        - `auth.refresh_buffer_seconds` (default: 600 = 10 min before expiry)
         
-        Interval configurable via `auth.refresh_interval_seconds` (default: 1800 = 30 min).
+        Features:
+        - Jitter ±15% to avoid thundering herd across instances
+        - In-process lock to prevent double-refresh
+        - Retry backoff on failure (1m, 5m, 15m) before notifying owner
         """
+        import random
         import time
+        retry_delays = [60, 300, 900]  # 1m, 5m, 15m
+        retry_count = 0
+        
         while self._running:
             try:
-                interval = await get_config("auth.refresh_interval_seconds", 1800)
-                await asyncio.sleep(int(interval))
+                interval = int(await get_config("auth.refresh_interval_seconds", 1800))
+                jitter = random.uniform(-0.15, 0.15) * interval
+                await asyncio.sleep(interval + jitter)
+                
                 oauth = self._get_oauth_provider()
-                if oauth:
-                    now = time.time()
-                    expires = oauth._token_expires_at
-                    if expires > 0 and now >= (expires - 300):
+                if not oauth:
+                    continue
+                
+                now = time.time()
+                buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
+                expires = oauth._token_expires_at
+                
+                if expires > 0 and now >= (expires - buffer):
+                    # In-process lock to prevent double-refresh
+                    if getattr(self, '_refreshing_token', False):
+                        logger.debug("Token refresh already in progress, skipping.")
+                        continue
+                    self._refreshing_token = True
+                    try:
                         logger.info("Periodic check: token expired/expiring, refreshing...")
                         result = oauth._refresh_token()
                         if result:
                             logger.info("Periodic token refresh successful.")
+                            retry_count = 0  # Reset on success
                         else:
-                            logger.warning("Periodic token refresh failed. User needs `syne reauth`.")
+                            retry_count += 1
+                            if retry_count <= len(retry_delays):
+                                delay = retry_delays[min(retry_count - 1, len(retry_delays) - 1)]
+                                logger.warning(f"Token refresh failed (attempt {retry_count}), retrying in {delay}s...")
+                                await asyncio.sleep(delay)
+                            else:
+                                logger.warning("Token refresh failed after retries. User needs `syne reauth`.")
+                                retry_count = 0  # Reset to avoid infinite escalation
+                    finally:
+                        self._refreshing_token = False
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -825,6 +854,8 @@ class SyneAgent:
         if oauth:
             expires = oauth._token_expires_at
             now = time.time()
+            buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
+            
             if expires <= 0:
                 lines.append("Token expiry: unknown (not recorded)")
             elif now >= expires:
@@ -835,12 +866,21 @@ class SyneAgent:
                 hours = remaining // 3600
                 mins = (remaining % 3600) // 60
                 lines.append(f"Token: valid (expires in {hours}h {mins}m)")
+                
+                # Next refresh
+                refresh_in = max(0, int(expires - buffer - now))
+                rh = refresh_in // 3600
+                rm = (refresh_in % 3600) // 60
+                lines.append(f"Next refresh in: {rh}h {rm}m")
             
             if hasattr(oauth, '_auth_failure') and oauth._auth_failure:
                 lines.append(f"⚠️ Auth failure: {oauth._auth_failure}")
             
             if hasattr(oauth, 'refresh_token'):
                 lines.append(f"Refresh token: {'present' if oauth.refresh_token else 'MISSING'}")
+            
+            interval = int(await get_config("auth.refresh_interval_seconds", 1800))
+            lines.append(f"Check interval: {interval}s (buffer: {buffer}s)")
         else:
             lines.append("Token: N/A (provider does not use OAuth)")
         
