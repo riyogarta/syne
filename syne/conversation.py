@@ -178,7 +178,7 @@ class Conversation:
         # ═══════════════════════════════════════════════════════════════
         if self._message_cache and self.context_mgr.should_compact(
             self._message_cache,
-            threshold=0.75,
+            threshold=0.85,
         ):
             logger.info(f"Context at 75%+, compacting BEFORE LLM call for session {self.session_id}")
             if self._mgr and self._mgr._status_callback:
