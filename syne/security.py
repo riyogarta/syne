@@ -515,13 +515,32 @@ def log_security_event(
 
 
 # ============================================================
-# EXEC OUTPUT REDACTION
+# CREDENTIAL PATTERN LEVELS
 # ============================================================
-# Sanitize shell command output before returning to LLM.
-# Catches credential patterns that slip through env, logs, etc.
+# Level 1 (SAFE): High-confidence patterns that rarely false-positive
+#   on code/docs. Safe for web content, search results, file reads.
+# Level 2 (AGGRESSIVE): All patterns including Cookie, PEM, long strings.
+#   Only for exec output and structured tool results.
 
 import re
 
+# LEVEL 1: Safe patterns — unlikely to match code/docs literals
+_SAFE_REDACT_PATTERNS = [
+    # Telegram bot tokens (digits:alphanumeric)
+    (re.compile(r'\d{7,}:[A-Za-z0-9_-]{20,}'), '***'),
+    # JWT tokens (xxx.yyy.zzz with base64 segments)
+    (re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'), '***'),
+    # GitHub/GitLab tokens
+    (re.compile(r'(?:ghp|gho|ghu|ghs|ghr|glpat)[_-][A-Za-z0-9]{20,}'), '***'),
+    # Generic "sk-" or "sk_" prefix tokens (OpenAI, Anthropic, etc.)
+    (re.compile(r'sk[-_][A-Za-z0-9_-]{20,}'), '***'),
+    # AWS-style keys (AKIA...)
+    (re.compile(r'AKIA[A-Z0-9]{16}'), '***'),
+    # Long hex strings (40+ chars — likely API keys/tokens)
+    (re.compile(r'\b[0-9a-f]{40,}\b', re.IGNORECASE), '***'),
+]
+
+# LEVEL 2: Aggressive patterns — full exec output redaction
 _EXEC_REDACT_PATTERNS = [
     # Telegram bot tokens (digits:alphanumeric) — must be first (before key=value catches partial)
     (re.compile(r'\d{7,}:[A-Za-z0-9_-]{20,}'), '***'),
@@ -541,7 +560,7 @@ _EXEC_REDACT_PATTERNS = [
     # Long hex strings that look like tokens/keys (40+ hex chars)
     (re.compile(r'\b[0-9a-f]{40,}\b', re.IGNORECASE), '***'),
     # JWT tokens (xxx.yyy.zzz with base64 segments)
-    (re.compile(r'eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}'), '***'),
+    (re.compile(r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'), '***'),
     # GitHub/GitLab tokens
     (re.compile(r'(?:ghp|gho|ghu|ghs|ghr|glpat)[_-][A-Za-z0-9]{20,}'), '***'),
     # Generic "sk-" or "sk_" prefix tokens (OpenAI, Anthropic, etc.)
@@ -563,6 +582,26 @@ _EXEC_REDACT_PATTERNS = [
         re.IGNORECASE
     ), '***PEM_PRIVATE_KEY***'),
 ]
+
+
+def redact_content_output(text: str) -> str:
+    """Redact credentials using SAFE patterns only.
+    
+    For tools that return content/code (web_fetch, web_search, file_read).
+    Uses Level 1 patterns that won't false-positive on code/docs.
+    
+    Args:
+        text: Content text to sanitize
+        
+    Returns:
+        Text with high-confidence credential patterns masked
+    """
+    if not text or len(text) < 8:
+        return text
+    result = text
+    for pattern, replacement in _SAFE_REDACT_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result
 
 
 # ============================================================

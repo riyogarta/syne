@@ -358,15 +358,30 @@ class Conversation:
                     result = f"Error: Unknown tool or ability '{name}'"
 
                 # ═══════════════════════════════════════════════════════
-                # GLOBAL TOOL RESULT SCRUBBER
-                # Last line of defense: scrub any credentials that slip
-                # through individual tool handlers before LLM sees them.
-                # Skip for read_source: it only returns source code (no
-                # credentials), and regex patterns IN source code get
-                # falsely redacted (e.g. Cookie regex → "Cookie:***").
-                # read_source already blocks .env/secrets files.
+                # GLOBAL TOOL RESULT SCRUBBER (two levels)
+                #
+                # Level 1 (SAFE): For content tools that may return code,
+                #   docs, regex patterns — only high-confidence patterns
+                #   (bot tokens, JWT, sk-*, AKIA, long hex, GitHub tokens).
+                #   Won't false-positive on Cookie regex or PEM in code.
+                #
+                # Level 2 (AGGRESSIVE): For all other tools — full regex
+                #   scrub including Cookie headers, querystrings, PEM, etc.
+                #
+                # SKIP entirely: exec (has dedicated redact_exec_output),
+                #   read_source (returns own source code, already blocks
+                #   .env/secrets — even safe patterns could mangle regex).
                 # ═══════════════════════════════════════════════════════
-                if name != "read_source":
+                _SCRUBBER_SKIP = frozenset({"exec", "read_source"})
+                _SCRUBBER_SAFE = frozenset({
+                    "file_read", "web_fetch", "web_search",
+                })
+                if name in _SCRUBBER_SKIP:
+                    pass  # exec has its own; read_source is safe
+                elif name in _SCRUBBER_SAFE:
+                    from .security import redact_content_output
+                    result = redact_content_output(str(result))
+                else:
                     from .security import redact_secrets_in_text
                     result = redact_secrets_in_text(str(result))
 
