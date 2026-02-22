@@ -301,7 +301,17 @@ The result is automatically delivered back to you when the sub-agent completes.
 ## Important:
 - Don't wait for the sub-agent — continue chatting with the user
 - Notify the user that you've delegated the task
-- Max concurrent sub-agents is configurable (default: 2)
+
+## Configuration (DB configurable):
+- `subagents.max_concurrent`: Max parallel sub-agents (default: **2**)
+- `subagents.timeout_seconds`: Timeout per sub-agent (default: **300** = 5 min)
+- `subagents.enabled`: Enable/disable sub-agents (default: **true**)
+- Owner can change these via `update_config`
+
+## Know Your Own Limits:
+When asked about capabilities or limits, **read your own source code first** before answering.
+Don't give vague answers about "it depends on the system" when the actual config values exist in your DB/code.
+Use `read_source` or query the config table to give precise answers.
 """
 
 
