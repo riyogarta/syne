@@ -152,21 +152,29 @@ class Conversation:
         self._message_metadata = message_metadata
         self._processing = True
 
-        # If image metadata present but provider can't see it natively,
-        # auto-analyze the image via ability and inject result as context
+        # Image handling: ability-first, native vision as fallback
+        # Priority: 1) image_analysis ability  2) native LLM vision  3) give up
         if message_metadata and message_metadata.get("image"):
-            if not self.provider.supports_vision:
-                img_data = message_metadata["image"]
-                analysis_result = await self._auto_analyze_image(
-                    img_data.get("base64", ""),
-                    img_data.get("mime_type", "image/jpeg"),
-                    user_message,
+            img_data = message_metadata["image"]
+            # Always try ability first (dedicated vision model, often better)
+            analysis_result = await self._auto_analyze_image(
+                img_data.get("base64", ""),
+                img_data.get("mime_type", "image/jpeg"),
+                user_message,
+            )
+            if analysis_result:
+                # Ability succeeded — inject result as text, strip image from metadata
+                # so LLM doesn't also try native vision (avoid double-processing)
+                user_message = (
+                    f"{user_message}\n\n"
+                    f"[Image analysis result: {analysis_result}]"
                 )
-                if analysis_result:
-                    user_message = (
-                        f"{user_message}\n\n"
-                        f"[Image analysis result: {analysis_result}]"
-                    )
+                message_metadata = None  # Don't pass image to LLM
+                self._message_metadata = None
+            elif not self.provider.supports_vision:
+                # Ability failed AND provider can't see images — nothing we can do
+                logger.warning("Image received but no analysis available (ability failed, no native vision)")
+            # else: ability failed but provider has native vision — image stays in metadata
 
         # Save user message
         await self.save_message("user", user_message)
@@ -427,8 +435,9 @@ class Conversation:
     async def _auto_analyze_image(
         self, image_base64: str, mime_type: str, user_prompt: str
     ) -> Optional[str]:
-        """Auto-analyze image via imageanalysis ability when provider lacks vision.
+        """Auto-analyze image via image_analysis ability.
         
+        Called FIRST for all images (ability-first strategy).
         Returns analysis text or None if ability unavailable/failed.
         """
         try:
