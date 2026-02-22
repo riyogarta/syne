@@ -1052,7 +1052,9 @@ class SyneAgent:
         if output:
             parts.append(f"stdout:\n{output[:output_max]}")
         parts.append(f"exit_code: {exit_code}")
-        return "\n".join(parts)
+        # Redact credentials in PTY output before returning to LLM
+        from .security import redact_exec_output
+        return redact_exec_output("\n".join(parts))
 
     @staticmethod
     def _mask_sensitive_value(key: str, value) -> str:
