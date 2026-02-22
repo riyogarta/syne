@@ -127,6 +127,12 @@ class TelegramChannel:
             self._handle_voice,
         ))
 
+        # Location handler
+        self.app.add_handler(MessageHandler(
+            filters.LOCATION | filters.Regex(r'^/location'),
+            self._handle_location,
+        ))
+
         # Reaction update handler
         self.app.add_handler(MessageReactionHandler(self._handle_reaction_update))
 
@@ -776,6 +782,84 @@ class TelegramChannel:
             except Exception as e:
                 logger.error(f"Error handling voice: {e}", exc_info=True)
                 await update.message.reply_text("Sorry, something went wrong processing that voice message.")
+
+    async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle location messages — extract coordinates and pass to LLM."""
+        if not update.message or not update.message.location:
+            return
+
+        user = update.message.from_user
+        chat = update.message.chat
+        is_group = chat.type in ("group", "supergroup")
+
+        # Access control
+        if not await self._check_access(update, user, chat, is_group):
+            return
+
+        location = update.message.location
+        lat = location.latitude
+        lng = location.longitude
+
+        # Check for venue (location with name/address)
+        venue = update.message.venue
+        caption = ""
+        if update.message.caption:
+            caption = update.message.caption
+
+        # Build message with location data
+        if venue:
+            location_text = (
+                f"[Location shared: {venue.title}"
+                f"{f' — {venue.address}' if venue.address else ''}"
+                f" (lat: {lat}, lng: {lng})]"
+            )
+        else:
+            location_text = f"[Location shared: lat: {lat}, lng: {lng}]"
+
+        # Reply context
+        reply_context = self._extract_reply_context(update)
+
+        user_text = ""
+        if reply_context:
+            user_text += reply_context + "\n\n"
+        if caption:
+            user_text += caption + "\n\n"
+        user_text += location_text
+
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {location_text}")
+
+        metadata = {
+            "message_id": update.message.message_id,
+            "location": {"latitude": lat, "longitude": lng},
+        }
+        if venue:
+            metadata["venue"] = {
+                "title": venue.title,
+                "address": venue.address or "",
+            }
+
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=user_text,
+                    display_name=self._get_display_name(user),
+                    is_group=is_group,
+                    message_metadata=metadata,
+                )
+
+                if response:
+                    response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    response, react_emojis = self._parse_react_tags(response)
+                    for emoji in react_emojis:
+                        await self.send_reaction(chat.id, update.message.message_id, emoji)
+                    await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
+
+            except Exception as e:
+                logger.error(f"Error handling location: {e}", exc_info=True)
 
     async def _handle_reaction_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle reaction updates on messages."""
