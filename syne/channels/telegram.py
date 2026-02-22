@@ -2297,25 +2297,32 @@ Or just send me a message!"""
 
     async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, splitting if too long for Telegram.
-        Falls back to plain text if Markdown parsing fails.
+        
+        Converts LLM markdown to Telegram HTML for reliable rendering.
+        Falls back to plain text if HTML parsing fails.
         
         Args:
             chat_id: Telegram chat ID
-            text: Response text
+            text: Response text (markdown from LLM)
             context: Telegram context (optional — uses self.app.bot if None)
             reply_to_message_id: Optional message ID to reply/quote to
         
         Returns:
             The last sent Message object, or None if send failed.
         """
+        from ..formatting import markdown_to_telegram_html
+        
         # Get bot instance — from context if available, otherwise from app
         bot = context.bot if context else self.app.bot
+        
+        # Convert markdown to Telegram HTML
+        html_text = markdown_to_telegram_html(text)
         
         max_length = 4096
         last_msg = None
 
         chunks = []
-        remaining = text
+        remaining = html_text
         while remaining:
             if len(remaining) <= max_length:
                 chunks.append(remaining)
@@ -2338,16 +2345,23 @@ Or just send me a message!"""
                 last_msg = await bot.send_message(
                     chat_id=chat_id,
                     text=chunk,
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                     reply_parameters=rp,
                 )
             except Exception:
-                # Markdown parse failed — send as plain text
-                last_msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    reply_parameters=rp,
-                )
+                # HTML parse failed — send as plain text
+                try:
+                    last_msg = await bot.send_message(
+                        chat_id=chat_id,
+                        text=text if i == 0 else chunk,  # Use original markdown for first chunk fallback
+                        reply_parameters=rp,
+                    )
+                except Exception:
+                    last_msg = await bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        reply_parameters=rp,
+                    )
 
         return last_msg
 
