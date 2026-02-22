@@ -282,7 +282,15 @@ class TelegramChannel:
 
         # Handle DMs - auto-create user
         else:
-            await self._ensure_user(user)
+            db_user = await self._ensure_user(user)
+            # Block rejected/blocked users silently
+            if db_user.get("access_level") == "blocked":
+                logger.debug(f"Ignoring message from blocked user {user.id}")
+                return
+            # Check approval policy for DMs
+            if db_user.get("access_level") == "pending":
+                await self._handle_pending_user(update, db_user)
+                return
             # DM received — send 👀 read receipt
             try:
                 await self.send_reaction(chat.id, update.message.message_id, "👀")
@@ -464,6 +472,69 @@ class TelegramChannel:
             display_name=self._get_display_name(tg_user),
         )
 
+    async def _handle_pending_user(self, update: Update, db_user: dict):
+        """Handle messages from pending (unapproved) users.
+        
+        Sends a polite waiting message to the user and notifies the owner
+        with approve/reject inline buttons.
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+        user_name = self._get_display_name(user)
+        
+        # Reply to user
+        await update.message.reply_text(
+            "⏳ Your access is pending approval from the owner. Please wait."
+        )
+        
+        # Find owner to notify
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            owner_row = await conn.fetchrow(
+                "SELECT platform_id FROM users WHERE platform = 'telegram' AND access_level = 'owner' LIMIT 1"
+            )
+        
+        if not owner_row:
+            logger.warning("No owner found to notify about pending user")
+            return
+        
+        owner_chat_id = int(owner_row["platform_id"])
+        
+        # Don't spam owner — check if we already notified recently
+        # Use a simple in-memory tracker
+        pending_key = f"pending_notify:{user.id}"
+        if not hasattr(self, '_pending_notified'):
+            self._pending_notified = set()
+        
+        if pending_key in self._pending_notified:
+            return  # Already notified owner about this user
+        
+        self._pending_notified.add(pending_key)
+        
+        # Build notification with approve/reject buttons
+        username_str = f" (@{user.username})" if user.username else ""
+        buttons = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve:{user.id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"reject:{user.id}"),
+            ]
+        ]
+        
+        try:
+            await self.app.bot.send_message(
+                chat_id=owner_chat_id,
+                text=(
+                    f"🔔 **New user wants access:**\n\n"
+                    f"• Name: {user_name}{username_str}\n"
+                    f"• ID: `{user.id}`\n\n"
+                    f"Approve or reject?"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify owner about pending user: {e}")
+
     async def _get_trigger_name(self) -> str:
         """Get the bot trigger name from config or identity."""
         # First check explicit config
@@ -536,7 +607,12 @@ class TelegramChannel:
             elif not self._is_reply_to_bot(update):
                 return  # Ignore photos in groups without mention/reply
 
-        await self._ensure_user(user)
+        db_user = await self._ensure_user(user)
+        
+        # Block pending users
+        if not is_group and db_user.get("access_level") == "pending":
+            await self._handle_pending_user(update, db_user)
+            return
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [photo] {caption[:100]}")
 
@@ -616,7 +692,12 @@ class TelegramChannel:
             if not self._is_reply_to_bot(update):
                 return  # Ignore voice in groups unless replying to bot
 
-        await self._ensure_user(user)
+        db_user = await self._ensure_user(user)
+        
+        # Block pending users
+        if not is_group and db_user.get("access_level") == "pending":
+            await self._handle_pending_user(update, db_user)
+            return
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [voice message]")
 
@@ -1791,6 +1872,66 @@ Or just send me a message!"""
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
+
+        elif data.startswith("approve:") or data.startswith("reject:"):
+            # User approval/rejection
+            parts = data.split(":", 1)
+            action_type = parts[0]
+            target_user_id = parts[1] if len(parts) > 1 else ""
+            
+            if not target_user_id:
+                await query.edit_message_text("❌ Invalid user ID.")
+                return
+            
+            from ..db.models import get_user, update_user
+            target_user = await get_user("telegram", target_user_id)
+            
+            if not target_user:
+                await query.edit_message_text(f"❌ User {target_user_id} not found.")
+                return
+            
+            target_name = target_user.get("display_name") or target_user.get("name", "Unknown")
+            
+            if action_type == "approve":
+                await update_user("telegram", target_user_id, access_level="public")
+                await query.edit_message_text(
+                    f"✅ **{target_name}** (`{target_user_id}`) approved.\n"
+                    f"They can now chat with the bot.",
+                    parse_mode="Markdown",
+                )
+                # Notify the user they've been approved
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=int(target_user_id),
+                        text="✅ Your access has been approved! You can now send messages.",
+                    )
+                except Exception:
+                    pass  # User may have blocked the bot
+                
+                # Clear pending notification tracker
+                pending_key = f"pending_notify:{target_user_id}"
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(pending_key)
+            
+            else:  # reject
+                await update_user("telegram", target_user_id, access_level="blocked")
+                await query.edit_message_text(
+                    f"🚫 **{target_name}** (`{target_user_id}`) rejected.",
+                    parse_mode="Markdown",
+                )
+                # Notify the user
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=int(target_user_id),
+                        text="Sorry, your access request was not approved.",
+                    )
+                except Exception:
+                    pass
+                
+                # Clear pending notification tracker
+                pending_key = f"pending_notify:{target_user_id}"
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(pending_key)
 
         elif data.startswith("brw:"):
             # Browse directory picker callbacks

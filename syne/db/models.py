@@ -168,6 +168,12 @@ async def get_or_create_user(
             total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
             if owner_on_platform == 0 and total_users <= 3:
                 access_level = "owner"
+            else:
+                # Check DM approval policy — new users start as 'pending'
+                # if approval mode is enabled
+                dm_policy = await get_config("telegram.dm_policy", "open")
+                if dm_policy == "approval":
+                    access_level = "pending"
     
     return await create_user(name, platform, platform_id, display_name, access_level)
 

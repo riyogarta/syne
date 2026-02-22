@@ -75,6 +75,9 @@ class ToolRegistry:
 
     def list_tools(self, access_level: str = "public") -> list[Tool]:
         """List available tools for a given access level."""
+        # pending/blocked users get NO tools
+        if access_level in ("pending", "blocked"):
+            return []
         level_order = ["public", "friend", "family", "admin", "owner"]
         try:
             max_level = level_order.index(access_level)
@@ -122,6 +125,9 @@ class ToolRegistry:
             return f"Error: {reason}"
 
         # Check access level (second layer)
+        # pending/blocked = no access
+        if access_level in ("pending", "blocked"):
+            return f"Error: Access denied."
         level_order = ["public", "friend", "family", "admin", "owner"]
         try:
             required = level_order.index(tool.requires_access_level)
