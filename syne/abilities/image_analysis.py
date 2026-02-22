@@ -2,16 +2,44 @@
 
 import base64
 import httpx
+from typing import Optional
 
 from .base import Ability
 
 
 class ImageAnalysisAbility(Ability):
-    """Analyze and describe images using Google Gemini vision model."""
+    """Analyze and describe images using Google Gemini vision model.
+    
+    Supports ability-first pre-processing: when an image is received,
+    this ability runs BEFORE the LLM sees the raw image data.
+    """
     
     name = "image_analysis"
     description = "Analyze and describe images using AI vision"
     version = "1.0"
+    
+    def handles_input_type(self, input_type: str) -> bool:
+        """This ability handles image inputs."""
+        return input_type == "image"
+    
+    async def pre_process(self, input_type: str, input_data: dict, user_prompt: str) -> Optional[str]:
+        """Pre-process image before LLM sees it."""
+        prompt = user_prompt if user_prompt and user_prompt.lower() not in (
+            "what's in this image?", "describe this image"
+        ) else "Describe this image in detail. If there is text, transcribe it."
+        
+        result = await self.execute(
+            params={
+                "image_base64": input_data.get("base64", ""),
+                "mime_type": input_data.get("mime_type", "image/jpeg"),
+                "prompt": prompt,
+            },
+            context={"config": {}},
+        )
+        
+        if result.get("success"):
+            return result["result"]
+        return None
     
     async def execute(self, params: dict, context: dict) -> dict:
         """Analyze an image and return a description.

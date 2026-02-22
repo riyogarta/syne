@@ -152,29 +152,18 @@ class Conversation:
         self._message_metadata = message_metadata
         self._processing = True
 
-        # Image handling: ability-first, native vision as fallback
-        # Priority: 1) image_analysis ability  2) native LLM vision  3) give up
-        if message_metadata and message_metadata.get("image"):
-            img_data = message_metadata["image"]
-            # Always try ability first (dedicated vision model, often better)
-            analysis_result = await self._auto_analyze_image(
-                img_data.get("base64", ""),
-                img_data.get("mime_type", "image/jpeg"),
-                user_message,
+        # ═══════════════════════════════════════════════════════════════
+        # ABILITY-FIRST PRE-PROCESSING
+        # For any input type (image, audio, document, etc.):
+        #   1. Try matching ability's pre_process() first
+        #   2. If ability succeeds → inject result as text, strip raw input
+        #   3. If ability fails → fallback to native LLM capability
+        # This applies to ALL abilities (bundled + self-created).
+        # ═══════════════════════════════════════════════════════════════
+        if message_metadata:
+            user_message, message_metadata = await self._ability_first_preprocess(
+                user_message, message_metadata
             )
-            if analysis_result:
-                # Ability succeeded — inject result as text, strip image from metadata
-                # so LLM doesn't also try native vision (avoid double-processing)
-                user_message = (
-                    f"{user_message}\n\n"
-                    f"[Image analysis result: {analysis_result}]"
-                )
-                message_metadata = None  # Don't pass image to LLM
-                self._message_metadata = None
-            elif not self.provider.supports_vision:
-                # Ability failed AND provider can't see images — nothing we can do
-                logger.warning("Image received but no analysis available (ability failed, no native vision)")
-            # else: ability failed but provider has native vision — image stays in metadata
 
         # Save user message
         await self.save_message("user", user_message)
@@ -432,48 +421,88 @@ class Conversation:
         return current
 
 
-    async def _auto_analyze_image(
-        self, image_base64: str, mime_type: str, user_prompt: str
-    ) -> Optional[str]:
-        """Auto-analyze image via image_analysis ability.
+    async def _ability_first_preprocess(
+        self, user_message: str, metadata: dict
+    ) -> tuple[str, Optional[dict]]:
+        """Ability-first pre-processing for all input types.
         
-        Called FIRST for all images (ability-first strategy).
-        Returns analysis text or None if ability unavailable/failed.
+        Scans metadata for known input types (image, audio, document, etc.)
+        and checks if any registered ability can handle them via pre_process().
+        
+        If an ability handles the input:
+        - Its text result is appended to user_message
+        - The raw input is stripped from metadata (prevents double-processing)
+        
+        If no ability handles it:
+        - Metadata stays intact for native LLM processing (if provider supports it)
+        
+        This is the ENGINE-LEVEL implementation of the ability-first principle.
+        Works for ALL abilities — bundled and self-created.
+        
+        Returns:
+            Tuple of (updated_user_message, updated_metadata)
         """
-        try:
-            if not self.abilities:
-                logger.debug("No abilities registry for auto image analysis")
-                return None
-
-            # Try to find image_analysis ability
-            registered = self.abilities.get("image_analysis")
-            if not registered or not registered.instance:
-                logger.debug("No image_analysis ability available for auto-analysis")
-                return None
-
-            prompt = user_prompt if user_prompt and user_prompt.lower() not in (
-                "what's in this image?", "describe this image"
-            ) else "Describe this image in detail. If there is text, transcribe it."
-
-            result = await registered.instance.execute(
-                params={
-                    "image_base64": image_base64,
-                    "mime_type": mime_type,
-                    "prompt": prompt,
-                },
-                context={"config": {}},
-            )
-
-            if result.get("success"):
-                logger.info(f"Auto image analysis: {len(result.get('result', ''))} chars")
-                return result["result"]
-            else:
-                logger.warning(f"Image analysis failed: {result.get('error')}")
-                return None
-
-        except Exception as e:
-            logger.error(f"Auto image analysis error: {e}")
-            return None
+        if not self.abilities:
+            return user_message, metadata
+        
+        # Known input types to check in metadata
+        # Each maps to: metadata key, native LLM capability check, label for logging
+        INPUT_TYPES = {
+            "image": {
+                "meta_key": "image",
+                "native_check": lambda: self.provider.supports_vision,
+                "label": "Image analysis",
+            },
+            "audio": {
+                "meta_key": "audio",
+                "native_check": lambda: False,  # No LLM natively handles audio input (yet)
+                "label": "Audio transcription",
+            },
+            "document": {
+                "meta_key": "document",
+                "native_check": lambda: False,  # Documents need parsing
+                "label": "Document processing",
+            },
+        }
+        
+        for input_type, spec in INPUT_TYPES.items():
+            input_data = metadata.get(spec["meta_key"])
+            if not input_data:
+                continue
+            
+            # Find an ability that handles this input type
+            result_text = None
+            for registered in self.abilities.list_enabled("owner"):
+                if not registered.instance.handles_input_type(input_type):
+                    continue
+                
+                try:
+                    result_text = await registered.instance.pre_process(
+                        input_type, input_data, user_message
+                    )
+                    if result_text:
+                        logger.info(
+                            f"{spec['label']} via ability '{registered.name}': "
+                            f"{len(result_text)} chars"
+                        )
+                        break  # First successful ability wins
+                except Exception as e:
+                    logger.error(f"Ability '{registered.name}' pre_process error: {e}")
+                    continue
+            
+            if result_text:
+                # Ability succeeded — inject result, strip raw input
+                user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
+                metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                self._message_metadata = metadata if metadata else None
+            elif not spec["native_check"]():
+                # No ability AND no native LLM support
+                logger.warning(
+                    f"{input_type} received but no handler available "
+                    f"(no ability, no native LLM support)"
+                )
+        
+        return user_message, metadata if metadata else None
 
 
 class ConversationManager:

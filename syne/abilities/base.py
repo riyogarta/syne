@@ -12,11 +12,57 @@ class Ability(ABC):
     - Execution with parameters and context
     - Schema generation for LLM function calling
     - Configuration validation
+    - Pre-processing input (ability-first strategy)
+    
+    ## Ability-First Principle
+    
+    Syne always prefers abilities over native LLM capabilities.
+    If an ability can handle an input type (image, audio, document, etc.),
+    it runs BEFORE the LLM sees the raw input. The LLM only gets the
+    ability's processed result as text context.
+    
+    To participate in pre-processing, override `handles_input_type()` and
+    `pre_process()`. The engine calls these BEFORE building the LLM context.
     """
     
     name: str
     description: str
     version: str = "1.0"
+    
+    def handles_input_type(self, input_type: str) -> bool:
+        """Check if this ability can pre-process a given input type.
+        
+        Override this to declare what input types this ability handles.
+        The engine calls this during the ability-first dispatch phase.
+        
+        Args:
+            input_type: Type of input (e.g. "image", "audio", "document")
+            
+        Returns:
+            True if this ability can pre-process this input type
+        """
+        return False
+    
+    async def pre_process(self, input_type: str, input_data: dict, user_prompt: str) -> Optional[str]:
+        """Pre-process an input before it reaches the LLM.
+        
+        Called by the engine when `handles_input_type()` returns True.
+        The result (if any) is injected as text context, and the raw input
+        is stripped from the LLM message to avoid double-processing.
+        
+        Args:
+            input_type: Type of input (e.g. "image", "audio", "document")
+            input_data: Raw input data dict. Contents depend on input_type:
+                - image: {"base64": str, "mime_type": str}
+                - audio: {"base64": str, "mime_type": str, "duration": float}
+                - document: {"base64": str, "mime_type": str, "filename": str}
+            user_prompt: The user's message text (for context-aware processing)
+            
+        Returns:
+            Processed text result, or None if pre-processing failed.
+            When None is returned, the engine falls back to native LLM capability.
+        """
+        return None
     
     @abstractmethod
     async def execute(self, params: dict, context: dict) -> dict:
