@@ -99,6 +99,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("forget", self._cmd_forget))
+        self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("think", self._cmd_think))
         self.app.add_handler(CommandHandler("reasoning", self._cmd_reasoning))
@@ -1058,6 +1059,7 @@ class TelegramChannel:
 /reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
 /forget — Clear conversation history
+/clear — Clear conversation history (same as /forget)
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
 
@@ -1305,6 +1307,10 @@ Or just send me a message!"""
         self.agent.conversations._active.pop(key, None)
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
+
+    async def _cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /clear command — alias for /forget."""
+        await self._cmd_forget(update, context)
 
     # Shared thinking level definitions
     THINK_LEVELS = {
