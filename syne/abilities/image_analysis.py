@@ -1,14 +1,26 @@
-"""Image Analysis Ability — analyze images via Google Gemini vision."""
+"""Image Analysis Ability — analyze images via multiple vision backends.
+
+Backends (tried in order):
+1. Google Gemini via OAuth (free, rate-limited)
+2. Together AI via API key (paid, from ability config)
+"""
 
 import base64
+import logging
 import httpx
 from typing import Optional
 
 from .base import Ability
 
+logger = logging.getLogger("syne.abilities.image_analysis")
+
 
 class ImageAnalysisAbility(Ability):
-    """Analyze and describe images using Google Gemini vision model.
+    """Analyze and describe images using AI vision models.
+    
+    Supports multiple backends with automatic fallback:
+    - Google Gemini (OAuth) — preferred, free
+    - Together AI (API key) — fallback, uses config api_key
     
     Supports ability-first pre-processing: when an image is received,
     this ability runs BEFORE the LLM sees the raw image data.
@@ -16,7 +28,7 @@ class ImageAnalysisAbility(Ability):
     
     name = "image_analysis"
     description = "Analyze and describe images using AI vision"
-    version = "1.0"
+    version = "1.1"
     
     def handles_input_type(self, input_type: str) -> bool:
         """This ability handles image inputs."""
@@ -44,11 +56,13 @@ class ImageAnalysisAbility(Ability):
     async def execute(self, params: dict, context: dict) -> dict:
         """Analyze an image and return a description.
         
+        Tries backends in order: Google Gemini OAuth → Together AI API key.
+        
         Args:
             params: Must contain either:
                 - 'image_url': URL of image to analyze
                 - 'image_base64': Base64-encoded image data
-            context: Must contain 'config' with Google OAuth credentials
+            context: Contains 'config' with optional Together AI api_key
             
         Returns:
             dict with success, result, error keys
@@ -61,49 +75,85 @@ class ImageAnalysisAbility(Ability):
             return {"success": False, "error": "Either image_url or image_base64 is required"}
         
         try:
-            # Get image data
-            if image_url:
-                # SSRF protection: block internal/private URLs
-                from ..security import is_url_safe
-                safe, reason = is_url_safe(image_url)
-                if not safe:
-                    return {"success": False, "error": f"URL blocked: {reason}"}
-
-                async with httpx.AsyncClient(timeout=30) as client:
-                    img_response = await client.get(image_url)
-                    if img_response.status_code != 200:
-                        return {"success": False, "error": f"Failed to fetch image from URL"}
-                    
-                    image_bytes = img_response.content
-                    # Detect mime type from content-type header or URL
-                    content_type = img_response.headers.get("content-type", "image/jpeg")
-                    if "png" in content_type or image_url.endswith(".png"):
-                        mime_type = "image/png"
-                    elif "gif" in content_type or image_url.endswith(".gif"):
-                        mime_type = "image/gif"
-                    elif "webp" in content_type or image_url.endswith(".webp"):
-                        mime_type = "image/webp"
-                    else:
-                        mime_type = "image/jpeg"
-                    
-                    image_base64 = base64.b64encode(image_bytes).decode()
-            else:
-                # Assume JPEG if not specified
-                mime_type = params.get("mime_type", "image/jpeg")
+            # Resolve image data from URL if needed
+            image_base64, mime_type = await self._resolve_image(
+                image_url, image_base64, params.get("mime_type", "image/jpeg")
+            )
+            if not image_base64:
+                return {"success": False, "error": "Failed to get image data"}
+        except Exception as e:
+            return {"success": False, "error": f"Image resolution error: {str(e)}"}
+        
+        # Try backends in order
+        errors = []
+        
+        # 1. Google Gemini via OAuth (free)
+        result = await self._try_gemini(image_base64, mime_type, prompt)
+        if result.get("success"):
+            return result
+        errors.append(f"Gemini: {result.get('error', 'unknown')}")
+        
+        # 2. Together AI via API key (from ability config or DB)
+        config = context.get("config", {})
+        together_key = config.get("api_key", "")
+        if not together_key:
+            # Try loading from DB ability config
+            together_key = await self._get_together_key_from_db()
+        
+        if together_key:
+            result = await self._try_together(image_base64, mime_type, prompt, together_key)
+            if result.get("success"):
+                return result
+            errors.append(f"Together: {result.get('error', 'unknown')}")
+        else:
+            errors.append("Together: no API key configured")
+        
+        return {
+            "success": False,
+            "error": f"All vision backends failed: {'; '.join(errors)}"
+        }
+    
+    async def _resolve_image(
+        self, image_url: str, image_base64: str, default_mime: str
+    ) -> tuple[str, str]:
+        """Resolve image data — download from URL if needed."""
+        if image_url:
+            from ..security import is_url_safe
+            safe, reason = is_url_safe(image_url)
+            if not safe:
+                raise ValueError(f"URL blocked: {reason}")
             
-            # Get Google OAuth credentials
-            # Import here to avoid circular imports
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(image_url)
+                if resp.status_code != 200:
+                    raise ValueError(f"HTTP {resp.status_code} fetching image")
+                
+                content_type = resp.headers.get("content-type", "image/jpeg")
+                if "png" in content_type or image_url.endswith(".png"):
+                    mime_type = "image/png"
+                elif "gif" in content_type or image_url.endswith(".gif"):
+                    mime_type = "image/gif"
+                elif "webp" in content_type or image_url.endswith(".webp"):
+                    mime_type = "image/webp"
+                else:
+                    mime_type = "image/jpeg"
+                
+                return base64.b64encode(resp.content).decode(), mime_type
+        
+        return image_base64, default_mime
+    
+    async def _try_gemini(self, image_b64: str, mime_type: str, prompt: str) -> dict:
+        """Try Google Gemini via OAuth."""
+        try:
             from ..auth.google_oauth import get_credentials
-            
-            try:
-                creds = await get_credentials()
-                if not creds:
-                    return {"success": False, "error": "No Google OAuth credentials. Run 'syne init' to authenticate."}
-                access_token = await creds.get_token()
-            except Exception as e:
-                return {"success": False, "error": f"Failed to get Google credentials: {str(e)}"}
-            
-            # Call Gemini API with vision
+            creds = await get_credentials()
+            if not creds:
+                return {"success": False, "error": "No Google OAuth credentials"}
+            access_token = await creds.get_token()
+        except Exception as e:
+            return {"success": False, "error": f"Google auth failed: {str(e)}"}
+        
+        try:
             async with httpx.AsyncClient(timeout=60) as client:
                 response = await client.post(
                     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
@@ -112,19 +162,12 @@ class ImageAnalysisAbility(Ability):
                         "Content-Type": "application/json",
                     },
                     json={
-                        "contents": [
-                            {
-                                "parts": [
-                                    {"text": prompt},
-                                    {
-                                        "inlineData": {
-                                            "mimeType": mime_type,
-                                            "data": image_base64,
-                                        }
-                                    },
-                                ]
-                            }
-                        ],
+                        "contents": [{
+                            "parts": [
+                                {"text": prompt},
+                                {"inlineData": {"mimeType": mime_type, "data": image_b64}},
+                            ]
+                        }],
                         "generationConfig": {
                             "temperature": 0.4,
                             "maxOutputTokens": 1024,
@@ -133,26 +176,79 @@ class ImageAnalysisAbility(Ability):
                 )
                 
                 if response.status_code != 200:
-                    error_text = response.text[:200]
-                    return {"success": False, "error": f"Gemini API error ({response.status_code}): {error_text}"}
+                    return {"success": False, "error": f"HTTP {response.status_code}: {response.text[:200]}"}
                 
                 data = response.json()
-                
-                # Extract text from response
-                try:
-                    text = data["candidates"][0]["content"]["parts"][0]["text"]
-                except (KeyError, IndexError):
-                    return {"success": False, "error": "Unexpected response format from Gemini"}
-                
-                return {
-                    "success": True,
-                    "result": text,
-                }
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return {"success": True, "result": text}
                 
         except httpx.TimeoutException:
             return {"success": False, "error": "Request timed out"}
+        except (KeyError, IndexError):
+            return {"success": False, "error": "Unexpected response format"}
         except Exception as e:
-            return {"success": False, "error": f"Unexpected error: {str(e)}"}
+            return {"success": False, "error": str(e)}
+    
+    async def _try_together(
+        self, image_b64: str, mime_type: str, prompt: str, api_key: str
+    ) -> dict:
+        """Try Together AI vision model."""
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    "https://api.together.xyz/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "meta-llama/Llama-Vision-Free",
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime_type};base64,{image_b64}"
+                                    },
+                                },
+                            ],
+                        }],
+                        "max_tokens": 1024,
+                        "temperature": 0.4,
+                    },
+                )
+                
+                if response.status_code != 200:
+                    return {"success": False, "error": f"HTTP {response.status_code}: {response.text[:200]}"}
+                
+                data = response.json()
+                text = data["choices"][0]["message"]["content"]
+                return {"success": True, "result": text}
+                
+        except httpx.TimeoutException:
+            return {"success": False, "error": "Request timed out"}
+        except (KeyError, IndexError):
+            return {"success": False, "error": "Unexpected response format"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    
+    async def _get_together_key_from_db(self) -> str:
+        """Try to load Together AI API key from ability config in DB."""
+        try:
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT config FROM abilities WHERE name = $1", "image_analysis"
+                )
+                if row and row["config"]:
+                    import json
+                    config = json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+                    return config.get("api_key", "")
+        except Exception as e:
+            logger.debug(f"Could not load Together key from DB: {e}")
+        return ""
     
     def get_schema(self) -> dict:
         """Return OpenAI-compatible function schema."""
@@ -160,7 +256,7 @@ class ImageAnalysisAbility(Ability):
             "type": "function",
             "function": {
                 "name": "image_analysis",
-                "description": "Analyze an image and describe its contents",
+                "description": "Analyze an image and describe its contents using AI vision",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -178,11 +274,11 @@ class ImageAnalysisAbility(Ability):
                             "default": "Describe this image in detail.",
                         },
                     },
-                    "required": [],  # One of image_url or image_base64 required
+                    "required": [],
                 },
             },
         }
     
     def get_required_config(self) -> list[str]:
-        """Google OAuth credentials are loaded automatically."""
+        """No hard requirements — uses Google OAuth or Together AI key."""
         return []
