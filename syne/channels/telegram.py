@@ -117,7 +117,7 @@ class TelegramChannel:
 
         # Photo handler
         self.app.add_handler(MessageHandler(
-            filters.PHOTO,
+            filters.PHOTO & ~filters.LOCATION,
             self._handle_photo,
         ))
 
