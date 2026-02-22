@@ -1838,10 +1838,10 @@ def reauth():
     import asyncio
 
     async def _reauth():
-        from .db.connection import get_connection, init_pool
+        from .db.connection import get_connection, get_pool
         from .db.models import get_config, set_config
 
-        await init_pool()
+        await get_pool()
 
         # Determine current provider
         primary = await get_config("provider.primary", None)
