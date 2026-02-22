@@ -749,6 +749,50 @@ class SyneAgent:
             requires_access_level="owner",
         )
 
+        # ── Auth Status Check ──
+        self.tools.register(
+            name="check_auth",
+            description="Check OAuth token status (expired/valid/time remaining). Does NOT expose credentials — only returns status.",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            handler=self._tool_check_auth,
+            requires_access_level="owner",
+        )
+
+    async def _tool_check_auth(self) -> str:
+        """Check OAuth token status without exposing credentials."""
+        import time
+        lines = []
+        provider = self.provider
+        
+        lines.append(f"Provider: {provider.name}")
+        
+        if hasattr(provider, '_token_expires_at'):
+            expires = provider._token_expires_at
+            now = time.time()
+            if expires <= 0:
+                lines.append("Token expiry: unknown (not recorded)")
+            elif now >= expires:
+                elapsed = int(now - expires)
+                lines.append(f"Token: EXPIRED ({elapsed}s ago)")
+            else:
+                remaining = int(expires - now)
+                hours = remaining // 3600
+                mins = (remaining % 3600) // 60
+                lines.append(f"Token: valid (expires in {hours}h {mins}m)")
+        else:
+            lines.append("Token expiry: N/A (provider does not use OAuth tokens)")
+        
+        if hasattr(provider, '_auth_failure') and provider._auth_failure:
+            lines.append(f"⚠️ Auth failure: {provider._auth_failure}")
+        
+        if hasattr(provider, 'refresh_token'):
+            lines.append(f"Refresh token: {'present' if provider.refresh_token else 'MISSING'}")
+        
+        return "\n".join(lines)
+
     async def _tool_spawn_subagent(self, task: str, context: str = "") -> str:
         """Tool handler: spawn a sub-agent."""
         if not self.subagents:
