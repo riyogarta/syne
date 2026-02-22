@@ -57,12 +57,21 @@ def markdown_to_telegram_html(text: str) -> str:
             continue
         
         # Markdown table detection: line starts with | and contains |
-        if line.strip().startswith('|') and '|' in line.strip()[1:]:
+        # Also detect lines that look like table rows (at least 2 pipes)
+        stripped = line.strip()
+        is_table_row = (
+            (stripped.startswith('|') and '|' in stripped[1:]) or
+            (stripped.count('|') >= 2 and not stripped.startswith('```'))
+        )
+        if is_table_row:
             table_lines = []
-            while i < len(lines) and lines[i].strip().startswith('|'):
+            while i < len(lines):
+                s = lines[i].strip()
+                # Stop if line doesn't look like a table row
+                if not s or (not s.startswith('|') and s.count('|') < 2):
+                    break
                 # Skip separator lines (|---|---|)
-                stripped = lines[i].strip()
-                if re.match(r'^\|[\s\-:|]+\|$', stripped):
+                if re.match(r'^[\s|]*[\-:]+[\s\-:|]*$', s):
                     i += 1
                     continue
                 table_lines.append(lines[i])
@@ -77,7 +86,62 @@ def markdown_to_telegram_html(text: str) -> str:
         result.append(_format_inline(line))
         i += 1
     
-    return '\n'.join(result)
+    output = '\n'.join(result)
+    
+    # Safety net: catch any remaining raw markdown tables that slipped through
+    # Look for consecutive lines with | that aren't inside <pre> tags
+    output = _wrap_stray_tables(output)
+    
+    return output
+
+
+def _wrap_stray_tables(html: str) -> str:
+    """Catch any markdown tables that weren't wrapped in <pre> during main pass.
+    
+    Scans for consecutive lines containing | pipes that are NOT already
+    inside <pre>...</pre> blocks, and wraps them.
+    """
+    # Split by <pre> blocks to avoid double-wrapping
+    parts = re.split(r'(<pre>.*?</pre>)', html, flags=re.DOTALL)
+    
+    new_parts = []
+    for part in parts:
+        if part.startswith('<pre>'):
+            new_parts.append(part)
+            continue
+        
+        # Check for stray table rows in non-pre content
+        lines = part.split('\n')
+        out_lines = []
+        j = 0
+        while j < len(lines):
+            line = lines[j]
+            stripped = line.strip()
+            # Detect table-like lines (2+ pipes, not a code element)
+            if stripped.count('|') >= 2 and not stripped.startswith('<code>'):
+                table_chunk = []
+                while j < len(lines):
+                    s = lines[j].strip()
+                    if not s and table_chunk:
+                        break
+                    if s.count('|') >= 2 or re.match(r'^[\s\-:|]+$', s):
+                        # Skip separator lines from display
+                        if not re.match(r'^[\s|]*[\-:]+[\s\-:|]*$', s):
+                            table_chunk.append(_html.escape(
+                                _html.unescape(lines[j]),  # unescape first to avoid double-escape
+                                quote=False
+                            ))
+                        j += 1
+                        continue
+                    break
+                if table_chunk:
+                    out_lines.append('<pre>' + '\n'.join(table_chunk) + '</pre>')
+                    continue
+            out_lines.append(line)
+            j += 1
+        new_parts.append('\n'.join(out_lines))
+    
+    return ''.join(new_parts)
 
 
 def _format_inline(text: str) -> str:
