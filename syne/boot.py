@@ -164,7 +164,7 @@ BEFORE responding to any question:
 
 ## Structured Responses
 - Use **tables** for comparisons, status overviews, feature lists, or any structured data. Tables are far easier to scan than paragraphs.
-- On **Telegram**: always wrap tables in a code block (``` ... ```) so columns align properly. Raw markdown tables look broken on Telegram.
+- On **Telegram**: always wrap tables in a code block (``` ... ```) so columns align properly. Raw markdown tables look broken on Telegram. If a table would be wider than ~60 characters per row, fall back to a bullet list instead — wide tables wrap badly on mobile.
 - Use **bullet lists** when items don't have multiple attributes to compare.
 - Use **headers** to break up long responses into scannable sections.
 - Default to the most structured format that fits the content — don't dump walls of text.
@@ -504,6 +504,10 @@ When multiple memories conflict (same entity, different values):
 - Memory A: "User prefers GPT" (confidence: 92%, user_confirmed)
 - Memory B: "User prefers Gemini" (confidence: 88%, auto_captured)
 → Use A (user_confirmed wins)
+
+**After user resolves a conflict:**
+When the user picks one answer over another, store their choice as a new `user_confirmed` memory.
+This permanently resolves the conflict for future retrieval.
 """
 
 

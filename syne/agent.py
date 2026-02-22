@@ -215,6 +215,10 @@ class SyneAgent:
         import time
         retry_delays = [60, 300, 900]  # 1m, 5m, 15m
         retry_count = 0
+        self._last_refresh_at = 0.0
+        self._last_refresh_success = 0.0
+        self._last_refresh_error = ""
+        self._consecutive_failures = 0
         
         while self._running:
             try:
@@ -237,20 +241,28 @@ class SyneAgent:
                         continue
                     self._refreshing_token = True
                     try:
+                        self._last_refresh_at = now
                         logger.info("Periodic check: token expired/expiring, refreshing...")
                         result = oauth._refresh_token()
                         if result:
                             logger.info("Periodic token refresh successful.")
-                            retry_count = 0  # Reset on success
+                            self._last_refresh_success = time.time()
+                            self._last_refresh_error = ""
+                            self._consecutive_failures = 0
+                            retry_count = 0
                         else:
                             retry_count += 1
+                            self._consecutive_failures += 1
+                            self._last_refresh_error = getattr(oauth, '_auth_failure', 'unknown error')
                             if retry_count <= len(retry_delays):
                                 delay = retry_delays[min(retry_count - 1, len(retry_delays) - 1)]
-                                logger.warning(f"Token refresh failed (attempt {retry_count}), retrying in {delay}s...")
-                                await asyncio.sleep(delay)
+                                # Add jitter to retry backoff too (±10%)
+                                delay_jitter = random.uniform(-0.1, 0.1) * delay
+                                logger.warning(f"Token refresh failed (attempt {retry_count}/{len(retry_delays)}), retrying in {int(delay + delay_jitter)}s...")
+                                await asyncio.sleep(delay + delay_jitter)
                             else:
                                 logger.warning("Token refresh failed after retries. User needs `syne reauth`.")
-                                retry_count = 0  # Reset to avoid infinite escalation
+                                retry_count = 0
                     finally:
                         self._refreshing_token = False
             except asyncio.CancelledError:
@@ -855,12 +867,14 @@ class SyneAgent:
             expires = oauth._token_expires_at
             now = time.time()
             buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
+            token_expired = False
             
             if expires <= 0:
                 lines.append("Token expiry: unknown (not recorded)")
             elif now >= expires:
                 elapsed = int(now - expires)
                 lines.append(f"Token: EXPIRED ({elapsed}s ago)")
+                token_expired = True
             else:
                 remaining = int(expires - now)
                 hours = remaining // 3600
@@ -873,14 +887,34 @@ class SyneAgent:
                 rm = (refresh_in % 3600) // 60
                 lines.append(f"Next refresh in: {rh}h {rm}m")
             
-            if hasattr(oauth, '_auth_failure') and oauth._auth_failure:
-                lines.append(f"⚠️ Auth failure: {oauth._auth_failure}")
-            
             if hasattr(oauth, 'refresh_token'):
                 lines.append(f"Refresh token: {'present' if oauth.refresh_token else 'MISSING'}")
             
+            # Telemetry
+            last_attempt = getattr(self, '_last_refresh_at', 0)
+            last_success = getattr(self, '_last_refresh_success', 0)
+            failures = getattr(self, '_consecutive_failures', 0)
+            last_error = getattr(self, '_last_refresh_error', '')
+            
+            if last_success > 0:
+                ago = int(now - last_success)
+                lines.append(f"Last successful refresh: {ago}s ago")
+            if failures > 0:
+                lines.append(f"Consecutive failures: {failures}")
+            if last_error:
+                # Redact any credential-like content
+                safe_error = last_error[:100] if len(last_error) > 100 else last_error
+                lines.append(f"Last error: {safe_error}")
+            
             interval = int(await get_config("auth.refresh_interval_seconds", 1800))
             lines.append(f"Check interval: {interval}s (buffer: {buffer}s)")
+            
+            # Next action recommendation
+            if token_expired and failures > 0:
+                lines.append("\n⚠️ Action needed: run `syne reauth` to re-authenticate.")
+            elif hasattr(oauth, '_auth_failure') and oauth._auth_failure:
+                lines.append(f"\n⚠️ Auth issue: {oauth._auth_failure}")
+                lines.append("Action needed: run `syne reauth` to re-authenticate.")
         else:
             lines.append("Token: N/A (provider does not use OAuth)")
         

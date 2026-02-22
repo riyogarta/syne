@@ -1088,6 +1088,32 @@ def status():
 
         table.add_row("Version", syne_version)
 
+        # Git commit hash
+        try:
+            import subprocess as _sp
+            git_result = _sp.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, cwd=os.path.dirname(__file__),
+            )
+            if git_result.returncode == 0:
+                table.add_row("Commit", git_result.stdout.strip())
+        except Exception:
+            pass
+
+        # Service uptime (systemd)
+        try:
+            import subprocess as _sp
+            uptime_result = _sp.run(
+                ["systemctl", "--user", "show", "syne", "--property=ActiveEnterTimestamp"],
+                capture_output=True, text=True,
+            )
+            if uptime_result.returncode == 0 and "=" in uptime_result.stdout:
+                ts_str = uptime_result.stdout.strip().split("=", 1)[1]
+                if ts_str:
+                    table.add_row("Service started", ts_str)
+        except Exception:
+            pass
+
         # DB connection
         try:
             pool = await init_db(settings.database_url)
