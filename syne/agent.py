@@ -1054,13 +1054,10 @@ class SyneAgent:
         from .db.models import get_config, set_config
         from .db.connection import get_connection
 
-        # Owner in DM can see full values; all other contexts get masked
-        conv = self._get_active_conversation()
-        is_owner_dm = (
-            conv
-            and not conv.is_group
-            and conv.user.get("access_level") == "owner"
-        )
+        # ALWAYS mask credentials — even for owner DM.
+        # Prompt injection could trick LLM into calling config list/get
+        # and exposing credentials in chat output.
+        # Owner can view raw credentials via direct DB access (SSH/psql).
 
         if action == "list":
             async with get_connection() as conn:
@@ -1069,8 +1066,7 @@ class SyneAgent:
                 return "No config entries."
             lines = ["**Current Configuration:**"]
             for row in rows:
-                val = row['value'] if is_owner_dm else self._mask_sensitive_value(row['key'], row['value'])
-                lines.append(f"- `{row['key']}`: {val}")
+                lines.append(f"- `{row['key']}`: {self._mask_sensitive_value(row['key'], row['value'])}")
             return "\n".join(lines)
 
         if action == "get":
@@ -1079,8 +1075,7 @@ class SyneAgent:
             val = await get_config(key)
             if val is None:
                 return f"Config key '{key}' not found."
-            display = val if is_owner_dm else self._mask_sensitive_value(key, val)
-            return f"`{key}` = {display}"
+            return f"`{key}` = {self._mask_sensitive_value(key, val)}"
 
         if action == "set":
             if not key or not value:
