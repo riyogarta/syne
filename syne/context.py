@@ -96,7 +96,8 @@ class ContextManager:
                 result.append(current_msg)
             return result
 
-        # Trim history from oldest
+        # Trim history from oldest (safety fallback — compaction should
+        # have already run, but just in case)
         trimmed_history = []
         running_tokens = 0
 
@@ -109,7 +110,23 @@ class ContextManager:
 
         dropped = len(history_msgs) - len(trimmed_history)
         if dropped > 0:
-            logger.info(f"Dropped {dropped} old messages to fit context window")
+            logger.warning(
+                f"Emergency trim: dropped {dropped} old messages "
+                f"(compaction should have prevented this)"
+            )
+            # Inject a notice so LLM knows context was lost
+            notice = ChatMessage(
+                role="system",
+                content=(
+                    f"⚠️ CONTEXT NOTICE: {dropped} older messages were dropped "
+                    f"from this conversation due to context window limits. "
+                    f"You may not have full history. If the user references "
+                    f"something you don't see, acknowledge that earlier context "
+                    f"was lost and ask them to clarify."
+                ),
+            )
+            # Insert notice after system messages, before history
+            system_msgs.append(notice)
 
         # Reassemble
         result = system_msgs + trimmed_history

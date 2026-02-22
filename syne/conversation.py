@@ -169,7 +169,45 @@ class Conversation:
         # Save user message
         await self.save_message("user", user_message)
 
-        # Build context (with auto-trim)
+        # ═══════════════════════════════════════════════════════════════
+        # PRE-FLIGHT COMPACTION CHECK
+        # Compact BEFORE building context so the LLM never sees a
+        # silently-trimmed conversation.  Old flow had compaction after
+        # the response, which meant trim_context could silently drop
+        # messages and cause amnesia.
+        # ═══════════════════════════════════════════════════════════════
+        if self._message_cache and self.context_mgr.should_compact(
+            self._message_cache,
+            threshold=0.75,
+        ):
+            logger.info(f"Context at 75%+, compacting BEFORE LLM call for session {self.session_id}")
+            if self._mgr and self._mgr._status_callback:
+                try:
+                    await self._mgr._status_callback(
+                        self.session_id,
+                        "🧹 Compacting memory... please wait a moment."
+                    )
+                except Exception as e:
+                    logger.debug(f"Status callback failed: {e}")
+            result = await auto_compact_check(
+                session_id=self.session_id,
+                provider=self.provider,
+            )
+            if result:
+                logger.info(
+                    f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
+                )
+                await self.load_history()
+                if self._mgr and self._mgr._status_callback:
+                    try:
+                        await self._mgr._status_callback(
+                            self.session_id,
+                            f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Status callback failed: {e}")
+
+        # Build context
         context = await self.build_context(user_message)
 
         # Log context usage
@@ -244,41 +282,6 @@ class Conversation:
                 user_message=user_message,
                 user_id=self.user.get("id"),
             )
-
-        # Check if compaction needed
-        if self.context_mgr.should_compact(
-            self._message_cache,
-            threshold=0.75,
-        ):
-            logger.info(f"Context at 75%+, triggering compaction for session {self.session_id}")
-            # Notify user that compaction is starting
-            if self._mgr and self._mgr._status_callback:
-                try:
-                    await self._mgr._status_callback(
-                        self.session_id,
-                        "🧹 Compacting memory... please wait a moment."
-                    )
-                except Exception as e:
-                    logger.debug(f"Status callback failed: {e}")
-            result = await auto_compact_check(
-                session_id=self.session_id,
-                provider=self.provider,
-            )
-            if result:
-                logger.info(
-                    f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
-                )
-                # Reload history after compaction
-                await self.load_history()
-                # Notify user compaction is done
-                if self._mgr and self._mgr._status_callback:
-                    try:
-                        await self._mgr._status_callback(
-                            self.session_id,
-                            f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
-                        )
-                    except Exception as e:
-                        logger.debug(f"Status callback failed: {e}")
 
         self._processing = False
         return final_response
