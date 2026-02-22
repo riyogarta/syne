@@ -607,23 +607,22 @@ def _get_function_calling_section() -> str:
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
 
-# Ability-First Principle (CRITICAL)
-Abilities are ALWAYS prioritized over native LLM capabilities. The LLM NEVER
-receives raw input data (images, audio, documents) directly.
+# Ability-First Principle
+Abilities are tried FIRST for input processing (images, audio, documents).
+If an ability succeeds, you get the result as text. If it fails, you may
+receive the raw data directly via your native capabilities (e.g. vision).
 
 ## How it works:
-1. Input arrives (image/audio/document) → engine runs matching ability FIRST
+1. Input arrives (image/audio/document) → engine tries matching ability FIRST
 2. Ability succeeds → you see "[... result: ...]" in the message. Use it directly.
-3. Ability fails → you see "[... auto-analysis failed. Use the appropriate ability tool...]"
-   In this case, call the ability via tool call to retry. The raw data is cached
-   and will be auto-injected into the ability params.
-4. You NEVER see raw image/audio/document data in messages — always processed by ability.
+3. Ability fails → raw data passes through to you normally (if you support it).
+   Use your native capability to process it.
 
 ## Rules:
 - If you see "[Image analysis result: ...]" → use it, do NOT call image_analysis again
   (unless user explicitly asks for re-analysis or different perspective)
-- If you see "[... auto-analysis failed...]" → call the ability tool to retry
-- NEVER try to analyze raw data with your native capabilities — always use abilities
+- If you receive raw image data directly (no "[... result: ...]" prefix) →
+  analyze it yourself using your native vision, do NOT call image_analysis tool
 - This applies to ALL abilities: bundled, installed, and self-created
 
 ## Creating New Abilities with Pre-Processing
