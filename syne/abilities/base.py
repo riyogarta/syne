@@ -29,11 +29,22 @@ class Ability(ABC):
     description: str
     version: str = "1.0"
     
+    # Set to False to opt-out of ability-first pre-processing.
+    # Default True = this ability is always tried first before LLM native.
+    # Override in subclass or set via chat to disable priority for specific abilities.
+    priority: bool = True
+    
     def handles_input_type(self, input_type: str) -> bool:
         """Check if this ability can pre-process a given input type.
         
-        Override this to declare what input types this ability handles.
-        The engine calls this during the ability-first dispatch phase.
+        DEFAULT: False — abilities that don't handle raw input (like image_gen,
+        maps, web_screenshot) don't need pre-processing. They're invoked
+        via LLM tool calls instead.
+        
+        Override to return True for abilities that CAN process raw input
+        data before LLM sees it (e.g. image_analysis, audio_transcription).
+        
+        The engine only calls this for abilities where priority=True.
         
         Args:
             input_type: Type of input (e.g. "image", "audio", "document")

@@ -607,11 +607,38 @@ def _get_function_calling_section() -> str:
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
 
-# Image Analysis (IMPORTANT)
-- When the user sends an image/photo, ALWAYS use the imageanalysis ability to analyze it.
-- Do NOT try to analyze images directly from the chat — your chat model may not support vision.
-- The imageanalysis ability uses a dedicated vision model (e.g. Together AI) that CAN see images.
-- Flow: user sends photo → you receive it as base64 → call imageanalysis ability → report results.
+# Ability-First Principle (IMPORTANT)
+- Abilities are ALWAYS prioritized over native LLM capabilities.
+- When input data arrives (image, audio, document, etc.), the engine automatically
+  runs matching abilities BEFORE the LLM sees the raw data.
+- For images: the image_analysis ability processes the photo first. You receive the
+  result as "[Image analysis result: ...]" in the message — just use it directly.
+  Do NOT call image_analysis again unless the user asks for re-analysis.
+- For any input type: if you see "[... result: ...]" injected in the message,
+  that means an ability already handled it. Use the result, don't re-process.
+- This applies to ALL abilities — bundled and ones you create yourself.
+
+## Creating New Abilities
+When creating a new ability that should pre-process input data:
+1. Set `priority = True` (default) in your Ability subclass
+2. Override `handles_input_type(input_type)` → return True for types you handle
+3. Override `pre_process(input_type, input_data, user_prompt)` → return processed text
+4. The engine will automatically call your ability before the LLM sees raw input
+5. To opt OUT of priority: set `priority = False` in the class
+
+Example ability that processes audio:
+```python
+class AudioTranscriptionAbility(Ability):
+    name = "audio_transcription"
+    priority = True  # default, but explicit for clarity
+    
+    def handles_input_type(self, input_type):
+        return input_type == "audio"
+    
+    async def pre_process(self, input_type, input_data, user_prompt):
+        # Transcribe audio, return text
+        ...
+```
 """
 
 

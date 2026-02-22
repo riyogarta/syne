@@ -470,9 +470,12 @@ class Conversation:
             if not input_data:
                 continue
             
-            # Find an ability that handles this input type
+            # Find a priority ability that handles this input type
             result_text = None
             for registered in self.abilities.list_enabled("owner"):
+                # Skip abilities that opted out of priority pre-processing
+                if not getattr(registered.instance, 'priority', True):
+                    continue
                 if not registered.instance.handles_input_type(input_type):
                     continue
                 
