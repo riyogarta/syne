@@ -92,12 +92,14 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     # Codex (ChatGPT OAuth)
     # ═══════════════════════════════════════════════════════════════
     elif driver_name == "codex":
-        access_token, refresh_token = await _load_codex_tokens()
-        return CodexProvider(
+        access_token, refresh_token, expires_at = await _load_codex_tokens()
+        provider = CodexProvider(
             access_token=access_token,
             refresh_token=refresh_token,
             chat_model=model_id,
         )
+        provider._token_expires_at = expires_at
+        return provider
     
     # ═══════════════════════════════════════════════════════════════
     # Anthropic Claude (OAuth via claude.ai)
@@ -249,11 +251,11 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
         return chat_provider
 
 
-async def _load_codex_tokens() -> tuple[str, str]:
+async def _load_codex_tokens() -> tuple[str, str, float]:
     """Load Codex OAuth tokens from DB or environment.
     
     Returns:
-        Tuple of (access_token, refresh_token)
+        Tuple of (access_token, refresh_token, expires_at)
         
     Raises:
         RuntimeError: If tokens not found
@@ -263,14 +265,15 @@ async def _load_codex_tokens() -> tuple[str, str]:
     # Try DB first
     access_token = await get_config("credential.codex_access_token", "")
     refresh_token = await get_config("credential.codex_refresh_token", "")
+    expires_at = await get_config("credential.codex_expires_at", 0)
     if access_token:
-        return access_token, refresh_token
+        return access_token, refresh_token, float(expires_at or 0)
     
     # Try environment
     access_token = os.environ.get("CODEX_ACCESS_TOKEN", "")
     refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "")
     if access_token:
-        return access_token, refresh_token
+        return access_token, refresh_token, 0
     
     raise RuntimeError(
         "No Codex OAuth tokens found. Store them via:\n"

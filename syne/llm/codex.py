@@ -87,7 +87,7 @@ class CodexProvider(LLMProvider):
                 
                 if not resp.is_success:
                     logger.error(f"Codex token refresh failed: {resp.status_code} {resp.text[:200]}")
-                    self._auth_failure = f"Codex OAuth token refresh failed ({resp.status_code}). Re-auth needed: run `syne init` and re-authenticate."
+                    self._auth_failure = f"Codex OAuth token refresh failed ({resp.status_code}). Run `syne reauth` to re-authenticate."
                     return False
                 
                 data = resp.json()

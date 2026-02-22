@@ -60,6 +60,9 @@ class SyneAgent:
         self.provider = await self._init_provider()
         logger.info(f"LLM provider: {self.provider.name}")
 
+        # 2.5. Proactive OAuth token refresh (before first API call)
+        await self._ensure_token_fresh()
+
         # 3. Memory
         self.memory = MemoryEngine(self.provider)
         logger.info("Memory engine ready.")
@@ -143,6 +146,35 @@ class SyneAgent:
         # Update sub-agent manager
         if self.subagents:
             self.subagents.provider = new_provider
+
+    async def _ensure_token_fresh(self):
+        """Proactive OAuth token refresh at startup.
+        
+        Checks if the current provider uses OAuth and if the token is expired
+        or about to expire. If so, triggers a refresh immediately — before
+        the first API call — so the user never sees an auth error.
+        
+        If refresh fails, logs a warning (the existing _auth_failure mechanism
+        in conversation.py will notify the owner on first chat).
+        """
+        import time
+        try:
+            if hasattr(self.provider, '_refresh_token') and hasattr(self.provider, '_token_expires_at'):
+                now = time.time()
+                expires = self.provider._token_expires_at
+                if expires > 0 and now >= (expires - 300):
+                    logger.info(f"OAuth token expired or expiring soon (expires_at={expires}, now={now}). Refreshing...")
+                    result = self.provider._refresh_token()
+                    if result:
+                        logger.info("OAuth token refreshed successfully at startup.")
+                    else:
+                        logger.warning("OAuth token refresh failed at startup. User will need to run `syne reauth`.")
+                elif expires == 0:
+                    # No expiry recorded — try refresh to establish baseline
+                    logger.info("No token expiry recorded. Attempting proactive refresh...")
+                    self.provider._refresh_token()
+        except Exception as e:
+            logger.warning(f"Startup token check failed: {e}")
 
     async def _init_provider(self) -> LLMProvider:
         """Initialize the LLM provider based on config.
