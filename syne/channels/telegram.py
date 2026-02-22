@@ -1052,7 +1052,6 @@ Or just send me a message!"""
             result = await compact_session(
                 session_id=session_id,
                 provider=self.agent.provider,
-                keep_recent=20,
             )
 
             if result:

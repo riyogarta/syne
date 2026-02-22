@@ -150,7 +150,7 @@ async def get_session_stats(session_id: int) -> dict:
 async def compact_session(
     session_id: int,
     provider: LLMProvider,
-    keep_recent: int = 20,
+    keep_recent: int | None = None,
 ) -> Optional[dict]:
     """Compact a session by summarizing old messages.
     
@@ -159,8 +159,11 @@ async def compact_session(
     - Subsequent compactions: merges new messages into existing summary
     
     Keeps the most recent `keep_recent` messages and summarizes the rest.
+    If keep_recent is None, reads from config (default: 40).
     Returns dict with summary and stats, or None if no compaction needed.
     """
+    if keep_recent is None:
+        keep_recent = await get_config("session.compaction_keep_recent", 40)
     async with get_connection() as conn:
         # Get pre-compaction stats
         pre_stats = await get_session_stats(session_id)
@@ -296,7 +299,6 @@ async def should_compact_by_chars(session_id: int, char_threshold: int = 80000) 
 async def auto_compact_check(
     session_id: int,
     provider: LLMProvider,
-    keep_recent: int = 20,
 ) -> Optional[dict]:
     """Check and compact if needed using config thresholds. Returns result dict or None."""
     # Get thresholds from config
@@ -309,5 +311,5 @@ async def auto_compact_check(
     )
 
     if needs_compact:
-        return await compact_session(session_id, provider, keep_recent)
+        return await compact_session(session_id, provider)  # keep_recent from config
     return None
