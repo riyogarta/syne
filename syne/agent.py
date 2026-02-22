@@ -188,17 +188,20 @@ class SyneAgent:
             logger.warning(f"Startup token check failed: {e}")
 
     async def _periodic_token_refresh(self):
-        """Background task: check and refresh OAuth token every 10 minutes.
+        """Background task: periodically check and refresh OAuth tokens.
         
         Runs as long as the agent is running. If the token is expired or
         about to expire (within 5 min buffer), triggers a refresh.
         If refresh fails, sets _auth_failure on the provider so the
         conversation engine can notify the owner.
+        
+        Interval configurable via `auth.refresh_interval_seconds` (default: 1800 = 30 min).
         """
         import time
         while self._running:
             try:
-                await asyncio.sleep(1800)  # Check every 30 minutes
+                interval = await get_config("auth.refresh_interval_seconds", 1800)
+                await asyncio.sleep(int(interval))
                 provider = self.provider
                 if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
                     now = time.time()
