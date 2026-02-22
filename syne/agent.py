@@ -1144,12 +1144,14 @@ class SyneAgent:
             return f"Ability '{name}' disabled." if ok else f"Ability '{name}' not found."
 
         if action == "config":
+            from .security import redact_dict
             if not config:
-                # Show current config
+                # Show current config (redacted — LLM should never see raw credentials)
                 ab = self.abilities.get(name)
                 if not ab:
                     return f"Ability '{name}' not found."
-                return f"Config for '{name}': {ab.config}"
+                safe = redact_dict(ab.config or {})
+                return f"Config for '{name}': {safe}"
             import json
             try:
                 new_config = json.loads(config)
@@ -1158,9 +1160,10 @@ class SyneAgent:
             ab = self.abilities.get(name)
             if not ab:
                 return f"Ability '{name}' not found."
-            merged = {**ab.config, **new_config}
+            merged = {**(ab.config or {}), **new_config}
             ok = await self.abilities.update_config(name, merged)
-            return f"Ability '{name}' config updated: {merged}" if ok else "Failed to update config."
+            safe = redact_dict(merged)
+            return f"Ability '{name}' config updated: {safe}" if ok else "Failed to update config."
 
         return f"Unknown action: {action}"
 
