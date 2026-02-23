@@ -47,6 +47,7 @@ class Conversation:
         self.system_prompt = system_prompt
         self.is_group = is_group
         self.chat_name = chat_name
+        self.chat_id: Optional[str] = None  # Set by manager for prompt refresh
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
@@ -731,6 +732,7 @@ class ConversationManager:
             extra_context=extra_context,
             is_group=is_group,
             chat_name=chat_name,
+            chat_id=chat_id,
         )
 
         conv = Conversation(
@@ -747,6 +749,7 @@ class ConversationManager:
         )
 
         conv._mgr = self  # Back-reference for status callbacks
+        conv.chat_id = chat_id  # Store for prompt refresh
 
         # Load history EAGERLY — before any chat() call can save a message
         # and make _message_cache non-empty (which would skip load_history
@@ -783,6 +786,7 @@ class ConversationManager:
                     abilities=ability_schemas,
                     is_group=conv.is_group,
                     chat_name=getattr(conv, 'chat_name', None),
+                    chat_id=getattr(conv, 'chat_id', None),
                 )
                 conv.system_prompt = new_prompt
                 logger.debug(f"Refreshed system prompt for session {key}")

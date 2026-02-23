@@ -928,6 +928,7 @@ async def get_full_prompt(
     extra_context: Optional[str] = None,
     is_group: bool = False,
     chat_name: Optional[str] = None,
+    chat_id: Optional[str] = None,
 ) -> str:
     """Get the complete system prompt, optionally with user context.
 
@@ -949,19 +950,31 @@ async def get_full_prompt(
         prompt += "\n" + user_ctx
 
     # Inject chat context so LLM knows WHERE it's chatting
-    if is_group and chat_name:
-        prompt += (
-            f"\n# Current Chat Context\n"
-            f"You are in a GROUP CHAT named \"{chat_name}\".\n"
-            f"IMPORTANT: Check your memories for how to address people in THIS specific group. "
-            f"Different groups may require different name forms (e.g., formal vs informal). "
-            f"Use the name/title appropriate for \"{chat_name}\", NOT the default DM name.\n"
-        )
-    elif is_group:
-        prompt += (
-            "\n# Current Chat Context\n"
-            "You are in a GROUP CHAT. Check your memories for group-specific naming conventions.\n"
-        )
+    if is_group:
+        ctx_lines = ["# Current Chat Context"]
+        group_display = chat_name or "Unknown"
+        ctx_lines.append(f"You are in a GROUP CHAT named \"{group_display}\".")
+
+        # Load group-specific settings from DB (owner_alias, context_notes, etc.)
+        if chat_id:
+            try:
+                from .db.connection import get_connection
+                import json as _json
+                async with get_connection() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT settings FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                        chat_id,
+                    )
+                if row and row["settings"]:
+                    settings = _json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
+                    if alias := settings.get("owner_alias"):
+                        ctx_lines.append(f"IMPORTANT: In this group, call the owner \"{alias}\" (NOT their DM name).")
+                    if notes := settings.get("context_notes"):
+                        ctx_lines.append(f"Group info: {notes}")
+            except Exception:
+                pass
+
+        prompt += "\n" + "\n".join(ctx_lines) + "\n"
     else:
         prompt += "\n# Current Chat Context\nYou are in a PRIVATE/DM chat with this user.\n"
 
