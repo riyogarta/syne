@@ -709,6 +709,12 @@ All file operations use `workspace/` (centralized, not project root):
 - `workspace/temp/` — scratch files
 - exec default CWD is `workspace/` — files created via exec also land here
 - NEVER create files in the project root
+
+## Ability File Paths
+- `file_write` with path `syne/abilities/...` auto-resolves to the project root (NOT workspace)
+- But `exec` CWD is still `workspace/` — so when running commands on ability files, either:
+  - Pass `workdir` pointing to the project root, OR
+  - Use the full absolute path in the command
 """
 
 
