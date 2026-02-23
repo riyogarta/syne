@@ -416,6 +416,16 @@ class Conversation:
                     from .security import redact_secrets_in_text
                     result = redact_secrets_in_text(str(result))
 
+                # Collect MEDIA: from tool results (same as ability results)
+                result_str = str(result)
+                if "\n\nMEDIA: " in result_str or result_str.startswith("MEDIA: "):
+                    if "\n\nMEDIA: " in result_str:
+                        media_path = result_str.rsplit("\n\nMEDIA: ", 1)[1].strip()
+                    else:
+                        media_path = result_str[7:].strip()
+                    if media_path and hasattr(self, '_pending_media'):
+                        self._pending_media.append(media_path)
+
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
