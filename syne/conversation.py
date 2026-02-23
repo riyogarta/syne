@@ -118,21 +118,15 @@ class Conversation:
         messages.append(ChatMessage(role="system", content=prompt))
 
         # 2. Recall relevant memories (with Rule 760 filtering via access_level)
-        #    HARDCODED: Skip memory recall in group chats.
-        #    Groups must rely ONLY on their own conversation history.
-        #    Memory recall in groups causes context leakage from DM conversations
-        #    (e.g., wrong name forms, unrelated topics from DM history).
-        #    This is enforced at engine level, not prompt level, so it works
-        #    regardless of which LLM model is used.
-        if self.is_group:
-            memories = []
-        else:
-            memories = await self.memory.recall(
-                query=user_message,
-                limit=10,
-                user_id=self.user.get("id"),
-                requester_access_level=access_level,  # Pass access level for Rule 760
-            )
+        #    Memory is GLOBAL — all sessions (DM + group) recall from the same pool.
+        #    Rule 760 filtering ensures family-private info only goes to family.
+        #    History is STRICTLY per-session (enforced by session_id in load_history).
+        memories = await self.memory.recall(
+            query=user_message,
+            limit=10,
+            user_id=self.user.get("id"),
+            requester_access_level=access_level,  # Pass access level for Rule 760
+        )
 
         # 3. Conversation history
         if not self._message_cache:
