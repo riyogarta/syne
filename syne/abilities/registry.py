@@ -123,12 +123,17 @@ class AbilityRegistry:
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
         """Convert enabled abilities to OpenAI function calling format.
         
+        Validates every schema before including it. Abilities with malformed
+        schemas are logged and skipped — they won't reach the LLM API.
+        
         Args:
             access_level: User's access level for filtering
             
         Returns:
-            List of function schemas for OpenAI API
+            List of validated function schemas for OpenAI API
         """
+        from .validator import validate_tool_schema
+
         abilities = self.list_enabled(access_level)
         schemas = []
         for ability in abilities:
@@ -138,6 +143,13 @@ class AbilityRegistry:
                 # Accept both {"type":"function","function":{...}} and flat {"name":...,"parameters":...}
                 if schema and "type" not in schema and "name" in schema:
                     schema = {"type": "function", "function": schema}
+
+                # Validate schema before adding — reject malformed definitions
+                ok, err = validate_tool_schema(schema, ability.name)
+                if not ok:
+                    logger.error(f"Skipping ability '{ability.name}': {err}")
+                    continue
+
                 schemas.append(schema)
             except Exception as e:
                 logger.error(f"Failed to get schema for {ability.name}: {e}")

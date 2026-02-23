@@ -167,6 +167,36 @@ async def ensure_abilities_table():
         logger.info("Abilities table ensured")
 
 
+def _resolve_module_to_filepath(module_path: str) -> Optional[str]:
+    """Convert a dotted module path to an actual file path.
+    
+    Args:
+        module_path: e.g. "syne.abilities.screenshot" or "syne/abilities/screenshot.py"
+        
+    Returns:
+        Absolute file path if the file exists, None otherwise
+    """
+    # Already a file path
+    if module_path.endswith(".py") or "/" in module_path:
+        p = Path(module_path)
+        if p.is_absolute():
+            return str(p) if p.exists() else None
+        # Relative to project root
+        project_root = Path(__file__).resolve().parent.parent.parent
+        full = project_root / p
+        return str(full) if full.exists() else None
+    
+    # Dotted path → file path
+    parts = module_path.split(".")
+    project_root = Path(__file__).resolve().parent.parent.parent
+    candidate = project_root / "/".join(parts)
+    py_file = candidate.with_suffix(".py")
+    if py_file.exists():
+        return str(py_file)
+    
+    return None
+
+
 def load_dynamic_ability(module_path: str) -> Optional[Ability]:
     """Dynamically load an Ability class from a module path.
 
@@ -238,20 +268,38 @@ async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:
             WHERE source != 'bundled'
         """)
 
+    from .validator import validate_ability_file, validate_ability_instance
+
     for row in rows:
         name = row["name"]
         if registry.get(name):
             continue  # already loaded
 
-        ability = load_dynamic_ability(row["module_path"])
+        module_path = row["module_path"]
+
+        # Pre-validate source file before importing
+        file_path = _resolve_module_to_filepath(module_path)
+        if file_path:
+            ok, err = validate_ability_file(file_path)
+            if not ok:
+                logger.error(f"Skipping ability '{name}' — {err}")
+                continue
+
+        ability = load_dynamic_ability(module_path)
         if ability is None:
             logger.warning(f"Skipping dynamic ability '{name}' — load failed")
+            continue
+
+        # Validate loaded instance (schema check)
+        ok, err = validate_ability_instance(ability, name)
+        if not ok:
+            logger.error(f"Skipping ability '{name}' — {err}")
             continue
 
         registry.register(
             ability=ability,
             source=row["source"],
-            module_path=row["module_path"],
+            module_path=module_path,
             config=json.loads(row["config"]) if row["config"] else {},
             enabled=row["enabled"],
             requires_access_level=row["requires_access_level"],
@@ -276,7 +324,8 @@ async def register_dynamic_ability(
     """Register a new self-created ability at runtime.
 
     Called by the ``update_ability`` tool when ``action=create``.
-    Dynamically imports the module, inserts/updates the DB record,
+    Validates the source file (syntax + structure), dynamically imports
+    the module, validates the schema output, inserts/updates the DB record,
     and registers the ability in the live registry.
 
     Args:
@@ -290,10 +339,24 @@ async def register_dynamic_ability(
     Returns:
         None on success, or an error message string.
     """
+    from .validator import validate_ability_file, validate_ability_instance
+
+    # 0. Pre-validate source file (syntax + structure) before importing
+    file_path = _resolve_module_to_filepath(module_path)
+    if file_path:
+        ok, err = validate_ability_file(file_path)
+        if not ok:
+            return f"Validation failed: {err}"
+
     # 1. Try to load
     ability = load_dynamic_ability(module_path)
     if ability is None:
         return f"Failed to load ability from '{module_path}'. Ensure file exists and contains a class that extends Ability."
+
+    # 1b. Validate loaded instance (schema check)
+    ok, err = validate_ability_instance(ability, name)
+    if not ok:
+        return f"Schema validation failed: {err}"
 
     # Override name/description if the class doesn't set them
     if not ability.name:

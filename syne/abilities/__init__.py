@@ -2,5 +2,6 @@
 
 from .base import Ability
 from .registry import AbilityRegistry
+from .validator import AbilityValidationError
 
-__all__ = ["Ability", "AbilityRegistry"]
+__all__ = ["Ability", "AbilityRegistry", "AbilityValidationError"]
