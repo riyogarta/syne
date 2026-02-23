@@ -1796,6 +1796,7 @@ class SyneAgent:
         display_name: Optional[str] = None,
         is_group: bool = False,
         message_metadata: Optional[dict] = None,
+        chat_name: Optional[str] = None,
     ) -> str:
         """Handle an incoming message from any channel.
         
@@ -1808,6 +1809,7 @@ class SyneAgent:
             display_name: Optional display name
             is_group: Whether this is a group chat (affects security restrictions)
             message_metadata: Optional metadata (e.g. image data for vision)
+            chat_name: Name of the chat (group title for groups)
             
         Returns:
             Agent response string
@@ -1828,4 +1830,5 @@ class SyneAgent:
             message=message,
             is_group=is_group,
             message_metadata=message_metadata,
+            chat_name=chat_name,
         )

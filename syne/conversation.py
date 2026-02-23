@@ -673,6 +673,7 @@ class ConversationManager:
         user: dict,
         is_group: bool = False,
         extra_context: str = None,
+        chat_name: str = None,
     ) -> Conversation:
         """Get existing conversation or create new one.
         
@@ -719,6 +720,8 @@ class ConversationManager:
             tools=tool_schemas,
             abilities=ability_schemas,
             extra_context=extra_context,
+            is_group=is_group,
+            chat_name=chat_name,
         )
 
         conv = Conversation(
@@ -768,6 +771,7 @@ class ConversationManager:
                     user=conv.user,
                     tools=tool_schemas,
                     abilities=ability_schemas,
+                    is_group=conv.is_group,
                 )
                 conv.system_prompt = new_prompt
                 logger.debug(f"Refreshed system prompt for session {key}")
@@ -782,6 +786,7 @@ class ConversationManager:
         message: str,
         is_group: bool = False,
         message_metadata: Optional[dict] = None,
+        chat_name: Optional[str] = None,
     ) -> str:
         """Handle an incoming message. Returns agent response.
         
@@ -792,6 +797,7 @@ class ConversationManager:
             message: Message content
             is_group: Whether this is a group chat (affects security)
             message_metadata: Optional metadata (e.g. image data for vision)
+            chat_name: Name of the chat (group title for groups)
             
         Returns:
             Agent response string
@@ -807,6 +813,7 @@ class ConversationManager:
                 f"Focus on the project/files in this directory unless asked otherwise."
             )
         conv = await self.get_or_create_session(
-            platform, chat_id, user, is_group=is_group, extra_context=extra_context
+            platform, chat_id, user, is_group=is_group,
+            extra_context=extra_context, chat_name=chat_name,
         )
         return await conv.chat(message, message_metadata=message_metadata)

@@ -920,6 +920,8 @@ async def get_full_prompt(
     tools: Optional[list[dict]] = None,
     abilities: Optional[list[dict]] = None,
     extra_context: Optional[str] = None,
+    is_group: bool = False,
+    chat_name: Optional[str] = None,
 ) -> str:
     """Get the complete system prompt, optionally with user context.
 
@@ -928,6 +930,8 @@ async def get_full_prompt(
         tools: Optional list of tools in OpenAI schema format
         abilities: Optional list of abilities in OpenAI schema format
         extra_context: Optional extra context to append (e.g., CLI working directory)
+        is_group: Whether this is a group chat
+        chat_name: Name of the group chat (if applicable)
         
     Returns:
         Complete system prompt string
@@ -937,6 +941,23 @@ async def get_full_prompt(
     if user:
         user_ctx = await build_user_context(user)
         prompt += "\n" + user_ctx
+
+    # Inject chat context — critical for DM vs group behavior
+    if is_group:
+        group_label = f" ({chat_name})" if chat_name else ""
+        prompt += (
+            f"\n## Current Chat Context\n"
+            f"You are in a **GROUP CHAT**{group_label}.\n"
+            f"- Conversation history below is from THIS group only.\n"
+            f"- Recalled memories are background knowledge — do NOT assume they are the current topic.\n"
+            f"- Respond ONLY to what people say in this group. Do NOT continue conversations from DMs.\n"
+            f"- If someone greets you or sends a short message, respond naturally — don't bring up unrelated topics.\n"
+        )
+    else:
+        prompt += (
+            "\n## Current Chat Context\n"
+            "You are in a **direct message (DM)** with this user.\n"
+        )
 
     if extra_context:
         prompt += "\n" + extra_context

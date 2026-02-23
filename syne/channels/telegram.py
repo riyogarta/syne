@@ -389,6 +389,7 @@ class TelegramChannel:
                         display_name=self._get_display_name(user),
                         is_group=is_group,
                         message_metadata=metadata,
+                        chat_name=chat.title if is_group else None,
                     )
 
                 if response:
