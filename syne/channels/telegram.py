@@ -97,6 +97,29 @@ class TelegramChannel:
         # Path lookup for browse callbacks (short hash → full path)
         self._browse_paths: dict[str, str] = {}
 
+    def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
+        """Build InboundContext from a Telegram Update. Used by ALL handlers."""
+        from ..inbound import InboundContext
+        msg = update.message
+        chat = msg.chat
+        user = msg.from_user
+        reply_raw = self._extract_reply_context_raw(update)
+        return InboundContext(
+            channel="telegram",
+            platform="telegram",
+            chat_type="group" if is_group else "direct",
+            conversation_label=self._get_display_name(user) if user else None,
+            group_subject=chat.title if is_group else None,
+            chat_id=str(chat.id),
+            sender_name=self._get_display_name(user) if is_group and user else None,
+            sender_id=str(user.id) if is_group and user else None,
+            sender_username=user.username if is_group and user else None,
+            was_mentioned=is_group,
+            has_reply_context=reply_raw is not None,
+            reply_to_sender=reply_raw["sender"] if reply_raw else None,
+            reply_to_body=reply_raw["body"] if reply_raw else None,
+        )
+
     async def start(self):
         """Start the Telegram bot."""
         self.app = (
@@ -339,23 +362,8 @@ class TelegramChannel:
         self._track_message(chat.id, message_id, text[:100])
 
         # Build InboundContext (OpenClaw-style — core module)
-        from ..inbound import InboundContext, build_user_context_prefix
-        reply_to = self._extract_reply_context_raw(update)
-        inbound = InboundContext(
-            channel="telegram",
-            platform="telegram",
-            chat_type="group" if is_group else "direct",
-            conversation_label=self._get_display_name(user),
-            group_subject=chat.title if is_group else None,
-            chat_id=str(chat.id),
-            sender_name=self._get_display_name(user) if is_group else None,
-            sender_id=str(user.id) if is_group else None,
-            sender_username=user.username if is_group else None,
-            was_mentioned=is_group,  # if we got here in group, we were mentioned
-            has_reply_context=reply_to is not None,
-            reply_to_sender=reply_to["sender"] if reply_to else None,
-            reply_to_body=reply_to["body"] if reply_to else None,
-        )
+        from ..inbound import build_user_context_prefix
+        inbound = self._build_inbound(update, is_group)
 
         # Prepend user context prefix to message (untrusted, per-message)
         user_prefix = build_user_context_prefix(inbound)
@@ -753,10 +761,7 @@ class TelegramChannel:
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [photo] {caption[:100]}")
 
-        # Extract reply/quote context
-        reply_context = self._extract_reply_context(update)
-        if reply_context:
-            caption = f"{reply_context}\n\n{caption}" if caption else reply_context
+        # Reply context is now handled by InboundContext (build_user_context_prefix)
 
         # Keep typing indicator alive throughout photo processing
         async with _TypingIndicator(context.bot, chat.id):
@@ -778,11 +783,17 @@ class TelegramChannel:
 
                 # Build message with image metadata for vision
                 user_text = caption if caption else "What's in this image?"
+                inbound = self._build_inbound(update, is_group)
+                from ..inbound import build_user_context_prefix
+                prefix = build_user_context_prefix(inbound)
+                if prefix:
+                    user_text = f"{prefix}\n\n{user_text}"
                 metadata = {
                     "image": {
                         "mime_type": "image/jpeg",
                         "base64": photo_b64,
-                    }
+                    },
+                    "inbound": inbound,
                 }
 
                 response = await self.agent.handle_message(
@@ -874,19 +885,22 @@ class TelegramChannel:
                 # Track this message ID
                 self._track_message(chat.id, update.message.message_id, f"[voice] {transcribed_text[:50]}")
 
-                # Extract reply/quote context for voice replies
-                reply_context = self._extract_reply_context(update)
+                # Reply context handled by InboundContext
 
                 # Process the transcribed text as a normal message
                 # Include transcription indicator so agent knows it's from voice
                 user_message = f"[Voice message transcription]: {transcribed_text}"
-                if reply_context:
-                    user_message = f"{reply_context}\n\n{user_message}"
+                inbound = self._build_inbound(update, is_group)
+                from ..inbound import build_user_context_prefix
+                prefix = build_user_context_prefix(inbound)
+                if prefix:
+                    user_message = f"{prefix}\n\n{user_message}"
                 
                 metadata = {
                     "message_id": update.message.message_id,
                     "voice_transcription": True,
                     "original_text": transcribed_text,
+                    "inbound": inbound,
                 }
 
                 response = await self.agent.handle_message(
@@ -966,9 +980,7 @@ class TelegramChannel:
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [document] {filename} ({mime_type}, {file_size} bytes)")
 
         # Extract reply/quote context
-        reply_context = self._extract_reply_context(update)
-        if reply_context:
-            caption = f"{reply_context}\n\n{caption}" if caption else reply_context
+        # Reply context handled by InboundContext
 
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -1022,6 +1034,13 @@ class TelegramChannel:
                     user_text = f"[User sent a file: {filename} ({mime_type}, {len(file_bytes)} bytes), saved at: {save_path}]"
 
                 self._track_message(chat.id, update.message.message_id, f"[doc] {filename}")
+
+                inbound = self._build_inbound(update, is_group)
+                from ..inbound import build_user_context_prefix
+                prefix = build_user_context_prefix(inbound)
+                if prefix:
+                    user_text = f"{prefix}\n\n{user_text}"
+                metadata["inbound"] = inbound
 
                 response = await self.agent.handle_message(
                     platform="telegram",
@@ -1102,12 +1121,14 @@ class TelegramChannel:
         else:
             location_text = f"[Location shared: lat: {lat}, lng: {lng}]"
 
-        # Reply context
-        reply_context = self._extract_reply_context(update)
+        # Build inbound context
+        inbound = self._build_inbound(update, is_group)
+        from ..inbound import build_user_context_prefix
+        prefix = build_user_context_prefix(inbound)
 
         user_text = ""
-        if reply_context:
-            user_text += reply_context + "\n\n"
+        if prefix:
+            user_text += prefix + "\n\n"
         if caption:
             user_text += caption + "\n\n"
         user_text += location_text
@@ -1117,6 +1138,7 @@ class TelegramChannel:
         metadata = {
             "message_id": update.message.message_id,
             "location": {"latitude": lat, "longitude": lng},
+            "inbound": inbound,
         }
         if venue:
             metadata["venue"] = {
