@@ -343,6 +343,12 @@ class TelegramChannel:
         if reply_context:
             text = f"{reply_context}\n\n{text}"
 
+        # Build inbound context metadata (OpenClaw-style)
+        # This is prepended to EVERY message so the LLM always knows context
+        inbound_ctx = self._build_inbound_context(update, is_group)
+        if inbound_ctx:
+            text = f"{inbound_ctx}\n\n{text}"
+
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -2432,6 +2438,61 @@ Or just send me a message!"""
         if user.first_name and user.last_name:
             return f"{user.first_name} {user.last_name}"
         return user.first_name or user.username or str(user.id)
+
+    @staticmethod
+    def _build_inbound_context(self, update: Update, is_group: bool) -> str | None:
+        """Build OpenClaw-style inbound context metadata.
+        
+        Prepended to EVERY message so the LLM always knows:
+        - Channel (telegram)
+        - Chat type (direct/group)
+        - Group subject (title)
+        - Sender info (in groups)
+        - Was mentioned
+        
+        This is DATA, not instruction. The LLM uses it like metadata.
+        """
+        import json as _json
+        
+        msg = update.message
+        if not msg:
+            return None
+        
+        chat = msg.chat
+        user = msg.from_user
+        
+        # Build context blocks
+        blocks = []
+        
+        # 1. Conversation info (always)
+        conv_info = {
+            "chat_type": "group" if is_group else "direct",
+        }
+        if is_group and chat.title:
+            conv_info["group_subject"] = chat.title
+        
+        blocks.append(
+            "Conversation context:\n```json\n"
+            + _json.dumps(conv_info, ensure_ascii=False)
+            + "\n```"
+        )
+        
+        # 2. Sender info (groups only — in DM it's obvious)
+        if is_group and user:
+            sender_name = self._get_display_name(user)
+            sender_info = {
+                "name": sender_name,
+                "id": str(user.id),
+            }
+            if user.username:
+                sender_info["username"] = user.username
+            blocks.append(
+                "Sender:\n```json\n"
+                + _json.dumps(sender_info, ensure_ascii=False)
+                + "\n```"
+            )
+        
+        return "\n\n".join(blocks) if blocks else None
 
     @staticmethod
     def _extract_reply_context(update: Update) -> str | None:
