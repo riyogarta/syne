@@ -171,7 +171,7 @@ async def get_or_create_user(
             else:
                 # Check DM approval policy — new users start as 'pending'
                 # if approval mode is enabled
-                dm_policy = await get_config("telegram.dm_policy", "open")
+                dm_policy = await get_config("telegram.dm_policy", "approval")
                 if dm_policy == "approval":
                     access_level = "pending"
     
