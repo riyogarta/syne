@@ -929,6 +929,7 @@ async def get_full_prompt(
     is_group: bool = False,
     chat_name: Optional[str] = None,
     chat_id: Optional[str] = None,
+    inbound: Optional["InboundContext"] = None,
 ) -> str:
     """Get the complete system prompt, optionally with user context.
 
@@ -939,6 +940,8 @@ async def get_full_prompt(
         extra_context: Optional extra context to append (e.g., CLI working directory)
         is_group: Whether this is a group chat
         chat_name: Name of the group chat (if applicable)
+        chat_id: Platform chat ID (for group settings lookup)
+        inbound: InboundContext with full message metadata
         
     Returns:
         Complete system prompt string
@@ -949,34 +952,52 @@ async def get_full_prompt(
         user_ctx = await build_user_context(user)
         prompt += "\n" + user_ctx
 
-    # Inject chat context so LLM knows WHERE it's chatting
-    if is_group:
-        ctx_lines = ["# Current Chat Context"]
-        group_display = chat_name or "Unknown"
-        ctx_lines.append(f"You are in a GROUP CHAT named \"{group_display}\".")
-
-        # Load group-specific settings from DB (owner_alias, context_notes, etc.)
-        if chat_id:
+    # Inject system metadata (OpenClaw-style — trusted, authoritative)
+    if inbound:
+        # Load group settings from DB if in a group
+        if inbound.chat_type == "group" and inbound.chat_id:
             try:
                 from .db.connection import get_connection
                 import json as _json
                 async with get_connection() as conn:
                     row = await conn.fetchrow(
-                        "SELECT settings FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                        "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
+                        inbound.platform, inbound.chat_id,
+                    )
+                if row and row["settings"]:
+                    settings = _json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
+                    inbound.group_settings = settings
+            except Exception:
+                pass
+
+        from .inbound import build_system_metadata
+        prompt += "\n" + build_system_metadata(inbound)
+    else:
+        # Fallback for callers that don't pass inbound (e.g., CLI for now)
+        from .inbound import InboundContext, build_system_metadata
+        fallback = InboundContext(
+            channel="cli" if not is_group else "unknown",
+            platform="cli" if not is_group else "unknown",
+            chat_type="group" if is_group else "direct",
+            group_subject=chat_name,
+            chat_id=chat_id,
+        )
+        # Load group settings for fallback too
+        if is_group and chat_id:
+            try:
+                from .db.connection import get_connection
+                import json as _json
+                async with get_connection() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT settings FROM groups WHERE platform_group_id = $1",
                         chat_id,
                     )
                 if row and row["settings"]:
                     settings = _json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
-                    if alias := settings.get("owner_alias"):
-                        ctx_lines.append(f"IMPORTANT: In this group, call the owner \"{alias}\" (NOT their DM name).")
-                    if notes := settings.get("context_notes"):
-                        ctx_lines.append(f"Group info: {notes}")
+                    fallback.group_settings = settings
             except Exception:
                 pass
-
-        prompt += "\n" + "\n".join(ctx_lines) + "\n"
-    else:
-        prompt += "\n# Current Chat Context\nYou are in a PRIVATE/DM chat with this user.\n"
+        prompt += "\n" + build_system_metadata(fallback)
 
     if extra_context:
         prompt += "\n" + extra_context

@@ -403,12 +403,20 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
 
                 agent.conversations.set_tool_callback(_on_tool)
 
+                from ..inbound import InboundContext
+                cli_inbound = InboundContext(
+                    channel="cli",
+                    platform="cli",
+                    chat_type="direct",
+                    conversation_label=user.get("display_name") or user.get("name", "user"),
+                    chat_id=chat_id,
+                )
                 response = await agent.conversations.handle_message(
                     platform="cli",
                     chat_id=chat_id,
                     user=user,
                     message=msg,
-                    message_metadata={"cwd": agent._cli_cwd},
+                    message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
                 )
 
                 # Cleanup spinner

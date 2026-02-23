@@ -684,6 +684,7 @@ class ConversationManager:
         is_group: bool = False,
         extra_context: str = None,
         chat_name: str = None,
+        inbound: Optional["InboundContext"] = None,
     ) -> Conversation:
         """Get existing conversation or create new one.
         
@@ -733,6 +734,7 @@ class ConversationManager:
             is_group=is_group,
             chat_name=chat_name,
             chat_id=chat_id,
+            inbound=inbound,
         )
 
         conv = Conversation(
@@ -750,6 +752,7 @@ class ConversationManager:
 
         conv._mgr = self  # Back-reference for status callbacks
         conv.chat_id = chat_id  # Store for prompt refresh
+        conv.inbound = inbound  # Store for prompt refresh
 
         # Load history EAGERLY — before any chat() call can save a message
         # and make _message_cache non-empty (which would skip load_history
@@ -787,6 +790,7 @@ class ConversationManager:
                     is_group=conv.is_group,
                     chat_name=getattr(conv, 'chat_name', None),
                     chat_id=getattr(conv, 'chat_id', None),
+                    inbound=getattr(conv, 'inbound', None),
                 )
                 conv.system_prompt = new_prompt
                 logger.debug(f"Refreshed system prompt for session {key}")
@@ -827,8 +831,13 @@ class ConversationManager:
                 f"When using exec tool, commands run in this directory by default.\n"
                 f"Focus on the project/files in this directory unless asked otherwise."
             )
+
+        # Extract InboundContext from metadata (set by channel)
+        inbound = message_metadata.get("inbound") if message_metadata else None
+
         conv = await self.get_or_create_session(
             platform, chat_id, user, is_group=is_group,
             extra_context=extra_context, chat_name=chat_name,
+            inbound=inbound,
         )
         return await conv.chat(message, message_metadata=message_metadata)

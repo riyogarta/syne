@@ -338,24 +338,38 @@ class TelegramChannel:
         message_id = update.message.message_id
         self._track_message(chat.id, message_id, text[:100])
 
-        # Extract reply/quote context and prepend to message
-        reply_context = self._extract_reply_context(update)
-        if reply_context:
-            text = f"{reply_context}\n\n{text}"
+        # Build InboundContext (OpenClaw-style — core module)
+        from ..inbound import InboundContext, build_user_context_prefix
+        reply_to = self._extract_reply_context_raw(update)
+        inbound = InboundContext(
+            channel="telegram",
+            platform="telegram",
+            chat_type="group" if is_group else "direct",
+            conversation_label=self._get_display_name(user),
+            group_subject=chat.title if is_group else None,
+            chat_id=str(chat.id),
+            sender_name=self._get_display_name(user) if is_group else None,
+            sender_id=str(user.id) if is_group else None,
+            sender_username=user.username if is_group else None,
+            was_mentioned=is_group,  # if we got here in group, we were mentioned
+            has_reply_context=reply_to is not None,
+            reply_to_sender=reply_to["sender"] if reply_to else None,
+            reply_to_body=reply_to["body"] if reply_to else None,
+        )
 
-        # Build inbound context metadata (OpenClaw-style)
-        # This is prepended to EVERY message so the LLM always knows context
-        inbound_ctx = self._build_inbound_context(update, is_group)
-        if inbound_ctx:
-            text = f"{inbound_ctx}\n\n{text}"
+        # Prepend user context prefix to message (untrusted, per-message)
+        user_prefix = build_user_context_prefix(inbound)
+        if user_prefix:
+            text = f"{user_prefix}\n\n{text}"
 
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
-                # Include message_id in metadata for tool context
+                # Include message_id and inbound context in metadata
                 metadata = {
                     "message_id": message_id,
                     "chat_id": str(chat.id),
+                    "inbound": inbound,  # Pass full context for system metadata injection
                 }
 
                 # Browse mode: route to CLI-compatible session with cwd
@@ -2440,82 +2454,21 @@ Or just send me a message!"""
         return user.first_name or user.username or str(user.id)
 
     @staticmethod
-    def _build_inbound_context(self, update: Update, is_group: bool) -> str | None:
-        """Build OpenClaw-style inbound context metadata.
-        
-        Prepended to EVERY message so the LLM always knows:
-        - Channel (telegram)
-        - Chat type (direct/group)
-        - Group subject (title)
-        - Sender info (in groups)
-        - Was mentioned
-        
-        This is DATA, not instruction. The LLM uses it like metadata.
-        """
-        import json as _json
-        
-        msg = update.message
-        if not msg:
-            return None
-        
-        chat = msg.chat
-        user = msg.from_user
-        
-        # Build context blocks
-        blocks = []
-        
-        # 1. Conversation info (always)
-        conv_info = {
-            "chat_type": "group" if is_group else "direct",
-        }
-        if is_group and chat.title:
-            conv_info["group_subject"] = chat.title
-        
-        blocks.append(
-            "Conversation context:\n```json\n"
-            + _json.dumps(conv_info, ensure_ascii=False)
-            + "\n```"
-        )
-        
-        # 2. Sender info (groups only — in DM it's obvious)
-        if is_group and user:
-            sender_name = self._get_display_name(user)
-            sender_info = {
-                "name": sender_name,
-                "id": str(user.id),
-            }
-            if user.username:
-                sender_info["username"] = user.username
-            blocks.append(
-                "Sender:\n```json\n"
-                + _json.dumps(sender_info, ensure_ascii=False)
-                + "\n```"
-            )
-        
-        return "\n\n".join(blocks) if blocks else None
-
     @staticmethod
-    def _extract_reply_context(update: Update) -> str | None:
-        """Extract quoted/replied message content for LLM context.
-        
-        When a user replies to a message, include the original message text
-        so the LLM understands what's being referenced.
+    def _extract_reply_context_raw(update: Update) -> dict | None:
+        """Extract reply context as raw dict for InboundContext.
         
         Returns:
-            Context string to prepend to message, or None if no reply.
+            Dict with 'sender' and 'body' keys, or None.
         """
         if not update.message or not update.message.reply_to_message:
             return None
         
         reply = update.message.reply_to_message
-        if not reply.text and not reply.caption:
-            return None  # Skip media-only replies without text
-        
         reply_text = reply.text or reply.caption or ""
         if not reply_text.strip():
             return None
         
-        # Identify who sent the original message
         sender = "Unknown"
         if reply.from_user:
             if reply.from_user.is_bot:
@@ -2523,12 +2476,20 @@ Or just send me a message!"""
             else:
                 sender = reply.from_user.first_name or reply.from_user.username or str(reply.from_user.id)
         
-        # Truncate very long quoted messages
+        # Truncate
         max_quote = 500
         if len(reply_text) > max_quote:
             reply_text = reply_text[:max_quote] + "…"
         
-        return f"[Replying to {sender}: \"{reply_text}\"]"
+        return {"sender": sender, "body": reply_text}
+
+    @staticmethod
+    def _extract_reply_context(update: Update) -> str | None:
+        """Extract reply context as formatted string (legacy, used by other handlers)."""
+        raw = TelegramChannel._extract_reply_context_raw(update)
+        if not raw:
+            return None
+        return f"[Replying to {raw['sender']}: \"{raw['body']}\"]"
 
     def _is_reply_to_bot(self, update: Update) -> bool:
         """Check if message is a reply to the bot."""
