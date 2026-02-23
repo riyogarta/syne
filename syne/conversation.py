@@ -306,6 +306,12 @@ class Conversation:
         """
         from .db.models import get_config
 
+        # Set owner-DM context for file_ops security bypass.
+        # Owner identity is platform-verified (Telegram ID), not message content.
+        from .tools.file_ops import set_owner_dm
+        is_owner_dm = (access_level == "owner" and not self.is_group)
+        set_owner_dm(is_owner_dm)
+
         max_rounds = await get_config("session.max_tool_rounds", 100)
         if isinstance(max_rounds, str):
             max_rounds = int(max_rounds)
@@ -405,17 +411,21 @@ class Conversation:
                 #   "safe" — high-confidence only (JWT, sk-*, bot tokens)
                 #   "none" — tool has its own dedicated scrubber
                 # Default = "aggressive" (safest for new tools)
+                #
+                # BYPASS: Owner DM — owner identity is platform-verified,
+                # no scrubbing needed. Owner can see all output.
                 # ═══════════════════════════════════════════════════════
-                tool_obj = self.tools.get(name)
-                scrub = tool_obj.scrub_level if tool_obj else "aggressive"
-                if scrub == "none":
-                    pass  # tool handles its own scrubbing
-                elif scrub == "safe":
-                    from .security import redact_content_output
-                    result = redact_content_output(str(result))
-                else:  # "aggressive" (default)
-                    from .security import redact_secrets_in_text
-                    result = redact_secrets_in_text(str(result))
+                if not is_owner_dm:
+                    tool_obj = self.tools.get(name)
+                    scrub = tool_obj.scrub_level if tool_obj else "aggressive"
+                    if scrub == "none":
+                        pass  # tool handles its own scrubbing
+                    elif scrub == "safe":
+                        from .security import redact_content_output
+                        result = redact_content_output(str(result))
+                    else:  # "aggressive" (default)
+                        from .security import redact_secrets_in_text
+                        result = redact_secrets_in_text(str(result))
 
                 # Collect MEDIA: from tool results (same as ability results)
                 result_str = str(result)
@@ -471,6 +481,9 @@ class Conversation:
                     tool_calls=None,
                     thinking=current.thinking,
                 )
+
+        # Reset owner-DM context after tool execution
+        set_owner_dm(False)
 
         return current
 

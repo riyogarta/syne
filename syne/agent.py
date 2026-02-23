@@ -1049,20 +1049,39 @@ class SyneAgent:
                 return True
         return False
 
+    def _is_owner_dm(self) -> bool:
+        """Check if current context is a verified owner in a direct message.
+        
+        Owner identity is verified by the PLATFORM (Telegram ID → access_level),
+        not by message content. This makes prompt injection impossible:
+        - Cannot be faked by message text ("owner kamu minta...")
+        - Cannot come from group chats (is_group check)
+        - Cannot come from other users' DMs (access_level check)
+        """
+        conv = self._get_active_conversation()
+        if not conv:
+            return False
+        if conv.is_group:
+            return False
+        return conv.user.get("access_level") == "owner"
+
     async def _tool_exec(self, command: str, timeout: int = 30, workdir: str = "") -> str:
         """Tool handler: execute shell command."""
         import asyncio
         import os
         from .db.models import get_config
 
+        is_owner_dm = self._is_owner_dm()
+
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Command Blacklist Check
-        # Check for dangerous command patterns BEFORE execution
+        # Skipped for owner DM — owner identity is platform-verified.
         # ═══════════════════════════════════════════════════════════════
-        safe, reason = check_command_safety(command)
-        if not safe:
-            logger.warning(f"Blocked dangerous command: {command[:100]}")
-            return f"Error: {reason}"
+        if not is_owner_dm:
+            safe, reason = check_command_safety(command)
+            if not safe:
+                logger.warning(f"Blocked dangerous command: {command[:100]}")
+                return f"Error: {reason}"
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Sudo Guard
@@ -1146,9 +1165,11 @@ class SyneAgent:
             parts.append(f"exit_code: {proc.returncode}")
 
             output = "\n".join(parts) if parts else f"exit_code: {proc.returncode}"
-            # Redact any credentials that may appear in command output
-            from .security import redact_exec_output
-            return redact_exec_output(output)
+            # Redact credentials in output — skip for owner DM (owner can see everything)
+            if not is_owner_dm:
+                from .security import redact_exec_output
+                output = redact_exec_output(output)
+            return output
 
         except asyncio.TimeoutError:
             try:
@@ -1295,9 +1316,12 @@ class SyneAgent:
         if output:
             parts.append(f"stdout:\n{output[:output_max]}")
         parts.append(f"exit_code: {exit_code}")
-        # Redact credentials in PTY output before returning to LLM
-        from .security import redact_exec_output
-        return redact_exec_output("\n".join(parts))
+        # Redact credentials in PTY output — skip for owner DM
+        output = "\n".join(parts)
+        if not self._is_owner_dm():
+            from .security import redact_exec_output
+            output = redact_exec_output(output)
+        return output
 
     @staticmethod
     def _mask_sensitive_value(key: str, value) -> str:

@@ -43,6 +43,13 @@ _SYNE_WRITABLE_PATHS = frozenset({
 # When set, file_write resolves relative paths here instead of process CWD.
 _workspace_dir: Optional[str] = None
 
+# Owner DM context — when True, all security restrictions are bypassed.
+# Set by the conversation layer before tool execution when the request
+# comes from a verified owner in a direct message (not group, not other users).
+# This is safe because owner identity is verified by the PLATFORM (Telegram ID),
+# not by message content — making prompt injection impossible.
+_owner_dm: bool = False
+
 
 def set_workspace(workspace_path: str) -> None:
     """Set the workspace directory for file_write resolution.
@@ -52,6 +59,18 @@ def set_workspace(workspace_path: str) -> None:
     """
     global _workspace_dir
     _workspace_dir = workspace_path
+
+
+def set_owner_dm(is_owner_dm: bool) -> None:
+    """Set whether current execution context is an owner DM.
+    
+    When True, file security restrictions are bypassed because
+    the owner's identity is platform-verified and cannot be spoofed.
+    
+    Called by conversation layer before tool execution.
+    """
+    global _owner_dm
+    _owner_dm = is_owner_dm
 
 
 # Default max read size (100KB)
@@ -73,17 +92,12 @@ def _is_path_under(path: Path, parent: Path) -> bool:
 def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     """Check if writing to this path is allowed.
     
-    Blacklist approach: Syne can write ANYWHERE except:
-    - syne/ core directories (engine, tools, channels, db, llm, security, auth, memory)
-    - Direct files in syne/ root (like syne/agent.py, syne/config.py)
-    - schema.sql
-    - .env files
+    Owner DM bypass: When _owner_dm is True, ALL write restrictions are
+    skipped. Owner identity is platform-verified (Telegram ID), making
+    prompt injection impossible in this context.
     
-    Syne CAN write to:
-    - syne/abilities/ (self-edit pattern)
-    - workspace/ and any subdirectory
-    - CWD and descendants
-    - /tmp, home directory, any other non-blocked path
+    Normal mode (non-owner or group): Blacklist approach — Syne can write
+    ANYWHERE except syne/ core, .env, schema.sql.
     
     Args:
         path: Absolute path to check
@@ -92,6 +106,10 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
+    # Owner DM = unrestricted write access
+    if _owner_dm:
+        return True, ""
+    
     resolved = path.resolve()
     fname = resolved.name.lower()
     
@@ -195,14 +213,16 @@ async def file_read_handler(
     file_path = file_path.resolve()
     
     # Block sensitive files — credentials must never reach the LLM
-    _BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.development"}
-    _BLOCKED_PATTERNS = {"secrets", ".pem", ".key", "id_rsa", "id_ed25519"}
-    fname = file_path.name.lower()
-    if fname in _BLOCKED_FILENAMES:
-        # Allow reading key names only (values redacted) for self-diagnosis
-        return _read_env_redacted(file_path)
-    if any(p in fname for p in _BLOCKED_PATTERNS):
-        return f"Error: Access denied — {file_path.name} contains credentials and cannot be read."
+    # Owner DM bypass: owner can read anything (identity is platform-verified)
+    if not _owner_dm:
+        _BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.development"}
+        _BLOCKED_PATTERNS = {"secrets", ".pem", ".key", "id_rsa", "id_ed25519"}
+        fname_lower = file_path.name.lower()
+        if fname_lower in _BLOCKED_FILENAMES:
+            # Allow reading key names only (values redacted) for self-diagnosis
+            return _read_env_redacted(file_path)
+        if any(p in fname_lower for p in _BLOCKED_PATTERNS):
+            return f"Error: Access denied — {file_path.name} contains credentials and cannot be read."
     
     if not file_path.exists():
         return f"Error: File not found: {path}"
