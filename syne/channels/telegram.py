@@ -2339,10 +2339,18 @@ Or just send me a message!"""
                         group_id,
                     )
                     if not existing:
+                        # Try to get actual group title from Telegram
+                        group_title = f"Group {group_id}"
+                        try:
+                            chat_info = await self.app.bot.get_chat(int(group_id))
+                            if chat_info and chat_info.title:
+                                group_title = chat_info.title
+                        except Exception:
+                            pass
                         await conn.execute(
                             """INSERT INTO groups (name, platform, platform_group_id, enabled, require_mention, settings)
                                VALUES ($1, 'telegram', $2, true, true, '{}')""",
-                            f"Group {group_id}",
+                            group_title,
                             group_id,
                         )
                 

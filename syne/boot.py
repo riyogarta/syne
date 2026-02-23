@@ -950,9 +950,18 @@ async def get_full_prompt(
 
     # Inject chat context so LLM knows WHERE it's chatting
     if is_group and chat_name:
-        prompt += f"\n# Current Chat Context\nYou are in a GROUP CHAT named \"{chat_name}\". Adjust your behavior accordingly — use the correct name/title for the owner as per your memories about this group.\n"
+        prompt += (
+            f"\n# Current Chat Context\n"
+            f"You are in a GROUP CHAT named \"{chat_name}\".\n"
+            f"IMPORTANT: Check your memories for how to address people in THIS specific group. "
+            f"Different groups may require different name forms (e.g., formal vs informal). "
+            f"Use the name/title appropriate for \"{chat_name}\", NOT the default DM name.\n"
+        )
     elif is_group:
-        prompt += "\n# Current Chat Context\nYou are in a GROUP CHAT. Adjust your behavior accordingly.\n"
+        prompt += (
+            "\n# Current Chat Context\n"
+            "You are in a GROUP CHAT. Check your memories for group-specific naming conventions.\n"
+        )
     else:
         prompt += "\n# Current Chat Context\nYou are in a PRIVATE/DM chat with this user.\n"
 
