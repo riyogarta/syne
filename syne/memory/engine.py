@@ -192,3 +192,80 @@ class MemoryEngine:
         async with get_connection() as conn:
             row = await conn.fetchrow("SELECT COUNT(*) as count FROM memory")
             return row["count"]
+
+    async def dedup(self, similarity_threshold: float = 0.85, dry_run: bool = False) -> dict:
+        """Remove duplicate memories based on embedding similarity.
+        
+        Compares all pairs of memories and removes newer duplicates.
+        Keeps the memory with the higher importance, or the older one if equal.
+        
+        Args:
+            similarity_threshold: Similarity above which memories are considered duplicates
+            dry_run: If True, only report duplicates without deleting
+            
+        Returns:
+            dict with keys: duplicates_found, deleted_ids, kept_ids
+        """
+        async with get_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT id, content, embedding, importance, created_at
+                FROM memory
+                WHERE embedding IS NOT NULL
+                ORDER BY id
+            """)
+
+        if len(rows) < 2:
+            return {"duplicates_found": 0, "deleted_ids": [], "kept_ids": []}
+
+        # Compare each pair using cosine similarity via DB
+        duplicates_found = []
+        deleted_ids = set()
+
+        for i in range(len(rows)):
+            if rows[i]["id"] in deleted_ids:
+                continue
+            for j in range(i + 1, len(rows)):
+                if rows[j]["id"] in deleted_ids:
+                    continue
+
+                # Compute similarity via DB
+                async with get_connection() as conn:
+                    sim_row = await conn.fetchrow(
+                        "SELECT 1 - ($1::vector <=> $2::vector) as similarity",
+                        str(rows[i]["embedding"]),
+                        str(rows[j]["embedding"]),
+                    )
+                sim = sim_row["similarity"]
+
+                if sim >= similarity_threshold:
+                    # Determine which to keep: higher importance wins, then older wins
+                    imp_i = rows[i]["importance"] or 0
+                    imp_j = rows[j]["importance"] or 0
+                    if imp_i >= imp_j:
+                        keep, remove = rows[i], rows[j]
+                    else:
+                        keep, remove = rows[j], rows[i]
+
+                    duplicates_found.append({
+                        "keep_id": keep["id"],
+                        "remove_id": remove["id"],
+                        "similarity": round(sim, 3),
+                        "keep_preview": keep["content"][:60],
+                        "remove_preview": remove["content"][:60],
+                    })
+                    deleted_ids.add(remove["id"])
+
+        if not dry_run and deleted_ids:
+            async with get_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM memory WHERE id = ANY($1::int[])",
+                    list(deleted_ids),
+                )
+            logger.info(f"Dedup: removed {len(deleted_ids)} duplicate memories")
+
+        return {
+            "duplicates_found": len(duplicates_found),
+            "deleted_ids": list(deleted_ids),
+            "kept_ids": [d["keep_id"] for d in duplicates_found],
+            "details": duplicates_found,
+        }

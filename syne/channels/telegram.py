@@ -40,17 +40,28 @@ class _TypingIndicator:
     Usage:
         async with _TypingIndicator(bot, chat_id):
             await long_running_work()
+
+    Safety: auto-stops after max_duration seconds even if the wrapped
+    coroutine hangs (e.g. LLM API timeout).  Default = 5 minutes.
     """
 
-    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0):
+    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0, max_duration: float = 300.0):
         self._bot = bot
         self._chat_id = chat_id
         self._interval = interval
+        self._max_duration = max_duration
         self._task: Optional[asyncio.Task] = None
 
     async def _loop(self):
+        import time
+        start = time.monotonic()
         try:
             while True:
+                if time.monotonic() - start > self._max_duration:
+                    logging.getLogger("syne.telegram").warning(
+                        f"Typing indicator timeout ({self._max_duration}s) for chat {self._chat_id}"
+                    )
+                    break
                 await self._bot.send_chat_action(self._chat_id, "typing")
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:

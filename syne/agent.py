@@ -133,11 +133,20 @@ class SyneAgent:
         # 9. Background token refresh task
         self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
 
+        # 10. Background memory dedup task (weekly)
+        self._dedup_task = asyncio.create_task(self._periodic_memory_dedup())
+
         logger.info("Syne agent started.")
 
     async def stop(self):
         """Stop the agent gracefully."""
         self._running = False
+        if hasattr(self, '_dedup_task') and self._dedup_task:
+            self._dedup_task.cancel()
+            try:
+                await self._dedup_task
+            except asyncio.CancelledError:
+                pass
         if hasattr(self, '_token_refresh_task') and self._token_refresh_task:
             self._token_refresh_task.cancel()
             try:
@@ -213,6 +222,32 @@ class SyneAgent:
                     oauth._refresh_token()
         except Exception as e:
             logger.warning(f"Startup token check failed: {e}")
+
+    async def _periodic_memory_dedup(self):
+        """Background task: deduplicate memories weekly.
+        
+        Runs every 7 days. Compares all memory pairs by embedding similarity
+        and removes duplicates (keeps higher importance or older memory).
+        """
+        DEDUP_INTERVAL = 7 * 24 * 60 * 60  # 7 days in seconds
+
+        # Initial delay — don't run immediately on startup, wait 1 hour
+        await asyncio.sleep(3600)
+
+        while self._running:
+            try:
+                result = await self.memory.dedup(similarity_threshold=0.85)
+                if result["duplicates_found"] > 0:
+                    logger.info(
+                        f"Memory dedup: removed {result['duplicates_found']} duplicates "
+                        f"(IDs: {result['deleted_ids']})"
+                    )
+                else:
+                    logger.info("Memory dedup: no duplicates found")
+            except Exception as e:
+                logger.error(f"Memory dedup failed: {e}")
+
+            await asyncio.sleep(DEDUP_INTERVAL)
 
     async def _periodic_token_refresh(self):
         """Background task: periodically check and refresh OAuth tokens.
