@@ -85,9 +85,10 @@ class ImageGenAbility(Ability):
                 else:
                     return {"success": False, "error": "No image data in response"}
                 
-                # Save to temp file
+                # Save to workspace/outputs/
                 session_id = context.get("session_id", int(time.time()))
-                filepath = f"/tmp/syne_image_{session_id}_{int(time.time())}.png"
+                outdir = self.get_output_dir()
+                filepath = os.path.join(outdir, f"syne_image_{session_id}_{int(time.time())}.png")
                 with open(filepath, "wb") as f:
                     f.write(image_bytes)
                 
