@@ -2241,9 +2241,14 @@ Or just send me a message!"""
 
         if media_path and os.path.isfile(media_path):
             try:
-                # Truncate caption for Telegram (max 1024 for photos)
+                from ..formatting import markdown_to_telegram_html
+
+                # Truncate caption for Telegram (max 1024 for photos/documents)
                 if len(caption_text) > 1024:
                     caption_text = caption_text[:1020] + "..."
+
+                # Convert caption to HTML (consistent with _send_response)
+                caption_html = markdown_to_telegram_html(caption_text) if caption_text else None
 
                 ext = os.path.splitext(media_path)[1].lower()
                 sent_msg = None
@@ -2254,12 +2259,12 @@ Or just send me a message!"""
                             sent_msg = await bot.send_photo(
                                 chat_id=chat_id,
                                 photo=f,
-                                caption=caption_text or None,
-                                parse_mode="Markdown" if caption_text else None,
+                                caption=caption_html,
+                                parse_mode="HTML" if caption_html else None,
                                 reply_parameters=reply_params,
                             )
                         except Exception:
-                            # Markdown parse failed — retry without parse_mode
+                            # HTML parse failed — retry without parse_mode
                             f.seek(0)
                             sent_msg = await bot.send_photo(
                                 chat_id=chat_id,
@@ -2273,8 +2278,8 @@ Or just send me a message!"""
                             sent_msg = await bot.send_document(
                                 chat_id=chat_id,
                                 document=f,
-                                caption=caption_text or None,
-                                parse_mode="Markdown" if caption_text else None,
+                                caption=caption_html,
+                                parse_mode="HTML" if caption_html else None,
                                 reply_parameters=reply_params,
                             )
                         except Exception:
