@@ -134,6 +134,10 @@ class AbilityRegistry:
         for ability in abilities:
             try:
                 schema = ability.instance.get_schema()
+                # Normalize: ensure OpenAI function calling format
+                # Accept both {"type":"function","function":{...}} and flat {"name":...,"parameters":...}
+                if schema and "type" not in schema and "name" in schema:
+                    schema = {"type": "function", "function": schema}
                 schemas.append(schema)
             except Exception as e:
                 logger.error(f"Failed to get schema for {ability.name}: {e}")
