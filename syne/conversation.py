@@ -125,6 +125,14 @@ class Conversation:
             requester_access_level=access_level,  # Pass access level for Rule 760
         )
 
+        # 3. Conversation history
+        if not self._message_cache:
+            await self.load_history()
+        messages.extend(self._message_cache)
+
+        # 4. Inject recalled memories AFTER history, close to the user message.
+        #    This positioning ensures the LLM "sees" memories near the question,
+        #    preventing long conversation history from drowning out memory context.
         if memories:
             memory_lines = [
                 "# Relevant Memories (auto-retrieved, scores = similarity confidence)",
@@ -137,13 +145,17 @@ class Conversation:
                 score = f"(confidence: {mem['similarity']:.0%})"
                 memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
+            # Log recalled memories for debugging
+            import logging
+            _log = logging.getLogger("syne.conversation")
+            _log.info(f"Recalled {len(memories)} memories for query: {user_message[:50]}")
+            for mem in memories[:3]:
+                _log.info(f"  Memory #{mem['id']} (sim={mem['similarity']:.3f}): {mem['content'][:60]}")
+        else:
+            import logging
+            logging.getLogger("syne.conversation").info(f"No memories recalled for query: {user_message[:50]}")
 
-        # 3. Conversation history
-        if not self._message_cache:
-            await self.load_history()
-        messages.extend(self._message_cache)
-
-        # 4. Current user message (with optional image metadata)
+        # 5. Current user message (with optional image metadata)
         msg_metadata = getattr(self, '_message_metadata', None)
         messages.append(ChatMessage(role="user", content=user_message, metadata=msg_metadata))
 
