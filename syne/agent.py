@@ -1393,23 +1393,22 @@ class SyneAgent:
             if error:
                 return f"Error creating ability: {error}"
             
-            # Rebuild system prompt to include new ability schema
-            ability_schemas = self.abilities.to_openai_schema("owner")
-            tool_schemas = self.tools.to_openai_schema("owner")
-            from .boot import build_system_prompt
-            self._system_prompt = await build_system_prompt(
-                tools=tool_schemas,
-                abilities=ability_schemas,
-            )
+            # Hot-reload: refresh system prompts for all active conversations
+            # so the LLM sees the new ability without restart
+            await self.conversations.refresh_system_prompts()
             
             return f"✅ Ability '{name}' created and registered. It is now available as a tool."
 
         if action == "enable":
             ok = await self.abilities.enable(name)
+            if ok:
+                await self.conversations.refresh_system_prompts()
             return f"Ability '{name}' enabled." if ok else f"Ability '{name}' not found."
 
         if action == "disable":
             ok = await self.abilities.disable(name)
+            if ok:
+                await self.conversations.refresh_system_prompts()
             return f"Ability '{name}' disabled." if ok else f"Ability '{name}' not found."
 
         if action == "config":

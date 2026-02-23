@@ -718,6 +718,31 @@ class ConversationManager:
         self._active[key] = conv
         return conv
 
+    async def refresh_system_prompts(self):
+        """Rebuild system prompts for all active conversations.
+
+        Called after ability changes (create/enable/disable) so that the
+        LLM sees updated tool descriptions without requiring a restart.
+        """
+        from .boot import get_full_prompt
+
+        for key, conv in self._active.items():
+            try:
+                access_level = conv.user.get("access_level", "public")
+                tool_schemas = self.tools.to_openai_schema(access_level)
+                ability_schemas = (
+                    self.abilities.to_openai_schema(access_level) if self.abilities else []
+                )
+                new_prompt = await get_full_prompt(
+                    user=conv.user,
+                    tools=tool_schemas,
+                    abilities=ability_schemas,
+                )
+                conv.system_prompt = new_prompt
+                logger.debug(f"Refreshed system prompt for session {key}")
+            except Exception as e:
+                logger.error(f"Failed to refresh prompt for {key}: {e}")
+
     async def handle_message(
         self,
         platform: str,
