@@ -1875,17 +1875,25 @@ def _restart_service():
     """Restart syne systemd service if it's running."""
     import subprocess
 
+    # Ensure XDG_RUNTIME_DIR is set for user-level systemd
+    env = os.environ.copy()
+    if "XDG_RUNTIME_DIR" not in env:
+        uid = os.getuid()
+        runtime_dir = f"/run/user/{uid}"
+        if os.path.isdir(runtime_dir):
+            env["XDG_RUNTIME_DIR"] = runtime_dir
+
     # Try user service first (no sudo needed)
     try:
         result = subprocess.run(
             ["systemctl", "--user", "is-active", "syne"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=env,
         )
         if result.stdout.strip() == "active":
             console.print("🔄 Restarting syne service...")
             restart = subprocess.run(
                 ["systemctl", "--user", "restart", "syne"],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True, text=True, timeout=15, env=env,
             )
             if restart.returncode == 0:
                 console.print("[green]✅ Service restarted[/green]")
