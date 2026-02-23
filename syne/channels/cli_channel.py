@@ -403,7 +403,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
 
                 agent.conversations.set_tool_callback(_on_tool)
 
-                from ..inbound import InboundContext
+                from ..communication.inbound import InboundContext
                 cli_inbound = InboundContext(
                     channel="cli",
                     platform="cli",

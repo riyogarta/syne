@@ -955,7 +955,7 @@ async def get_full_prompt(
     # InboundContext must be fully populated by the channel BEFORE reaching here.
     # No DB queries here — all data already in the dataclass.
     if inbound:
-        from .inbound import build_system_metadata
+        from .communication.inbound import build_system_metadata
         prompt += "\n" + build_system_metadata(inbound)
 
     if extra_context:

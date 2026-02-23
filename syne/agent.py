@@ -101,7 +101,7 @@ class SyneAgent:
 
         # 7. Sub-agent Manager
         from .boot import get_full_prompt
-        from .inbound import InboundContext
+        from .communication.inbound import InboundContext
         # Build prompt with tools and abilities for owner access level
         tool_schemas = self.tools.to_openai_schema("owner")
         ability_schemas = self.abilities.to_openai_schema("owner")

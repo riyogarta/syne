@@ -7,7 +7,7 @@ from typing import Optional
 
 from .config import load_settings
 from .agent import SyneAgent
-from .channels.telegram import TelegramChannel
+from .communication.telegram import TelegramChannel
 from .scheduler import Scheduler
 
 logging.basicConfig(
