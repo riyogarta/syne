@@ -1,7 +1,15 @@
 """Base Ability class — all abilities inherit from this."""
 
+import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Optional
+
+
+def _get_workspace_root() -> str:
+    """Return the workspace root directory (project_root/workspace/)."""
+    project_root = str(Path(__file__).resolve().parent.parent.parent)
+    return os.path.join(project_root, "workspace")
 
 
 class Ability(ABC):
@@ -23,6 +31,20 @@ class Ability(ABC):
     
     To participate in pre-processing, override `handles_input_type()` and
     `pre_process()`. The engine calls these BEFORE building the LLM context.
+    
+    ## File Output Convention
+    
+    All abilities MUST use `self.get_output_dir()` for file output.
+    This returns `workspace/outputs/` — a centralized location that keeps
+    generated files organized and out of the project root.
+    
+    Example in execute():
+        outdir = self.get_output_dir()
+        out_path = os.path.join(outdir, "result.pdf")
+        
+    For session-isolated output:
+        outdir = self.get_output_dir(session_id=context.get("session_id"))
+        # Returns workspace/outputs/session_<id>/
     """
     
     name: str
@@ -34,6 +56,46 @@ class Ability(ABC):
     # Override in subclass or set via chat to disable priority for specific abilities.
     priority: bool = True
     
+    def get_output_dir(self, session_id: Optional[str] = None) -> str:
+        """Return the output directory for this ability.
+        
+        All generated files (PDFs, images, screenshots, reports) go here.
+        Path: workspace/outputs/ (or workspace/outputs/session_<id>/ if isolated)
+        
+        The directory is created automatically if it doesn't exist.
+        
+        Args:
+            session_id: Optional session ID for per-session isolation
+            
+        Returns:
+            Absolute path to the output directory
+        """
+        base = os.path.join(_get_workspace_root(), "outputs")
+        if session_id:
+            base = os.path.join(base, f"session_{session_id}")
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    @staticmethod
+    def get_uploads_dir() -> str:
+        """Return the uploads directory (files received from users).
+        
+        Path: workspace/uploads/
+        """
+        d = os.path.join(_get_workspace_root(), "uploads")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @staticmethod
+    def get_temp_dir() -> str:
+        """Return the temp directory for scratch files.
+        
+        Path: workspace/temp/
+        """
+        d = os.path.join(_get_workspace_root(), "temp")
+        os.makedirs(d, exist_ok=True)
+        return d
+
     def handles_input_type(self, input_type: str) -> bool:
         """Check if this ability can pre-process a given input type.
         

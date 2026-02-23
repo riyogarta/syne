@@ -703,17 +703,12 @@ class AudioTranscriptionAbility(Ability):
 def _get_workspace_section() -> str:
     """Return workspace directory rules."""
     return """# Workspace Directory
-All generated files, downloads, and outputs MUST go in the `workspace/` directory:
-- `workspace/uploads/` — files received from users (Telegram document uploads)
-- `workspace/outputs/` — files you generate (PDFs, screenshots, images, reports)
-- `workspace/temp/` — temporary files (auto-cleanup)
-
-**Rules:**
-- When using exec to create files, save them in `workspace/outputs/`
-- NEVER create files in the project root directory
-- The default working directory for exec (Telegram) is already set to `workspace/`
-- Abilities automatically use `workspace/outputs/` for their output
-- Example: `exec("python3 script.py > workspace/outputs/result.txt")`
+All file operations use `workspace/` (centralized, not project root):
+- `workspace/uploads/` — user uploads
+- `workspace/outputs/` — generated files (abilities use this automatically)
+- `workspace/temp/` — scratch files
+- exec default CWD is `workspace/` — files created via exec also land here
+- NEVER create files in the project root
 """
 
 
