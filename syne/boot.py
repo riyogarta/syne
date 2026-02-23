@@ -942,23 +942,6 @@ async def get_full_prompt(
         user_ctx = await build_user_context(user)
         prompt += "\n" + user_ctx
 
-    # Inject chat context — critical for DM vs group behavior
-    if is_group:
-        group_label = f" ({chat_name})" if chat_name else ""
-        prompt += (
-            f"\n## Current Chat Context\n"
-            f"You are in a **GROUP CHAT**{group_label}.\n"
-            f"- Conversation history below is from THIS group only.\n"
-            f"- Recalled memories are background knowledge — do NOT assume they are the current topic.\n"
-            f"- Respond ONLY to what people say in this group. Do NOT continue conversations from DMs.\n"
-            f"- If someone greets you or sends a short message, respond naturally — don't bring up unrelated topics.\n"
-        )
-    else:
-        prompt += (
-            "\n## Current Chat Context\n"
-            "You are in a **direct message (DM)** with this user.\n"
-        )
-
     if extra_context:
         prompt += "\n" + extra_context
 
