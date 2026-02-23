@@ -2378,6 +2378,17 @@ Or just send me a message!"""
             media_path = text[7:].strip()
             caption_text = ""
 
+        # Strip server paths from outgoing messages — NEVER expose internal file locations
+        # Catches: "File: /home/syne/...", bare "/home/...", "Saved to: /tmp/..."
+        # (?<!\S) ensures we don't match URL paths like https://example.com/home/...
+        import re
+        _PATH_STRIP_RE = re.compile(
+            r'(?:(?:File|Path|Saved to|Output|Lokasi|Location)\s*:?\s*\n?\s*)?(?<!\S)/(?:home|tmp|var|opt|usr)/\S+',
+            re.IGNORECASE,
+        )
+        caption_text = _PATH_STRIP_RE.sub('', caption_text).strip()
+        caption_text = re.sub(r'\n{3,}', '\n\n', caption_text).strip()
+
         if media_path and os.path.isfile(media_path):
             try:
                 from ..formatting import markdown_to_telegram_html
@@ -2454,7 +2465,16 @@ Or just send me a message!"""
         Returns:
             The last sent Message object, or None if send failed.
         """
+        import re
         from ..formatting import markdown_to_telegram_html
+        
+        # Strip server paths from response — NEVER expose internal file locations
+        _PATH_STRIP_RE = re.compile(
+            r'(?:(?:File|Path|Saved to|Output|Lokasi|Location)\s*:?\s*\n?\s*)?(?<!\S)/(?:home|tmp|var|opt|usr)/\S+',
+            re.IGNORECASE,
+        )
+        text = _PATH_STRIP_RE.sub('', text)
+        text = re.sub(r'\n{3,}', '\n\n', text).strip()
         
         # Get bot instance — from context if available, otherwise from app
         bot = context.bot if context else self.app.bot
