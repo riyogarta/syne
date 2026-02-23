@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
 from telegram.ext import (
     Application,
+    ChatMemberHandler,
     CommandHandler,
     MessageHandler,
     MessageReactionHandler,
@@ -143,6 +144,12 @@ class TelegramChannel:
 
         # Reaction update handler
         self.app.add_handler(MessageReactionHandler(self._handle_reaction_update))
+
+        # Chat member handler — detect when bot is added to/removed from groups
+        self.app.add_handler(ChatMemberHandler(
+            self._handle_my_chat_member,
+            ChatMemberHandler.MY_CHAT_MEMBER,
+        ))
 
         # Callback query handler (inline button clicks)
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
@@ -548,6 +555,90 @@ class TelegramChannel:
             )
         except Exception as e:
             logger.error(f"Failed to notify owner about pending user: {e}")
+
+    async def _handle_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle when bot is added to or removed from a group.
+        
+        When added to a new group, notify owner with approve/reject buttons.
+        Bot stays silent in the group until approved.
+        """
+        member_update = update.my_chat_member
+        if not member_update:
+            return
+        
+        chat = member_update.chat
+        new_status = member_update.new_chat_member.status
+        old_status = member_update.old_chat_member.status
+        
+        # Only handle group additions
+        if chat.type not in ("group", "supergroup"):
+            return
+        
+        # Bot was added to group (status changed to "member" or "administrator")
+        if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
+            logger.info(f"Bot added to group: {chat.title} ({chat.id})")
+            
+            # Check if group is already registered
+            group = await get_group("telegram", str(chat.id))
+            if group:
+                logger.info(f"Group {chat.id} already registered, enabled={group.get('enabled')}")
+                return
+            
+            # New group — notify owner for approval
+            added_by = member_update.from_user
+            added_by_name = self._get_display_name(added_by) if added_by else "Unknown"
+            added_by_username = f" (@{added_by.username})" if added_by and added_by.username else ""
+            
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                owner_row = await conn.fetchrow(
+                    "SELECT platform_id FROM users WHERE platform = 'telegram' AND access_level = 'owner' LIMIT 1"
+                )
+            
+            if not owner_row:
+                logger.warning("No owner found to notify about group addition")
+                return
+            
+            owner_chat_id = int(owner_row["platform_id"])
+            
+            # Don't spam — track notifications
+            pending_key = f"pending_group:{chat.id}"
+            if not hasattr(self, '_pending_notified'):
+                self._pending_notified = set()
+            if pending_key in self._pending_notified:
+                return
+            self._pending_notified.add(pending_key)
+            
+            buttons = [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"group_approve:{chat.id}"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"group_reject:{chat.id}"),
+                ]
+            ]
+            
+            try:
+                await self.app.bot.send_message(
+                    chat_id=owner_chat_id,
+                    text=(
+                        f"🔔 **Bot added to a new group:**\n\n"
+                        f"• Group: {chat.title}\n"
+                        f"• ID: `{chat.id}`\n"
+                        f"• Added by: {added_by_name}{added_by_username}\n\n"
+                        f"Approve this group?"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+            except Exception as e:
+                logger.error(f"Failed to notify owner about group addition: {e}")
+        
+        # Bot was removed from group
+        elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
+            logger.info(f"Bot removed from group: {chat.title} ({chat.id})")
+            # Clean up pending tracker
+            pending_key = f"pending_group:{chat.id}"
+            if hasattr(self, '_pending_notified'):
+                self._pending_notified.discard(pending_key)
 
     async def _get_trigger_name(self) -> str:
         """Get the bot trigger name from config or identity."""
@@ -2213,6 +2304,61 @@ Or just send me a message!"""
                 
                 # Clear pending notification tracker
                 pending_key = f"pending_notify:{target_user_id}"
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(pending_key)
+
+        elif data.startswith("group_approve:") or data.startswith("group_reject:"):
+            # Group approval/rejection
+            parts = data.split(":", 1)
+            action_type = parts[0]
+            group_id = parts[1] if len(parts) > 1 else ""
+            
+            if not group_id:
+                await query.edit_message_text("❌ Invalid group ID.")
+                return
+            
+            if action_type == "group_approve":
+                # Register the group in DB
+                from ..db.connection import get_connection
+                async with get_connection() as conn:
+                    # Check if group already exists
+                    existing = await conn.fetchrow(
+                        "SELECT id FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                        group_id,
+                    )
+                    if not existing:
+                        await conn.execute(
+                            """INSERT INTO groups (name, platform, platform_group_id, enabled, require_mention, settings)
+                               VALUES ($1, 'telegram', $2, true, true, '{}')""",
+                            f"Group {group_id}",
+                            group_id,
+                        )
+                
+                await query.edit_message_text(
+                    f"✅ Group `{group_id}` approved.\n"
+                    f"Bot will now respond when mentioned.",
+                    parse_mode="Markdown",
+                )
+                
+                # Clear pending tracker
+                pending_key = f"pending_group:{group_id}"
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(pending_key)
+            
+            else:  # group_reject
+                # Leave the group
+                try:
+                    await self.app.bot.leave_chat(int(group_id))
+                except Exception as e:
+                    logger.warning(f"Failed to leave rejected group {group_id}: {e}")
+                
+                await query.edit_message_text(
+                    f"🚫 Group `{group_id}` rejected. Bot has left the group.",
+                    parse_mode="Markdown",
+                )
+                
+                # Clear pending tracker
+                pending_key = f"pending_group:{group_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
 
