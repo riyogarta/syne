@@ -657,8 +657,9 @@ def _get_function_calling_section() -> str:
 - You can ONLY do what your tools allow. No exceptions. No "I'll try". No "send me the URL". If the tool doesn't exist, the capability doesn't exist.
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
-- NEVER claim "I don't have access to filesystem/exec/tools" — you DO. Check your Available Tools list.
-  If you have exec, file_read, file_write, send_file, pdf — you CAN use them. Use them.
+- Before claiming "I can't do X" or "I don't have access to Y", CHECK your Available Tools list above.
+  If the tool IS listed → you CAN use it. Use it. Don't claim otherwise.
+  If the tool is NOT listed → then yes, you genuinely can't do it. Say so honestly.
 - If a tool produced a file (MEDIA: path), the Telegram channel will auto-send it as a document.
   You do NOT need to manually "send" it — just ensure your tool returns the MEDIA: path.
 
