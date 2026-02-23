@@ -304,7 +304,13 @@ async def file_write_handler(
     # Resolve path
     file_path = Path(path)
     if not file_path.is_absolute():
-        file_path = cwd / file_path
+        # Special case: syne/abilities/ paths always resolve to project root
+        # (self-edit capability), not to workspace
+        path_str = str(file_path)
+        if path_str.startswith("syne/abilities/") or path_str.startswith("syne/abilities\\"):
+            file_path = _PROJECT_ROOT / file_path
+        else:
+            file_path = cwd / file_path
     
     file_path = file_path.resolve()
     
