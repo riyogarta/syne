@@ -126,7 +126,13 @@ class Conversation:
         )
 
         if memories:
-            memory_lines = ["# Relevant Memories (auto-retrieved, scores = similarity confidence)"]
+            memory_lines = [
+                "# Relevant Memories (auto-retrieved, scores = similarity confidence)",
+                "These are YOUR memories about the owner and their world. They are FACTS you have stored.",
+                "ALWAYS use these memories to answer questions. NEVER say 'I don't know' or 'I don't have that information' if the answer exists in these memories.",
+                "If the user asks a personal question (family, health, preferences, etc.), CHECK these memories FIRST before responding.",
+                "",
+            ]
             for mem in memories:
                 score = f"(confidence: {mem['similarity']:.0%})"
                 memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}")
