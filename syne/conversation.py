@@ -300,9 +300,13 @@ class Conversation:
                 logger.info(f"Attached pending media to response: {last_media}")
 
         # Evaluate memory (only if auto_capture enabled)
+        # Rule 760: Only owner and family can write to global memory.
+        # Non-family messages stay in session history only.
         from .db.models import get_config
+        access_level = self.user.get("access_level", "public")
+        can_write_memory = access_level in ("owner", "family")
         auto_capture = await get_config("memory.auto_capture", False)
-        if auto_capture:
+        if auto_capture and can_write_memory:
             await evaluate_and_store(
                 provider=self.provider,
                 memory_engine=self.memory,
