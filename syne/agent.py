@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -48,6 +49,15 @@ class SyneAgent:
         self._pending_sudo_command: Optional[str] = None
         self._pending_sudo_at: float = 0.0  # timestamp when pending was set
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
+
+        # Workspace directory — central location for all generated/uploaded files
+        project_root = str(Path(__file__).resolve().parent.parent)
+        self.workspace = os.path.join(project_root, "workspace")
+        self.workspace_uploads = os.path.join(self.workspace, "uploads")
+        self.workspace_outputs = os.path.join(self.workspace, "outputs")
+        self.workspace_temp = os.path.join(self.workspace, "temp")
+        for d in (self.workspace, self.workspace_uploads, self.workspace_outputs, self.workspace_temp):
+            os.makedirs(d, exist_ok=True)
 
     async def start(self):
         """Start the agent — initialize DB, provider, memory, tools."""
@@ -112,6 +122,7 @@ class SyneAgent:
             context_mgr=self.context_mgr,
             subagents=self.subagents,
         )
+        self.conversations.workspace_outputs = self.workspace_outputs
 
         self._running = True
 
@@ -1093,14 +1104,13 @@ class SyneAgent:
         timeout = min(max(timeout, 1), timeout_max)
         # Default cwd:
         # - CLI mode: directory where user ran `syne cli`
-        # - Telegram/other: project root (for ability self-edit)
-        project_root = str(Path(__file__).resolve().parent.parent)
+        # - Telegram/other: workspace/ (keeps generated files organized)
         if workdir:
             cwd = workdir
         elif self._cli_cwd:
             cwd = self._cli_cwd
         else:
-            cwd = project_root
+            cwd = self.workspace
 
         logger.info(f"Executing command: {command[:100]}")
 

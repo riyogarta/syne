@@ -856,8 +856,8 @@ class TelegramChannel:
                     await update.message.reply_text("Sorry, couldn't download the file. Try sending again.")
                     return
 
-                # Save to a persistent uploads directory
-                uploads_dir = os.path.join(os.getcwd(), ".syne_uploads")
+                # Save to workspace/uploads/
+                uploads_dir = self.agent.workspace_uploads
                 os.makedirs(uploads_dir, exist_ok=True)
 
                 # Use unique name to avoid collisions

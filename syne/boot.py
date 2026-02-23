@@ -700,6 +700,23 @@ class AudioTranscriptionAbility(Ability):
 """
 
 
+def _get_workspace_section() -> str:
+    """Return workspace directory rules."""
+    return """# Workspace Directory
+All generated files, downloads, and outputs MUST go in the `workspace/` directory:
+- `workspace/uploads/` — files received from users (Telegram document uploads)
+- `workspace/outputs/` — files you generate (PDFs, screenshots, images, reports)
+- `workspace/temp/` — temporary files (auto-cleanup)
+
+**Rules:**
+- When using exec to create files, save them in `workspace/outputs/`
+- NEVER create files in the project root directory
+- The default working directory for exec (Telegram) is already set to `workspace/`
+- Abilities automatically use `workspace/outputs/` for their output
+- Example: `exec("python3 script.py > workspace/outputs/result.txt")`
+"""
+
+
 def _get_security_context_section() -> str:
     """Return the hardcoded security rules section.
     
@@ -821,6 +838,9 @@ async def build_system_prompt(
 
     # [6.5] CORE SECURITY RULES
     parts.append(_get_security_context_section())
+
+    # [6.6] WORKSPACE RULES
+    parts.append(_get_workspace_section())
 
     # [7] ABILITY STATUS — shows what's configured vs needs setup
     ability_status = await _build_ability_status_section()

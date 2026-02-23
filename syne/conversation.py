@@ -381,6 +381,7 @@ class Conversation:
                         "session_id": self.session_id,
                         "access_level": access_level,
                         "config": self.abilities.get(name).config or {},
+                        "workspace": getattr(self._mgr, 'workspace_outputs', None) if self._mgr else None,
                     }
                     ability_result = await self.abilities.execute(name, args, ability_context)
                     if ability_result.get("success"):
@@ -584,6 +585,7 @@ class ConversationManager:
         self.abilities = abilities
         self.context_mgr = context_mgr or ContextManager()
         self.subagents = subagents
+        self.workspace_outputs: Optional[str] = None  # Set by agent after init
         self._active: dict[str, Conversation] = {}
         self._delivery_callback = None  # Set by channel for delivering sub-agent results
         self._status_callback = None  # Set by channel for status notifications (e.g., compaction)

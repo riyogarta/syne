@@ -44,3 +44,8 @@ user_abilities/
 *.sql.bak
 *.png
 data/output/
+
+# Workspace (user files, uploads, outputs)
+workspace/
+.syne_uploads/
+.syne_outputs/
