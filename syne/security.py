@@ -242,30 +242,19 @@ BLOCKED_COMMAND_PATTERNS = [
     # These use word boundaries via regex check below
     # "| sh" and "| bash" are checked separately with regex
     
-    # Credential/config file access patterns
-    ".syne/",
-    "google_credentials",
-    "refresh_token",
-    "access_token",
-    "api_key",
-    "apikey",
-    "secret_key",
-    "private_key",
-    
-    # Sensitive system files
-    "/etc/shadow",
-    "/etc/passwd-",
-    "/etc/sudoers",
-    
-    # Database credential patterns
-    "pg_dump.*password",
-    "pg_dumpall",
-    "psql.*password",
-    
     # Fork bombs and resource exhaustion
     ":(){ :|:& };:",
     "fork bomb",
 ]
+
+# NOTE: Credential-related patterns (api_key, secret_key, .syne/, etc.)
+# were REMOVED from BLOCKED_COMMAND_PATTERNS. They caused false positives
+# on legitimate owner commands like "grep api_key config.py" or
+# "cat .syne/config". Credential protection is handled by:
+# 1. redact_exec_output() — masks secrets in command OUTPUT
+# 2. file_read .env blocking — prevents reading credential files
+# 3. redact_content_output() — masks secrets in file content
+# The COMMAND itself is not the threat vector; the OUTPUT is.
 
 
 def check_command_safety(command: str) -> tuple[bool, str]:

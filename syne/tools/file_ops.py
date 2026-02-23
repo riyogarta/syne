@@ -73,10 +73,17 @@ def _is_path_under(path: Path, parent: Path) -> bool:
 def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     """Check if writing to this path is allowed.
     
-    Rules:
-    1. Path must be absolute or resolved
-    2. Path must be inside CWD or syne/abilities/
-    3. Path must NOT be inside syne/ core directories
+    Blacklist approach: Syne can write ANYWHERE except:
+    - syne/ core directories (engine, tools, channels, db, llm, security, auth, memory)
+    - Direct files in syne/ root (like syne/agent.py, syne/config.py)
+    - schema.sql
+    - .env files
+    
+    Syne CAN write to:
+    - syne/abilities/ (self-edit pattern)
+    - workspace/ and any subdirectory
+    - CWD and descendants
+    - /tmp, home directory, any other non-blocked path
     
     Args:
         path: Absolute path to check
@@ -86,53 +93,37 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
         Tuple of (allowed: bool, reason: str)
     """
     resolved = path.resolve()
+    fname = resolved.name.lower()
     
-    # Check if it's inside workspace/ (always writable)
-    workspace_path = _PROJECT_ROOT / "workspace"
-    if _is_path_under(resolved, workspace_path):
-        return True, ""
-
-    # Check if it's inside CWD
-    is_in_cwd = _is_path_under(resolved, cwd)
+    # Block .env files everywhere
+    if fname in {".env", ".env.local", ".env.production", ".env.development"}:
+        return False, "Cannot write to .env files (credential protection)."
     
-    # Check if it's inside syne/abilities/
-    is_in_abilities = False
-    for writable in _SYNE_WRITABLE_PATHS:
-        writable_path = _PROJECT_ROOT / writable
-        if _is_path_under(resolved, writable_path):
-            is_in_abilities = True
-            break
+    # Block schema.sql
+    if fname == "schema.sql" and _is_path_under(resolved, _PROJECT_ROOT):
+        return False, "Cannot write to schema.sql (database schema is protected)."
     
-    # Check if it's inside syne/ core (blocked)
-    is_in_core = False
-    for core_dir in _SYNE_CORE_DIRS:
-        core_path = _PROJECT_ROOT / core_dir
-        if _is_path_under(resolved, core_path):
-            is_in_core = True
-            break
+    # Check syne/ paths
+    syne_dir = _PROJECT_ROOT / "syne"
+    if _is_path_under(resolved, syne_dir):
+        # Allow syne/abilities/ (self-edit pattern)
+        for writable in _SYNE_WRITABLE_PATHS:
+            writable_path = _PROJECT_ROOT / writable
+            if _is_path_under(resolved, writable_path):
+                return True, ""
+        
+        # Block syne/ core directories
+        for core_dir in _SYNE_CORE_DIRS:
+            core_path = _PROJECT_ROOT / core_dir
+            if _is_path_under(resolved, core_path):
+                return False, f"Cannot write to Syne core directory. Path is inside protected area."
+        
+        # Block direct files in syne/ root (like syne/agent.py)
+        if resolved.parent == syne_dir:
+            return False, f"Cannot write directly to syne/. Only syne/abilities/ is writable."
     
-    # Also check direct syne/ files (not in abilities)
-    is_direct_syne_file = False
-    if _is_path_under(resolved, _PROJECT_ROOT / "syne"):
-        if not is_in_abilities and resolved.parent == (_PROJECT_ROOT / "syne"):
-            # Direct file in syne/ (like syne/agent.py)
-            is_direct_syne_file = True
-    
-    # Decision
-    if is_in_core:
-        return False, f"Cannot write to Syne core directory. Path is inside protected area."
-    
-    if is_direct_syne_file:
-        return False, f"Cannot write directly to syne/. Only syne/abilities/ is writable."
-    
-    if is_in_abilities:
-        return True, ""
-    
-    if is_in_cwd:
-        return True, ""
-    
-    # Not in CWD and not in abilities
-    return False, f"Path must be inside working directory or syne/abilities/."
+    # Everything else is allowed
+    return True, ""
 
 
 def _read_env_redacted(file_path: Path) -> str:
