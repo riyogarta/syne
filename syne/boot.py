@@ -657,6 +657,10 @@ def _get_function_calling_section() -> str:
 - You can ONLY do what your tools allow. No exceptions. No "I'll try". No "send me the URL". If the tool doesn't exist, the capability doesn't exist.
 - If an ability needs an API key that isn't configured yet, tell the user it needs setup first.
 - After executing a tool, report the actual result — not what you imagine it would be.
+- NEVER claim "I don't have access to filesystem/exec/tools" — you DO. Check your Available Tools list.
+  If you have exec, file_read, file_write, send_file, pdf — you CAN use them. Use them.
+- If a tool produced a file (MEDIA: path), the Telegram channel will auto-send it as a document.
+  You do NOT need to manually "send" it — just ensure your tool returns the MEDIA: path.
 
 # Ability-First Principle
 Abilities are tried FIRST for input processing (images, audio, documents).
