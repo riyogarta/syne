@@ -34,8 +34,7 @@ class Conversation:
         user: dict,
         system_prompt: str,
         abilities: Optional[AbilityRegistry] = None,
-        is_group: bool = False,
-        chat_name: Optional[str] = None,
+        inbound: Optional["InboundContext"] = None,
     ):
         self.provider = provider
         self.memory = memory
@@ -45,9 +44,11 @@ class Conversation:
         self.session_id = session_id
         self.user = user
         self.system_prompt = system_prompt
-        self.is_group = is_group
-        self.chat_name = chat_name
-        self.chat_id: Optional[str] = None  # Set by manager for prompt refresh
+        # InboundContext is the single source of truth for chat context
+        self.inbound: Optional["InboundContext"] = inbound
+        self.is_group: bool = inbound.is_group if inbound else False
+        self.chat_name: Optional[str] = inbound.group_subject if inbound else None
+        self.chat_id: Optional[str] = inbound.chat_id if inbound else None
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
@@ -681,29 +682,33 @@ class ConversationManager:
         platform: str,
         chat_id: str,
         user: dict,
-        is_group: bool = False,
         extra_context: str = None,
-        chat_name: str = None,
         inbound: Optional["InboundContext"] = None,
     ) -> Conversation:
         """Get existing conversation or create new one.
-        
+
+        InboundContext is the SINGLE SOURCE OF TRUTH for chat context.
+        is_group, chat_name, etc. are all derived from it.
+
         Args:
             platform: Platform identifier (telegram, etc.)
             chat_id: Chat/conversation ID
             user: User dict with access_level, id, etc.
-            is_group: Whether this is a group chat (affects security restrictions)
             extra_context: Optional extra context for system prompt (e.g., CLI cwd)
-            
+            inbound: InboundContext with full message metadata
+
         Returns:
             Conversation instance
         """
         key = self._session_key(platform, chat_id)
 
         if key in self._active:
-            # Update is_group flag in case it changed
-            self._active[key].is_group = is_group
-            return self._active[key]
+            # Update inbound context (may change per message, e.g. different sender in group)
+            existing = self._active[key]
+            if inbound:
+                existing.inbound = inbound
+                existing.is_group = inbound.is_group
+            return existing
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
@@ -731,9 +736,6 @@ class ConversationManager:
             tools=tool_schemas,
             abilities=ability_schemas,
             extra_context=extra_context,
-            is_group=is_group,
-            chat_name=chat_name,
-            chat_id=chat_id,
             inbound=inbound,
         )
 
@@ -746,13 +748,10 @@ class ConversationManager:
             user=user,
             system_prompt=system_prompt,
             abilities=self.abilities,
-            is_group=is_group,
-            chat_name=chat_name,
+            inbound=inbound,
         )
 
         conv._mgr = self  # Back-reference for status callbacks
-        conv.chat_id = chat_id  # Store for prompt refresh
-        conv.inbound = inbound  # Store for prompt refresh
 
         # Load history EAGERLY — before any chat() call can save a message
         # and make _message_cache non-empty (which would skip load_history
@@ -787,10 +786,7 @@ class ConversationManager:
                     user=conv.user,
                     tools=tool_schemas,
                     abilities=ability_schemas,
-                    is_group=conv.is_group,
-                    chat_name=getattr(conv, 'chat_name', None),
-                    chat_id=getattr(conv, 'chat_id', None),
-                    inbound=getattr(conv, 'inbound', None),
+                    inbound=conv.inbound,
                 )
                 conv.system_prompt = new_prompt
                 logger.debug(f"Refreshed system prompt for session {key}")
@@ -803,21 +799,20 @@ class ConversationManager:
         chat_id: str,
         user: dict,
         message: str,
-        is_group: bool = False,
         message_metadata: Optional[dict] = None,
-        chat_name: Optional[str] = None,
     ) -> str:
         """Handle an incoming message. Returns agent response.
-        
+
+        InboundContext must be present in message_metadata["inbound"].
+        All chat context (is_group, chat_name, sender, etc.) comes from it.
+
         Args:
             platform: Platform identifier
             chat_id: Chat/conversation ID
             user: User dict
             message: Message content
-            is_group: Whether this is a group chat (affects security)
-            message_metadata: Optional metadata (e.g. image data for vision)
-            chat_name: Name of the chat (group title for groups)
-            
+            message_metadata: Metadata dict. Must contain "inbound" (InboundContext).
+
         Returns:
             Agent response string
         """
@@ -836,8 +831,8 @@ class ConversationManager:
         inbound = message_metadata.get("inbound") if message_metadata else None
 
         conv = await self.get_or_create_session(
-            platform, chat_id, user, is_group=is_group,
-            extra_context=extra_context, chat_name=chat_name,
+            platform, chat_id, user,
+            extra_context=extra_context,
             inbound=inbound,
         )
         return await conv.chat(message, message_metadata=message_metadata)

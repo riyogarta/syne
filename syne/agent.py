@@ -101,13 +101,21 @@ class SyneAgent:
 
         # 7. Sub-agent Manager
         from .boot import get_full_prompt
+        from .inbound import InboundContext
         # Build prompt with tools and abilities for owner access level
         tool_schemas = self.tools.to_openai_schema("owner")
         ability_schemas = self.abilities.to_openai_schema("owner")
+        # Sub-agents run in an internal context (no channel, no group)
+        subagent_inbound = InboundContext(
+            channel="internal",
+            platform="internal",
+            chat_type="direct",
+        )
         system_prompt = await get_full_prompt(
             user={"access_level": "owner"},
             tools=tool_schemas,
             abilities=ability_schemas,
+            inbound=subagent_inbound,
         )
         self.subagents = SubAgentManager(
             provider=self.provider,
@@ -1794,12 +1802,14 @@ class SyneAgent:
         user_platform_id: str,
         message: str,
         display_name: Optional[str] = None,
-        is_group: bool = False,
         message_metadata: Optional[dict] = None,
-        chat_name: Optional[str] = None,
     ) -> str:
         """Handle an incoming message from any channel.
-        
+
+        All per-message context (is_group, chat_name, sender, etc.) must be
+        in message_metadata["inbound"] as an InboundContext object. This is
+        the single source of truth — no separate is_group/chat_name params.
+
         Args:
             platform: Platform identifier (telegram, etc.)
             chat_id: Chat/conversation ID
@@ -1807,10 +1817,8 @@ class SyneAgent:
             user_platform_id: User's platform-specific ID
             message: Message content
             display_name: Optional display name
-            is_group: Whether this is a group chat (affects security restrictions)
-            message_metadata: Optional metadata (e.g. image data for vision)
-            chat_name: Name of the chat (group title for groups)
-            
+            message_metadata: Metadata dict. Must contain "inbound" (InboundContext).
+
         Returns:
             Agent response string
         """
@@ -1828,7 +1836,5 @@ class SyneAgent:
             chat_id=chat_id,
             user=user,
             message=message,
-            is_group=is_group,
             message_metadata=message_metadata,
-            chat_name=chat_name,
         )

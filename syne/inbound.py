@@ -13,42 +13,83 @@ Two layers, following OpenClaw's proven architecture:
 
 Channels (Telegram, CLI, future) only need to fill InboundContext.
 Formatting is centralized here.
+
+This is the SINGLE SOURCE OF TRUTH for per-message context.
+No other module should query group settings, check is_group, or build
+context blocks independently. If it's per-message metadata, it goes here.
 """
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
+logger = logging.getLogger("syne.inbound")
 
 
 @dataclass
 class InboundContext:
-    """Raw inbound context data. Channels populate this, core formats it."""
+    """Raw inbound context data. Channels populate this, core formats it.
 
-    # Channel info
+    This dataclass is the canonical representation of a single inbound message's
+    context. Channels (Telegram, CLI) fill it at the edge; the engine uses it
+    throughout without querying DB or platform APIs.
+    """
+
+    # ── Channel info ──────────────────────────────────────────
     channel: str = "unknown"           # telegram, cli, etc.
     platform: str = "unknown"          # same as channel for now
 
-    # Chat context
+    # ── Chat context ──────────────────────────────────────────
     chat_type: str = "direct"          # direct, group
     conversation_label: Optional[str] = None   # display name of conversation
     group_subject: Optional[str] = None        # group title/name
     chat_id: Optional[str] = None              # platform chat ID
 
-    # Sender (relevant in groups)
+    # ── Sender (relevant in groups) ───────────────────────────
     sender_name: Optional[str] = None
     sender_id: Optional[str] = None
     sender_username: Optional[str] = None
 
-    # Flags
+    # ── Flags ─────────────────────────────────────────────────
     was_mentioned: bool = False
     has_reply_context: bool = False
 
-    # Reply context
+    # ── Reply context ─────────────────────────────────────────
     reply_to_sender: Optional[str] = None
     reply_to_body: Optional[str] = None
 
-    # Group settings (loaded from DB by caller or engine)
+    # ── Group settings (loaded from DB by channel at creation time) ──
     group_settings: Optional[dict] = field(default_factory=dict)
+
+    # ── Derived convenience properties ────────────────────────
+
+    @property
+    def is_group(self) -> bool:
+        return self.chat_type == "group"
+
+
+async def load_group_settings(ctx: InboundContext) -> None:
+    """Load group settings from DB into the InboundContext.
+
+    Call this in the channel layer after creating InboundContext,
+    before passing it downstream. This keeps all DB access at the edge.
+    """
+    if not ctx.is_group or not ctx.chat_id:
+        return
+
+    try:
+        from .db.connection import get_connection
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
+                ctx.platform, ctx.chat_id,
+            )
+        if row and row["settings"]:
+            settings = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
+            ctx.group_settings = settings
+    except Exception as e:
+        logger.warning(f"Failed to load group settings for {ctx.chat_id}: {e}")
 
 
 def build_system_metadata(ctx: InboundContext) -> str:
@@ -63,7 +104,7 @@ def build_system_metadata(ctx: InboundContext) -> str:
         "platform": ctx.platform,
         "chat_type": ctx.chat_type,
         "flags": _clean_dict({
-            "is_group_chat": True if ctx.chat_type == "group" else None,
+            "is_group_chat": True if ctx.is_group else None,
             "was_mentioned": True if ctx.was_mentioned else None,
             "has_reply_context": ctx.has_reply_context or None,
         }),
@@ -80,7 +121,7 @@ def build_system_metadata(ctx: InboundContext) -> str:
     ]
 
     # Group settings — injected as trusted data, not instructions
-    if ctx.chat_type == "group" and ctx.group_settings:
+    if ctx.is_group and ctx.group_settings:
         settings_lines = []
         if alias := ctx.group_settings.get("owner_alias"):
             settings_lines.append(f"owner_alias: {alias}")
@@ -113,7 +154,7 @@ def build_user_context_prefix(ctx: InboundContext) -> str:
         blocks.append(_json_block("Conversation info (untrusted metadata):", conv_info))
 
     # 2. Sender info (groups only — in DM the sender is obvious)
-    if ctx.chat_type == "group" and ctx.sender_name:
+    if ctx.is_group and ctx.sender_name:
         sender_info = _clean_dict({
             "name": ctx.sender_name,
             "id": ctx.sender_id,

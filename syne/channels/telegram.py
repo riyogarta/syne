@@ -97,14 +97,19 @@ class TelegramChannel:
         # Path lookup for browse callbacks (short hash → full path)
         self._browse_paths: dict[str, str] = {}
 
-    def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
-        """Build InboundContext from a Telegram Update. Used by ALL handlers."""
-        from ..inbound import InboundContext
+    async def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
+        """Build InboundContext from a Telegram Update. Used by ALL handlers.
+
+        This is the SINGLE place where Telegram-specific data is mapped to
+        the channel-agnostic InboundContext. Group settings are loaded here
+        so downstream code never needs to query the DB for chat context.
+        """
+        from ..inbound import InboundContext, load_group_settings
         msg = update.message
         chat = msg.chat
         user = msg.from_user
         reply_raw = self._extract_reply_context_raw(update)
-        return InboundContext(
+        ctx = InboundContext(
             channel="telegram",
             platform="telegram",
             chat_type="group" if is_group else "direct",
@@ -119,6 +124,9 @@ class TelegramChannel:
             reply_to_sender=reply_raw["sender"] if reply_raw else None,
             reply_to_body=reply_raw["body"] if reply_raw else None,
         )
+        # Load group settings from DB (owner_alias, context_notes, etc.)
+        await load_group_settings(ctx)
+        return ctx
 
     async def start(self):
         """Start the Telegram bot."""
@@ -271,6 +279,15 @@ class TelegramChannel:
             pass  # Best-effort
         
         try:
+            # Build InboundContext for scheduled messages (DM context)
+            from ..inbound import InboundContext
+            sched_inbound = InboundContext(
+                channel="telegram",
+                platform="telegram",
+                chat_type="direct",
+                conversation_label=user_name,
+                chat_id=str(chat_id),
+            )
             # Process the message via agent (DM context, not group)
             response = await self.agent.handle_message(
                 platform="telegram",
@@ -279,8 +296,7 @@ class TelegramChannel:
                 user_platform_id=str(chat_id),
                 message=payload,
                 display_name=user_name,
-                is_group=False,
-                message_metadata={"scheduled": True},
+                message_metadata={"scheduled": True, "inbound": sched_inbound},
             )
             
             if response:
@@ -363,7 +379,7 @@ class TelegramChannel:
 
         # Build InboundContext (OpenClaw-style — core module)
         from ..inbound import build_user_context_prefix
-        inbound = self._build_inbound(update, is_group)
+        inbound = await self._build_inbound(update, is_group)
 
         # Prepend user context prefix to message (untrusted, per-message)
         user_prefix = build_user_context_prefix(inbound)
@@ -377,16 +393,25 @@ class TelegramChannel:
                 metadata = {
                     "message_id": message_id,
                     "chat_id": str(chat.id),
-                    "inbound": inbound,  # Pass full context for system metadata injection
+                    "inbound": inbound,  # Single source of truth for all context
                 }
 
                 # Browse mode: route to CLI-compatible session with cwd
                 browse_cwd = self._browse_cwd.get(user.id) if not is_group else None
                 if browse_cwd:
                     import getpass
+                    from ..inbound import InboundContext
                     username = getpass.getuser()
                     cli_chat_id = f"cli:{username}:{browse_cwd}"
                     metadata["cwd"] = browse_cwd
+                    # Override inbound for CLI context
+                    metadata["inbound"] = InboundContext(
+                        channel="cli",
+                        platform="cli",
+                        chat_type="direct",
+                        conversation_label=self._get_display_name(user),
+                        chat_id=cli_chat_id,
+                    )
 
                     # Get the existing Telegram user (don't create a CLI user)
                     tg_user = await get_user("telegram", str(user.id))
@@ -400,7 +425,6 @@ class TelegramChannel:
                                 chat_id=cli_chat_id,
                                 user=tg_user,
                                 message=text,
-                                is_group=False,
                                 message_metadata=metadata,
                             )
                         finally:
@@ -415,9 +439,7 @@ class TelegramChannel:
                         user_platform_id=str(user.id),
                         message=text,
                         display_name=self._get_display_name(user),
-                        is_group=is_group,
                         message_metadata=metadata,
-                        chat_name=chat.title if is_group else None,
                     )
 
                 if response:
@@ -783,7 +805,7 @@ class TelegramChannel:
 
                 # Build message with image metadata for vision
                 user_text = caption if caption else "What's in this image?"
-                inbound = self._build_inbound(update, is_group)
+                inbound = await self._build_inbound(update, is_group)
                 from ..inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
                 if prefix:
@@ -803,7 +825,6 @@ class TelegramChannel:
                     user_platform_id=str(user.id),
                     message=user_text,
                     display_name=self._get_display_name(user),
-                    is_group=is_group,
                     message_metadata=metadata,
                 )
 
@@ -890,7 +911,7 @@ class TelegramChannel:
                 # Process the transcribed text as a normal message
                 # Include transcription indicator so agent knows it's from voice
                 user_message = f"[Voice message transcription]: {transcribed_text}"
-                inbound = self._build_inbound(update, is_group)
+                inbound = await self._build_inbound(update, is_group)
                 from ..inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
                 if prefix:
@@ -910,7 +931,6 @@ class TelegramChannel:
                     user_platform_id=str(user.id),
                     message=user_message,
                     display_name=self._get_display_name(user),
-                    is_group=is_group,
                     message_metadata=metadata,
                 )
 
@@ -1035,7 +1055,7 @@ class TelegramChannel:
 
                 self._track_message(chat.id, update.message.message_id, f"[doc] {filename}")
 
-                inbound = self._build_inbound(update, is_group)
+                inbound = await self._build_inbound(update, is_group)
                 from ..inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
                 if prefix:
@@ -1049,7 +1069,6 @@ class TelegramChannel:
                     user_platform_id=str(user.id),
                     message=user_text,
                     display_name=self._get_display_name(user),
-                    is_group=is_group,
                     message_metadata=metadata,
                 )
 
@@ -1122,7 +1141,7 @@ class TelegramChannel:
             location_text = f"[Location shared: lat: {lat}, lng: {lng}]"
 
         # Build inbound context
-        inbound = self._build_inbound(update, is_group)
+        inbound = await self._build_inbound(update, is_group)
         from ..inbound import build_user_context_prefix
         prefix = build_user_context_prefix(inbound)
 
@@ -1155,7 +1174,6 @@ class TelegramChannel:
                     user_platform_id=str(user.id),
                     message=user_text,
                     display_name=self._get_display_name(user),
-                    is_group=is_group,
                     message_metadata=metadata,
                 )
 
@@ -1250,11 +1268,27 @@ class TelegramChannel:
 
             # Route reaction to agent so it can decide to respond
             try:
+                from ..inbound import InboundContext
+                is_group = chat.type != "private"
+                react_inbound = InboundContext(
+                    channel="telegram",
+                    platform="telegram",
+                    chat_type="group" if is_group else "direct",
+                    conversation_label=user_name,
+                    group_subject=chat.title if is_group else None,
+                    chat_id=str(chat.id),
+                    sender_name=user_name if is_group else None,
+                    sender_id=user_id if is_group else None,
+                )
+                if is_group:
+                    from ..inbound import load_group_settings
+                    await load_group_settings(react_inbound)
                 metadata = {
                     "message_id": message_id,
                     "chat_id": str(chat.id),
                     "is_reaction": True,
                     "reaction_emojis": added_emojis,
+                    "inbound": react_inbound,
                 }
                 response = await self.agent.handle_message(
                     platform="telegram",
@@ -1263,7 +1297,6 @@ class TelegramChannel:
                     user_platform_id=user_id,
                     message=event_text,
                     display_name=user_name,
-                    is_group=(chat.type != "private"),
                     message_metadata=metadata,
                 )
                 if response and response.strip().upper() != "NO_REPLY":
@@ -2476,7 +2509,6 @@ Or just send me a message!"""
         return user.first_name or user.username or str(user.id)
 
     @staticmethod
-    @staticmethod
     def _extract_reply_context_raw(update: Update) -> dict | None:
         """Extract reply context as raw dict for InboundContext.
         
@@ -2504,14 +2536,6 @@ Or just send me a message!"""
             reply_text = reply_text[:max_quote] + "…"
         
         return {"sender": sender, "body": reply_text}
-
-    @staticmethod
-    def _extract_reply_context(update: Update) -> str | None:
-        """Extract reply context as formatted string (legacy, used by other handlers)."""
-        raw = TelegramChannel._extract_reply_context_raw(update)
-        if not raw:
-            return None
-        return f"[Replying to {raw['sender']}: \"{raw['body']}\"]"
 
     def _is_reply_to_bot(self, update: Update) -> bool:
         """Check if message is a reply to the bot."""

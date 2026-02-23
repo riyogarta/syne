@@ -926,23 +926,22 @@ async def get_full_prompt(
     tools: Optional[list[dict]] = None,
     abilities: Optional[list[dict]] = None,
     extra_context: Optional[str] = None,
-    is_group: bool = False,
-    chat_name: Optional[str] = None,
-    chat_id: Optional[str] = None,
     inbound: Optional["InboundContext"] = None,
 ) -> str:
     """Get the complete system prompt, optionally with user context.
+
+    InboundContext is the SINGLE SOURCE OF TRUTH for per-message context.
+    All callers MUST provide an InboundContext. Group settings, chat type,
+    sender info — everything lives in InboundContext, loaded by the channel
+    at the edge before passing downstream.
 
     Args:
         user: Optional user dict for user-specific context
         tools: Optional list of tools in OpenAI schema format
         abilities: Optional list of abilities in OpenAI schema format
         extra_context: Optional extra context to append (e.g., CLI working directory)
-        is_group: Whether this is a group chat
-        chat_name: Name of the group chat (if applicable)
-        chat_id: Platform chat ID (for group settings lookup)
-        inbound: InboundContext with full message metadata
-        
+        inbound: InboundContext with full message metadata (REQUIRED for proper context)
+
     Returns:
         Complete system prompt string
     """
@@ -953,51 +952,11 @@ async def get_full_prompt(
         prompt += "\n" + user_ctx
 
     # Inject system metadata (OpenClaw-style — trusted, authoritative)
+    # InboundContext must be fully populated by the channel BEFORE reaching here.
+    # No DB queries here — all data already in the dataclass.
     if inbound:
-        # Load group settings from DB if in a group
-        if inbound.chat_type == "group" and inbound.chat_id:
-            try:
-                from .db.connection import get_connection
-                import json as _json
-                async with get_connection() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
-                        inbound.platform, inbound.chat_id,
-                    )
-                if row and row["settings"]:
-                    settings = _json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
-                    inbound.group_settings = settings
-            except Exception:
-                pass
-
         from .inbound import build_system_metadata
         prompt += "\n" + build_system_metadata(inbound)
-    else:
-        # Fallback for callers that don't pass inbound (e.g., CLI for now)
-        from .inbound import InboundContext, build_system_metadata
-        fallback = InboundContext(
-            channel="cli" if not is_group else "unknown",
-            platform="cli" if not is_group else "unknown",
-            chat_type="group" if is_group else "direct",
-            group_subject=chat_name,
-            chat_id=chat_id,
-        )
-        # Load group settings for fallback too
-        if is_group and chat_id:
-            try:
-                from .db.connection import get_connection
-                import json as _json
-                async with get_connection() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT settings FROM groups WHERE platform_group_id = $1",
-                        chat_id,
-                    )
-                if row and row["settings"]:
-                    settings = _json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
-                    fallback.group_settings = settings
-            except Exception:
-                pass
-        prompt += "\n" + build_system_metadata(fallback)
 
     if extra_context:
         prompt += "\n" + extra_context
