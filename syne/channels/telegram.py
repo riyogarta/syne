@@ -129,6 +129,12 @@ class TelegramChannel:
             self._handle_voice,
         ))
 
+        # Document/file handler
+        self.app.add_handler(MessageHandler(
+            filters.Document.ALL,
+            self._handle_document,
+        ))
+
         # Location handler
         self.app.add_handler(MessageHandler(
             filters.LOCATION | filters.Regex(r'^/location'),
@@ -784,6 +790,139 @@ class TelegramChannel:
             except Exception as e:
                 logger.error(f"Error handling voice: {e}", exc_info=True)
                 await update.message.reply_text("Sorry, something went wrong processing that voice message.")
+
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle document/file uploads — download, save to disk, pass path to LLM."""
+        if not update.message or not update.message.document:
+            return
+
+        import base64
+        import os
+        import tempfile
+
+        caption = update.message.caption or ""
+        user = update.effective_user
+        chat = update.effective_chat
+        is_group = chat.type in ("group", "supergroup")
+
+        # Rate limiting
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
+        if not allowed:
+            await update.message.reply_text(f"⏱️ {rate_msg}")
+            return
+
+        # Group checks — documents in groups require mention/reply
+        if is_group:
+            if caption:
+                result = await self._process_group_message(update, context, caption)
+                if result is None:
+                    return
+                caption = result
+            elif not self._is_reply_to_bot(update):
+                return
+
+        db_user = await self._ensure_user(user)
+
+        # Block pending users
+        if not is_group and db_user.get("access_level") == "pending":
+            await self._handle_pending_user(update, db_user)
+            return
+
+        doc = update.message.document
+        filename = doc.file_name or "unknown_file"
+        mime_type = doc.mime_type or "application/octet-stream"
+        file_size = doc.file_size or 0
+
+        # Telegram Bot API file download limit: 20MB
+        if file_size > 20 * 1024 * 1024:
+            await update.message.reply_text("⚠️ File too large (max 20 MB for download).")
+            return
+
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [document] {filename} ({mime_type}, {file_size} bytes)")
+
+        # Extract reply/quote context
+        reply_context = self._extract_reply_context(update)
+        if reply_context:
+            caption = f"{reply_context}\n\n{caption}" if caption else reply_context
+
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                tg_file = await doc.get_file()
+                file_bytes = await tg_file.download_as_bytearray()
+
+                if not file_bytes or len(file_bytes) == 0:
+                    await update.message.reply_text("Sorry, couldn't download the file. Try sending again.")
+                    return
+
+                # Save to a persistent uploads directory
+                uploads_dir = os.path.join(os.getcwd(), ".syne_uploads")
+                os.makedirs(uploads_dir, exist_ok=True)
+
+                # Use unique name to avoid collisions
+                safe_name = filename.replace("/", "_").replace("..", "_")
+                save_path = os.path.join(uploads_dir, f"{doc.file_unique_id}_{safe_name}")
+                with open(save_path, "wb") as f:
+                    f.write(file_bytes)
+
+                logger.info(f"Document saved: {save_path} ({len(file_bytes)} bytes)")
+
+                # Build metadata for the agent
+                metadata = {
+                    "document": {
+                        "path": save_path,
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size": len(file_bytes),
+                    },
+                    "message_id": update.message.message_id,
+                }
+
+                # For images sent as documents (uncompressed), treat as image
+                if mime_type and mime_type.startswith("image/"):
+                    photo_b64 = base64.b64encode(bytes(file_bytes)).decode("utf-8")
+                    metadata["image"] = {
+                        "mime_type": mime_type,
+                        "base64": photo_b64,
+                    }
+
+                # For PDF files, also include base64 for ability pre-processing
+                if mime_type == "application/pdf":
+                    doc_b64 = base64.b64encode(bytes(file_bytes)).decode("utf-8")
+                    metadata["document"]["base64"] = doc_b64
+
+                # Construct user message
+                if caption:
+                    user_text = f"[User sent a file: {filename} ({mime_type}, {len(file_bytes)} bytes), saved at: {save_path}]\n\n{caption}"
+                else:
+                    user_text = f"[User sent a file: {filename} ({mime_type}, {len(file_bytes)} bytes), saved at: {save_path}]"
+
+                self._track_message(chat.id, update.message.message_id, f"[doc] {filename}")
+
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=user_text,
+                    display_name=self._get_display_name(user),
+                    is_group=is_group,
+                    message_metadata=metadata,
+                )
+
+                if response:
+                    response, reply_to = self._parse_reply_tag(response, update.message.message_id)
+                    response, react_emojis = self._parse_react_tags(response)
+                    for emoji in react_emojis:
+                        await self.send_reaction(chat.id, update.message.message_id, emoji)
+                    sent = await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
+                    if sent:
+                        self._track_message(chat.id, sent.message_id, response[:50])
+
+            except Exception as e:
+                logger.error(f"Error handling document: {e}", exc_info=True)
+                await update.message.reply_text("Sorry, something went wrong processing that file.")
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""
