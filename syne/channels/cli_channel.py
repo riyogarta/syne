@@ -144,6 +144,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
         # Set CLI working directory to where user launched `syne cli`
         agent._cli_cwd = os.getcwd()
 
+        # Override workspace for file_write — CLI uses caller's directory
+        from ..tools.file_ops import set_workspace
+        set_workspace(os.getcwd())
+
         # Auto-migrate Google OAuth if needed
         from ..main import _auto_migrate_google_oauth
         await _auto_migrate_google_oauth()

@@ -39,6 +39,21 @@ _SYNE_WRITABLE_PATHS = frozenset({
     "syne/abilities",
 })
 
+# Workspace directory — set by agent at startup for non-CLI channels.
+# When set, file_write resolves relative paths here instead of process CWD.
+_workspace_dir: Optional[str] = None
+
+
+def set_workspace(workspace_path: str) -> None:
+    """Set the workspace directory for file_write resolution.
+    
+    Called by SyneAgent at startup. When set, relative paths in file_write
+    resolve to workspace/ instead of os.getcwd().
+    """
+    global _workspace_dir
+    _workspace_dir = workspace_path
+
+
 # Default max read size (100KB)
 _DEFAULT_MAX_READ_SIZE = 100 * 1024  # 100KB
 
@@ -72,6 +87,11 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     """
     resolved = path.resolve()
     
+    # Check if it's inside workspace/ (always writable)
+    workspace_path = _PROJECT_ROOT / "workspace"
+    if _is_path_under(resolved, workspace_path):
+        return True, ""
+
     # Check if it's inside CWD
     is_in_cwd = _is_path_under(resolved, cwd)
     
@@ -273,10 +293,13 @@ async def file_write_handler(
         return "Error: content is required (use empty string for empty file)."
     
     # Determine working directory
+    # Priority: explicit workdir > workspace (Telegram) > process CWD (CLI)
     if workdir:
         cwd = Path(workdir).resolve()
+    elif _workspace_dir:
+        cwd = Path(_workspace_dir).resolve()
     else:
-        cwd = Path.cwd()
+        cwd = Path.cwd()  # CLI mode — user's actual directory
     
     # Resolve path
     file_path = Path(path)

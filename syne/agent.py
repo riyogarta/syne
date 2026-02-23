@@ -59,6 +59,10 @@ class SyneAgent:
         for d in (self.workspace, self.workspace_uploads, self.workspace_outputs, self.workspace_temp):
             os.makedirs(d, exist_ok=True)
 
+        # Set workspace for file_write tool (resolves relative paths here)
+        from .tools.file_ops import set_workspace
+        set_workspace(self.workspace)
+
     async def start(self):
         """Start the agent — initialize DB, provider, memory, tools."""
         logger.info("Starting Syne agent...")
