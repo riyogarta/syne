@@ -35,6 +35,7 @@ class Conversation:
         system_prompt: str,
         abilities: Optional[AbilityRegistry] = None,
         is_group: bool = False,
+        chat_name: Optional[str] = None,
     ):
         self.provider = provider
         self.memory = memory
@@ -45,6 +46,7 @@ class Conversation:
         self.user = user
         self.system_prompt = system_prompt
         self.is_group = is_group
+        self.chat_name = chat_name
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
@@ -741,6 +743,7 @@ class ConversationManager:
             system_prompt=system_prompt,
             abilities=self.abilities,
             is_group=is_group,
+            chat_name=chat_name,
         )
 
         conv._mgr = self  # Back-reference for status callbacks
@@ -779,6 +782,7 @@ class ConversationManager:
                     tools=tool_schemas,
                     abilities=ability_schemas,
                     is_group=conv.is_group,
+                    chat_name=getattr(conv, 'chat_name', None),
                 )
                 conv.system_prompt = new_prompt
                 logger.debug(f"Refreshed system prompt for session {key}")

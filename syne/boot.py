@@ -948,6 +948,14 @@ async def get_full_prompt(
         user_ctx = await build_user_context(user)
         prompt += "\n" + user_ctx
 
+    # Inject chat context so LLM knows WHERE it's chatting
+    if is_group and chat_name:
+        prompt += f"\n# Current Chat Context\nYou are in a GROUP CHAT named \"{chat_name}\". Adjust your behavior accordingly — use the correct name/title for the owner as per your memories about this group.\n"
+    elif is_group:
+        prompt += "\n# Current Chat Context\nYou are in a GROUP CHAT. Adjust your behavior accordingly.\n"
+    else:
+        prompt += "\n# Current Chat Context\nYou are in a PRIVATE/DM chat with this user.\n"
+
     if extra_context:
         prompt += "\n" + extra_context
 
