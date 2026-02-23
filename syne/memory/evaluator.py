@@ -26,6 +26,11 @@ DO NOT STORE:
 - Things that are already common knowledge
 - Vague statements without concrete info
 - Commands or instructions to the assistant ("check this", "do that")
+- Task-level requests ("make a PDF", "fix this bug", "update the code")
+- File names, code fixes, or debugging details (these are session-specific, not long-term facts)
+- Technical troubleshooting steps ("run sudo apt install X", "restart the service")
+- One-time confirmations ("that works now", "send_file confirmed working")
+- Scheduler/cron task details (times, reminders) — these belong in the scheduler, not memory
 
 IMPORTANT — conflict resolution:
 When the user states something that UPDATES previous info (e.g. "I moved to Bandung" when we stored "lives in Jakarta"), extract the LATEST fact. The storage engine will automatically find and update the old memory. Just extract the new content accurately.
@@ -57,7 +62,19 @@ User: "I moved to Bandung last month"
 → STORE|fact|0.7|User moved to and now lives in Bandung
 
 User: "Actually I switched from Metformin to Januvia"
-→ STORE|health|0.8|User switched diabetes medication from Metformin to Januvia"""
+→ STORE|health|0.8|User switched diabetes medication from Metformin to Januvia
+
+User: "Make that PDF landscape with a comparison table"
+→ SKIP
+
+User: "The filename is website_screenshot.py"
+→ SKIP
+
+User: "Run sudo apt install ca-certificates"
+→ SKIP
+
+User: "Send me a reminder at 3:17 for sahur"
+→ SKIP"""
 
 
 async def evaluate_message(
