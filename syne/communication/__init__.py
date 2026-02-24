@@ -9,7 +9,7 @@ This package is the single source of truth for all communication logic:
 """
 
 from .inbound import InboundContext, build_system_metadata, build_user_context_prefix, load_group_settings
-from .outbound import strip_server_paths, extract_media, split_message
+from .outbound import strip_server_paths, strip_narration, extract_media, split_message, process_outbound
 from .tags import parse_reply_tag, parse_react_tags
 
 __all__ = [
@@ -20,8 +20,10 @@ __all__ = [
     "load_group_settings",
     # Outbound
     "strip_server_paths",
+    "strip_narration",
     "extract_media",
     "split_message",
+    "process_outbound",
     # Tags
     "parse_reply_tag",
     "parse_react_tags",

@@ -20,7 +20,7 @@ from telegram.ext import (
 
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
-from .outbound import strip_server_paths, extract_media, split_message
+from .outbound import strip_server_paths, extract_media, split_message, process_outbound
 from ..db.models import (
     get_group,
     get_user,
@@ -2569,7 +2569,7 @@ Or just send me a message!"""
 
         # Use communication sub-core for universal processing
         caption_text, media_path = extract_media(text)
-        caption_text = strip_server_paths(caption_text)
+        caption_text = process_outbound(caption_text)
 
         if media_path and os.path.isfile(media_path):
             try:
@@ -2649,8 +2649,8 @@ Or just send me a message!"""
         """
         from .formatting import markdown_to_telegram_html
 
-        # Universal outbound processing
-        text = strip_server_paths(text)
+        # Universal outbound processing (path strip + narration strip + cleanup)
+        text = process_outbound(text)
         
         # Get bot instance — from context if available, otherwise from app
         bot = context.bot if context else self.app.bot
