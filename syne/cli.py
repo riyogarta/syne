@@ -187,7 +187,8 @@ def _ensure_system_deps():
     console.print(f"[bold yellow]Missing system packages: {pkg_list}[/bold yellow]")
     console.print("[dim]Installing via apt (sudo required)...[/dim]")
 
-    ret = os.system(f"sudo apt-get update -qq && sudo apt-get install -y -qq {pkg_list}")
+    sys.stdout.flush()
+    ret = os.system(f"sudo apt-get update -q && sudo apt-get install -y -q {pkg_list}")
     if ret != 0:
         console.print(f"[red]Failed to install {pkg_list}.[/red]")
         console.print(f"[dim]Install manually: sudo apt install {pkg_list}[/dim]")
@@ -209,7 +210,9 @@ def _ensure_docker() -> str:
     # 1. Install if missing
     if not shutil.which("docker"):
         console.print("[bold yellow]Docker is not installed — installing now...[/bold yellow]")
-        ret = os.system("curl -fsSL https://get.docker.com | sh")
+        console.print("[dim]This downloads Docker packages — may take a few minutes.[/dim]")
+        sys.stdout.flush()
+        ret = os.system("curl -fL https://get.docker.com | sh")
         if ret != 0:
             console.print("[red]Docker installation failed.[/red]")
             console.print("[dim]Install manually: https://docs.docker.com/get-docker/[/dim]")
