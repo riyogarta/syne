@@ -2092,33 +2092,35 @@ Or just send me a message!"""
 
     # ── Auth (credential management) ───────────────────────────
 
-    # Known OAuth providers and their labels
-    _AUTH_OAUTH_PROVIDERS = {
-        "google": "Google (Gemini)",
-        "codex": "OpenAI / Codex",
-        "claude": "Claude / Anthropic",
-    }
+    # Default auth providers — used when auth.providers not configured in DB.
+    # After first init, these are seeded into DB and DB becomes source of truth.
+    _DEFAULT_AUTH_PROVIDERS = [
+        {"key": "google", "label": "Google (Gemini)", "auth_type": "oauth", "oauth_driver": "google"},
+        {"key": "codex", "label": "OpenAI / Codex", "auth_type": "oauth", "oauth_driver": "codex"},
+        {"key": "claude", "label": "Claude / Anthropic", "auth_type": "oauth", "oauth_driver": "claude"},
+        {"key": "groq", "label": "Groq", "auth_type": "api_key", "credential_key": "credential.groq_api_key"},
+        {"key": "together", "label": "Together AI", "auth_type": "api_key", "credential_key": "credential.together_api_key"},
+        {"key": "openrouter", "label": "OpenRouter", "auth_type": "api_key", "credential_key": "credential.openrouter_api_key"},
+    ]
 
-    # Known API key providers and their labels
-    _AUTH_APIKEY_PROVIDERS = {
-        "groq": "Groq",
-        "together": "Together AI",
-        "openrouter": "OpenRouter",
-    }
-
-    # Mapping from provider key → credential DB key for API keys
-    _APIKEY_CREDENTIAL_KEYS = {
-        "groq": "credential.groq_api_key",
-        "together": "credential.together_api_key",
-        "openrouter": "credential.openrouter_api_key",
-    }
+    async def _get_auth_providers(self) -> list[dict]:
+        """Get auth providers from DB, falling back to defaults.
+        
+        On first call with empty DB, seeds defaults into DB.
+        """
+        providers = await get_config("auth.providers", None)
+        if providers is None:
+            # Seed defaults into DB
+            await set_config("auth.providers", self._DEFAULT_AUTH_PROVIDERS, "Auth provider registry")
+            return self._DEFAULT_AUTH_PROVIDERS
+        return providers
 
     async def _cmd_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /auth command — unified credential management.
         
-        Owner only. Three options:
-        - New OAuth Setup: Google, Codex, Claude
-        - New API Key: Groq, Together AI, OpenRouter
+        Owner only. Provider list from DB (auth.providers).
+        - New OAuth Setup: providers with auth_type=oauth
+        - New API Key: providers with auth_type=api_key
         - Re-authenticate: Refresh existing OAuth credentials
         """
         user = update.effective_user
@@ -2244,12 +2246,12 @@ Or just send me a message!"""
     async def _process_apikey_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
         """Process pasted API key."""
         text = text.strip()
-        provider = state["provider"]
-        credential_key = self._APIKEY_CREDENTIAL_KEYS.get(provider)
+        credential_key = state.get("credential_key", "")
+        label = state.get("label", state.get("provider", "?"))
         bot = context.bot if context else self.app.bot
 
         if not credential_key:
-            await bot.send_message(chat_id=chat_id, text=f"❌ Unknown provider: {provider}")
+            await bot.send_message(chat_id=chat_id, text="❌ No credential key configured for this provider.")
             self._auth_state.pop(user_id, None)
             return True
 
@@ -2262,15 +2264,14 @@ Or just send me a message!"""
             return True
 
         try:
-            await set_config(credential_key, text, f"{provider} API key")
-            label = self._AUTH_APIKEY_PROVIDERS.get(provider, provider)
+            await set_config(credential_key, text, f"{label} API key")
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"✅ {label} API key saved.\n\n⚠️ Use /restart to apply.",
             )
-            logger.info(f"API key saved for {provider} by user {user_id}")
+            logger.info(f"API key saved for {label} ({credential_key}) by user {user_id}")
         except Exception as e:
-            logger.error(f"Failed to save API key for {provider}: {e}")
+            logger.error(f"Failed to save API key for {label}: {e}")
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ Failed to save API key: {str(e)[:200]}",
@@ -2280,42 +2281,42 @@ Or just send me a message!"""
 
         return True
 
-    async def _start_oauth_flow(self, provider: str, chat_id: int, user_id: int, context):
-        """Generate OAuth URL and send it to user via Telegram."""
+    async def _start_oauth_flow(self, provider_entry: dict, chat_id: int, user_id: int, context):
+        """Generate OAuth URL and send it to user via Telegram.
+        
+        Args:
+            provider_entry: Dict from auth.providers with key, label, oauth_driver, etc.
+        """
         bot = context.bot if context else self.app.bot
+        driver = provider_entry.get("oauth_driver", provider_entry.get("key", ""))
+        label = provider_entry.get("label", driver)
+
+        # Map oauth_driver → URL generator
+        _generators = {
+            "google": self._generate_google_oauth_url,
+            "codex": self._generate_codex_oauth_url,
+            "claude": self._generate_claude_oauth_url,
+        }
+
+        generator = _generators.get(driver)
+        if not generator:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Unknown OAuth driver: {driver}")
+            return
 
         try:
-            if provider == "google":
-                url, pkce_state = self._generate_google_oauth_url()
-                self._auth_state[user_id] = {
-                    "type": "oauth",
-                    "provider": "google",
-                    "verifier": pkce_state["verifier"],
-                }
-            elif provider == "codex":
-                url, pkce_state = self._generate_codex_oauth_url()
-                self._auth_state[user_id] = {
-                    "type": "oauth",
-                    "provider": "codex",
-                    "verifier": pkce_state["verifier"],
-                    "state": pkce_state["state"],
-                }
-            elif provider == "claude":
-                url, pkce_state = self._generate_claude_oauth_url()
-                self._auth_state[user_id] = {
-                    "type": "oauth",
-                    "provider": "claude",
-                    "verifier": pkce_state["verifier"],
-                    "state": pkce_state["state"],
-                }
-            else:
-                await bot.send_message(chat_id=chat_id, text=f"❌ Unknown OAuth provider: {provider}")
-                return
+            url, pkce_state = generator()
+            self._auth_state[user_id] = {
+                "type": "oauth",
+                "provider": driver,  # Used by _exchange methods
+                "verifier": pkce_state["verifier"],
+                "state": pkce_state.get("state", ""),
+                "label": label,
+            }
 
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"🔐 **{self._AUTH_OAUTH_PROVIDERS.get(provider, provider)} OAuth Setup**\n\n"
+                    f"🔐 **{label} OAuth Setup**\n\n"
                     f"1️⃣ Open this URL in your browser:\n\n"
                     f"`{url}`\n\n"
                     f"2️⃣ Sign in and authorize access\n"
@@ -2326,10 +2327,10 @@ Or just send me a message!"""
                 ),
                 parse_mode="Markdown",
             )
-            logger.info(f"OAuth flow started for {provider} by user {user_id}")
+            logger.info(f"OAuth flow started for {label} ({driver}) by user {user_id}")
 
         except Exception as e:
-            logger.error(f"Failed to start OAuth flow for {provider}: {e}", exc_info=True)
+            logger.error(f"Failed to start OAuth flow for {label}: {e}", exc_info=True)
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"❌ Failed to start OAuth flow: {str(e)[:200]}",
@@ -2547,7 +2548,7 @@ Or just send me a message!"""
         logger.info(f"Claude OAuth credentials saved for {email}")
 
     async def _get_credential_status(self) -> str:
-        """Get formatted status of all credentials."""
+        """Get formatted status of all credentials from DB provider registry."""
         import time
         from ..db.credentials import (
             get_google_oauth_credentials,
@@ -2555,50 +2556,59 @@ Or just send me a message!"""
             get_credential,
         )
 
+        providers = await self._get_auth_providers()
         lines = ["📋 **Credential Status**\n"]
 
-        # Google OAuth
-        google = await get_google_oauth_credentials()
-        if google and google.get("refresh_token"):
-            exp = google.get("expires_at", 0)
-            expired = time.time() >= exp
-            email = google.get("email", "?")
-            status = "⚠️ expired" if expired else "✅ active"
-            lines.append(f"🔑 **Google OAuth:** {status} ({email})")
-        else:
-            lines.append("🔑 **Google OAuth:** ❌ not configured")
+        for p in providers:
+            key = p.get("key", "")
+            label = p.get("label", key)
+            auth_type = p.get("auth_type", "")
 
-        # Claude OAuth
-        claude = await get_claude_oauth_credentials()
-        if claude and claude.get("refresh_token"):
-            exp = claude.get("expires_at", 0)
-            expired = time.time() >= exp
-            email = claude.get("email", "?")
-            status = "⚠️ expired" if expired else "✅ active"
-            lines.append(f"🔑 **Claude OAuth:** {status} ({email})")
-        else:
-            lines.append("🔑 **Claude OAuth:** ❌ not configured")
+            if auth_type == "oauth":
+                driver = p.get("oauth_driver", key)
+                if driver == "google":
+                    creds = await get_google_oauth_credentials()
+                    if creds and creds.get("refresh_token"):
+                        exp = creds.get("expires_at", 0)
+                        expired = time.time() >= exp
+                        email = creds.get("email", "?")
+                        status = "⚠️ expired" if expired else "✅ active"
+                        lines.append(f"🔑 **{label}:** {status} ({email})")
+                    else:
+                        lines.append(f"🔑 **{label}:** ❌ not configured")
+                elif driver == "claude":
+                    creds = await get_claude_oauth_credentials()
+                    if creds and creds.get("refresh_token"):
+                        exp = creds.get("expires_at", 0)
+                        expired = time.time() >= exp
+                        email = creds.get("email", "?")
+                        status = "⚠️ expired" if expired else "✅ active"
+                        lines.append(f"🔑 **{label}:** {status} ({email})")
+                    else:
+                        lines.append(f"🔑 **{label}:** ❌ not configured")
+                elif driver == "codex":
+                    token = await get_credential("credential.codex_access_token")
+                    if token:
+                        exp = await get_credential("credential.codex_expires_at", 0)
+                        expired = time.time() >= float(exp or 0)
+                        status = "⚠️ expired" if expired else "✅ active"
+                        lines.append(f"🔑 **{label}:** {status}")
+                    else:
+                        lines.append(f"🔑 **{label}:** ❌ not configured")
+                else:
+                    lines.append(f"🔑 **{label}:** ❓ unknown driver ({driver})")
 
-        # Codex OAuth
-        codex_token = await get_credential("credential.codex_access_token")
-        if codex_token:
-            exp = await get_credential("credential.codex_expires_at", 0)
-            expired = time.time() >= float(exp or 0)
-            status = "⚠️ expired" if expired else "✅ active"
-            lines.append(f"🔑 **Codex OAuth:** {status}")
-        else:
-            lines.append("🔑 **Codex OAuth:** ❌ not configured")
-
-        # API Keys
-        for provider, label in self._AUTH_APIKEY_PROVIDERS.items():
-            cred_key = self._APIKEY_CREDENTIAL_KEYS[provider]
-            val = await get_credential(cred_key)
-            if val:
-                # Show first 4 + last 4 chars
-                masked = f"{str(val)[:4]}...{str(val)[-4:]}" if len(str(val)) > 8 else "***"
-                lines.append(f"🔐 **{label}:** ✅ ({masked})")
-            else:
-                lines.append(f"🔐 **{label}:** ❌ not configured")
+            elif auth_type == "api_key":
+                cred_key = p.get("credential_key", "")
+                if cred_key:
+                    val = await get_credential(cred_key)
+                    if val:
+                        masked = f"{str(val)[:4]}...{str(val)[-4:]}" if len(str(val)) > 8 else "***"
+                        lines.append(f"🔐 **{label}:** ✅ ({masked})")
+                    else:
+                        lines.append(f"🔐 **{label}:** ❌ not configured")
+                else:
+                    lines.append(f"🔐 **{label}:** ❓ no credential_key")
 
         return "\n".join(lines)
 
@@ -3041,10 +3051,14 @@ Or just send me a message!"""
             chat_id = query.message.chat_id
 
             if auth_action == "oauth_menu":
-                # Show OAuth provider selection
+                # Show OAuth provider selection from DB
+                providers = await self._get_auth_providers()
                 buttons = []
-                for key, label in self._AUTH_OAUTH_PROVIDERS.items():
-                    buttons.append(InlineKeyboardButton(label, callback_data=f"auth:oauth:{key}"))
+                for p in providers:
+                    if p.get("auth_type") == "oauth":
+                        buttons.append(InlineKeyboardButton(
+                            p["label"], callback_data=f"auth:oauth:{p['key']}"
+                        ))
                 buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
                 keyboard = [[btn] for btn in buttons]
                 await query.edit_message_text(
@@ -3054,10 +3068,14 @@ Or just send me a message!"""
                 )
 
             elif auth_action == "apikey_menu":
-                # Show API key provider selection
+                # Show API key provider selection from DB
+                providers = await self._get_auth_providers()
                 buttons = []
-                for key, label in self._AUTH_APIKEY_PROVIDERS.items():
-                    buttons.append(InlineKeyboardButton(label, callback_data=f"auth:apikey:{key}"))
+                for p in providers:
+                    if p.get("auth_type") == "api_key":
+                        buttons.append(InlineKeyboardButton(
+                            p["label"], callback_data=f"auth:apikey:{p['key']}"
+                        ))
                 buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
                 keyboard = [[btn] for btn in buttons]
                 await query.edit_message_text(
@@ -3074,30 +3092,38 @@ Or just send me a message!"""
                     get_claude_oauth_credentials,
                     get_credential,
                 )
+                providers = await self._get_auth_providers()
                 buttons = []
 
-                google = await get_google_oauth_credentials()
-                if google and google.get("refresh_token"):
-                    exp = google.get("expires_at", 0)
-                    expired = time.time() >= exp
-                    email = google.get("email", "?")
-                    label = f"Google ({email})" + (" ⚠️" if expired else " ✅")
-                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:google"))
+                for p in providers:
+                    if p.get("auth_type") != "oauth":
+                        continue
+                    driver = p.get("oauth_driver", p.get("key", ""))
+                    label = p.get("label", driver)
 
-                claude = await get_claude_oauth_credentials()
-                if claude and claude.get("refresh_token"):
-                    exp = claude.get("expires_at", 0)
-                    expired = time.time() >= exp
-                    email = claude.get("email", "?")
-                    label = f"Claude ({email})" + (" ⚠️" if expired else " ✅")
-                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:claude"))
-
-                codex_token = await get_credential("credential.codex_access_token")
-                if codex_token:
-                    exp = await get_credential("credential.codex_expires_at", 0)
-                    expired = time.time() >= float(exp or 0)
-                    label = "Codex" + (" ⚠️" if expired else " ✅")
-                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:codex"))
+                    if driver == "google":
+                        creds = await get_google_oauth_credentials()
+                        if creds and creds.get("refresh_token"):
+                            exp = creds.get("expires_at", 0)
+                            expired = time.time() >= exp
+                            email = creds.get("email", "?")
+                            btn_label = f"{label} ({email})" + (" ⚠️" if expired else " ✅")
+                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
+                    elif driver == "claude":
+                        creds = await get_claude_oauth_credentials()
+                        if creds and creds.get("refresh_token"):
+                            exp = creds.get("expires_at", 0)
+                            expired = time.time() >= exp
+                            email = creds.get("email", "?")
+                            btn_label = f"{label} ({email})" + (" ⚠️" if expired else " ✅")
+                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
+                    elif driver == "codex":
+                        token = await get_credential("credential.codex_access_token")
+                        if token:
+                            exp = await get_credential("credential.codex_expires_at", 0)
+                            expired = time.time() >= float(exp or 0)
+                            btn_label = label + (" ⚠️" if expired else " ✅")
+                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
 
                 if not buttons:
                     await query.edit_message_text(
@@ -3147,33 +3173,38 @@ Or just send me a message!"""
                 )
 
             elif auth_action.startswith("oauth:"):
-                # Start OAuth flow for specific provider
-                provider = auth_action.split(":", 1)[1]
-                if provider in self._AUTH_OAUTH_PROVIDERS:
+                # Start OAuth flow for specific provider key
+                provider_key = auth_action.split(":", 1)[1]
+                providers = await self._get_auth_providers()
+                entry = next((p for p in providers if p["key"] == provider_key and p.get("auth_type") == "oauth"), None)
+                if entry:
                     await query.edit_message_text(
-                        f"🔄 Starting {self._AUTH_OAUTH_PROVIDERS[provider]} OAuth...",
+                        f"🔄 Starting {entry['label']} OAuth...",
                     )
-                    await self._start_oauth_flow(provider, chat_id, user.id, context)
+                    await self._start_oauth_flow(entry, chat_id, user.id, context)
                 else:
-                    await query.edit_message_text(f"❌ Unknown OAuth provider: {provider}")
+                    await query.edit_message_text(f"❌ Unknown OAuth provider: {provider_key}")
 
             elif auth_action.startswith("apikey:"):
                 # Start API key input flow
-                provider = auth_action.split(":", 1)[1]
-                if provider in self._AUTH_APIKEY_PROVIDERS:
-                    label = self._AUTH_APIKEY_PROVIDERS[provider]
+                provider_key = auth_action.split(":", 1)[1]
+                providers = await self._get_auth_providers()
+                entry = next((p for p in providers if p["key"] == provider_key and p.get("auth_type") == "api_key"), None)
+                if entry:
                     self._auth_state[user.id] = {
                         "type": "apikey",
-                        "provider": provider,
+                        "provider": provider_key,
+                        "credential_key": entry.get("credential_key", ""),
+                        "label": entry.get("label", provider_key),
                     }
                     await query.edit_message_text(
-                        f"🔐 **{label} API Key**\n\n"
+                        f"🔐 **{entry['label']} API Key**\n\n"
                         f"Paste your API key below.\n"
                         f"It will be saved to the database and **NOT** stored in chat history.\n\n"
                         f"Send /cancel to abort.",
                     )
                 else:
-                    await query.edit_message_text(f"❌ Unknown API key provider: {provider}")
+                    await query.edit_message_text(f"❌ Unknown API key provider: {provider_key}")
 
         elif data.startswith("brw:"):
             # Browse directory picker callbacks
