@@ -275,6 +275,11 @@ class GoogleProvider(LLMProvider):
             resp.raise_for_status()
             data = resp.json()
 
+        # Debug: log raw response structure for diagnosis
+        candidates = data.get("response", data).get("candidates", [])
+        if not candidates or not candidates[0].get("content", {}).get("parts"):
+            logger.warning(f"CCA empty/no-parts response for {model}: {json.dumps(data)[:1000]}")
+
         return self._parse_cca_response(data, model)
 
     async def _chat_cca_streaming(self, body: dict, headers: dict) -> ChatResponse:
