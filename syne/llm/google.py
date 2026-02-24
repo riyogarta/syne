@@ -292,9 +292,9 @@ class GoogleProvider(LLMProvider):
                         chunk = json.loads(data_str)
                         # CCA may wrap in response envelope
                         inner = chunk.get("response", chunk)
-                        # Debug: log first chunk structure (use WARNING to ensure visibility)
+                        # Log first chunk for debugging
                         if not text_parts and not thinking_parts and not tool_calls:
-                            logger.warning(f"CCA streaming first chunk: {data_str[:500]}")
+                            logger.debug(f"CCA streaming first chunk: {data_str[:500]}")
                         # Extract text, thinking, and function calls from candidates
                         for candidate in inner.get("candidates", []):
                             for part in candidate.get("content", {}).get("parts", []):
