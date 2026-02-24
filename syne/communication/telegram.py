@@ -2139,6 +2139,10 @@ Or just send me a message!"""
                 InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
             ],
             [
+                InlineKeyboardButton("🤖 Add Model", callback_data="auth:addmodel_menu"),
+                InlineKeyboardButton("🧠 Add Embedding", callback_data="auth:addembed_menu"),
+            ],
+            [
                 InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
             ],
             [
@@ -2147,7 +2151,7 @@ Or just send me a message!"""
         ]
 
         await update.message.reply_text(
-            "🔐 **Credential Management**\n\n"
+            "🔐 **Credential & Provider Management**\n\n"
             "Choose an action:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons),
@@ -2181,6 +2185,10 @@ Or just send me a message!"""
             return await self._process_oauth_input(user_id, chat_id, text, state, context)
         elif auth_type == "apikey":
             return await self._process_apikey_input(user_id, chat_id, text, state, context)
+        elif auth_type == "addmodel":
+            return await self._process_addmodel_input(user_id, chat_id, text, state, context)
+        elif auth_type == "addembed":
+            return await self._process_addembed_input(user_id, chat_id, text, state, context)
 
         return False
 
@@ -2280,6 +2288,221 @@ Or just send me a message!"""
             self._auth_state.pop(user_id, None)
 
         return True
+
+    # Default context windows per driver (used as suggestion)
+    _DEFAULT_CONTEXT_WINDOWS = {
+        "google_cca": 1048576,  # 1M
+        "codex": 1048576,       # 1M
+        "openai_compat": 128000,
+        "groq": 131072,         # 128K
+    }
+
+    # Default auth type per driver
+    _DRIVER_AUTH_TYPES = {
+        "google_cca": "oauth",
+        "codex": "oauth",
+        "openai_compat": "api_key",
+        "groq": "api_key",
+        "ollama": "none",
+        "together": "api_key",
+    }
+
+    async def _process_addmodel_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Multi-step model addition flow."""
+        bot = context.bot if context else self.app.bot
+        step = state.get("step", "")
+        text = text.strip()
+
+        if step == "model_id":
+            state["model_id"] = text
+            state["step"] = "label"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Model ID: `{text}`\n\n"
+                     f"Now send a **display label** (e.g. `Gemini 2.5 Flash`, `GPT-5.2`).\n"
+                     f"Or send `.` to use model ID as label.",
+                parse_mode="Markdown",
+            )
+            return True
+
+        elif step == "label":
+            label = text if text != "." else state["model_id"]
+            state["label"] = label
+            state["step"] = "context_window"
+            driver = state.get("driver", "")
+            default_ctx = self._DEFAULT_CONTEXT_WINDOWS.get(driver, 128000)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Label: **{label}**\n\n"
+                     f"Send **context window** in tokens (number only).\n"
+                     f"Or send `.` for default ({default_ctx:,}).",
+                parse_mode="Markdown",
+            )
+            return True
+
+        elif step == "context_window":
+            driver = state.get("driver", "")
+            if text == ".":
+                ctx_window = self._DEFAULT_CONTEXT_WINDOWS.get(driver, 128000)
+            else:
+                try:
+                    ctx_window = int(text.replace(",", "").replace("_", ""))
+                except ValueError:
+                    await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number, or `.` for default.")
+                    return True
+
+            # Build model entry and save
+            auth_type = self._DRIVER_AUTH_TYPES.get(driver, "api_key")
+            entry = {
+                "key": state["model_id"].replace("/", "-").replace(".", "-").lower(),
+                "label": state["label"],
+                "driver": driver,
+                "model_id": state["model_id"],
+                "auth": auth_type,
+                "context_window": ctx_window,
+            }
+
+            # Append to provider.models in DB
+            models = await get_config("provider.models", [])
+            # Check for duplicate key
+            existing = next((m for m in models if m["key"] == entry["key"]), None)
+            if existing:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Model `{entry['key']}` already exists. Remove it first or use a different model ID.",
+                    parse_mode="Markdown",
+                )
+                self._auth_state.pop(user_id, None)
+                return True
+
+            models.append(entry)
+            await set_config("provider.models", models)
+
+            ctx_display = f"{ctx_window/1000000:.1f}M" if ctx_window >= 1000000 else f"{ctx_window//1000}K"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ **Model added:**\n\n"
+                    f"• Key: `{entry['key']}`\n"
+                    f"• Label: {entry['label']}\n"
+                    f"• Driver: {driver}\n"
+                    f"• Auth: {auth_type}\n"
+                    f"• Context: {ctx_display}\n\n"
+                    f"Use /model to switch to it."
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(f"Model added: {entry}")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        return False
+
+    async def _process_addembed_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Multi-step embedding provider addition flow."""
+        bot = context.bot if context else self.app.bot
+        step = state.get("step", "")
+        text = text.strip()
+
+        if step == "model_id":
+            state["model_id"] = text
+            state["step"] = "dimensions"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Model ID: `{text}`\n\n"
+                     f"Send **embedding dimensions** (number only, e.g. `768`, `1024`, `1536`).",
+                parse_mode="Markdown",
+            )
+            return True
+
+        elif step == "dimensions":
+            try:
+                dims = int(text.replace(",", ""))
+            except ValueError:
+                await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number (e.g. `768`, `1024`).")
+                return True
+
+            state["dimensions"] = dims
+            driver = state.get("driver", "")
+
+            if driver == "ollama":
+                # Ollama doesn't need base_url prompt — default localhost
+                state["step"] = "label"
+                state["base_url"] = "http://localhost:11434"
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Dimensions: {dims}\n\n"
+                         f"Send a **display label** (e.g. `Ollama — qwen3 (local)`).\n"
+                         f"Or send `.` to auto-generate.",
+                    parse_mode="Markdown",
+                )
+            else:
+                state["step"] = "label"
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Dimensions: {dims}\n\n"
+                         f"Send a **display label** (e.g. `Together — BGE Base`).\n"
+                         f"Or send `.` to auto-generate.",
+                    parse_mode="Markdown",
+                )
+            return True
+
+        elif step == "label":
+            driver = state.get("driver", "")
+            model_id = state.get("model_id", "")
+            if text == ".":
+                label = f"{driver} — {model_id}"
+            else:
+                label = text
+
+            auth_type = self._DRIVER_AUTH_TYPES.get(driver, "api_key")
+            cost = "FREE (local)" if driver == "ollama" else "API Key"
+
+            entry = {
+                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower(),
+                "label": label,
+                "driver": driver,
+                "model_id": model_id,
+                "auth": auth_type,
+                "dimensions": state["dimensions"],
+                "cost": cost,
+            }
+            if driver == "ollama":
+                entry["base_url"] = state.get("base_url", "http://localhost:11434")
+
+            # Append to provider.embedding_models in DB
+            models = await get_config("provider.embedding_models", [])
+            existing = next((m for m in models if m["key"] == entry["key"]), None)
+            if existing:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Embedding `{entry['key']}` already exists.",
+                    parse_mode="Markdown",
+                )
+                self._auth_state.pop(user_id, None)
+                return True
+
+            models.append(entry)
+            await set_config("provider.embedding_models", models)
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ **Embedding added:**\n\n"
+                    f"• Key: `{entry['key']}`\n"
+                    f"• Label: {entry['label']}\n"
+                    f"• Driver: {driver}\n"
+                    f"• Dimensions: {entry['dimensions']}\n"
+                    f"• Cost: {cost}\n\n"
+                    f"Use /embedding to switch to it."
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(f"Embedding added: {entry}")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        return False
 
     async def _start_oauth_flow(self, provider_entry: dict, chat_id: int, user_id: int, context):
         """Generate OAuth URL and send it to user via Telegram.
@@ -3159,6 +3382,10 @@ Or just send me a message!"""
                         InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
                     ],
                     [
+                        InlineKeyboardButton("🤖 Add Model", callback_data="auth:addmodel_menu"),
+                        InlineKeyboardButton("🧠 Add Embedding", callback_data="auth:addembed_menu"),
+                    ],
+                    [
                         InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
                     ],
                     [
@@ -3166,7 +3393,7 @@ Or just send me a message!"""
                     ],
                 ]
                 await query.edit_message_text(
-                    "🔐 **Credential Management**\n\n"
+                    "🔐 **Credential & Provider Management**\n\n"
                     "Choose an action:",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(buttons),
@@ -3205,6 +3432,78 @@ Or just send me a message!"""
                     )
                 else:
                     await query.edit_message_text(f"❌ Unknown API key provider: {provider_key}")
+
+            elif auth_action == "addmodel_menu":
+                # Show available drivers for adding a new model
+                # Known drivers that have implementations in syne/llm/drivers.py
+                drivers = [
+                    ("google_cca", "Google (OAuth)"),
+                    ("codex", "OpenAI / Codex (OAuth)"),
+                    ("openai_compat", "OpenAI-compatible (API Key)"),
+                    ("groq", "Groq (API Key)"),
+                ]
+                buttons = [
+                    InlineKeyboardButton(label, callback_data=f"auth:addmodel:{key}")
+                    for key, label in drivers
+                ]
+                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
+                keyboard = [[btn] for btn in buttons]
+                await query.edit_message_text(
+                    "🤖 **Add Model**\n\n"
+                    "Choose a driver:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif auth_action.startswith("addmodel:"):
+                # User selected a driver — ask for model details
+                driver = auth_action.split(":", 1)[1]
+                self._auth_state[user.id] = {
+                    "type": "addmodel",
+                    "driver": driver,
+                    "step": "model_id",
+                }
+                await query.edit_message_text(
+                    f"🤖 **Add Model — {driver}**\n\n"
+                    "Send the model ID (e.g. `gemini-2.5-flash`, `gpt-5.2`, `llama-3.3-70b-versatile`).\n\n"
+                    "Send /cancel to abort.",
+                    parse_mode="Markdown",
+                )
+
+            elif auth_action == "addembed_menu":
+                # Show available embedding drivers
+                drivers = [
+                    ("ollama", "Ollama (local, FREE)"),
+                    ("together", "Together AI (API Key)"),
+                    ("openai_compat", "OpenAI-compatible (API Key)"),
+                ]
+                buttons = [
+                    InlineKeyboardButton(label, callback_data=f"auth:addembed:{key}")
+                    for key, label in drivers
+                ]
+                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
+                keyboard = [[btn] for btn in buttons]
+                await query.edit_message_text(
+                    "🧠 **Add Embedding**\n\n"
+                    "Choose a driver:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif auth_action.startswith("addembed:"):
+                # User selected embedding driver — ask for model details
+                driver = auth_action.split(":", 1)[1]
+                self._auth_state[user.id] = {
+                    "type": "addembed",
+                    "driver": driver,
+                    "step": "model_id",
+                }
+                await query.edit_message_text(
+                    f"🧠 **Add Embedding — {driver}**\n\n"
+                    "Send the model ID (e.g. `qwen3-embedding:0.6b`, `BAAI/bge-base-en-v1.5`).\n\n"
+                    "Send /cancel to abort.",
+                    parse_mode="Markdown",
+                )
 
         elif data.startswith("brw:"):
             # Browse directory picker callbacks
