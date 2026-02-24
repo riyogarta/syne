@@ -40,6 +40,7 @@ async def manage_schedule_handler(
     schedule_type: str = "",
     schedule_value: str = "",
     payload: str = "",
+    end_date: str = "",
 ) -> str:
     """Handle manage_schedule tool calls.
     
@@ -53,6 +54,7 @@ async def manage_schedule_handler(
             - interval: seconds (e.g., "3600" for hourly)
             - cron: cron expression (e.g., "0 9 * * *")
         payload: Message to inject when task runs (for create)
+        end_date: Optional ISO timestamp — recurring tasks auto-disable after this date
         
     Returns:
         Result message
@@ -77,12 +79,23 @@ async def manage_schedule_handler(
         if not payload:
             return "Error: payload is required (message to inject when task runs)."
         
+        # Parse end_date if provided
+        parsed_end_date = None
+        if end_date:
+            try:
+                parsed_end_date = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                if parsed_end_date.tzinfo is None:
+                    parsed_end_date = parsed_end_date.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return f"Error: invalid end_date format '{end_date}'. Use ISO format (e.g., 2026-03-21T08:00:00+07:00)."
+        
         result = await create_task(
             name=name,
             schedule_type=schedule_type,
             schedule_value=schedule_value,
             payload=payload,
             created_by=_current_user_platform_id,
+            end_date=parsed_end_date,
         )
         
         if not result["success"]:
@@ -95,13 +108,19 @@ async def manage_schedule_handler(
         else:
             next_run_str = str(next_run)
         
+        task_end_date = task.get("end_date")
+        end_date_str = ""
+        if task_end_date and isinstance(task_end_date, datetime):
+            end_date_str = f"\n- End date: {task_end_date.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        
         return (
             f"✅ Task created:\n"
             f"- ID: {task['id']}\n"
             f"- Name: {task['name']}\n"
             f"- Type: {task['schedule_type']}\n"
             f"- Schedule: {task['schedule_value']}\n"
-            f"- Next run: {next_run_str}\n"
+            f"- Next run: {next_run_str}"
+            f"{end_date_str}\n"
             f"- Payload: {task['payload'][:100]}{'...' if len(task['payload']) > 100 else ''}"
         )
     
@@ -120,9 +139,14 @@ async def manage_schedule_handler(
             else:
                 next_run_str = str(next_run) if next_run else "N/A"
             
+            end_date = t.get("end_date")
+            end_str = ""
+            if end_date and isinstance(end_date, datetime):
+                end_str = f" | Until: {end_date.strftime('%m/%d %H:%M')}"
+            
             lines.append(
                 f"- {status} **{t['name']}** (id={t['id']})\n"
-                f"  Type: {t['schedule_type']} | Next: {next_run_str} | Runs: {t['run_count']}"
+                f"  Type: {t['schedule_type']} | Next: {next_run_str}{end_str} | Runs: {t['run_count']}"
             )
         
         return "\n".join(lines)
@@ -150,11 +174,15 @@ async def manage_schedule_handler(
                 return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
             return str(dt) if dt else "Never"
         
+        end_date = task.get("end_date")
+        end_date_line = f"\n- End date: {fmt_dt(end_date)}" if end_date else ""
+        
         return (
             f"**Task: {task['name']}** (id={task['id']})\n"
             f"- Status: {'Enabled' if task['enabled'] else 'Disabled'}\n"
             f"- Type: {task['schedule_type']}\n"
-            f"- Schedule: {task['schedule_value']}\n"
+            f"- Schedule: {task['schedule_value']}"
+            f"{end_date_line}\n"
             f"- Next run: {fmt_dt(next_run)}\n"
             f"- Last run: {fmt_dt(last_run)}\n"
             f"- Run count: {task['run_count']}\n"
@@ -206,7 +234,8 @@ MANAGE_SCHEDULE_TOOL = {
     "description": (
         "Create and manage scheduled tasks. Tasks execute by injecting payload as user message. "
         "Actions: create (new task), list (all tasks), get (task details), delete, enable, disable. "
-        "Types: 'once' (ISO timestamp), 'interval' (seconds), 'cron' (cron expression)."
+        "Types: 'once' (ISO timestamp), 'interval' (seconds), 'cron' (cron expression). "
+        "Optional end_date for recurring tasks — auto-disables after the date passes."
     ),
     "parameters": {
         "type": "object",
@@ -240,6 +269,15 @@ MANAGE_SCHEDULE_TOOL = {
             "payload": {
                 "type": "string",
                 "description": "Message to inject when task executes (for create)",
+            },
+            "end_date": {
+                "type": "string",
+                "description": (
+                    "Optional ISO timestamp for recurring tasks. "
+                    "Task auto-disables after this date. "
+                    "NULL/empty = no end date (runs forever or once). "
+                    "Example: '2026-03-21T08:00:00+07:00'"
+                ),
             },
         },
         "required": ["action"],

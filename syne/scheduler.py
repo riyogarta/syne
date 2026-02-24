@@ -183,7 +183,7 @@ class Scheduler:
             # Get all due tasks
             due_tasks = await conn.fetch(
                 """
-                SELECT id, name, schedule_type, schedule_value, payload, created_by
+                SELECT id, name, schedule_type, schedule_value, payload, created_by, end_date
                 FROM scheduled_tasks
                 WHERE enabled = true
                   AND next_run <= $1
@@ -199,6 +199,7 @@ class Scheduler:
                 schedule_value = task["schedule_value"]
                 payload = task["payload"]
                 created_by = task["created_by"]
+                end_date = task["end_date"]
                 
                 logger.info(f"Executing scheduled task: {task_name} (id={task_id})")
                 
@@ -224,16 +225,33 @@ class Scheduler:
                         next_run = _calculate_next_run(schedule_type, schedule_value, now)
                         
                         if next_run:
-                            await conn.execute(
-                                """
-                                UPDATE scheduled_tasks
-                                SET last_run = $1,
-                                    next_run = $2,
-                                    run_count = run_count + 1
-                                WHERE id = $3
-                                """,
-                                now, next_run, task_id,
-                            )
+                            # Check end_date: if next_run exceeds end_date, disable task
+                            if end_date and next_run > end_date:
+                                logger.info(
+                                    f"Task {task_id} ({task_name}) reached end_date "
+                                    f"{end_date.isoformat()}, disabling"
+                                )
+                                await conn.execute(
+                                    """
+                                    UPDATE scheduled_tasks
+                                    SET enabled = false,
+                                        last_run = $1,
+                                        run_count = run_count + 1
+                                    WHERE id = $2
+                                    """,
+                                    now, task_id,
+                                )
+                            else:
+                                await conn.execute(
+                                    """
+                                    UPDATE scheduled_tasks
+                                    SET last_run = $1,
+                                        next_run = $2,
+                                        run_count = run_count + 1
+                                    WHERE id = $3
+                                    """,
+                                    now, next_run, task_id,
+                                )
                         else:
                             # Failed to calculate next run — disable
                             logger.error(f"Failed to calculate next run for task {task_id}, disabling")
@@ -263,6 +281,7 @@ async def create_task(
     schedule_value: str,
     payload: str,
     created_by: Optional[int] = None,
+    end_date: Optional[datetime] = None,
 ) -> dict:
     """Create a new scheduled task.
     
@@ -272,6 +291,7 @@ async def create_task(
         schedule_value: Value for schedule type
         payload: Message to inject when task runs
         created_by: Telegram user ID of creator
+        end_date: Optional end date — recurring tasks auto-disable after this
         
     Returns:
         Created task dict or error dict
@@ -287,14 +307,18 @@ async def create_task(
     if not next_run:
         return {"success": False, "error": f"Invalid schedule_value for {schedule_type}: {schedule_value}"}
     
+    # Validate end_date: must be after next_run for recurring tasks
+    if end_date and schedule_type != "once" and end_date < next_run:
+        return {"success": False, "error": f"end_date ({end_date.isoformat()}) must be after first run ({next_run.isoformat()})"}
+    
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO scheduled_tasks (name, schedule_type, schedule_value, payload, created_by, next_run)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            RETURNING id, name, schedule_type, schedule_value, payload, enabled, next_run, created_at
+            INSERT INTO scheduled_tasks (name, schedule_type, schedule_value, payload, created_by, next_run, end_date)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, name, schedule_type, schedule_value, payload, enabled, next_run, end_date, created_at
             """,
-            name, schedule_type, schedule_value, payload, created_by, next_run,
+            name, schedule_type, schedule_value, payload, created_by, next_run, end_date,
         )
     
     return {
@@ -319,7 +343,7 @@ async def list_tasks(enabled_only: bool = False) -> list[dict]:
             rows = await conn.fetch(
                 """
                 SELECT id, name, schedule_type, schedule_value, payload, enabled,
-                       last_run, next_run, run_count, created_by, created_at
+                       last_run, next_run, end_date, run_count, created_by, created_at
                 FROM scheduled_tasks
                 WHERE enabled = true
                 ORDER BY next_run ASC
@@ -329,7 +353,7 @@ async def list_tasks(enabled_only: bool = False) -> list[dict]:
             rows = await conn.fetch(
                 """
                 SELECT id, name, schedule_type, schedule_value, payload, enabled,
-                       last_run, next_run, run_count, created_by, created_at
+                       last_run, next_run, end_date, run_count, created_by, created_at
                 FROM scheduled_tasks
                 ORDER BY created_at DESC
                 """
@@ -353,7 +377,7 @@ async def get_task(task_id: int) -> Optional[dict]:
         row = await conn.fetchrow(
             """
             SELECT id, name, schedule_type, schedule_value, payload, enabled,
-                   last_run, next_run, run_count, created_by, created_at
+                   last_run, next_run, end_date, run_count, created_by, created_at
             FROM scheduled_tasks
             WHERE id = $1
             """,

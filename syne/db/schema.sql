@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS scheduled_tasks (
     created_by BIGINT,                    -- telegram user id
     last_run TIMESTAMPTZ,
     next_run TIMESTAMPTZ,
+    end_date TIMESTAMPTZ,                -- NULL = no end date; recurring tasks auto-disable after this
     run_count INTEGER DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
