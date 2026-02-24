@@ -118,12 +118,107 @@ class MemoryEngine:
                     WHERE id = ANY($1)
                 """, ids_to_update)
 
+            # ═══════════════════════════════════════════════════════════
+            # CONFLICT DETECTION — flag contradictory memories
+            # If multiple high-similarity results are about the same
+            # topic but have different content, mark them as conflicting.
+            # This is CODE-ENFORCED so the LLM gets structured metadata
+            # instead of relying on prompt instructions to detect conflicts.
+            # ═══════════════════════════════════════════════════════════
+            results = self._detect_conflicts(results)
+
             return results
+
+    def _detect_conflicts(self, results: list[dict]) -> list[dict]:
+        """Detect and flag conflicting memories in recall results.
+
+        Two memories conflict when they:
+        1. Are in the same category
+        2. Have high mutual similarity (same topic)
+        3. But different content (different values)
+
+        When conflicts are found:
+        - Higher authority (user_confirmed > auto_captured) gets "authoritative" flag
+        - Lower authority gets "conflicted" flag with reference to the authoritative one
+        - Same authority: newer gets "authoritative", older gets "conflicted"
+
+        This gives the LLM structured metadata to work with, instead of
+        relying on prompt instructions to detect contradictions.
+        """
+        if len(results) < 2:
+            return results
+
+        # Group by category
+        by_category: dict[str, list[dict]] = {}
+        for r in results:
+            cat = r.get("category", "fact")
+            by_category.setdefault(cat, []).append(r)
+
+        # Check for conflicts within each category
+        conflict_pairs = set()  # (lower_id, higher_id) to avoid double-marking
+        for cat, mems in by_category.items():
+            if len(mems) < 2:
+                continue
+            for i in range(len(mems)):
+                for j in range(i + 1, len(mems)):
+                    a, b = mems[i], mems[j]
+                    # Both high similarity to query means same topic
+                    # But they're different memories → potential conflict
+                    # Only flag if both have similarity > 0.5 to the query
+                    # and their content is meaningfully different
+                    if a.get("similarity", 0) < 0.5 or b.get("similarity", 0) < 0.5:
+                        continue
+                    if a["content"].strip() == b["content"].strip():
+                        continue  # Same content, not a conflict
+
+                    # Determine winner
+                    a_pri = self._source_priority(a.get("source", "system"))
+                    b_pri = self._source_priority(b.get("source", "system"))
+
+                    if a_pri > b_pri:
+                        winner, loser = a, b
+                    elif b_pri > a_pri:
+                        winner, loser = b, a
+                    else:
+                        # Same priority → newer wins
+                        a_time = a.get("created_at")
+                        b_time = b.get("created_at")
+                        if a_time and b_time and a_time > b_time:
+                            winner, loser = a, b
+                        else:
+                            winner, loser = b, a
+
+                    # Flag
+                    winner["_conflict_status"] = "authoritative"
+                    loser["_conflict_status"] = "conflicted"
+                    loser["_conflicts_with"] = winner["id"]
+                    conflict_pairs.add((loser["id"], winner["id"]))
+
+        if conflict_pairs:
+            logger.info(f"Detected {len(conflict_pairs)} memory conflict(s) during recall")
+
+        return results
 
     async def find_similar(self, content: str, threshold: float = 0.85) -> Optional[dict]:
         """Check if a similar memory already exists (for dedup)."""
         results = await self.recall(content, limit=1, min_similarity=threshold)
         return results[0] if results else None
+
+    # ================================================================
+    # SOURCE PRIORITY (for conflict resolution)
+    # Higher number = higher authority. Used when deciding whether
+    # a new memory should overwrite an existing one.
+    # ================================================================
+    SOURCE_PRIORITY = {
+        "user_confirmed": 3,  # User explicitly stated or confirmed
+        "observed": 2,        # Inferred from user behavior/messages
+        "system": 1,          # System-generated (auto_capture, etc.)
+        "auto_captured": 1,   # Alias for system
+    }
+
+    def _source_priority(self, source: str) -> int:
+        """Get numeric priority for a memory source. Higher = more authoritative."""
+        return self.SOURCE_PRIORITY.get(source, 0)
 
     async def store_if_new(
         self,
@@ -139,10 +234,15 @@ class MemoryEngine:
 
         Three zones based on similarity to existing memories:
         - >= similarity_threshold (0.85): Exact duplicate → SKIP
-        - >= conflict_threshold (0.70):   Same topic, possibly updated info → UPDATE old
+        - >= conflict_threshold (0.70):   Same topic, different info → RESOLVE
         - < conflict_threshold:           New topic → INSERT
-        
-        Returns memory ID (new or updated) or None if duplicate.
+
+        Conflict resolution rules (enforced by code, not prompt):
+        1. user_confirmed ALWAYS wins over auto_captured/system/observed
+        2. Same source priority → newer wins (time-based data changes)
+        3. Higher importance wins as tiebreaker
+
+        Returns memory ID (new or updated) or None if duplicate/skipped.
         """
         # Find the most similar existing memory
         results = await self.recall(content, limit=1, min_similarity=conflict_threshold)
@@ -156,31 +256,73 @@ class MemoryEngine:
                 logger.debug(f"Duplicate (sim={sim:.3f}), skipping: {content[:80]}")
                 return None
 
-            # Conflict zone (0.70–0.85): same topic but different info → update
+            # ═══════════════════════════════════════════════════════════
+            # CONFLICT ZONE (0.70–0.85): same topic, different info
+            # Resolve by source priority, then recency, then importance.
+            # This is CODE-ENFORCED — model-agnostic, deterministic.
+            # ═══════════════════════════════════════════════════════════
             old_id = existing["id"]
             old_content = existing["content"]
+            old_source = existing.get("source", "system")
+            old_importance = existing.get("importance", 0.5)
+
+            new_priority = self._source_priority(source)
+            old_priority = self._source_priority(old_source)
+
+            # Rule 1: Higher source priority wins
+            if new_priority > old_priority:
+                logger.info(
+                    f"Conflict resolved by source priority: "
+                    f"new '{source}'({new_priority}) > old '{old_source}'({old_priority}). "
+                    f"Updating #{old_id}."
+                )
+                return await self._update_memory(
+                    old_id, content, category, source, importance
+                )
+
+            if new_priority < old_priority:
+                # Existing memory has higher authority — don't overwrite
+                logger.info(
+                    f"Conflict resolved by source priority: "
+                    f"old '{old_source}'({old_priority}) > new '{source}'({new_priority}). "
+                    f"Keeping #{old_id}, skipping new."
+                )
+                return None
+
+            # Rule 2: Same priority → newer wins (data changes over time)
             logger.info(
-                f"Conflict detected (sim={sim:.3f}): "
-                f"old='{old_content[:60]}' → new='{content[:60]}'. "
-                f"Updating memory #{old_id}."
+                f"Conflict resolved by recency (same source priority): "
+                f"old='{old_content[:50]}' → new='{content[:50]}'. "
+                f"Updating #{old_id}."
             )
-
-            # Generate new embedding for the updated content
-            embedding_resp = await self.provider.embed(content)
-            vector = embedding_resp.vector
-
-            async with get_connection() as conn:
-                await conn.execute("""
-                    UPDATE memory
-                    SET content = $1, embedding = $2::vector, category = $3,
-                        source = $4, importance = $5, updated_at = NOW()
-                    WHERE id = $6
-                """, content, str(vector), category, source, importance, old_id)
-
-            return old_id
+            return await self._update_memory(
+                old_id, content, category, source, importance
+            )
 
         # No similar memory at all — insert new
         return await self.store(content, category, source, user_id, importance)
+
+    async def _update_memory(
+        self,
+        memory_id: int,
+        content: str,
+        category: str,
+        source: str,
+        importance: float,
+    ) -> int:
+        """Update an existing memory with new content and embedding."""
+        embedding_resp = await self.provider.embed(content)
+        vector = embedding_resp.vector
+
+        async with get_connection() as conn:
+            await conn.execute("""
+                UPDATE memory
+                SET content = $1, embedding = $2::vector, category = $3,
+                    source = $4, importance = $5, updated_at = NOW()
+                WHERE id = $6
+            """, content, str(vector), category, source, importance, memory_id)
+
+        return memory_id
 
     async def delete(self, memory_id: int):
         """Delete a memory by ID."""

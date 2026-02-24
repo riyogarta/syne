@@ -142,15 +142,22 @@ class Conversation:
         #    preventing long conversation history from drowning out memory context.
         if memories:
             memory_lines = [
-                "# Relevant Memories (auto-retrieved, scores = similarity confidence)",
-                "These are YOUR memories about the owner and their world. They are FACTS you have stored.",
-                "ALWAYS use these memories to answer questions. NEVER say 'I don't know' or 'I don't have that information' if the answer exists in these memories.",
-                "If the user asks a personal question (family, health, preferences, etc.), CHECK these memories FIRST before responding.",
+                "# Relevant Memories",
+                "Your stored facts about the owner and their world. Use these to answer questions.",
                 "",
             ]
             for mem in memories:
                 score = f"(confidence: {mem['similarity']:.0%})"
-                memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}")
+                # Conflict flags injected by memory engine (code-enforced)
+                conflict_status = mem.get("_conflict_status", "")
+                if conflict_status == "conflicted":
+                    ref_id = mem.get("_conflicts_with", "?")
+                    flag = f" ⚠️ CONFLICTED — superseded by memory #{ref_id}"
+                elif conflict_status == "authoritative":
+                    flag = " ✅ AUTHORITATIVE"
+                else:
+                    flag = ""
+                memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}{flag}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
             # Log recalled memories for debugging
             import logging

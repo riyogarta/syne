@@ -248,8 +248,10 @@ Memories include confidence scores (e.g. 85%). Use them:
 - Below 60% → don't treat as fact, ask for confirmation
 
 ## Conflicts
-When memories conflict: user-confirmed wins, then newer wins, then higher score.
-If still ambiguous, present both and ask the user.
+Conflicts are auto-detected and flagged by the engine:
+- ✅ AUTHORITATIVE = the winning memory (higher source priority or newer)
+- ⚠️ CONFLICTED = superseded memory (reference to the authoritative one provided)
+When you see these flags, use the AUTHORITATIVE one. Mention the conflict only if the user asks.
 """
 
 
