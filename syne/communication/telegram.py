@@ -98,6 +98,8 @@ class TelegramChannel:
         self._browse_cwd: dict[int, str] = {}
         # Path lookup for browse callbacks (short hash → full path)
         self._browse_paths: dict[str, str] = {}
+        # Auth flow state: {telegram_user_id: {"type": "oauth"|"apikey", "provider": str, ...}}
+        self._auth_state: dict[int, dict] = {}
 
     async def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
         """Build InboundContext from a Telegram Update. Used by ALL handlers.
@@ -154,6 +156,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("model", self._cmd_model))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
+        self.app.add_handler(CommandHandler("auth", self._cmd_auth))
+        self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Update commands removed — use `syne update` / `syne updatedev` from CLI
 
         # Message handler — catch all text messages
@@ -341,6 +345,15 @@ class TelegramChannel:
             await update.message.reply_text(f"⏱️ {rate_msg}")
             return
 
+        # ═══════════════════════════════════════════════════════════════
+        # AUTH FLOW INTERCEPT: If user is in auth flow, handle credential
+        # input here and SKIP history/memory entirely.
+        # ═══════════════════════════════════════════════════════════════
+        if user.id in self._auth_state and not is_group:
+            handled = await self._handle_auth_input(update, context, text)
+            if handled:
+                return  # Credential processed — do NOT save to history
+
         # Handle group messages with registration and mention checks
         if is_group:
             result = await self._process_group_message(update, context, text)
@@ -371,6 +384,19 @@ class TelegramChannel:
                 pass
 
         if not text:
+            return
+
+        # ═══════════════════════════════════════════════════════════════
+        # CREDENTIAL LEAK PREVENTION: Detect credential patterns in
+        # normal chat. Warn user and skip history/memory.
+        # ═══════════════════════════════════════════════════════════════
+        if not is_group and self._contains_credential(text):
+            await update.message.reply_text(
+                "⚠️ Credential detected in message. Use `/auth` to manage credentials.\n"
+                "This message was NOT saved to history or memory.",
+                parse_mode="Markdown",
+            )
+            logger.warning(f"Credential pattern detected in chat from user {user.id} — skipped history")
             return
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {text[:100]}")
@@ -1392,9 +1418,12 @@ class TelegramChannel:
 /think — Set thinking level (off/low/medium/high/max)
 /reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
+/model — Switch LLM model
+/auth — Manage credentials (OAuth & API keys)
 /clear — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
+/cancel — Cancel active auth flow
 
 Or just send me a message!"""
 
@@ -2059,6 +2088,551 @@ Or just send me a message!"""
         self._browse_paths[short] = path
         return short
 
+    # ── Auth (credential management) ───────────────────────────
+
+    # Known OAuth providers and their labels
+    _AUTH_OAUTH_PROVIDERS = {
+        "google": "Google (Gemini)",
+        "codex": "OpenAI / Codex",
+        "claude": "Claude / Anthropic",
+    }
+
+    # Known API key providers and their labels
+    _AUTH_APIKEY_PROVIDERS = {
+        "groq": "Groq",
+        "together": "Together AI",
+        "openrouter": "OpenRouter",
+    }
+
+    # Mapping from provider key → credential DB key for API keys
+    _APIKEY_CREDENTIAL_KEYS = {
+        "groq": "credential.groq_api_key",
+        "together": "credential.together_api_key",
+        "openrouter": "credential.openrouter_api_key",
+    }
+
+    async def _cmd_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /auth command — unified credential management.
+        
+        Owner only. Three options:
+        - New OAuth Setup: Google, Codex, Claude
+        - New API Key: Groq, Together AI, OpenRouter
+        - Re-authenticate: Refresh existing OAuth credentials
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage credentials.")
+            return
+
+        # Clear any stale auth state
+        self._auth_state.pop(user.id, None)
+
+        buttons = [
+            [
+                InlineKeyboardButton("🔑 New OAuth Setup", callback_data="auth:oauth_menu"),
+                InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
+            ],
+            [
+                InlineKeyboardButton("📋 Credential Status", callback_data="auth:status"),
+            ],
+        ]
+
+        await update.message.reply_text(
+            "🔐 **Credential Management**\n\n"
+            "Choose an action:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /cancel command — abort auth flow."""
+        user = update.effective_user
+        if user.id in self._auth_state:
+            self._auth_state.pop(user.id, None)
+            await update.message.reply_text("👌 Auth flow cancelled.")
+        else:
+            await update.message.reply_text("Nothing to cancel.")
+
+    async def _handle_auth_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
+        """Handle user input during auth flow.
+        
+        Returns True if the message was handled (credential processed),
+        False if it should be treated as normal chat.
+        """
+        user_id = update.effective_user.id
+        state = self._auth_state.get(user_id)
+        if not state:
+            return False
+
+        chat_id = update.effective_chat.id
+        auth_type = state.get("type")
+        provider = state.get("provider", "")
+
+        if auth_type == "oauth":
+            return await self._process_oauth_input(user_id, chat_id, text, state, context)
+        elif auth_type == "apikey":
+            return await self._process_apikey_input(user_id, chat_id, text, state, context)
+
+        return False
+
+    async def _process_oauth_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Process pasted OAuth callback URL."""
+        from urllib.parse import urlparse, parse_qs
+
+        text = text.strip()
+
+        # Check if this looks like a callback URL
+        if not text.startswith("http"):
+            # Not a URL — user might be chatting normally
+            bot = context.bot if context else self.app.bot
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ That doesn't look like a callback URL.\n"
+                     "Paste the full URL from your browser address bar, or send /cancel to abort.",
+            )
+            return True  # Still consume the message to prevent history save
+
+        parsed = urlparse(text)
+        params = parse_qs(parsed.query)
+        code = params.get("code", [None])[0]
+
+        if not code:
+            bot = context.bot if context else self.app.bot
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ No authorization code found in that URL.\n"
+                     "Make sure you copy the ENTIRE URL from the browser address bar.",
+            )
+            return True
+
+        provider = state["provider"]
+        bot = context.bot if context else self.app.bot
+
+        await bot.send_message(chat_id=chat_id, text="🔄 Exchanging authorization code...")
+
+        try:
+            if provider == "google":
+                await self._exchange_google_oauth(code, state)
+                await bot.send_message(chat_id=chat_id, text="✅ Google OAuth configured successfully!")
+            elif provider == "codex":
+                await self._exchange_codex_oauth(code, state)
+                await bot.send_message(chat_id=chat_id, text="✅ OpenAI/Codex OAuth configured successfully!")
+            elif provider == "claude":
+                await self._exchange_claude_oauth(code, state)
+                await bot.send_message(chat_id=chat_id, text="✅ Claude OAuth configured successfully!")
+            else:
+                await bot.send_message(chat_id=chat_id, text=f"❌ Unknown provider: {provider}")
+        except Exception as e:
+            logger.error(f"OAuth exchange failed for {provider}: {e}", exc_info=True)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ OAuth exchange failed: {str(e)[:200]}\n\nTry again with /auth.",
+            )
+        finally:
+            # Always clear auth state
+            self._auth_state.pop(user_id, None)
+
+        return True
+
+    async def _process_apikey_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Process pasted API key."""
+        text = text.strip()
+        provider = state["provider"]
+        credential_key = self._APIKEY_CREDENTIAL_KEYS.get(provider)
+        bot = context.bot if context else self.app.bot
+
+        if not credential_key:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Unknown provider: {provider}")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        # Basic validation — API keys are typically 20+ chars alphanumeric
+        if len(text) < 10:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ That looks too short for an API key. Paste the full key, or send /cancel to abort.",
+            )
+            return True
+
+        try:
+            await set_config(credential_key, text, f"{provider} API key")
+            label = self._AUTH_APIKEY_PROVIDERS.get(provider, provider)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ {label} API key saved.\n\n⚠️ Use /restart to apply.",
+            )
+            logger.info(f"API key saved for {provider} by user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to save API key for {provider}: {e}")
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Failed to save API key: {str(e)[:200]}",
+            )
+        finally:
+            self._auth_state.pop(user_id, None)
+
+        return True
+
+    async def _start_oauth_flow(self, provider: str, chat_id: int, user_id: int, context):
+        """Generate OAuth URL and send it to user via Telegram."""
+        bot = context.bot if context else self.app.bot
+
+        try:
+            if provider == "google":
+                url, pkce_state = self._generate_google_oauth_url()
+                self._auth_state[user_id] = {
+                    "type": "oauth",
+                    "provider": "google",
+                    "verifier": pkce_state["verifier"],
+                }
+            elif provider == "codex":
+                url, pkce_state = self._generate_codex_oauth_url()
+                self._auth_state[user_id] = {
+                    "type": "oauth",
+                    "provider": "codex",
+                    "verifier": pkce_state["verifier"],
+                    "state": pkce_state["state"],
+                }
+            elif provider == "claude":
+                url, pkce_state = self._generate_claude_oauth_url()
+                self._auth_state[user_id] = {
+                    "type": "oauth",
+                    "provider": "claude",
+                    "verifier": pkce_state["verifier"],
+                    "state": pkce_state["state"],
+                }
+            else:
+                await bot.send_message(chat_id=chat_id, text=f"❌ Unknown OAuth provider: {provider}")
+                return
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🔐 **{self._AUTH_OAUTH_PROVIDERS.get(provider, provider)} OAuth Setup**\n\n"
+                    f"1️⃣ Open this URL in your browser:\n\n"
+                    f"`{url}`\n\n"
+                    f"2️⃣ Sign in and authorize access\n"
+                    f'3️⃣ Browser will show "This site can\'t be reached" — that\'s normal!\n'
+                    f"4️⃣ Copy the ENTIRE URL from the browser address bar\n"
+                    f"5️⃣ Paste it here\n\n"
+                    f"⏱️ You have 5 minutes. Send /cancel to abort."
+                ),
+                parse_mode="Markdown",
+            )
+            logger.info(f"OAuth flow started for {provider} by user {user_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to start OAuth flow for {provider}: {e}", exc_info=True)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Failed to start OAuth flow: {str(e)[:200]}",
+            )
+            self._auth_state.pop(user_id, None)
+
+    def _generate_google_oauth_url(self) -> tuple[str, dict]:
+        """Generate Google OAuth URL with PKCE."""
+        import base64, hashlib, secrets
+        from urllib.parse import urlencode
+
+        verifier = secrets.token_urlsafe(64)
+        digest = hashlib.sha256(verifier.encode()).digest()
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+        # Same credentials as google_oauth.py
+        client_id = base64.b64decode(
+            "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLm"
+            "FwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"
+        ).decode()
+
+        params = urlencode({
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": "http://localhost:8085/oauth2callback",
+            "scope": " ".join([
+                "https://www.googleapis.com/auth/cloud-platform",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "https://www.googleapis.com/auth/userinfo.profile",
+            ]),
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": verifier,
+            "access_type": "offline",
+            "prompt": "consent",
+        })
+        url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
+        return url, {"verifier": verifier, "challenge": challenge}
+
+    def _generate_codex_oauth_url(self) -> tuple[str, dict]:
+        """Generate Codex/OpenAI OAuth URL with PKCE."""
+        import base64, hashlib, secrets
+        from urllib.parse import urlencode
+
+        verifier = secrets.token_urlsafe(64)
+        digest = hashlib.sha256(verifier.encode()).digest()
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        state = secrets.token_hex(16)
+
+        params = urlencode({
+            "response_type": "code",
+            "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+            "redirect_uri": "http://localhost:1455/auth/callback",
+            "scope": "openid profile email offline_access",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+            "id_token_add_organizations": "true",
+            "codex_cli_simplified_flow": "true",
+        })
+        url = f"https://auth.openai.com/oauth/authorize?{params}"
+        return url, {"verifier": verifier, "challenge": challenge, "state": state}
+
+    def _generate_claude_oauth_url(self) -> tuple[str, dict]:
+        """Generate Claude OAuth URL with PKCE."""
+        import base64, hashlib, secrets
+        from urllib.parse import urlencode
+
+        verifier = secrets.token_urlsafe(64)
+        digest = hashlib.sha256(verifier.encode()).digest()
+        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+        state = secrets.token_hex(16)
+
+        params = urlencode({
+            "response_type": "code",
+            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            "redirect_uri": "http://localhost:9742/oauth/callback",
+            "scope": "user:inference user:profile",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+        })
+        url = f"https://claude.ai/oauth/authorize?{params}"
+        return url, {"verifier": verifier, "challenge": challenge, "state": state}
+
+    async def _exchange_google_oauth(self, code: str, state: dict):
+        """Exchange Google auth code for tokens and save to DB."""
+        import base64, time
+        from ..auth.google_oauth import GoogleCredentials, _discover_project, _get_user_email
+
+        client_id = base64.b64decode(
+            "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLm"
+            "FwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"
+        ).decode()
+        client_secret = base64.b64decode("R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=").decode()
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": "http://localhost:8085/oauth2callback",
+                    "code_verifier": state["verifier"],
+                },
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+
+        if not token_data.get("refresh_token"):
+            raise RuntimeError("No refresh token received. Try again with prompt=consent.")
+
+        access_token = token_data["access_token"]
+        expires_at = time.time() + token_data["expires_in"] - 300
+
+        email = await _get_user_email(access_token)
+        project_id = await _discover_project(access_token)
+
+        creds = GoogleCredentials(
+            access_token=access_token,
+            refresh_token=token_data["refresh_token"],
+            expires_at=expires_at,
+            project_id=project_id,
+            email=email,
+        )
+        await creds.save_to_db()
+        logger.info(f"Google OAuth credentials saved for {email}")
+
+    async def _exchange_codex_oauth(self, code: str, state: dict):
+        """Exchange Codex auth code for tokens and save to DB."""
+        import time
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://auth.openai.com/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+                    "code": code,
+                    "code_verifier": state["verifier"],
+                    "redirect_uri": "http://localhost:1455/auth/callback",
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+        if not access_token or not refresh_token:
+            raise RuntimeError("Token exchange failed — missing tokens.")
+
+        expires_at = time.time() + token_data.get("expires_in", 0)
+
+        await set_config("credential.codex_access_token", access_token, "Codex OAuth access token")
+        await set_config("credential.codex_refresh_token", refresh_token, "Codex OAuth refresh token")
+        await set_config("credential.codex_expires_at", expires_at, "Codex OAuth token expiry")
+        logger.info("Codex OAuth credentials saved to DB")
+
+    async def _exchange_claude_oauth(self, code: str, state: dict):
+        """Exchange Claude auth code for tokens and save to DB."""
+        import time
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://platform.claude.com/v1/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                    "code": code,
+                    "code_verifier": state["verifier"],
+                    "redirect_uri": "http://localhost:9742/oauth/callback",
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "anthropic-beta": "oauth-2025-04-20",
+                },
+            )
+            resp.raise_for_status()
+            token_data = resp.json()
+
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+        if not access_token or not refresh_token:
+            raise RuntimeError("Token exchange failed — missing tokens.")
+
+        expires_at = time.time() + token_data.get("expires_in", 3600) - 300
+
+        # Try to get user profile
+        email = None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.anthropic.com/v1/me",
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "anthropic-version": "2023-06-01",
+                        "anthropic-beta": "oauth-2025-04-20",
+                    },
+                )
+                if resp.status_code == 200:
+                    email = resp.json().get("email") or resp.json().get("name")
+        except Exception:
+            pass
+
+        from ..db.credentials import set_claude_oauth_credentials
+        await set_claude_oauth_credentials(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            email=email,
+        )
+        logger.info(f"Claude OAuth credentials saved for {email}")
+
+    async def _get_credential_status(self) -> str:
+        """Get formatted status of all credentials."""
+        import time
+        from ..db.credentials import (
+            get_google_oauth_credentials,
+            get_claude_oauth_credentials,
+            get_credential,
+        )
+
+        lines = ["📋 **Credential Status**\n"]
+
+        # Google OAuth
+        google = await get_google_oauth_credentials()
+        if google and google.get("refresh_token"):
+            exp = google.get("expires_at", 0)
+            expired = time.time() >= exp
+            email = google.get("email", "?")
+            status = "⚠️ expired" if expired else "✅ active"
+            lines.append(f"🔑 **Google OAuth:** {status} ({email})")
+        else:
+            lines.append("🔑 **Google OAuth:** ❌ not configured")
+
+        # Claude OAuth
+        claude = await get_claude_oauth_credentials()
+        if claude and claude.get("refresh_token"):
+            exp = claude.get("expires_at", 0)
+            expired = time.time() >= exp
+            email = claude.get("email", "?")
+            status = "⚠️ expired" if expired else "✅ active"
+            lines.append(f"🔑 **Claude OAuth:** {status} ({email})")
+        else:
+            lines.append("🔑 **Claude OAuth:** ❌ not configured")
+
+        # Codex OAuth
+        codex_token = await get_credential("credential.codex_access_token")
+        if codex_token:
+            exp = await get_credential("credential.codex_expires_at", 0)
+            expired = time.time() >= float(exp or 0)
+            status = "⚠️ expired" if expired else "✅ active"
+            lines.append(f"🔑 **Codex OAuth:** {status}")
+        else:
+            lines.append("🔑 **Codex OAuth:** ❌ not configured")
+
+        # API Keys
+        for provider, label in self._AUTH_APIKEY_PROVIDERS.items():
+            cred_key = self._APIKEY_CREDENTIAL_KEYS[provider]
+            val = await get_credential(cred_key)
+            if val:
+                # Show first 4 + last 4 chars
+                masked = f"{str(val)[:4]}...{str(val)[-4:]}" if len(str(val)) > 8 else "***"
+                lines.append(f"🔐 **{label}:** ✅ ({masked})")
+            else:
+                lines.append(f"🔐 **{label}:** ❌ not configured")
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _contains_credential(text: str) -> bool:
+        """Check if text contains credential patterns.
+        
+        Used to prevent accidental credential leaks in normal chat.
+        Conservative — only catches high-confidence patterns to avoid
+        false positives on normal conversation.
+        """
+        if not text or len(text) < 20:
+            return False
+
+        from ..security import _SAFE_REDACT_PATTERNS
+
+        for pattern, _ in _SAFE_REDACT_PATTERNS:
+            if pattern.search(text):
+                # Double-check: the matched text should look like a standalone credential,
+                # not a code snippet or URL discussion
+                match = pattern.search(text)
+                if match:
+                    matched = match.group(0)
+                    # Skip if it's clearly a code example or markdown
+                    if text.count('\n') > 3:  # Multi-line = likely code/docs
+                        continue
+                    # Skip if surrounded by backticks (code context)
+                    start = max(0, match.start() - 5)
+                    end = min(len(text), match.end() + 5)
+                    context = text[start:end]
+                    if '`' in context:
+                        continue
+                    return True
+
+        return False
+
     # ── Browse (directory picker) ──────────────────────────────
 
     async def _cmd_browse(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2458,6 +3032,146 @@ Or just send me a message!"""
                 pending_key = f"pending_group:{group_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
+
+        elif data.startswith("auth:"):
+            # Auth credential management callbacks
+            auth_action = data.split(":", 1)[1] if ":" in data else ""
+            chat_id = query.message.chat_id
+
+            if auth_action == "oauth_menu":
+                # Show OAuth provider selection
+                buttons = []
+                for key, label in self._AUTH_OAUTH_PROVIDERS.items():
+                    buttons.append(InlineKeyboardButton(label, callback_data=f"auth:oauth:{key}"))
+                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
+                keyboard = [[btn] for btn in buttons]
+                await query.edit_message_text(
+                    "🔑 **New OAuth Setup**\n\nChoose a provider:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif auth_action == "apikey_menu":
+                # Show API key provider selection
+                buttons = []
+                for key, label in self._AUTH_APIKEY_PROVIDERS.items():
+                    buttons.append(InlineKeyboardButton(label, callback_data=f"auth:apikey:{key}"))
+                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
+                keyboard = [[btn] for btn in buttons]
+                await query.edit_message_text(
+                    "🔐 **New API Key**\n\nChoose a provider:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif auth_action == "reauth_menu":
+                # Show only configured OAuth credentials for re-auth
+                import time
+                from ..db.credentials import (
+                    get_google_oauth_credentials,
+                    get_claude_oauth_credentials,
+                    get_credential,
+                )
+                buttons = []
+
+                google = await get_google_oauth_credentials()
+                if google and google.get("refresh_token"):
+                    exp = google.get("expires_at", 0)
+                    expired = time.time() >= exp
+                    email = google.get("email", "?")
+                    label = f"Google ({email})" + (" ⚠️" if expired else " ✅")
+                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:google"))
+
+                claude = await get_claude_oauth_credentials()
+                if claude and claude.get("refresh_token"):
+                    exp = claude.get("expires_at", 0)
+                    expired = time.time() >= exp
+                    email = claude.get("email", "?")
+                    label = f"Claude ({email})" + (" ⚠️" if expired else " ✅")
+                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:claude"))
+
+                codex_token = await get_credential("credential.codex_access_token")
+                if codex_token:
+                    exp = await get_credential("credential.codex_expires_at", 0)
+                    expired = time.time() >= float(exp or 0)
+                    label = "Codex" + (" ⚠️" if expired else " ✅")
+                    buttons.append(InlineKeyboardButton(label, callback_data="auth:oauth:codex"))
+
+                if not buttons:
+                    await query.edit_message_text(
+                        "🔄 **Re-authenticate**\n\n"
+                        "No OAuth credentials configured yet.\n"
+                        "Use **New OAuth Setup** first.",
+                        parse_mode="Markdown",
+                    )
+                    return
+
+                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
+                keyboard = [[btn] for btn in buttons]
+                await query.edit_message_text(
+                    "🔄 **Re-authenticate**\n\nSelect credential to refresh:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif auth_action == "status":
+                status_text = await self._get_credential_status()
+                buttons = [[InlineKeyboardButton("⬅️ Back", callback_data="auth:back")]]
+                await query.edit_message_text(
+                    status_text,
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+
+            elif auth_action == "back":
+                # Back to main auth menu
+                buttons = [
+                    [
+                        InlineKeyboardButton("🔑 New OAuth Setup", callback_data="auth:oauth_menu"),
+                        InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
+                    ],
+                    [
+                        InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
+                    ],
+                    [
+                        InlineKeyboardButton("📋 Credential Status", callback_data="auth:status"),
+                    ],
+                ]
+                await query.edit_message_text(
+                    "🔐 **Credential Management**\n\n"
+                    "Choose an action:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+
+            elif auth_action.startswith("oauth:"):
+                # Start OAuth flow for specific provider
+                provider = auth_action.split(":", 1)[1]
+                if provider in self._AUTH_OAUTH_PROVIDERS:
+                    await query.edit_message_text(
+                        f"🔄 Starting {self._AUTH_OAUTH_PROVIDERS[provider]} OAuth...",
+                    )
+                    await self._start_oauth_flow(provider, chat_id, user.id, context)
+                else:
+                    await query.edit_message_text(f"❌ Unknown OAuth provider: {provider}")
+
+            elif auth_action.startswith("apikey:"):
+                # Start API key input flow
+                provider = auth_action.split(":", 1)[1]
+                if provider in self._AUTH_APIKEY_PROVIDERS:
+                    label = self._AUTH_APIKEY_PROVIDERS[provider]
+                    self._auth_state[user.id] = {
+                        "type": "apikey",
+                        "provider": provider,
+                    }
+                    await query.edit_message_text(
+                        f"🔐 **{label} API Key**\n\n"
+                        f"Paste your API key below.\n"
+                        f"It will be saved to the database and **NOT** stored in chat history.\n\n"
+                        f"Send /cancel to abort.",
+                    )
+                else:
+                    await query.edit_message_text(f"❌ Unknown API key provider: {provider}")
 
         elif data.startswith("brw:"):
             # Browse directory picker callbacks
