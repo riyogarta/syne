@@ -13,8 +13,24 @@ to the conversation.
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger("syne.tools.scheduler")
+
+# Current user context — set by conversation layer before tool execution.
+# Used to auto-fill created_by when creating tasks.
+_current_user_platform_id: Optional[int] = None
+
+
+def set_current_user(platform_id: Optional[int]) -> None:
+    """Set the current user's platform ID for task creation.
+    
+    Called by conversation layer before executing tools, so that
+    manage_schedule can auto-fill created_by without relying on
+    the LLM to pass it.
+    """
+    global _current_user_platform_id
+    _current_user_platform_id = platform_id
 
 
 async def manage_schedule_handler(
@@ -66,6 +82,7 @@ async def manage_schedule_handler(
             schedule_type=schedule_type,
             schedule_value=schedule_value,
             payload=payload,
+            created_by=_current_user_platform_id,
         )
         
         if not result["success"]:

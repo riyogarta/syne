@@ -348,6 +348,11 @@ class Conversation:
         is_owner_dm = (access_level == "owner" and not self.is_group)
         set_owner_dm(is_owner_dm)
 
+        # Set current user context for scheduler (auto-fill created_by).
+        from .tools.scheduler import set_current_user
+        user_platform_id = self.user.get("platform_id")
+        set_current_user(int(user_platform_id) if user_platform_id else None)
+
         max_rounds = await get_config("session.max_tool_rounds", 100)
         if isinstance(max_rounds, str):
             max_rounds = int(max_rounds)
@@ -518,8 +523,9 @@ class Conversation:
                     thinking=current.thinking,
                 )
 
-        # Reset owner-DM context after tool execution
+        # Reset context after tool execution
         set_owner_dm(False)
+        set_current_user(None)
 
         return current
 
