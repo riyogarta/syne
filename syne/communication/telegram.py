@@ -2039,29 +2039,22 @@ Or just send me a message!"""
         )
         
         try:
-            # Create provider and test it
-            provider = await create_hybrid_provider(model_entry)
-            success, error = await test_model(provider, timeout=120)
+            # Switch directly — no test call. Model is already registered
+            # with a valid driver. Testing wastes a CCA request and often
+            # triggers 429 rate limits on Google CCA's tight quotas.
+            await set_config("provider.active_model", model_key)
             
-            if success:
-                # Test passed — save new model
-                await set_config("provider.active_model", model_key)
-                
-                # Auto-adjust compaction threshold based on context window
-                # Default: ~75% of context window in chars (tokens * 3.5)
-                ctx_window = model_entry.get("context_window")
-                if ctx_window:
-                    new_threshold = int(ctx_window * 0.75 * 3.5)
-                    await set_config("session.compaction_threshold", new_threshold)
-                    logger.info(f"Auto-adjusted compaction threshold to {new_threshold} chars for {ctx_window} token context")
-                
-                # Hot-reload provider in the running agent
-                await self.agent.reload_provider()
-                
-                return True, model_entry.get("label", model_key)
-            else:
-                # Test failed — report error
-                return False, f"{model_entry.get('label', model_key)} failed: {error}"
+            # Auto-adjust compaction threshold based on context window
+            ctx_window = model_entry.get("context_window")
+            if ctx_window:
+                new_threshold = int(ctx_window * 0.75 * 3.5)
+                await set_config("session.compaction_threshold", new_threshold)
+                logger.info(f"Auto-adjusted compaction threshold to {new_threshold} chars for {ctx_window} token context")
+            
+            # Hot-reload provider in the running agent
+            await self.agent.reload_provider()
+            
+            return True, model_entry.get("label", model_key)
                 
         except Exception as e:
             return False, f"{model_entry.get('label', model_key)} failed: {str(e)[:100]}"
