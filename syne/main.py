@@ -91,10 +91,20 @@ async def _scheduler_callback(task_id: int, payload: str, created_by: int):
         return
     
     # Get the user's DM chat ID (same as user ID for DMs)
+    # Fall back to owner if created_by is NULL (e.g., system-generated tasks)
     chat_id = created_by
     if not chat_id:
-        logger.warning(f"Scheduler: No created_by for task {task_id}")
-        return
+        from .db.connection import get_connection
+        async with get_connection() as conn:
+            owner_row = await conn.fetchrow(
+                "SELECT platform_id FROM users WHERE access_level = 'owner' AND platform = 'telegram' LIMIT 1"
+            )
+        if owner_row and owner_row["platform_id"]:
+            chat_id = int(owner_row["platform_id"])
+            logger.info(f"Scheduler: No created_by for task {task_id}, falling back to owner {chat_id}")
+        else:
+            logger.warning(f"Scheduler: No created_by for task {task_id} and no owner found")
+            return
     
     logger.info(f"Scheduler: Executing task {task_id} for user {chat_id}")
     
