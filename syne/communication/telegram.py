@@ -158,6 +158,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
         self.app.add_handler(CommandHandler("auth", self._cmd_auth))
         self.app.add_handler(CommandHandler("group", self._cmd_group))
+        self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Update commands removed — use `syne update` / `syne updatedev` from CLI
 
@@ -229,6 +230,7 @@ class TelegramChannel:
             BotCommand("embedding", "Switch embedding model (owner only)"),
             BotCommand("auth", "Manage credentials (OAuth & API keys)"),
             BotCommand("group", "Manage groups, members & aliases"),
+            BotCommand("members", "Manage global user access levels"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
@@ -2350,6 +2352,121 @@ Or just send me a message!"""
         if len(matches) == 1:
             return matches[0]
         return None
+
+    async def _cmd_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /members command — manage global user access levels.
+
+        Usage (owner DM only):
+            /members list                     — list all registered users
+            /members set <id> <level>         — set access level (owner/family/public/blocked)
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+
+        # Owner-only, DM-only
+        from ..db.models import get_user
+        db_user = await get_user("telegram", str(user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage members.")
+            return
+        if chat.type != "private":
+            await update.message.reply_text("⚠️ Use /members in DM only.")
+            return
+
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "👥 <b>Global Member Management</b>\n\n"
+                "<code>/members list</code> — list all registered users\n"
+                "<code>/members set &lt;id&gt; owner|family|public|blocked</code> — set access level\n\n"
+                "This sets the <b>global</b> access level (Rule 700/760).\n"
+                "For per-group aliases, use <code>/group alias</code>.",
+                parse_mode="HTML",
+            )
+            return
+
+        subcommand = args[0].lower()
+
+        if subcommand == "list":
+            await self._members_list(update)
+        elif subcommand == "set" and len(args) >= 3:
+            await self._members_set(update, args[1], args[2])
+        else:
+            await update.message.reply_text("❌ Invalid syntax. Use /members for help.")
+
+    async def _members_list(self, update: Update):
+        """List all registered users with access levels."""
+        from ..db.models import list_users
+        users = await list_users(platform="telegram")
+        if not users:
+            await update.message.reply_text("No users registered.")
+            return
+
+        lines = ["👥 <b>Registered Users</b>\n"]
+
+        # Sort: owner first, then family, then public, then others
+        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4, "blocked": 5}
+        users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("name", "")))
+
+        for u in users:
+            access = u.get("access_level", "public")
+            access_icon = {
+                "owner": "👑",
+                "family": "👨‍👩‍👧",
+                "public": "👤",
+                "approved": "✅",
+                "pending": "⏳",
+                "blocked": "🚫",
+            }.get(access, "❓")
+
+            name = u.get("display_name") or u.get("name", "?")
+            platform_id = u.get("platform_id", "?")
+            lines.append(f"{access_icon} <b>{name}</b> — {access}\n   ID: <code>{platform_id}</code>")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def _members_set(self, update: Update, member_id: str, level: str):
+        """Set a user's global access level."""
+        level = level.lower()
+        valid_levels = ("owner", "family", "public", "blocked")
+        if level not in valid_levels:
+            await update.message.reply_text(
+                f"❌ Access level must be one of: {', '.join(valid_levels)}"
+            )
+            return
+
+        from ..db.models import get_user, update_user
+
+        # Check user exists
+        db_user = await get_user("telegram", member_id)
+        if not db_user:
+            await update.message.reply_text(
+                f"❌ User with ID <code>{member_id}</code> not found.\n"
+                f"They need to DM the bot first (or chat in an approved group).",
+                parse_mode="HTML",
+            )
+            return
+
+        # Prevent owner from accidentally downgrading themselves
+        current_user = update.effective_user
+        if member_id == str(current_user.id) and level != "owner":
+            await update.message.reply_text(
+                "⚠️ You can't downgrade your own access level.\n"
+                "Another owner would need to do this."
+            )
+            return
+
+        result = await update_user("telegram", member_id, access_level=level)
+        if result:
+            name = result.get("display_name") or result.get("name", member_id)
+            prev_level = db_user.get("access_level", "?")
+            await update.message.reply_text(
+                f"✅ <b>{name}</b> (<code>{member_id}</code>)\n"
+                f"   {prev_level} → <b>{level}</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update access level.")
 
     async def _handle_auth_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
         """Handle user input during auth flow.
