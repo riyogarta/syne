@@ -251,37 +251,9 @@ class GoogleProvider(LLMProvider):
             **_CCA_HEADERS,
         }
 
-        # Use non-streaming endpoint for simplicity
-        url = f"{_CCA_ENDPOINT}/v1internal:generateContent"
-
-        # Debug: log request structure (not full content)
-        inner_req = body.get("request", {})
-        n_contents = len(inner_req.get("contents", []))
-        has_system = "systemInstruction" in inner_req
-        has_tools = "tools" in inner_req
-        gen_config = inner_req.get("generationConfig", {})
-        logger.debug(f"CCA request: model={body.get('model')}, contents={n_contents}, system={has_system}, tools={has_tools}, genConfig={gen_config}")
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(url, json=body, headers=headers)
-
-            if resp.status_code == 404 or resp.status_code == 405:
-                # Fallback to streaming and collect
-                logger.debug("Non-streaming endpoint unavailable, using streaming...")
-                return await self._chat_cca_streaming(body, headers)
-
-            if resp.status_code != 200:
-                body_text = resp.text[:500] if resp.text else "(empty)"
-                logger.error(f"CCA error {resp.status_code}: {body_text}")
-            resp.raise_for_status()
-            data = resp.json()
-
-        # Debug: log raw response structure for diagnosis
-        candidates = data.get("response", data).get("candidates", [])
-        if not candidates or not candidates[0].get("content", {}).get("parts"):
-            logger.warning(f"CCA empty/no-parts response for {model}: {json.dumps(data)[:1000]}")
-
-        return self._parse_cca_response(data, model)
+        # Use streaming endpoint by default (same as OpenClaw/Gemini CLI).
+        # Streaming endpoint has better rate limit handling on CCA.
+        return await self._chat_cca_streaming(body, headers)
 
     async def _chat_cca_streaming(self, body: dict, headers: dict) -> ChatResponse:
         """Chat via CCA streaming endpoint, collecting full response."""
