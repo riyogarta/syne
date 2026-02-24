@@ -157,6 +157,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
         self.app.add_handler(CommandHandler("auth", self._cmd_auth))
+        self.app.add_handler(CommandHandler("group", self._cmd_group))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Update commands removed — use `syne update` / `syne updatedev` from CLI
 
@@ -227,6 +228,7 @@ class TelegramChannel:
             BotCommand("model", "Switch LLM model (owner only)"),
             BotCommand("embedding", "Switch embedding model (owner only)"),
             BotCommand("auth", "Manage credentials (OAuth & API keys)"),
+            BotCommand("group", "Manage groups, members & aliases"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
@@ -548,6 +550,20 @@ class TelegramChannel:
         
         # Auto-discover/create user from group interaction
         await self._ensure_user(user)
+        
+        # Auto-collect group member — store from.id + name + username
+        # Never overwrites alias or access (those are manual-only)
+        try:
+            from ..db.models import update_group_member
+            await update_group_member(
+                platform="telegram",
+                platform_group_id=group_id,
+                member_id=str(user.id),
+                name=user.first_name or user.username or str(user.id),
+                username=user.username,
+            )
+        except Exception as e:
+            logger.debug(f"Auto-collect member failed: {e}")
         
         # Check if mention is required
         require_mention = True
@@ -2158,6 +2174,182 @@ Or just send me a message!"""
             await update.message.reply_text("👌 Auth flow cancelled.")
         else:
             await update.message.reply_text("Nothing to cancel.")
+
+    async def _cmd_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /group command — manage group members, aliases, access levels.
+
+        Usage (owner DM only):
+            /group list                          — list all registered groups
+            /group members <group_id_or_name>    — list members in a group
+            /group set <group> <member_id> <level>  — set access (owner/family/public)
+            /group alias <group> <member_id> <name>  — set per-group alias
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+
+        # Owner-only, DM-only
+        from ..db.models import get_user
+        db_user = await get_user("telegram", str(user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage groups.")
+            return
+        if chat.type != "private":
+            await update.message.reply_text("⚠️ Use /group in DM only.")
+            return
+
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(
+                "📋 <b>Group Management</b>\n\n"
+                "<code>/group list</code> — list registered groups\n"
+                "<code>/group members &lt;group&gt;</code> — list members\n"
+                "<code>/group set &lt;group&gt; &lt;id&gt; owner|family|public</code> — set access\n"
+                "<code>/group alias &lt;group&gt; &lt;id&gt; &lt;name&gt;</code> — set alias\n",
+                parse_mode="HTML",
+            )
+            return
+
+        subcommand = args[0].lower()
+
+        if subcommand == "list":
+            await self._group_list(update)
+        elif subcommand == "members" and len(args) >= 2:
+            await self._group_members(update, args[1])
+        elif subcommand == "set" and len(args) >= 4:
+            await self._group_set_access(update, args[1], args[2], args[3])
+        elif subcommand == "alias" and len(args) >= 4:
+            alias_name = " ".join(args[3:])  # Allow multi-word aliases
+            await self._group_set_alias(update, args[1], args[2], alias_name)
+        else:
+            await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
+
+    async def _group_list(self, update: Update):
+        """List all registered groups."""
+        from ..db.models import list_groups
+        groups = await list_groups(platform="telegram", enabled_only=False)
+        if not groups:
+            await update.message.reply_text("No groups registered.")
+            return
+
+        lines = ["📋 <b>Registered Groups</b>\n"]
+        for g in groups:
+            status = "✅" if g.get("enabled") else "❌"
+            mention = "📢" if not g.get("require_mention") else "🔇"
+            settings = g.get("settings", {}) or {}
+            member_count = len(settings.get("members", {}))
+            lines.append(
+                f"{status} <b>{g['name']}</b>\n"
+                f"   ID: <code>{g['platform_group_id']}</code>\n"
+                f"   {mention} mention={'required' if g.get('require_mention') else 'optional'}"
+                f" | {member_count} members"
+            )
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def _group_members(self, update: Update, group_ref: str):
+        """List members in a group. group_ref can be ID or partial name."""
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+
+        settings = group.get("settings", {}) or {}
+        members = settings.get("members", {})
+
+        if not members:
+            await update.message.reply_text(
+                f"👥 <b>{group['name']}</b> — no members collected yet.\n"
+                f"Members are auto-collected when they chat in the group.",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = [f"👥 <b>{group['name']}</b> — {len(members)} members\n"]
+        for mid, info in sorted(members.items(), key=lambda x: x[1].get("name", "")):
+            name = info.get("name", "?")
+            alias = info.get("alias")
+            access = info.get("access", "public")
+            username = info.get("username")
+
+            # Access level emoji
+            access_icon = {"owner": "👑", "family": "👨‍👩‍👧", "public": "👤"}.get(access, "❓")
+
+            alias_str = f' → "<b>{alias}</b>"' if alias else ""
+            user_str = f" (@{username})" if username else ""
+            lines.append(f"{access_icon} {name}{user_str}{alias_str}\n   ID: <code>{mid}</code> | {access}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def _group_set_access(self, update: Update, group_ref: str, member_id: str, level: str):
+        """Set a member's access level in a group."""
+        level = level.lower()
+        if level not in ("owner", "family", "public"):
+            await update.message.reply_text("❌ Access level must be: owner, family, or public")
+            return
+
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+
+        from ..db.models import update_group_member
+        result = await update_group_member(
+            platform="telegram",
+            platform_group_id=group["platform_group_id"],
+            member_id=member_id,
+            access=level,
+        )
+        if result:
+            name = result.get("name", member_id)
+            await update.message.reply_text(
+                f"✅ <b>{name}</b> ({member_id}) set to <b>{level}</b> in {group['name']}",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update member.")
+
+    async def _group_set_alias(self, update: Update, group_ref: str, member_id: str, alias: str):
+        """Set a member's alias in a group."""
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+
+        from ..db.models import update_group_member
+        result = await update_group_member(
+            platform="telegram",
+            platform_group_id=group["platform_group_id"],
+            member_id=member_id,
+            alias=alias,
+        )
+        if result:
+            name = result.get("name", member_id)
+            await update.message.reply_text(
+                f"✅ <b>{name}</b> ({member_id}) will be called \"<b>{alias}</b>\" in {group['name']}",
+                parse_mode="HTML",
+            )
+        else:
+            await update.message.reply_text("❌ Failed to update alias.")
+
+    async def _resolve_group(self, ref: str) -> Optional[dict]:
+        """Resolve a group reference — by ID or partial name match."""
+        from ..db.models import get_group, list_groups
+
+        # Try exact ID match first (with or without minus)
+        group = await get_group("telegram", ref)
+        if group:
+            return group
+        if not ref.startswith("-"):
+            group = await get_group("telegram", f"-{ref}")
+            if group:
+                return group
+
+        # Partial name match
+        all_groups = await list_groups(platform="telegram", enabled_only=False)
+        ref_lower = ref.lower()
+        matches = [g for g in all_groups if ref_lower in (g.get("name") or "").lower()]
+        if len(matches) == 1:
+            return matches[0]
+        return None
 
     async def _handle_auth_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
         """Handle user input during auth flow.

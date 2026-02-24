@@ -51,6 +51,10 @@ class InboundContext:
     sender_id: Optional[str] = None
     sender_username: Optional[str] = None
 
+    # ── Sender (resolved from group member registry) ────────
+    sender_alias: Optional[str] = None       # per-group alias (e.g. "Pak Riyo")
+    sender_access: Optional[str] = None      # per-group access (owner/family/public)
+
     # ── Flags ─────────────────────────────────────────────────
     was_mentioned: bool = False
     has_reply_context: bool = False
@@ -74,6 +78,8 @@ async def load_group_settings(ctx: InboundContext) -> None:
 
     Call this in the channel layer after creating InboundContext,
     before passing it downstream. This keeps all DB access at the edge.
+
+    Also resolves sender_alias and sender_access from members registry.
     """
     if not ctx.is_group or not ctx.chat_id:
         return
@@ -88,6 +94,15 @@ async def load_group_settings(ctx: InboundContext) -> None:
         if row and row["settings"]:
             settings = json.loads(row["settings"]) if isinstance(row["settings"], str) else row["settings"]
             ctx.group_settings = settings
+
+            # Resolve sender alias & access from members registry
+            if ctx.sender_id:
+                members = settings.get("members", {})
+                member = members.get(ctx.sender_id, {})
+                if member.get("alias"):
+                    ctx.sender_alias = member["alias"]
+                if member.get("access"):
+                    ctx.sender_access = member["access"]
     except Exception as e:
         logger.warning(f"Failed to load group settings for {ctx.chat_id}: {e}")
 
@@ -132,6 +147,14 @@ def build_system_metadata(ctx: InboundContext) -> str:
             lines.append("## Group Settings (from database)")
             for sl in settings_lines:
                 lines.append(f"- {sl}")
+
+    # Sender alias — code-enforced naming from member registry
+    if ctx.is_group and ctx.sender_alias:
+        lines.append("")
+        lines.append("## Sender Identity (from member registry — AUTHORITATIVE)")
+        lines.append(f"- Call this sender: **{ctx.sender_alias}**")
+        if ctx.sender_access:
+            lines.append(f"- Access level: {ctx.sender_access}")
 
     lines.append("")
     return "\n".join(lines)

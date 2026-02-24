@@ -342,6 +342,83 @@ async def update_group(
         return dict(row) if row else None
 
 
+async def update_group_member(
+    platform: str,
+    platform_group_id: str,
+    member_id: str,
+    name: Optional[str] = None,
+    username: Optional[str] = None,
+    alias: Optional[str] = None,
+    access: Optional[str] = None,
+) -> Optional[dict]:
+    """Upsert a member in group settings.members JSONB.
+
+    Auto-collect: only updates name/username/seen (never overwrites alias/access).
+    Manual: explicitly sets alias and/or access.
+    Returns the updated member entry or None if group not found.
+    """
+    import json
+    from datetime import datetime, timezone
+
+    async with get_connection() as conn:
+        # Get current settings
+        row = await conn.fetchrow(
+            "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
+            platform, platform_group_id,
+        )
+        if not row:
+            return None
+
+        settings = row["settings"]
+        if isinstance(settings, str):
+            settings = json.loads(settings) if settings else {}
+        settings = settings or {}
+
+        members = settings.get("members", {})
+        existing = members.get(member_id, {})
+
+        # Update fields — auto-collect never overwrites alias/access
+        if name is not None:
+            existing["name"] = name
+        if username is not None:
+            existing["username"] = username
+        if alias is not None:
+            existing["alias"] = alias
+        if access is not None:
+            existing["access"] = access
+
+        # Set defaults for new members
+        if "access" not in existing:
+            existing["access"] = "public"
+        existing["seen"] = datetime.now(timezone.utc).isoformat()
+
+        members[member_id] = existing
+        settings["members"] = members
+
+        await conn.execute(
+            "UPDATE groups SET settings = $1::jsonb, updated_at = NOW() WHERE platform = $2 AND platform_group_id = $3",
+            json.dumps(settings, ensure_ascii=False), platform, platform_group_id,
+        )
+
+        return existing
+
+
+async def get_group_members(platform: str, platform_group_id: str) -> dict:
+    """Get all members from group settings.members. Returns {id: {name, alias, access, ...}}."""
+    import json
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
+            platform, platform_group_id,
+        )
+        if not row:
+            return {}
+        settings = row["settings"]
+        if isinstance(settings, str):
+            settings = json.loads(settings) if settings else {}
+        return (settings or {}).get("members", {})
+
+
 async def delete_group(platform: str, platform_group_id: str) -> bool:
     """Delete a group registration. Returns True if deleted."""
     async with get_connection() as conn:

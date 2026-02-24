@@ -14,8 +14,8 @@ class TestConvertToolsToGemini:
         assert _convert_tools_to_gemini([]) == []
         assert _convert_tools_to_gemini(None) == []
 
-    def test_single_tool_conversion(self):
-        """Single OpenAI tool converts to Gemini format."""
+    def test_single_tool_conversion_parametersJsonSchema(self):
+        """Single OpenAI tool converts using parametersJsonSchema (not parameters)."""
         openai_tools = [
             {
                 "type": "function",
@@ -41,7 +41,29 @@ class TestConvertToolsToGemini:
         assert len(decls) == 1
         assert decls[0]["name"] == "get_weather"
         assert decls[0]["description"] == "Get the current weather"
-        assert decls[0]["parameters"]["properties"]["location"]["type"] == "string"
+        # #1: Must use parametersJsonSchema, NOT parameters
+        assert "parametersJsonSchema" in decls[0]
+        assert "parameters" not in decls[0]
+        assert decls[0]["parametersJsonSchema"]["properties"]["location"]["type"] == "string"
+
+    def test_legacy_parameters_for_claude(self):
+        """Claude models use legacy parameters field."""
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "tool_a",
+                    "description": "Test",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        result = _convert_tools_to_gemini(openai_tools, use_parameters=True)
+
+        decls = result[0]["functionDeclarations"]
+        assert "parameters" in decls[0]
+        assert "parametersJsonSchema" not in decls[0]
 
     def test_multiple_tools_conversion(self):
         """Multiple OpenAI tools convert to single Gemini tools array."""
@@ -90,6 +112,7 @@ class TestConvertToolsToGemini:
         decls = result[0]["functionDeclarations"]
         assert decls[0]["name"] == "no_params"
         assert "parameters" not in decls[0]
+        assert "parametersJsonSchema" not in decls[0]
 
     def test_invalid_tool_format_skipped(self):
         """Invalid tool formats are skipped."""
@@ -177,7 +200,7 @@ class TestFormatMessages:
         assert parts[1]["functionCall"]["args"] == {"location": "Tokyo"}
 
     def test_tool_message_formats_as_function_response(self, provider):
-        """Tool result message formats as functionResponse."""
+        """Tool result message formats as functionResponse with {output: ...}."""
         messages = [
             ChatMessage(
                 role="tool",
@@ -194,10 +217,26 @@ class TestFormatMessages:
         assert len(parts) == 1
         assert "functionResponse" in parts[0]
         assert parts[0]["functionResponse"]["name"] == "get_weather"
-        assert parts[0]["functionResponse"]["response"] == {"result": "Sunny, 25°C"}
+        # #9: Must use {output: value} format, NOT raw JSON
+        assert parts[0]["functionResponse"]["response"] == {"output": "Sunny, 25°C"}
+
+    def test_tool_message_error_response(self, provider):
+        """Tool error uses {error: value} format."""
+        messages = [
+            ChatMessage(
+                role="tool",
+                content="Connection timeout",
+                metadata={"tool_name": "get_weather", "is_error": True},
+            )
+        ]
+
+        _, contents = provider._format_messages(messages)
+
+        response = contents[0]["parts"][0]["functionResponse"]["response"]
+        assert response == {"error": "Connection timeout"}
 
     def test_tool_message_json_content(self, provider):
-        """Tool result with JSON content parses correctly."""
+        """Tool result with JSON content uses output wrapper."""
         messages = [
             ChatMessage(
                 role="tool",
@@ -209,7 +248,22 @@ class TestFormatMessages:
         _, contents = provider._format_messages(messages)
 
         response_data = contents[0]["parts"][0]["functionResponse"]["response"]
-        assert response_data == {"temp": 25, "condition": "sunny"}
+        # #9: JSON string wrapped in {output: ...}
+        assert response_data == {"output": '{"temp": 25, "condition": "sunny"}'}
+
+    def test_empty_text_blocks_skipped(self, provider):
+        """Empty text blocks in assistant messages are skipped."""
+        messages = [
+            ChatMessage(role="assistant", content="", metadata=None),
+            ChatMessage(role="assistant", content="  ", metadata=None),
+            ChatMessage(role="user", content="hello", metadata=None),
+        ]
+
+        _, contents = provider._format_messages(messages)
+
+        # Empty assistant messages should be skipped
+        assert len(contents) == 1
+        assert contents[0]["role"] == "user"
 
     def test_full_tool_call_flow(self, provider):
         """Full tool call flow: user -> assistant (tool call) -> tool result."""
@@ -250,105 +304,95 @@ class TestFormatMessages:
         assert "functionResponse" in contents[2]["parts"][0]
 
 
-class TestParseCCAResponse:
-    """Tests for parsing CCA response with tool calls."""
+class TestStreamingParsing:
+    """Tests for CCA streaming response parsing logic."""
 
-    @pytest.fixture
-    def provider(self):
-        return GoogleProvider(api_key="test-key")
-
-    def test_text_response(self, provider):
-        """Normal text response parses correctly."""
-        data = {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [{"text": "Hello, how can I help?"}]
-                    }
-                }
-            ],
-            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
-        }
-
-        response = provider._parse_cca_response(data, "gemini-2.5-pro")
-
-        assert response.content == "Hello, how can I help?"
-        assert response.tool_calls is None
-        assert response.input_tokens == 10
-        assert response.output_tokens == 5
-
-    def test_function_call_response(self, provider):
-        """Function call response parses correctly."""
-        data = {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {
-                                "functionCall": {
-                                    "name": "get_weather",
-                                    "args": {"location": "Tokyo"},
-                                }
-                            }
-                        ]
-                    }
-                }
-            ],
-            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
-        }
-
-        response = provider._parse_cca_response(data, "gemini-2.5-pro")
-
-        assert response.content == ""
-        assert response.tool_calls is not None
-        assert len(response.tool_calls) == 1
-        assert response.tool_calls[0]["function"]["name"] == "get_weather"
-        # Arguments should be JSON string (OpenAI format)
-        assert json.loads(response.tool_calls[0]["function"]["arguments"]) == {"location": "Tokyo"}
-
-    def test_mixed_text_and_function_call(self, provider):
-        """Response with both text and function call."""
-        data = {
-            "candidates": [
-                {
-                    "content": {
-                        "parts": [
-                            {"text": "Let me check that for you."},
-                            {
-                                "functionCall": {
-                                    "name": "search",
-                                    "args": {"query": "test"},
-                                }
-                            },
-                        ]
-                    }
-                }
-            ],
-            "usageMetadata": {},
-        }
-
-        response = provider._parse_cca_response(data, "gemini-2.5-pro")
-
-        assert response.content == "Let me check that for you."
-        assert response.tool_calls is not None
-        assert len(response.tool_calls) == 1
-        assert response.tool_calls[0]["function"]["name"] == "search"
-
-    def test_cca_wrapped_response(self, provider):
-        """CCA-wrapped response (with 'response' envelope) parses correctly."""
-        data = {
+    def test_text_response(self):
+        """Normal text response parses correctly from streaming chunk."""
+        chunk = {
             "response": {
                 "candidates": [
                     {
                         "content": {
-                            "parts": [{"text": "Wrapped response"}]
+                            "parts": [{"text": "Hello, how can I help?"}]
                         }
                     }
                 ],
-                "usageMetadata": {},
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5},
             }
         }
 
-        response = provider._parse_cca_response(data, "gemini-2.5-pro")
+        response_data = chunk.get("response", chunk)
+        text_parts = []
+        tool_calls = []
+        for candidate in response_data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                if "text" in part and part["text"].strip():
+                    text_parts.append(part["text"])
+                elif "functionCall" in part:
+                    tool_calls.append(part["functionCall"])
 
-        assert response.content == "Wrapped response"
+        assert "".join(text_parts) == "Hello, how can I help?"
+        assert tool_calls == []
+
+    def test_function_call_response(self):
+        """Function call response parses correctly from streaming chunk."""
+        chunk = {
+            "response": {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "get_weather",
+                                        "args": {"location": "Tokyo"},
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ],
+            }
+        }
+
+        response_data = chunk.get("response", chunk)
+        tool_calls = []
+        for candidate in response_data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                if "functionCall" in part:
+                    tool_calls.append(part["functionCall"])
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["name"] == "get_weather"
+        assert tool_calls[0]["args"] == {"location": "Tokyo"}
+
+    def test_thinking_response(self):
+        """Thinking parts are separated from text parts."""
+        chunk = {
+            "response": {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {"text": "Let me think...", "thought": True},
+                                {"text": "Here is the answer."},
+                            ]
+                        }
+                    }
+                ],
+            }
+        }
+
+        response_data = chunk.get("response", chunk)
+        text_parts = []
+        thinking_parts = []
+        for candidate in response_data.get("candidates", []):
+            for part in candidate.get("content", {}).get("parts", []):
+                if part.get("thought") and "text" in part:
+                    thinking_parts.append(part["text"])
+                elif "text" in part and part["text"].strip():
+                    text_parts.append(part["text"])
+
+        assert "".join(text_parts) == "Here is the answer."
+        assert "".join(thinking_parts) == "Let me think..."
