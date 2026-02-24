@@ -138,13 +138,40 @@ class Scheduler:
     
     async def _run_loop(self):
         """Main scheduler loop."""
+        cleanup_counter = 0
         while self._running:
             try:
                 await self._check_and_execute()
             except Exception as e:
                 logger.error(f"Scheduler error: {e}", exc_info=True)
-            
+
+            # Periodic cleanup: delete disabled once-tasks older than 30 days.
+            # Runs roughly once per day (every ~2880 checks at 30s interval).
+            cleanup_counter += 1
+            if cleanup_counter >= 2880:
+                cleanup_counter = 0
+                try:
+                    await self._cleanup_expired()
+                except Exception as e:
+                    logger.error(f"Scheduler cleanup error: {e}")
+
             await asyncio.sleep(_CHECK_INTERVAL)
+
+    async def _cleanup_expired(self):
+        """Delete disabled one-time tasks older than 30 days."""
+        from .db.connection import get_connection
+
+        async with get_connection() as conn:
+            result = await conn.execute("""
+                DELETE FROM scheduled_tasks
+                WHERE enabled = false
+                  AND schedule_type = 'once'
+                  AND last_run < NOW() - INTERVAL '30 days'
+            """)
+        # result = "DELETE N"
+        count = result.split()[-1] if result else "0"
+        if count != "0":
+            logger.info(f"Cleanup: deleted {count} expired one-time tasks (>30 days old)")
     
     async def _check_and_execute(self):
         """Check for due tasks and execute them."""
@@ -181,12 +208,17 @@ class Scheduler:
                     
                     # Update task based on type
                     if schedule_type == "once":
-                        # Delete one-time tasks after execution — no reason to keep them
+                        # Disable one-time tasks after execution (keep for audit trail)
                         await conn.execute(
-                            "DELETE FROM scheduled_tasks WHERE id = $1",
-                            task_id,
+                            """
+                            UPDATE scheduled_tasks
+                            SET enabled = false,
+                                last_run = $1,
+                                run_count = run_count + 1
+                            WHERE id = $2
+                            """,
+                            now, task_id,
                         )
-                        logger.info(f"Deleted one-time task {task_id} ({task_name}) after execution")
                     else:
                         # Calculate next run for interval/cron
                         next_run = _calculate_next_run(schedule_type, schedule_value, now)
