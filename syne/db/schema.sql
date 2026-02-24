@@ -299,6 +299,17 @@ BEGIN
     END IF;
 END $$;
 
+-- Add end_date column to scheduled_tasks if not exists (for time-bounded recurring tasks)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'scheduled_tasks' AND column_name = 'end_date'
+    ) THEN
+        ALTER TABLE scheduled_tasks ADD COLUMN end_date TIMESTAMPTZ;
+    END IF;
+END $$;
+
 -- ============================================================
 -- SEED DATA
 -- ============================================================
