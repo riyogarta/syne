@@ -226,8 +226,10 @@ class TelegramChannel:
             BotCommand("identity", "Show agent identity"),
             BotCommand("model", "Switch LLM model (owner only)"),
             BotCommand("embedding", "Switch embedding model (owner only)"),
+            BotCommand("auth", "Manage credentials (OAuth & API keys)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
+            BotCommand("cancel", "Cancel active operation"),
         ])
 
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
