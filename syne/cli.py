@@ -1961,7 +1961,7 @@ def reauth():
             console.print("[bold]🔄 Re-authenticating Google Gemini OAuth...[/bold]")
             from .auth.google_oauth import login_google
             try:
-                creds = login_google()
+                creds = await login_google()
                 await set_config("credential.google_access_token", creds.token)
                 await set_config("credential.google_refresh_token", creds.refresh_token)
                 if creds.expiry:
