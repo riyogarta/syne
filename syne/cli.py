@@ -50,7 +50,9 @@ def _ensure_ollama():
     # 1. Install Ollama if missing
     if not shutil.which("ollama"):
         console.print("[bold yellow]Ollama is not installed — installing now...[/bold yellow]")
-        ret = os.system("curl -fsSL https://ollama.com/install.sh | sh")
+        console.print("[dim]This downloads ~100MB and requires sudo for installation.[/dim]")
+        sys.stdout.flush()
+        ret = os.system("curl -fL https://ollama.com/install.sh | sh")
         if ret != 0:
             console.print("[red]Ollama installation failed.[/red]")
             console.print("[dim]Install manually: https://ollama.com/download[/dim]")
@@ -67,22 +69,28 @@ def _ensure_ollama():
         server_running = False
 
     if not server_running:
-        console.print("[dim]Starting Ollama server...[/dim]", flush=True)
+        console.print("[dim]Starting Ollama server...[/dim]")
+        sys.stdout.flush()
 
         # Try multiple strategies in order
         strategies = [
             # 1. systemctl without sudo (user may have permissions)
-            ["systemctl", "start", "ollama"],
+            (["systemctl", "start", "ollama"], False),
             # 2. sudo systemctl (ollama official install = root systemd service)
-            ["sudo", "systemctl", "start", "ollama"],
+            (["sudo", "systemctl", "start", "ollama"], True),
         ]
 
-        for cmd in strategies:
+        for cmd, needs_sudo in strategies:
             try:
-                r = subprocess.run(cmd, capture_output=True, timeout=10)
+                if needs_sudo:
+                    console.print("[dim]  Trying sudo (you may be prompted for password)...[/dim]")
+                    sys.stdout.flush()
+                r = subprocess.run(cmd, timeout=15)
                 if r.returncode == 0:
                     time.sleep(2)
                     break
+            except subprocess.TimeoutExpired:
+                continue
             except Exception:
                 continue
 
