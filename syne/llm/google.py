@@ -278,8 +278,13 @@ class GoogleProvider(LLMProvider):
                         continue
                     try:
                         chunk = json.loads(data_str)
+                        # CCA may wrap in response envelope
+                        inner = chunk.get("response", chunk)
+                        # Debug: log first chunk structure
+                        if not text_parts and not thinking_parts and not tool_calls:
+                            logger.debug(f"CCA streaming first chunk keys: {list(chunk.keys())}, inner keys: {list(inner.keys()) if isinstance(inner, dict) else 'N/A'}")
                         # Extract text, thinking, and function calls from candidates
-                        for candidate in chunk.get("candidates", []):
+                        for candidate in inner.get("candidates", []):
                             for part in candidate.get("content", {}).get("parts", []):
                                 if part.get("thought") and "text" in part:
                                     thinking_parts.append(part["text"])
@@ -293,8 +298,8 @@ class GoogleProvider(LLMProvider):
                                             "arguments": json.dumps(fc.get("args", {})),
                                         }
                                     })
-                        # Extract usage
-                        usage = chunk.get("usageMetadata", {})
+                        # Extract usage (may be in inner or chunk)
+                        usage = inner.get("usageMetadata", chunk.get("usageMetadata", {}))
                         if usage.get("promptTokenCount"):
                             input_tokens = usage["promptTokenCount"]
                         if usage.get("candidatesTokenCount"):
@@ -302,8 +307,13 @@ class GoogleProvider(LLMProvider):
                     except json.JSONDecodeError:
                         continue
 
+        content = "".join(text_parts)
+        thinking = "".join(thinking_parts) if thinking_parts else None
+        if not content and not tool_calls:
+            logger.warning(f"CCA streaming empty result for {model}: thinking={len(thinking_parts)} parts, text={len(text_parts)} parts, tools={len(tool_calls)}, in={input_tokens}, out={output_tokens}")
+
         return ChatResponse(
-            content="".join(text_parts),
+            content=content,
             model=model,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
