@@ -3473,11 +3473,22 @@ Or just send me a message!"""
                     "driver": driver,
                     "step": "model_id",
                 }
-                await query.edit_message_text(
-                    f"🤖 <b>Add Model — {driver_label}</b>\n\n"
-                    f"Send the model ID (e.g. <code>{examples.split(', ')[0]}</code>).\n\n"
-                    f"Available: {examples}\n\n"
-                    f"Send /cancel to abort.",
+                # Answer callback, then send NEW message (edit_message_text
+                # fails with "can't find end of entity" when the previous
+                # message used Markdown and this one uses HTML).
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                example_first = examples.split(", ")[0]
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"🤖 <b>Add Model — {driver_label}</b>\n\n"
+                        f"Send the model ID (e.g. <code>{example_first}</code>).\n\n"
+                        f"Available: {examples}\n\n"
+                        f"Send /cancel to abort."
+                    ),
                     parse_mode="HTML",
                 )
 
@@ -3516,10 +3527,17 @@ Or just send me a message!"""
                     "driver": driver,
                     "step": "model_id",
                 }
-                await query.edit_message_text(
-                    f"🧠 <b>Add Embedding — {driver_label}</b>\n\n"
-                    "Send the model ID (e.g. <code>qwen3-embedding:0.6b</code>, <code>BAAI/bge-base-en-v1.5</code>).\n\n"
-                    "Send /cancel to abort.",
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await context.bot.send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        f"🧠 <b>Add Embedding — {driver_label}</b>\n\n"
+                        "Send the model ID (e.g. <code>qwen3-embedding:0.6b</code>, <code>BAAI/bge-base-en-v1.5</code>).\n\n"
+                        "Send /cancel to abort."
+                    ),
                     parse_mode="HTML",
                 )
 
