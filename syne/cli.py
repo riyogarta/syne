@@ -1962,10 +1962,10 @@ def reauth():
             from .auth.google_oauth import login_google
             try:
                 creds = await login_google()
-                await set_config("credential.google_access_token", creds.token)
+                await set_config("credential.google_access_token", creds.access_token)
                 await set_config("credential.google_refresh_token", creds.refresh_token)
-                if creds.expiry:
-                    await set_config("credential.google_token_expiry", creds.expiry.isoformat())
+                await set_config("credential.google_expires_at", creds.expires_at)
+                await set_config("credential.google_project_id", creds.project_id)
                 console.print("[green]✅ Google OAuth tokens refreshed.[/green]")
             except Exception as e:
                 console.print(f"[red]❌ Google re-auth failed: {e}[/red]")
