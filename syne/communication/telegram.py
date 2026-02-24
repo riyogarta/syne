@@ -2318,10 +2318,10 @@ Or just send me a message!"""
             state["step"] = "label"
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"Model ID: `{text}`\n\n"
-                     f"Now send a **display label** (e.g. `Gemini 2.5 Flash`, `GPT-5.2`).\n"
-                     f"Or send `.` to use model ID as label.",
-                parse_mode="Markdown",
+                text=f"Model ID: <code>{text}</code>\n\n"
+                     f"Now send a <b>display label</b> (e.g. <code>Gemini 2.5 Flash</code>, <code>GPT-5.2</code>).\n"
+                     f"Or send <code>.</code> to use model ID as label.",
+                parse_mode="HTML",
             )
             return True
 
@@ -2333,10 +2333,10 @@ Or just send me a message!"""
             default_ctx = self._DEFAULT_CONTEXT_WINDOWS.get(driver, 128000)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"Label: **{label}**\n\n"
-                     f"Send **context window** in tokens (number only).\n"
-                     f"Or send `.` for default ({default_ctx:,}).",
-                parse_mode="Markdown",
+                text=f"Label: <b>{label}</b>\n\n"
+                     f"Send <b>context window</b> in tokens (number only).\n"
+                     f"Or send <code>.</code> for default ({default_ctx:,}).",
+                parse_mode="HTML",
             )
             return True
 
@@ -2348,7 +2348,7 @@ Or just send me a message!"""
                 try:
                     ctx_window = int(text.replace(",", "").replace("_", ""))
                 except ValueError:
-                    await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number, or `.` for default.")
+                    await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number, or <code>.</code> for default.", parse_mode="HTML")
                     return True
 
             # Build model entry and save
@@ -2369,8 +2369,8 @@ Or just send me a message!"""
             if existing:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ Model `{entry['key']}` already exists. Remove it first or use a different model ID.",
-                    parse_mode="Markdown",
+                    text=f"⚠️ Model <code>{entry['key']}</code> already exists. Remove it first or use a different model ID.",
+                    parse_mode="HTML",
                 )
                 self._auth_state.pop(user_id, None)
                 return True
@@ -2382,15 +2382,15 @@ Or just send me a message!"""
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"✅ **Model added:**\n\n"
-                    f"• Key: `{entry['key']}`\n"
+                    f"✅ <b>Model added:</b>\n\n"
+                    f"• Key: <code>{entry['key']}</code>\n"
                     f"• Label: {entry['label']}\n"
                     f"• Driver: {driver}\n"
                     f"• Auth: {auth_type}\n"
                     f"• Context: {ctx_display}\n\n"
                     f"Use /model to switch to it."
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             logger.info(f"Model added: {entry}")
             self._auth_state.pop(user_id, None)
@@ -2409,9 +2409,9 @@ Or just send me a message!"""
             state["step"] = "dimensions"
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"Model ID: `{text}`\n\n"
-                     f"Send **embedding dimensions** (number only, e.g. `768`, `1024`, `1536`).",
-                parse_mode="Markdown",
+                text=f"Model ID: <code>{text}</code>\n\n"
+                     f"Send <b>embedding dimensions</b> (number only, e.g. <code>768</code>, <code>1024</code>, <code>1536</code>).",
+                parse_mode="HTML",
             )
             return True
 
@@ -2419,31 +2419,30 @@ Or just send me a message!"""
             try:
                 dims = int(text.replace(",", ""))
             except ValueError:
-                await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number (e.g. `768`, `1024`).")
+                await bot.send_message(chat_id=chat_id, text="⚠️ Enter a number (e.g. <code>768</code>, <code>1024</code>).", parse_mode="HTML")
                 return True
 
             state["dimensions"] = dims
             driver = state.get("driver", "")
 
             if driver == "ollama":
-                # Ollama doesn't need base_url prompt — default localhost
                 state["step"] = "label"
                 state["base_url"] = "http://localhost:11434"
                 await bot.send_message(
                     chat_id=chat_id,
                     text=f"Dimensions: {dims}\n\n"
-                         f"Send a **display label** (e.g. `Ollama — qwen3 (local)`).\n"
-                         f"Or send `.` to auto-generate.",
-                    parse_mode="Markdown",
+                         f"Send a <b>display label</b> (e.g. <code>Ollama — qwen3 (local)</code>).\n"
+                         f"Or send <code>.</code> to auto-generate.",
+                    parse_mode="HTML",
                 )
             else:
                 state["step"] = "label"
                 await bot.send_message(
                     chat_id=chat_id,
                     text=f"Dimensions: {dims}\n\n"
-                         f"Send a **display label** (e.g. `Together — BGE Base`).\n"
-                         f"Or send `.` to auto-generate.",
-                    parse_mode="Markdown",
+                         f"Send a <b>display label</b> (e.g. <code>Together — BGE Base</code>).\n"
+                         f"Or send <code>.</code> to auto-generate.",
+                    parse_mode="HTML",
                 )
             return True
 
@@ -2476,8 +2475,8 @@ Or just send me a message!"""
             if existing:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"⚠️ Embedding `{entry['key']}` already exists.",
-                    parse_mode="Markdown",
+                    text=f"⚠️ Embedding <code>{entry['key']}</code> already exists.",
+                    parse_mode="HTML",
                 )
                 self._auth_state.pop(user_id, None)
                 return True
@@ -2488,15 +2487,15 @@ Or just send me a message!"""
             await bot.send_message(
                 chat_id=chat_id,
                 text=(
-                    f"✅ **Embedding added:**\n\n"
-                    f"• Key: `{entry['key']}`\n"
+                    f"✅ <b>Embedding added:</b>\n\n"
+                    f"• Key: <code>{entry['key']}</code>\n"
                     f"• Label: {entry['label']}\n"
                     f"• Driver: {driver}\n"
                     f"• Dimensions: {entry['dimensions']}\n"
                     f"• Cost: {cost}\n\n"
                     f"Use /embedding to switch to it."
                 ),
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
             logger.info(f"Embedding added: {entry}")
             self._auth_state.pop(user_id, None)
@@ -3460,16 +3459,24 @@ Or just send me a message!"""
                 # User selected a driver — ask for model details
                 driver = auth_action.split(":", 1)[1]
                 logger.info(f"Add model: driver={driver}, user={user.id}")
+                # Find friendly label for this driver
+                driver_labels = {
+                    "google_cca": "Google (OAuth)",
+                    "codex": "OpenAI / Codex (OAuth)",
+                    "openai_compat": "OpenAI-compatible (API Key)",
+                    "groq": "Groq (API Key)",
+                }
+                driver_label = driver_labels.get(driver, driver)
                 self._auth_state[user.id] = {
                     "type": "addmodel",
                     "driver": driver,
                     "step": "model_id",
                 }
                 await query.edit_message_text(
-                    f"🤖 **Add Model — {driver}**\n\n"
-                    "Send the model ID (e.g. `gemini-2.5-flash`, `gpt-5.2`, `llama-3.3-70b-versatile`).\n\n"
+                    f"🤖 <b>Add Model — {driver_label}</b>\n\n"
+                    "Send the model ID (e.g. <code>gemini-2.5-flash</code>, <code>gpt-5.2</code>, <code>llama-3.3-70b-versatile</code>).\n\n"
                     "Send /cancel to abort.",
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
 
             elif auth_action == "addembed_menu":
@@ -3496,16 +3503,22 @@ Or just send me a message!"""
                 # User selected embedding driver — ask for model details
                 driver = auth_action.split(":", 1)[1]
                 logger.info(f"Add embedding: driver={driver}, user={user.id}")
+                driver_labels = {
+                    "ollama": "Ollama (local, FREE)",
+                    "together": "Together AI (API Key)",
+                    "openai_compat": "OpenAI-compatible (API Key)",
+                }
+                driver_label = driver_labels.get(driver, driver)
                 self._auth_state[user.id] = {
                     "type": "addembed",
                     "driver": driver,
                     "step": "model_id",
                 }
                 await query.edit_message_text(
-                    f"🧠 **Add Embedding — {driver}**\n\n"
-                    "Send the model ID (e.g. `qwen3-embedding:0.6b`, `BAAI/bge-base-en-v1.5`).\n\n"
+                    f"🧠 <b>Add Embedding — {driver_label}</b>\n\n"
+                    "Send the model ID (e.g. <code>qwen3-embedding:0.6b</code>, <code>BAAI/bge-base-en-v1.5</code>).\n\n"
                     "Send /cancel to abort.",
-                    parse_mode="Markdown",
+                    parse_mode="HTML",
                 )
 
         elif data.startswith("brw:"):
