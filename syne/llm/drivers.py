@@ -364,7 +364,7 @@ async def test_model(provider: LLMProvider, timeout: int = 10) -> tuple[bool, st
     
     try:
         response = await asyncio.wait_for(
-            provider.chat(test_messages, max_tokens=100),
+            provider.chat(test_messages),
             timeout=timeout,
         )
         
