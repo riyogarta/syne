@@ -494,6 +494,28 @@ async def list_users(platform: str = None, access_level: str = None) -> list[dic
         return results
 
 
+async def get_first_owner(platform: str = "telegram") -> Optional[dict]:
+    """Get the first owner (by created_at) — this user is immutable via UI."""
+    import json
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            """SELECT id, name, display_name, platform, platform_id, access_level, preferences, aliases
+               FROM users WHERE platform = $1 AND access_level = 'owner'
+               ORDER BY created_at ASC LIMIT 1""",
+            platform,
+        )
+        if not row:
+            return None
+        result = dict(row)
+        for field in ['preferences', 'aliases']:
+            if field in result and isinstance(result[field], str):
+                try:
+                    result[field] = json.loads(result[field])
+                except (json.JSONDecodeError, TypeError):
+                    result[field] = {}
+        return result
+
+
 # ============================================================
 # CONFIG
 # ============================================================

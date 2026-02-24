@@ -2435,7 +2435,7 @@ Or just send me a message!"""
             )
             return
 
-        from ..db.models import get_user, update_user
+        from ..db.models import get_user, update_user, get_first_owner
 
         # Check user exists
         db_user = await get_user("telegram", member_id)
@@ -2447,7 +2447,17 @@ Or just send me a message!"""
             )
             return
 
-        # Prevent owner from accidentally downgrading themselves
+        # IMMUTABLE: First owner cannot be changed via UI — ever
+        first_owner = await get_first_owner("telegram")
+        if first_owner and db_user.get("platform_id") == first_owner.get("platform_id"):
+            if level != "owner":
+                await update.message.reply_text(
+                    "🔒 The original owner's access level cannot be changed.\n"
+                    "This is a permanent protection — only direct database access can modify it."
+                )
+                return
+
+        # Prevent any owner from downgrading themselves
         current_user = update.effective_user
         if member_id == str(current_user.id) and level != "owner":
             await update.message.reply_text(
