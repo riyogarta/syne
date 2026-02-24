@@ -67,7 +67,7 @@ def _ensure_ollama():
         server_running = False
 
     if not server_running:
-        console.print("[dim]Starting Ollama server...[/dim]")
+        console.print("[dim]Starting Ollama server...[/dim]", flush=True)
 
         # Try multiple strategies in order
         strategies = [
@@ -137,8 +137,10 @@ def _ensure_ollama():
         pass
 
     # 4. Pull model
-    console.print(f"[bold]Downloading {model_name} (~700MB)...[/bold]")
+    console.print(f"\n[bold]Downloading {model_name} (~700MB)...[/bold]")
     console.print("[dim]This may take a few minutes depending on your connection.[/dim]")
+    sys.stdout.flush()
+    sys.stderr.flush()
     ret = os.system(f"ollama pull {model_name}")
     if ret != 0:
         console.print(f"[red]Failed to pull {model_name}.[/red]")
