@@ -181,17 +181,12 @@ class Scheduler:
                     
                     # Update task based on type
                     if schedule_type == "once":
-                        # Disable one-time tasks
+                        # Delete one-time tasks after execution — no reason to keep them
                         await conn.execute(
-                            """
-                            UPDATE scheduled_tasks
-                            SET enabled = false,
-                                last_run = $1,
-                                run_count = run_count + 1
-                            WHERE id = $2
-                            """,
-                            now, task_id,
+                            "DELETE FROM scheduled_tasks WHERE id = $1",
+                            task_id,
                         )
+                        logger.info(f"Deleted one-time task {task_id} ({task_name}) after execution")
                     else:
                         # Calculate next run for interval/cron
                         next_run = _calculate_next_run(schedule_type, schedule_value, now)
