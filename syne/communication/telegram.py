@@ -3460,13 +3460,14 @@ Or just send me a message!"""
                 driver = auth_action.split(":", 1)[1]
                 logger.info(f"Add model: driver={driver}, user={user.id}")
                 # Find friendly label for this driver
-                driver_labels = {
-                    "google_cca": "Google (OAuth)",
-                    "codex": "OpenAI / Codex (OAuth)",
-                    "openai_compat": "OpenAI-compatible (API Key)",
-                    "groq": "Groq (API Key)",
+                # Driver metadata: label + example model IDs
+                _driver_meta = {
+                    "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
+                    "codex": ("OpenAI / Codex (OAuth)", "gpt-5.2, o3-pro"),
+                    "openai_compat": ("OpenAI-compatible (API Key)", "meta-llama/llama-4-maverick"),
+                    "groq": ("Groq (API Key)", "llama-3.3-70b-versatile, qwen/qwen3-32b"),
                 }
-                driver_label = driver_labels.get(driver, driver)
+                driver_label, examples = _driver_meta.get(driver, (driver, "model-name"))
                 self._auth_state[user.id] = {
                     "type": "addmodel",
                     "driver": driver,
@@ -3474,8 +3475,9 @@ Or just send me a message!"""
                 }
                 await query.edit_message_text(
                     f"🤖 <b>Add Model — {driver_label}</b>\n\n"
-                    "Send the model ID (e.g. <code>gemini-2.5-flash</code>, <code>gpt-5.2</code>, <code>llama-3.3-70b-versatile</code>).\n\n"
-                    "Send /cancel to abort.",
+                    f"Send the model ID (e.g. <code>{examples.split(', ')[0]}</code>).\n\n"
+                    f"Available: {examples}\n\n"
+                    f"Send /cancel to abort.",
                     parse_mode="HTML",
                 )
 
