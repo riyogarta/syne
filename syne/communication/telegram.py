@@ -2041,7 +2041,7 @@ Or just send me a message!"""
         try:
             # Create provider and test it
             provider = await create_hybrid_provider(model_entry)
-            success, error = await test_model(provider, timeout=10)
+            success, error = await test_model(provider, timeout=120)
             
             if success:
                 # Test passed — save new model
