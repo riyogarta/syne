@@ -3272,6 +3272,7 @@ Or just send me a message!"""
             # Auth credential management callbacks
             auth_action = data.split(":", 1)[1] if ":" in data else ""
             chat_id = query.message.chat_id
+            logger.info(f"Auth callback: action={auth_action}, data={data}, user={user.id}")
 
             if auth_action == "oauth_menu":
                 # Show OAuth provider selection from DB
@@ -3458,6 +3459,7 @@ Or just send me a message!"""
             elif auth_action.startswith("addmodel:"):
                 # User selected a driver — ask for model details
                 driver = auth_action.split(":", 1)[1]
+                logger.info(f"Add model: driver={driver}, user={user.id}")
                 self._auth_state[user.id] = {
                     "type": "addmodel",
                     "driver": driver,
@@ -3493,6 +3495,7 @@ Or just send me a message!"""
             elif auth_action.startswith("addembed:"):
                 # User selected embedding driver — ask for model details
                 driver = auth_action.split(":", 1)[1]
+                logger.info(f"Add embedding: driver={driver}, user={user.id}")
                 self._auth_state[user.id] = {
                     "type": "addembed",
                     "driver": driver,
