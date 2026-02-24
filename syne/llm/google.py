@@ -83,6 +83,17 @@ class GoogleProvider(LLMProvider):
 
         self._use_cca = credentials is not None
 
+    # Class-level lock — serialize ALL CCA requests across all instances.
+    # Google CCA has very tight per-second rate limits (~1 req/36s).
+    # Without this, concurrent requests (model test + chat) cause 429s.
+    _cca_lock: Optional[asyncio.Lock] = None
+
+    @classmethod
+    def _get_cca_lock(cls) -> asyncio.Lock:
+        if cls._cca_lock is None:
+            cls._cca_lock = asyncio.Lock()
+        return cls._cca_lock
+
     @property
     def name(self) -> str:
         return "google"
@@ -188,7 +199,8 @@ class GoogleProvider(LLMProvider):
         for attempt in range(max_retries):
             try:
                 if self._use_cca:
-                    return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
+                    async with self._get_cca_lock():
+                        return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
                 else:
                     return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
             except httpx.HTTPStatusError as e:
