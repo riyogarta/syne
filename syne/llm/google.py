@@ -182,7 +182,8 @@ class GoogleProvider(LLMProvider):
         thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
-        max_retries = 3
+        max_retries = 4
+        _retry_delays = [10, 30, 60, 60]  # seconds — CCA rate limits need longer cooldown
 
         for attempt in range(max_retries):
             try:
@@ -192,7 +193,7 @@ class GoogleProvider(LLMProvider):
                     return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 429 and attempt < max_retries - 1:
-                    wait = (2 ** attempt) * 2  # 2s, 4s, 8s
+                    wait = _retry_delays[attempt]
                     logger.warning(f"Rate limited (429), retrying in {wait}s (attempt {attempt + 1}/{max_retries})")
                     await asyncio.sleep(wait)
                     continue
