@@ -57,24 +57,35 @@ async def wait_for_auth_code(
                 code_event.set()
                 return
 
-    # Thread 2: Read stdin directly (blocking, in a real thread)
+    # Thread 2: Read stdin line-by-line with select for non-blocking check
     def _read_stdin():
-        """Read from stdin using low-level read to avoid input() issues."""
+        """Read callback URL from stdin. Exits promptly when code_event is set."""
+        import select
+
         sys.stdout.write(">>> Paste URL: ")
         sys.stdout.flush()
 
         buf = ""
         while not code_event.is_set():
             try:
+                # Use select to avoid blocking forever on read(1).
+                # This lets us check code_event regularly.
+                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if not ready:
+                    continue  # timeout — loop back and check code_event
+
                 ch = sys.stdin.read(1)
                 if not ch:  # EOF
                     break
                 if ch in ("\n", "\r"):
                     line = buf.strip()
                     buf = ""
+                    if code_event.is_set():
+                        return  # Code already received via callback
                     if not line:
-                        sys.stdout.write(">>> Paste URL: ")
-                        sys.stdout.flush()
+                        if not code_event.is_set():
+                            sys.stdout.write(">>> Paste URL: ")
+                            sys.stdout.flush()
                         continue
 
                     code = _extract_code_from_url(line)
@@ -83,6 +94,8 @@ async def wait_for_auth_code(
                         code_event.set()
                         return
                     else:
+                        if code_event.is_set():
+                            return  # Don't print error if already authenticated
                         if "/authorize" in line or "oauth2/v2/auth" in line:
                             sys.stdout.write(
                                 "\n⚠  That's the authorize URL. You need the REDIRECT URL.\n"
@@ -98,7 +111,7 @@ async def wait_for_auth_code(
                         sys.stdout.flush()
                 else:
                     buf += ch
-            except (EOFError, OSError, KeyboardInterrupt):
+            except (EOFError, OSError, KeyboardInterrupt, ValueError):
                 return
 
     # Start stdin reader thread
