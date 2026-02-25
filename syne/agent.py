@@ -98,23 +98,9 @@ class SyneAgent:
         logger.info("Rate limiter initialized.")
 
         # 7. Sub-agent Manager
-        from .boot import get_full_prompt
-        from .communication.inbound import InboundContext
-        # Build prompt with tools and abilities for owner access level
-        tool_schemas = self.tools.to_openai_schema("owner")
-        ability_schemas = self.abilities.to_openai_schema("owner")
-        # Sub-agents run in an internal context (no channel, no group)
-        subagent_inbound = InboundContext(
-            channel="internal",
-            platform="internal",
-            chat_type="direct",
-        )
-        system_prompt = await get_full_prompt(
-            user={"access_level": "owner"},
-            tools=tool_schemas,
-            abilities=ability_schemas,
-            inbound=subagent_inbound,
-        )
+        from .boot import build_subagent_prompt
+        # Lightweight prompt — identity + rules only (avoids token limit errors)
+        system_prompt = await build_subagent_prompt()
         self.subagents = SubAgentManager(
             provider=self.provider,
             system_prompt=system_prompt,

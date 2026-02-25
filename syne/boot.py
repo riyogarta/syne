@@ -623,3 +623,46 @@ async def get_full_prompt(
         prompt += "\n" + extra_context
 
     return prompt
+
+
+async def build_subagent_prompt() -> str:
+    """Build a lightweight system prompt for sub-agents.
+
+    Sub-agents only need: identity, rules, and basic workspace info.
+    They do NOT need: full tool docs (they get schemas), config dump,
+    channel context, soul management instructions, memory behavior, etc.
+
+    This keeps the prompt small enough to avoid token limit errors
+    while still giving the sub-agent proper identity and guardrails.
+    """
+    identity = await models.get_identity()
+    rules = await models.get_rules()
+
+    parts = []
+
+    # [1] IDENTITY — minimal
+    bot_name = identity.get('name', 'Syne')
+    parts.append(f"# Identity")
+    parts.append(f"You are {bot_name}, an AI assistant.")
+    if personality := identity.get("personality"):
+        parts.append(f"Personality: {personality}")
+    parts.append("")
+
+    # [2] RULES — all rules apply to sub-agents too
+    if rules:
+        parts.append("# Rules (Non-Negotiable)")
+        for rule in rules:
+            severity_marker = "🔴" if rule["severity"] == "hard" else "🟡"
+            parts.append(f"- {severity_marker} [{rule['code']}] {rule['name']}: {rule['description']}")
+        parts.append("")
+
+    # [3] WORKSPACE — minimal
+    parts.append(_get_workspace_section())
+
+    # [4] FUNCTION CALLING — minimal
+    parts.append("# Function Calling")
+    parts.append("- Use tools when the task requires them. Never fake or simulate tool output.")
+    parts.append("- After executing a tool, report the ACTUAL result, not what you imagine.")
+    parts.append("")
+
+    return "\n".join(parts)
