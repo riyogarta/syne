@@ -698,14 +698,6 @@ class TelegramChannel:
             
             owner_chat_id = int(owner_row["platform_id"])
             
-            # Don't spam — track notifications
-            pending_key = f"pending_group:{chat.id}"
-            if not hasattr(self, '_pending_notified'):
-                self._pending_notified = set()
-            if pending_key in self._pending_notified:
-                return
-            self._pending_notified.add(pending_key)
-            
             buttons = [
                 [
                     InlineKeyboardButton("✅ Approve", callback_data=f"group_approve:{chat.id}"),
@@ -732,10 +724,7 @@ class TelegramChannel:
         # Bot was removed from group
         elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
             logger.info(f"Bot removed from group: {chat.title} ({chat.id})")
-            # Clean up pending tracker
-            pending_key = f"pending_group:{chat.id}"
-            if hasattr(self, '_pending_notified'):
-                self._pending_notified.discard(pending_key)
+
 
     async def _get_trigger_name(self) -> str:
         """Get the bot trigger name from config or identity."""
