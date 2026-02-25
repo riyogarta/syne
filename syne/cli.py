@@ -1207,7 +1207,7 @@ def status():
             # Scheduler/cron
             from .db.connection import get_connection
             async with get_connection() as conn:
-                sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM schedules WHERE enabled = true")
+                sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM scheduled_tasks WHERE enabled = true")
             if sched_count and sched_count["c"] > 0:
                 table.add_row("Scheduled Jobs", f"{sched_count['c']} active")
             else:
