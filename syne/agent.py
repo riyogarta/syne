@@ -28,7 +28,6 @@ from .context import ContextManager
 from .conversation import ConversationManager
 from .subagent import SubAgentManager
 from .security import check_command_safety, check_rule_removal
-from .ratelimit import init_rate_limiter_from_config
 
 logger = logging.getLogger("syne.agent")
 
@@ -96,7 +95,6 @@ class SyneAgent:
         logger.info(f"Context window: {max_context} tokens")
 
         # 6.5. Rate Limiter
-        await init_rate_limiter_from_config()
         logger.info("Rate limiter initialized.")
 
         # 7. Sub-agent Manager

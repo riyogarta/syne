@@ -31,7 +31,7 @@ from ..db.models import (
     set_config,
     update_user,
 )
-from ..ratelimit import check_rate_limit
+
 
 logger = logging.getLogger("syne.telegram")
 
@@ -337,19 +337,6 @@ class TelegramChannel:
         chat = update.effective_chat
         text = update.message.text
         is_group = chat.type in ("group", "supergroup")
-
-        # ═══════════════════════════════════════════════════════════════
-        # RATE LIMITING: Check before processing
-        # Get user's access level for rate limit check (owner may be exempt)
-        # ═══════════════════════════════════════════════════════════════
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        
-        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
-        if not allowed:
-            logger.info(f"Rate limited user {user.id}: {rate_msg}")
-            await update.message.reply_text(f"⏱️ {rate_msg}")
-            return
 
         # ═══════════════════════════════════════════════════════════════
         # AUTH FLOW INTERCEPT: If user is in auth flow, handle credential
@@ -804,12 +791,6 @@ class TelegramChannel:
         is_group = chat.type in ("group", "supergroup")
 
         # Rate limiting
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
-        if not allowed:
-            await update.message.reply_text(f"⏱️ {rate_msg}")
-            return
 
         # Group checks (same as text messages)
         if is_group:
@@ -897,12 +878,6 @@ class TelegramChannel:
         is_group = chat.type in ("group", "supergroup")
 
         # Rate limiting
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
-        if not allowed:
-            await update.message.reply_text(f"⏱️ {rate_msg}")
-            return
 
         # Group checks — voice in groups requires mention/reply context
         if is_group:
@@ -1011,12 +986,6 @@ class TelegramChannel:
         is_group = chat.type in ("group", "supergroup")
 
         # Rate limiting
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
-        if not allowed:
-            await update.message.reply_text(f"⏱️ {rate_msg}")
-            return
 
         # Group checks — documents in groups require mention/reply
         if is_group:
@@ -1143,12 +1112,6 @@ class TelegramChannel:
         is_group = chat.type in ("group", "supergroup")
 
         # Rate limiting
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        allowed, rate_msg = check_rate_limit(str(user.id), access_level)
-        if not allowed:
-            await update.message.reply_text(f"⏱️ {rate_msg}")
-            return
 
         # Group checks
         if is_group and not self._is_reply_to_bot(update):
