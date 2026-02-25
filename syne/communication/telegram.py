@@ -101,6 +101,8 @@ class TelegramChannel:
         self._browse_paths: dict[str, str] = {}
         # Auth flow state: {telegram_user_id: {"type": "oauth"|"apikey", "provider": str, ...}}
         self._auth_state: dict[int, dict] = {}
+        # Active processing tasks per chat_id — for /cancel support
+        self._active_tasks: dict[int, asyncio.Task] = {}
 
     async def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
         """Build InboundContext from a Telegram Update. Used by ALL handlers.
@@ -441,6 +443,8 @@ class TelegramChannel:
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
 
+        # Track this as an active task for /cancel support
+        self._active_tasks[chat.id] = asyncio.current_task()
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -525,6 +529,10 @@ class TelegramChannel:
                     if sent:
                         self._track_message(chat.id, sent.message_id, response[:100])
 
+            except asyncio.CancelledError:
+                logger.info(f"Processing cancelled by user for chat {chat.id}")
+                await update.message.reply_text("✋ Cancelled.")
+                return
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
                 # Classify by exception type first, then fall back to string matching
@@ -548,6 +556,8 @@ class TelegramChannel:
                         await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
                     else:
                         await update.message.reply_text("⚠️ Something went wrong. Check logs for details.")
+            finally:
+                self._active_tasks.pop(chat.id, None)
 
     async def _process_group_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
@@ -2209,11 +2219,25 @@ Or just send me a message!"""
         )
 
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /cancel command — abort auth flow."""
+        """Handle /cancel command — abort active operation or auth flow."""
         user = update.effective_user
+        chat = update.effective_chat
+        cancelled = False
+
+        # Cancel active processing task
+        task = self._active_tasks.get(chat.id)
+        if task and not task.done():
+            task.cancel()
+            self._active_tasks.pop(chat.id, None)
+            cancelled = True
+
+        # Cancel auth flow
         if user.id in self._auth_state:
             self._auth_state.pop(user.id, None)
-            await update.message.reply_text("👌 Auth flow cancelled.")
+            cancelled = True
+
+        if cancelled:
+            await update.message.reply_text("✋ Cancelled.")
         else:
             await update.message.reply_text("Nothing to cancel.")
 
