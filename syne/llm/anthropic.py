@@ -360,6 +360,11 @@ class AnthropicProvider(LLMProvider):
                     logger.error(f"Anthropic 400 Bad Request: {error_text}")
                     raise RuntimeError(f"Anthropic API error 400: {error_text}")
                 
+                if resp.status_code == 500:
+                    error_text = resp.text[:500]
+                    logger.error(f"Anthropic 500 Server Error: {error_text}")
+                    logger.debug(f"Request body model={body.get('model')}, messages_count={len(body.get('messages', []))}, has_tools={bool(body.get('tools'))}")
+                
                 resp.raise_for_status()
                 break
             else:
