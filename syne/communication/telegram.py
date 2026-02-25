@@ -259,6 +259,33 @@ class TelegramChannel:
 
         logger.info("Telegram bot started.")
 
+        # Check if this startup follows a /restart command → notify user
+        await self._notify_restart_complete()
+
+    async def _notify_restart_complete(self):
+        """Send 'restart done' notification if this startup follows a /restart command."""
+        import json, os, tempfile
+        restart_flag = os.path.join(tempfile.gettempdir(), "syne_restart_flag.json")
+        if not os.path.exists(restart_flag):
+            return
+        try:
+            with open(restart_flag) as f:
+                data = json.load(f)
+            chat_id = data.get("chat_id")
+            if chat_id:
+                await self.app.bot.send_message(
+                    chat_id=chat_id,
+                    text="✅ Syne restarted successfully.",
+                )
+                logger.info(f"Sent restart-complete notification to chat {chat_id}")
+        except Exception as e:
+            logger.warning(f"Failed to send restart notification: {e}")
+        finally:
+            try:
+                os.remove(restart_flag)
+            except OSError:
+                pass
+
     async def stop(self):
         """Stop the Telegram bot."""
         if self.app:
@@ -2084,6 +2111,15 @@ Or just send me a message!"""
 
         await update.message.reply_text("🔄 Restarting Syne...")
         logger.info(f"Restart requested by {user.id}")
+
+        # Save restart flag so we can notify when back up
+        import json, tempfile, os
+        restart_flag = os.path.join(tempfile.gettempdir(), "syne_restart_flag.json")
+        try:
+            with open(restart_flag, "w") as f:
+                json.dump({"chat_id": update.effective_chat.id, "user_id": user.id}, f)
+        except Exception as e:
+            logger.warning(f"Failed to save restart flag: {e}")
 
         import sys
         # Exit with non-zero code so systemd (Restart=on-failure) will restart us
