@@ -1217,9 +1217,19 @@ def status():
         except Exception as e:
             table.add_row("Provider", f"[red]Error: {e}[/red]")
 
-        # Telegram
-        tg = "✓ Configured" if settings.telegram_bot_token else "Not configured"
-        table.add_row("Telegram", tg)
+        # Telegram (check DB first, then env)
+        tg_status = "Not configured"
+        try:
+            from .db.credentials import get_telegram_bot_token
+            db_token = await get_telegram_bot_token()
+            if db_token:
+                tg_status = "✓ Configured"
+            elif settings.telegram_bot_token:
+                tg_status = "✓ Configured (env)"
+        except Exception:
+            if settings.telegram_bot_token:
+                tg_status = "✓ Configured (env)"
+        table.add_row("Telegram", tg_status)
 
         console.print(table)
 
