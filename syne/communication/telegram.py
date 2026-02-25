@@ -2536,7 +2536,7 @@ Or just send me a message!"""
         )
 
     async def _group_menu_members(self, query, group_id: str):
-        """Show group members list."""
+        """Show group members list with clickable edit buttons."""
         from ..db.models import get_group
         group = await get_group("telegram", group_id)
         if not group:
@@ -2548,15 +2548,61 @@ Or just send me a message!"""
         
         if not members:
             text = f"👥 <b>{name} — Members</b>\n\nNo members collected yet."
+            buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
         else:
-            text = f"👥 <b>{name} — Members</b>\n\n"
+            text = f"👥 <b>{name} — Members</b>\n\nTap a member to edit:"
+            buttons = []
             for mid, info in sorted(members.items(), key=lambda x: x[1].get("name", "")):
                 m_name = info.get("alias") or info.get("name", "Unknown")
                 access = info.get("access", "public")
                 emoji = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤"}.get(access, "👤")
-                text += f"{emoji} {m_name} ({mid}) — {access}\n"
+                buttons.append([InlineKeyboardButton(
+                    f"{emoji} {m_name} — {access}",
+                    callback_data=f"grp:member:{group_id}:{mid}",
+                )])
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")])
         
-        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _group_menu_member_detail(self, query, group_id: str, member_id: str):
+        """Show member detail with access level and alias options."""
+        from ..db.models import get_group
+        group = await get_group("telegram", group_id)
+        if not group:
+            await query.edit_message_text("❌ Group not found.")
+            return
+        
+        members = ((group.get("settings") or {}).get("members") or {})
+        info = members.get(member_id, {})
+        m_name = info.get("name", "Unknown")
+        alias = info.get("alias", "")
+        access = info.get("access", "public")
+        username = info.get("username", "")
+        
+        text = f"👤 <b>Member Detail</b>\n\n"
+        text += f"Name: {m_name}\n"
+        if username:
+            text += f"Username: @{username}\n"
+        text += f"ID: <code>{member_id}</code>\n"
+        if alias:
+            text += f"Alias: {alias}\n"
+        text += f"Access: <b>{access}</b>"
+        
+        # Access level buttons
+        levels = ["owner", "family", "public"]
+        access_buttons = []
+        for lvl in levels:
+            check = " ✓" if lvl == access else ""
+            access_buttons.append(InlineKeyboardButton(
+                f"{lvl}{check}", callback_data=f"grp:member_access:{group_id}:{member_id}:{lvl}"
+            ))
+        
+        buttons = [
+            access_buttons,
+            [InlineKeyboardButton("✏️ Set Alias", callback_data=f"grp:member_alias_prompt:{group_id}:{member_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"grp:members:{group_id}")],
+        ]
+        
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _group_menu_settings(self, query, group_id: str):
