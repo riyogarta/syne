@@ -599,7 +599,11 @@ class GoogleProvider(LLMProvider):
 
             async with httpx.AsyncClient(timeout=180) as client:
                 async with client.stream("POST", url, content=body_json, headers=headers) as resp:
-                    resp.raise_for_status()
+                    # Check status BEFORE consuming stream.
+                    # On error, read body for retry delay info, then raise.
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        resp.raise_for_status()
                     async for line in resp.aiter_lines():
                         if not line.startswith("data:"):
                             continue
