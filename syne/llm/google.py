@@ -681,7 +681,12 @@ class GoogleProvider(LLMProvider):
                 break  # Success
 
             except httpx.HTTPStatusError as e:
-                error_text = e.response.text if hasattr(e.response, 'text') else str(e)
+                # Streaming responses may not have body read yet
+                try:
+                    await e.response.aread()
+                    error_text = e.response.text
+                except Exception:
+                    error_text = str(e)
                 status = e.response.status_code
 
                 # #3: Check if retryable
