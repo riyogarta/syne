@@ -1529,7 +1529,7 @@ Or just send me a message!"""
         reasoning_visible = await get_config("session.reasoning_visible", False)
 
         # Context window and driver name from registry
-        context_window = active_model_entry.get("context_window", 128000) if active_model_entry else 128000
+        context_window = int(active_model_entry.get("context_window", 128000)) if active_model_entry else 128000
         provider_name = active_model_entry.get("driver", self.agent.provider.name) if active_model_entry else self.agent.provider.name
         
         # Get active embedding info
@@ -1911,7 +1911,7 @@ Or just send me a message!"""
         # Get current model label and context window
         current_model = next((m for m in models if m.get("key") == active_model_key), None)
         current_label = current_model.get("label", active_model_key) if current_model else active_model_key
-        ctx_window = current_model.get("context_window") if current_model else None
+        ctx_window = int(current_model.get("context_window", 0)) if current_model else None
         
         ctx_info = ""
         if ctx_window:
@@ -2094,7 +2094,7 @@ Or just send me a message!"""
             await set_config("provider.chat_model", model_entry.get("model_id", model_key))
             
             # Auto-adjust compaction threshold based on context window
-            ctx_window = model_entry.get("context_window")
+            ctx_window = int(model_entry.get("context_window", 0))
             if ctx_window:
                 new_threshold = int(ctx_window * 0.75 * 3.5)
                 await set_config("session.compaction_threshold", new_threshold)
