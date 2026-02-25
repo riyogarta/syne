@@ -95,9 +95,12 @@ class MemoryEngine:
                 SELECT
                     id, content, category, source, importance,
                     access_count, created_at,
+                    COALESCE(permanent, false) as permanent,
+                    COALESCE(recall_count, 1) as recall_count,
                     1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE {where}
+                  AND (COALESCE(permanent, false) = true OR COALESCE(recall_count, 1) > 0)
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
             """, *params)
@@ -119,6 +122,17 @@ class MemoryEngine:
                     
                     results.append(dict(row))
                     ids_to_update.append(row["id"])
+
+            # Sort by combined score: similarity (primary) + recall_count boost
+            # Higher recall_count = more frequently relevant = slight priority boost
+            if results:
+                for r in results:
+                    rc = r.get("recall_count", 1)
+                    # Boost: log2(recall_count+1) * 0.02 — subtle but meaningful
+                    # rc=1 → +0.02, rc=5 → +0.05, rc=20 → +0.09, rc=100 → +0.13
+                    import math
+                    r["_score"] = r["similarity"] + math.log2(max(rc, 1) + 1) * 0.02
+                results.sort(key=lambda r: r["_score"], reverse=True)
 
             # Update access stats + recall_count (for non-permanent memories)
             if ids_to_update:
