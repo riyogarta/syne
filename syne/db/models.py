@@ -263,7 +263,17 @@ async def get_group(platform: str, platform_group_id: str) -> Optional[dict]:
             SELECT id, platform, platform_group_id, name, enabled, require_mention, allow_from, settings
             FROM groups WHERE platform = $1 AND platform_group_id = $2
         """, platform, platform_group_id)
-        return dict(row) if row else None
+        if not row:
+            return None
+        result = dict(row)
+        # Ensure settings is always a dict (asyncpg may return jsonb as str in some configs)
+        if isinstance(result.get("settings"), str):
+            import json
+            try:
+                result["settings"] = json.loads(result["settings"])
+            except (ValueError, TypeError):
+                result["settings"] = {}
+        return result
 
 
 async def create_group(
