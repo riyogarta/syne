@@ -724,6 +724,18 @@ class TelegramChannel:
         # Bot was removed from group
         elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
             logger.info(f"Bot removed from group: {chat.title} ({chat.id})")
+            
+            # Delete group from DB — clean slate if re-added later
+            from ..db.connection import get_connection
+            try:
+                async with get_connection() as conn:
+                    await conn.execute(
+                        "DELETE FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                        str(chat.id),
+                    )
+                logger.info(f"Deleted group {chat.id} from database")
+            except Exception as e:
+                logger.error(f"Failed to delete group {chat.id}: {e}")
 
 
     async def _get_trigger_name(self) -> str:
