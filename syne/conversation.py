@@ -498,6 +498,11 @@ class Conversation:
                     if media_path and hasattr(self, '_pending_media'):
                         self._pending_media.append(media_path)
 
+                # Strip server paths from tool results before LLM sees them
+                # (prevents LLM from echoing /home/syne/... paths to users)
+                from .communication.outbound import strip_server_paths
+                result = strip_server_paths(str(result))
+
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id

@@ -351,7 +351,9 @@ async def file_write_handler(
     size = len(content.encode("utf-8"))
     logger.info(f"file_write: {file_path} ({size} bytes)")
     
-    return f"✅ File written: {path} ({size:,} bytes)"
+    # Return filename only — never expose server paths to LLM (which may echo them to users)
+    display_name = file_path.name
+    return f"✅ File written: {display_name} ({size:,} bytes)"
 
 
 # ── Tool Registration Dicts ──
