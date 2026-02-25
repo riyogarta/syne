@@ -5,6 +5,32 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# ════════════════════════════════════════════════════════
+# LLM Exception Hierarchy — classify errors by type,
+# not by string matching.  telegram.py catches these.
+# ════════════════════════════════════════════════════════
+
+class LLMError(Exception):
+    """Base class for all LLM provider errors."""
+    pass
+
+class LLMRateLimitError(LLMError):
+    """429 — rate limited after all retries exhausted."""
+    pass
+
+class LLMAuthError(LLMError):
+    """401/403 — authentication or authorization failure."""
+    pass
+
+class LLMBadRequestError(LLMError):
+    """400 — bad request (malformed prompt, tool schema, etc.)."""
+    pass
+
+class LLMEmptyResponseError(LLMError):
+    """LLM returned empty content after retries."""
+    pass
+
+
 @dataclass
 class ChatMessage:
     role: str           # 'system', 'user', 'assistant', 'tool'

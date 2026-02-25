@@ -26,7 +26,7 @@ import time
 import random
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
 from ..auth.google_oauth import GoogleCredentials
 
 logger = logging.getLogger("syne.llm.google")
@@ -694,7 +694,9 @@ class GoogleProvider(LLMProvider):
                     # Cap at max delay
                     if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
                         delay_s = server_delay // 1000
-                        raise  # Re-raise — too long to wait
+                        raise LLMRateLimitError(
+                            f"Rate limited (429). Server requested {delay_s}s wait (max {_MAX_RETRY_DELAY_MS // 1000}s)."
+                        ) from e
 
                     logger.warning(
                         f"CCA {status}, retrying in {delay_ms}ms "
@@ -704,8 +706,18 @@ class GoogleProvider(LLMProvider):
                     _reset_output()
                     continue
 
-                # Not retryable (400 etc.) or max retries exceeded
-                raise
+                # Not retryable or max retries exceeded — classify the error
+                if status == 429:
+                    raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.") from e
+                elif status in (401, 403):
+                    raise LLMAuthError(f"Authentication failed ({status}): {error_text[:200]}") from e
+                elif status == 400:
+                    raise LLMBadRequestError(f"Bad request (400): {error_text[:200]}") from e
+                else:
+                    raise
+
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+                raise  # Already classified, don't wrap again
 
             except Exception as e:
                 last_error = e
@@ -733,7 +745,7 @@ class GoogleProvider(LLMProvider):
                     logger.warning(f"CCA empty stream retry failed: {e}")
 
         if not streamed:
-            raise Exception(f"Cloud Code Assist API returned an empty response for {model}")
+            raise LLMEmptyResponseError(f"Cloud Code Assist API returned an empty response for {model}")
 
         content = "".join(text_parts)
         thinking = "".join(thinking_parts) if thinking_parts else None

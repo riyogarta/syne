@@ -500,16 +500,27 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
-                # Provide more useful error context
-                error_msg = str(e)
-                if "400" in error_msg:
-                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
-                elif "429" in error_msg:
+                # Classify by exception type first, then fall back to string matching
+                from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
+                if isinstance(e, LLMRateLimitError):
                     await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
-                elif "401" in error_msg or "403" in error_msg:
+                elif isinstance(e, LLMAuthError):
                     await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
+                elif isinstance(e, LLMBadRequestError):
+                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
+                elif isinstance(e, LLMEmptyResponseError):
+                    await update.message.reply_text("⚠️ LLM returned an empty response. Please try again.")
                 else:
-                    await update.message.reply_text("Sorry, something went wrong. Please try again.")
+                    # Fall back to string matching for non-CCA errors
+                    error_msg = str(e)
+                    if "429" in error_msg:
+                        await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
+                    elif "400" in error_msg:
+                        await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
+                    elif "401" in error_msg or "403" in error_msg:
+                        await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
+                    else:
+                        await update.message.reply_text("⚠️ Something went wrong. Check logs for details.")
 
     async def _process_group_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
@@ -874,7 +885,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
-                await update.message.reply_text("Sorry, something went wrong processing that photo.")
+                await update.message.reply_text("⚠️ Something went wrong processing that photo. Check logs for details.")
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle voice messages and audio files — transcribe via STT and process as text."""
@@ -977,7 +988,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling voice: {e}", exc_info=True)
-                await update.message.reply_text("Sorry, something went wrong processing that voice message.")
+                await update.message.reply_text("⚠️ Something went wrong processing that voice message. Check logs for details.")
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document/file uploads — download, save to disk, pass path to LLM."""
@@ -1108,7 +1119,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling document: {e}", exc_info=True)
-                await update.message.reply_text("Sorry, something went wrong processing that file.")
+                await update.message.reply_text("⚠️ Something went wrong processing that file. Check logs for details.")
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""
