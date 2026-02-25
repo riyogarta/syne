@@ -1818,11 +1818,13 @@ def restart():
         capture_output=True, text=True,
     )
     if result.returncode == 0:
+        console.print("🔄 Restarting service... Please wait a moment.")
         subprocess.run(["systemctl", "--user", "restart", "syne"])
-        console.print("[green]✓ Syne restarted (systemd)[/green]")
+        console.print("[green]✓ Service restarted (systemd)[/green]")
         return
 
     # Manual: kill + start
+    console.print("🔄 Restarting service... Please wait a moment.")
     subprocess.run(["pkill", "-f", "syne.main"], capture_output=True)
     import time
     time.sleep(2)
@@ -1836,7 +1838,7 @@ def restart():
         stderr=subprocess.STDOUT,
         start_new_session=True,
     )
-    console.print("[green]✓ Syne restarted (PID in background)[/green]")
+    console.print("[green]✓ Service restarted (PID in background)[/green]")
     console.print("[dim]Logs: tail -f /tmp/syne.log[/dim]")
 
 

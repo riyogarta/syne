@@ -2091,6 +2091,7 @@ Or just send me a message!"""
             # with a valid driver. Testing wastes a CCA request and often
             # triggers 429 rate limits on Google CCA's tight quotas.
             await set_config("provider.active_model", model_key)
+            await set_config("provider.chat_model", model_entry.get("model_id", model_key))
             
             # Auto-adjust compaction threshold based on context window
             ctx_window = model_entry.get("context_window")
