@@ -395,7 +395,7 @@ class TelegramChannel:
 
         # Handle DMs - auto-create user
         else:
-            db_user = await self._ensure_user(user)
+            db_user = await self._ensure_user(user, is_dm=True)
             # Block rejected/blocked users silently
             if db_user.get("access_level") == "blocked":
                 logger.debug(f"Ignoring message from blocked user {user.id}")
@@ -626,13 +626,20 @@ class TelegramChannel:
         
         return text
 
-    async def _ensure_user(self, tg_user) -> dict:
-        """Ensure user exists in database, creating if needed."""
+    async def _ensure_user(self, tg_user, is_dm: bool = False) -> dict:
+        """Ensure user exists in database, creating if needed.
+        
+        Args:
+            tg_user: Telegram user object
+            is_dm: True if this is from a direct/private message.
+                   Only DM interactions can auto-promote to owner.
+        """
         return await get_or_create_user(
             name=tg_user.first_name or tg_user.username or str(tg_user.id),
             platform="telegram",
             platform_id=str(tg_user.id),
             display_name=self._get_display_name(tg_user),
+            is_dm=is_dm,
         )
 
     async def _handle_pending_user(self, update: Update, db_user: dict):
@@ -849,7 +856,7 @@ class TelegramChannel:
             elif not self._is_reply_to_bot(update):
                 return  # Ignore photos in groups without mention/reply
 
-        db_user = await self._ensure_user(user)
+        db_user = await self._ensure_user(user, is_dm=not is_group)
         
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":
@@ -930,7 +937,7 @@ class TelegramChannel:
             if not self._is_reply_to_bot(update):
                 return  # Ignore voice in groups unless replying to bot
 
-        db_user = await self._ensure_user(user)
+        db_user = await self._ensure_user(user, is_dm=not is_group)
         
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":
@@ -1043,7 +1050,7 @@ class TelegramChannel:
             elif not self._is_reply_to_bot(update):
                 return
 
-        db_user = await self._ensure_user(user)
+        db_user = await self._ensure_user(user, is_dm=not is_group)
 
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":
@@ -1163,7 +1170,7 @@ class TelegramChannel:
         if is_group and not self._is_reply_to_bot(update):
             return  # Ignore location in groups without reply to bot
 
-        db_user = await self._ensure_user(user)
+        db_user = await self._ensure_user(user, is_dm=not is_group)
 
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":

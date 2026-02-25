@@ -159,6 +159,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
             platform="cli",
             platform_id=f"cli:{username}",
             display_name=username,
+            is_dm=True,  # CLI is always direct interaction
         )
 
         # Ensure CLI user is owner

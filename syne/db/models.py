@@ -101,19 +101,22 @@ async def get_or_create_user(
     platform: str,
     platform_id: str,
     display_name: Optional[str] = None,
+    is_dm: bool = False,
 ) -> dict:
     """Get existing user or create new one.
     
-    If no owner exists yet, the first user to interact becomes the owner.
-    This handles both fresh installs (no users) and cases where users
-    were created before the owner logic was added.
+    If no owner exists yet, the first user to interact **via DM** becomes
+    the owner.  Group interactions NEVER auto-promote to owner — otherwise
+    a random group member who happens to chat first would hijack ownership.
+    
+    Args:
+        is_dm: True if this interaction is a direct message (private chat).
+               Only DM interactions can trigger auto-promote to owner.
     """
     user = await get_user(platform, platform_id)
     if user:
-        # Auto-promote: if no owner exists yet, promote this existing user.
-        # Also: if this is a fresh install (few users) and no owner exists
-        # on THIS platform yet, promote — likely same person from another channel.
-        if user.get("access_level") != "owner":
+        # Auto-promote: ONLY from DM, and only if no owner exists yet.
+        if is_dm and user.get("access_level") != "owner":
             async with get_connection() as conn:
                 owner_count = await conn.fetchval(
                     "SELECT COUNT(*) FROM users WHERE access_level = 'owner'"
@@ -127,7 +130,7 @@ async def get_or_create_user(
                     user["access_level"] = "owner"
                     import logging
                     logging.getLogger("syne.db").info(
-                        f"Auto-promoted user {user['name']} ({platform_id}) to owner (no owner existed)"
+                        f"Auto-promoted user {user['name']} ({platform_id}) to owner (first DM, no owner existed)"
                     )
                 else:
                     # Fresh install heuristic: if no owner on THIS platform
@@ -147,33 +150,34 @@ async def get_or_create_user(
                         import logging
                         logging.getLogger("syne.db").info(
                             f"Auto-promoted user {user['name']} ({platform_id}) to owner "
-                            f"(first on platform '{platform}', fresh install)"
+                            f"(first DM on platform '{platform}', fresh install)"
                         )
         return user
     
-    # New user — if no owner exists, this one becomes owner.
-    # Also: fresh install heuristic for cross-platform owner.
+    # New user — auto-promote to owner ONLY from DM.
     access_level = "public"
-    async with get_connection() as conn:
-        owner_count = await conn.fetchval(
-            "SELECT COUNT(*) FROM users WHERE access_level = 'owner'"
-        )
-        if owner_count == 0:
-            access_level = "owner"
-        else:
-            owner_on_platform = await conn.fetchval(
-                "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND platform = $1",
-                platform
+    if is_dm:
+        async with get_connection() as conn:
+            owner_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM users WHERE access_level = 'owner'"
             )
-            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
-            if owner_on_platform == 0 and total_users <= 3:
+            if owner_count == 0:
                 access_level = "owner"
             else:
-                # Check DM approval policy — new users start as 'pending'
-                # if approval mode is enabled
-                dm_policy = await get_config("telegram.dm_policy", "approval")
-                if dm_policy == "approval":
-                    access_level = "pending"
+                owner_on_platform = await conn.fetchval(
+                    "SELECT COUNT(*) FROM users WHERE access_level = 'owner' AND platform = $1",
+                    platform
+                )
+                total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+                if owner_on_platform == 0 and total_users <= 3:
+                    access_level = "owner"
+                else:
+                    dm_policy = await get_config("telegram.dm_policy", "approval")
+                    if dm_policy == "approval":
+                        access_level = "pending"
+    else:
+        # Group interaction — never auto-promote, just create as public
+        pass
     
     return await create_user(name, platform, platform_id, display_name, access_level)
 
