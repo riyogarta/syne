@@ -1577,7 +1577,21 @@ Or just send me a message!"""
             status_lines.append("**Current session:**")
             status_lines.append(session_info)
 
-        await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
+        # Escape underscores for Telegram Markdown (e.g., google_cca → google\_cca)
+        status_text = "\n".join(status_lines)
+        # Only escape underscores NOT inside backtick blocks
+        import re
+        def _escape_md_underscores(text: str) -> str:
+            """Escape underscores outside of backtick-delimited code spans."""
+            parts = text.split("`")
+            for i in range(len(parts)):
+                if i % 2 == 0:  # Outside backticks
+                    parts[i] = parts[i].replace("_", "\\_")
+            return "`".join(parts)
+        
+        status_text = _escape_md_underscores(status_text)
+        
+        await update.message.reply_text(status_text, parse_mode="Markdown")
 
     async def _cmd_memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /memory command — show memory and session stats."""
