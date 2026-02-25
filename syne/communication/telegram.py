@@ -2220,7 +2220,10 @@ Or just send me a message!"""
                 "<code>/group list</code> — list registered groups\n"
                 "<code>/group members &lt;group&gt;</code> — list members\n"
                 "<code>/group set &lt;group&gt; &lt;id&gt; owner|family|public</code> — set access\n"
-                "<code>/group alias &lt;group&gt; &lt;id&gt; &lt;name&gt;</code> — set alias\n",
+                "<code>/group alias &lt;group&gt; &lt;id&gt; &lt;name&gt;</code> — set alias\n"
+                "<code>/group settings &lt;group&gt;</code> — view group settings\n"
+                "<code>/group settings &lt;group&gt; &lt;key&gt; &lt;value&gt;</code> — set a setting\n"
+                "<code>/group settings &lt;group&gt; &lt;key&gt; --delete</code> — remove a setting\n",
                 parse_mode="HTML",
             )
             return
@@ -2236,6 +2239,17 @@ Or just send me a message!"""
         elif subcommand == "alias" and len(args) >= 4:
             alias_name = " ".join(args[3:])  # Allow multi-word aliases
             await self._group_set_alias(update, args[1], args[2], alias_name)
+        elif subcommand == "settings" and len(args) >= 2:
+            if len(args) == 2:
+                # View settings
+                await self._group_view_settings(update, args[1])
+            elif len(args) >= 4:
+                # Set or delete a setting
+                key = args[2]
+                value = " ".join(args[3:])
+                await self._group_set_setting(update, args[1], key, value)
+            else:
+                await update.message.reply_text("❌ Usage: /group settings <group> [key] [value|--delete]")
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
 
@@ -2253,11 +2267,17 @@ Or just send me a message!"""
             mention = "📢" if not g.get("require_mention") else "🔇"
             settings = g.get("settings", {}) or {}
             member_count = len(settings.get("members", {}))
+            # Custom settings (excluding members)
+            custom = {k: v for k, v in settings.items() if k != "members"}
+            settings_str = ""
+            if custom:
+                settings_str = "\n   ⚙️ " + ", ".join(f"{k}={v}" for k, v in sorted(custom.items()))
+
             lines.append(
                 f"{status} <b>{g['name']}</b>\n"
                 f"   ID: <code>{g['platform_group_id']}</code>\n"
                 f"   {mention} mention={'required' if g.get('require_mention') else 'optional'}"
-                f" | {member_count} members"
+                f" | {member_count} members{settings_str}"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
@@ -2345,6 +2365,67 @@ Or just send me a message!"""
             )
         else:
             await update.message.reply_text("❌ Failed to update alias.")
+
+    async def _group_view_settings(self, update: Update, group_ref: str):
+        """View group settings (excluding members — those are in /group members)."""
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+
+        settings = group.get("settings", {}) or {}
+        # Filter out 'members' — that's managed via /group members
+        display = {k: v for k, v in settings.items() if k != "members"}
+
+        if not display:
+            await update.message.reply_text(
+                f"⚙️ <b>{group['name']}</b> — no custom settings.\n\n"
+                f"Set with: <code>/group settings {group_ref} key value</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        lines = [f"⚙️ <b>{group['name']}</b> settings:\n"]
+        for k, v in sorted(display.items()):
+            lines.append(f"  <b>{k}</b>: {v}")
+        lines.append(f"\nEdit: <code>/group settings {group_ref} key value</code>")
+        lines.append(f"Delete: <code>/group settings {group_ref} key --delete</code>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def _group_set_setting(self, update: Update, group_ref: str, key: str, value: str):
+        """Set or delete a group setting."""
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+
+        # Protect 'members' key — managed via /group set and /group alias
+        if key == "members":
+            await update.message.reply_text("❌ Use /group set and /group alias to manage members.")
+            return
+
+        from ..db.connection import get_connection
+
+        if value == "--delete":
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET settings = settings - $1 WHERE id = $2",
+                    key, group["id"],
+                )
+            await update.message.reply_text(
+                f"🗑️ Setting <b>{key}</b> removed from {group['name']}",
+                parse_mode="HTML",
+            )
+        else:
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET settings = jsonb_set(COALESCE(settings, '{}'), $1, $2) WHERE id = $3",
+                    [key], f'"{value}"', group["id"],
+                )
+            await update.message.reply_text(
+                f"✅ <b>{group['name']}</b>: <b>{key}</b> = {value}",
+                parse_mode="HTML",
+            )
 
     async def _resolve_group(self, ref: str) -> Optional[dict]:
         """Resolve a group reference — by ID or partial name match."""
