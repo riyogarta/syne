@@ -2180,6 +2180,7 @@ Or just send me a message!"""
         if not args:
             await update.message.reply_text(
                 "📋 <b>Group Management</b>\n\n"
+                "<code>/group add &lt;group_id&gt;</code> — manually register a group\n"
                 "<code>/group list</code> — list registered groups\n"
                 "<code>/group members &lt;group&gt;</code> — list members\n"
                 "<code>/group set &lt;group&gt; &lt;id&gt; owner|family|public</code> — set access\n"
@@ -2193,7 +2194,9 @@ Or just send me a message!"""
 
         subcommand = args[0].lower()
 
-        if subcommand == "list":
+        if subcommand == "add" and len(args) >= 2:
+            await self._group_add(update, args[1])
+        elif subcommand == "list":
             await self._group_list(update)
         elif subcommand == "members" and len(args) >= 2:
             await self._group_members(update, args[1])
@@ -2215,6 +2218,46 @@ Or just send me a message!"""
                 await update.message.reply_text("❌ Usage: /group settings <group> [key] [value|--delete]")
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
+
+    async def _group_add(self, update: Update, group_id_str: str):
+        """Manually register a group by ID."""
+        # Normalize group ID
+        group_id_str = group_id_str.strip()
+        
+        # Check if already registered
+        from ..db.models import get_group
+        existing = await get_group("telegram", group_id_str)
+        if existing:
+            await update.message.reply_text(f"ℹ️ Group `{group_id_str}` is already registered.", parse_mode="Markdown")
+            return
+        
+        # Try to get group info from Telegram
+        group_name = f"Group {group_id_str}"
+        try:
+            chat = await self.app.bot.get_chat(int(group_id_str))
+            if chat.title:
+                group_name = chat.title
+        except Exception as e:
+            logger.warning(f"Could not get chat info for {group_id_str}: {e}")
+        
+        # Register the group
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            await conn.execute(
+                """INSERT INTO groups (platform, platform_group_id, name, enabled, require_mention)
+                   VALUES ($1, $2, $3, true, true)
+                   ON CONFLICT (platform, platform_group_id) DO NOTHING""",
+                "telegram", group_id_str, group_name,
+            )
+        
+        await update.message.reply_text(
+            f"✅ Group registered:\n\n"
+            f"• Name: {group_name}\n"
+            f"• ID: `{group_id_str}`\n"
+            f"• Mention required: yes\n\n"
+            f"Bot will now respond in this group when mentioned.",
+            parse_mode="Markdown",
+        )
 
     async def _group_list(self, update: Update):
         """List all registered groups."""
