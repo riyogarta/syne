@@ -210,7 +210,13 @@ class TelegramChannel:
         logger.info("Starting Telegram bot...")
         await self.app.initialize()
         await self.app.start()
-        await self.app.updater.start_polling(drop_pending_updates=True)
+        await self.app.updater.start_polling(
+            drop_pending_updates=True,
+            allowed_updates=[
+                "message", "edited_message", "callback_query",
+                "my_chat_member", "message_reaction",
+            ],
+        )
 
         # Register bot commands menu (the "/" button in Telegram)
         from telegram import BotCommand
