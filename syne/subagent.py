@@ -56,7 +56,7 @@ class SubAgentManager:
 
     async def timeout_seconds(self) -> int:
         """Get sub-agent timeout."""
-        return await get_config("subagents.timeout_seconds", 300)
+        return await get_config("subagents.timeout_seconds", 900)
 
     @property
     def active_count(self) -> int:

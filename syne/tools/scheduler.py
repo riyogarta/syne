@@ -9,8 +9,13 @@ Task types:
 
 When a task executes, its payload is injected as a user message
 to the conversation.
+
+Bulk operations:
+- 'bulk_create': Create multiple tasks at once (pass JSON array in 'bulk_tasks')
+- 'bulk_delete': Delete multiple tasks by ID range or list (pass 'task_ids' as comma-separated)
 """
 
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -41,11 +46,13 @@ async def manage_schedule_handler(
     schedule_value: str = "",
     payload: str = "",
     end_date: str = "",
+    bulk_tasks: str = "",
+    task_ids: str = "",
 ) -> str:
     """Handle manage_schedule tool calls.
     
     Args:
-        action: create, list, delete, enable, disable, get
+        action: create, list, delete, enable, disable, get, bulk_create, bulk_delete
         name: Task name (for create/delete_by_name)
         task_id: Task ID (for delete/enable/disable/get)
         schedule_type: 'once', 'interval', or 'cron' (for create)
@@ -55,6 +62,10 @@ async def manage_schedule_handler(
             - cron: cron expression (e.g., "0 9 * * *")
         payload: Message to inject when task runs (for create)
         end_date: Optional ISO timestamp — recurring tasks auto-disable after this date
+        bulk_tasks: JSON array of tasks for bulk_create. Each item:
+            {"name", "schedule_type", "schedule_value", "payload", "end_date"(optional)}
+        task_ids: Comma-separated task IDs for bulk_delete (e.g., "64,65,66,67")
+            Also supports ranges: "64-131" or mixed: "64-70,75,80-90"
         
     Returns:
         Result message
@@ -223,8 +234,102 @@ async def manage_schedule_handler(
             return f"✅ Task {task_id} disabled"
         return f"Task not found: {task_id}"
     
+    elif action == "bulk_create":
+        if not bulk_tasks:
+            return "Error: bulk_tasks is required (JSON array of task objects)."
+        
+        try:
+            tasks_list = json.loads(bulk_tasks)
+        except json.JSONDecodeError as e:
+            return f"Error: invalid JSON in bulk_tasks: {e}"
+        
+        if not isinstance(tasks_list, list):
+            return "Error: bulk_tasks must be a JSON array."
+        
+        if len(tasks_list) > 500:
+            return "Error: maximum 500 tasks per bulk_create."
+        
+        created = 0
+        errors = []
+        
+        for i, t in enumerate(tasks_list):
+            t_name = t.get("name", "")
+            t_type = t.get("schedule_type", "")
+            t_value = t.get("schedule_value", "")
+            t_payload = t.get("payload", "")
+            t_end = t.get("end_date", "")
+            
+            if not all([t_name, t_type, t_value, t_payload]):
+                errors.append(f"#{i}: missing required fields (name/schedule_type/schedule_value/payload)")
+                continue
+            
+            parsed_end = None
+            if t_end:
+                try:
+                    parsed_end = datetime.fromisoformat(t_end.replace("Z", "+00:00"))
+                    if parsed_end.tzinfo is None:
+                        parsed_end = parsed_end.replace(tzinfo=timezone.utc)
+                except (ValueError, TypeError):
+                    errors.append(f"#{i} '{t_name}': invalid end_date '{t_end}'")
+                    continue
+            
+            result = await create_task(
+                name=t_name,
+                schedule_type=t_type,
+                schedule_value=t_value,
+                payload=t_payload,
+                created_by=_current_user_platform_id,
+                end_date=parsed_end,
+            )
+            
+            if result["success"]:
+                created += 1
+            else:
+                errors.append(f"#{i} '{t_name}': {result['error']}")
+        
+        msg = f"✅ Bulk create: {created}/{len(tasks_list)} tasks created."
+        if errors:
+            msg += f"\n\n❌ {len(errors)} errors:\n" + "\n".join(errors[:20])
+            if len(errors) > 20:
+                msg += f"\n... and {len(errors) - 20} more"
+        return msg
+    
+    elif action == "bulk_delete":
+        if not task_ids:
+            return "Error: task_ids is required (comma-separated IDs or ranges like '64-131')."
+        
+        # Parse task IDs — support ranges like "64-131" and lists like "64,65,66"
+        ids_to_delete = []
+        for part in task_ids.split(","):
+            part = part.strip()
+            if "-" in part:
+                try:
+                    start, end = part.split("-", 1)
+                    ids_to_delete.extend(range(int(start.strip()), int(end.strip()) + 1))
+                except ValueError:
+                    return f"Error: invalid range '{part}'. Use format: '64-131'"
+            else:
+                try:
+                    ids_to_delete.append(int(part))
+                except ValueError:
+                    return f"Error: invalid task ID '{part}'."
+        
+        if len(ids_to_delete) > 500:
+            return f"Error: too many IDs ({len(ids_to_delete)}). Maximum 500 per bulk_delete."
+        
+        deleted = 0
+        not_found = 0
+        for tid in ids_to_delete:
+            success = await delete_task(tid)
+            if success:
+                deleted += 1
+            else:
+                not_found += 1
+        
+        return f"✅ Bulk delete: {deleted} tasks deleted, {not_found} not found (out of {len(ids_to_delete)} IDs)."
+    
     else:
-        return f"Unknown action: {action}. Use: create, list, get, delete, enable, disable"
+        return f"Unknown action: {action}. Use: create, list, get, delete, enable, disable, bulk_create, bulk_delete"
 
 
 # ── Tool Registration Dict ──
@@ -233,16 +338,18 @@ MANAGE_SCHEDULE_TOOL = {
     "name": "manage_schedule",
     "description": (
         "Create and manage scheduled tasks. Tasks execute by injecting payload as user message. "
-        "Actions: create (new task), list (all tasks), get (task details), delete, enable, disable. "
+        "Actions: create, list, get, delete, enable, disable, bulk_create, bulk_delete. "
         "Types: 'once' (ISO timestamp), 'interval' (seconds), 'cron' (cron expression). "
-        "Optional end_date for recurring tasks — auto-disables after the date passes."
+        "Optional end_date for recurring tasks — auto-disables after the date passes. "
+        "Use bulk_create with a JSON array to create many tasks in one call. "
+        "Use bulk_delete with comma-separated IDs or ranges (e.g., '64-131') to delete many at once."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["create", "list", "get", "delete", "enable", "disable"],
+                "enum": ["create", "list", "get", "delete", "enable", "disable", "bulk_create", "bulk_delete"],
                 "description": "Action to perform",
             },
             "name": {
@@ -277,6 +384,21 @@ MANAGE_SCHEDULE_TOOL = {
                     "Task auto-disables after this date. "
                     "NULL/empty = no end date (runs forever or once). "
                     "Example: '2026-03-21T08:00:00+07:00'"
+                ),
+            },
+            "bulk_tasks": {
+                "type": "string",
+                "description": (
+                    "JSON array of task objects for bulk_create. "
+                    "Each: {\"name\", \"schedule_type\", \"schedule_value\", \"payload\", \"end_date\"(optional)}. "
+                    "Max 500 tasks per call."
+                ),
+            },
+            "task_ids": {
+                "type": "string",
+                "description": (
+                    "Comma-separated task IDs for bulk_delete. "
+                    "Supports ranges: '64-131' or mixed: '64-70,75,80-90'. Max 500."
                 ),
             },
         },
