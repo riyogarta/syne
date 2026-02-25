@@ -90,7 +90,7 @@ class SyneAgent:
         logger.info(f"Abilities loaded: {ability_count}")
 
         # 6. Context Manager
-        max_context = await get_config("session.compaction_threshold", 80000)
+        max_context = await get_config("session.compaction_threshold", 150000)
         self.context_mgr = ContextManager(max_context_tokens=max_context)
         logger.info(f"Context window: {max_context} tokens")
 

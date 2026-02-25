@@ -288,7 +288,7 @@ async def should_compact(session_id: int, threshold: int = 100) -> bool:
     return False
 
 
-async def should_compact_by_chars(session_id: int, char_threshold: int = 80000) -> bool:
+async def should_compact_by_chars(session_id: int, char_threshold: int = 150000) -> bool:
     """Check if a session needs compaction based on total character count."""
     stats = await get_session_stats(session_id)
     return stats["total_chars"] >= char_threshold
@@ -301,7 +301,7 @@ async def auto_compact_check(
     """Check and compact if needed using config thresholds. Returns result dict or None."""
     # Get thresholds from config
     msg_threshold = await get_config("session.max_messages", 100)
-    char_threshold = await get_config("session.compaction_threshold", 80000)
+    char_threshold = await get_config("session.compaction_threshold", 150000)
 
     needs_compact = (
         await should_compact(session_id, msg_threshold)
