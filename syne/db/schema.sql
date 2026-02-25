@@ -375,3 +375,9 @@ BEGIN
         ALTER TABLE memory ADD COLUMN recall_count INTEGER DEFAULT 1;
     END IF;
 END $$;
+
+-- ============================================================
+-- CONFIG MIGRATIONS: Update defaults for existing installs
+-- ============================================================
+-- v0.9.0: decay_amount changed from 2 to 1 (recall +2, decay -1)
+UPDATE config SET value = '1' WHERE key = 'memory.decay_amount' AND value = '2';
