@@ -76,7 +76,9 @@ CREATE TABLE IF NOT EXISTS memory (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     accessed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ                -- NULL = never expires
+    expires_at TIMESTAMPTZ,               -- NULL = never expires
+    permanent BOOLEAN DEFAULT false,      -- true = never decays (explicit "remember this")
+    recall_count INTEGER DEFAULT 1        -- conversation-based decay counter
 );
 
 -- NOTE: Vector index is created dynamically after embedding provider is selected
@@ -324,6 +326,9 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.auto_evaluate', 'true', 'Use LLM to judge what is worth storing (only when auto_capture is ON)'),
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '10', 'Max memories to recall per query'),
+    ('memory.decay_interval', '50', 'Decay every N conversations'),
+    ('memory.decay_amount', '2', 'How much recall_count decreases per decay'),
+    ('memory.initial_recall_count', '1', 'Starting recall_count for new memories'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Token count threshold for compaction'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
@@ -352,3 +357,21 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
     ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key')
 ON CONFLICT (key) DO NOTHING;
+
+-- Add memory decay columns (permanent flag + recall_count for conversation-based decay)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'memory' AND column_name = 'permanent'
+    ) THEN
+        ALTER TABLE memory ADD COLUMN permanent BOOLEAN DEFAULT false;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'memory' AND column_name = 'recall_count'
+    ) THEN
+        ALTER TABLE memory ADD COLUMN recall_count INTEGER DEFAULT 1;
+    END IF;
+END $$;

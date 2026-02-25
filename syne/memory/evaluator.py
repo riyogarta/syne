@@ -149,6 +149,20 @@ async def evaluate_message(
         return None
 
 
+def _is_explicit_remember(message: str) -> bool:
+    """Detect if user explicitly asked to remember/store something."""
+    import re
+    lower = message.lower().strip()
+    patterns = [
+        r"\b(ingat|inget|catat|simpan|remember|memorize|store|save)\b.*\b(ini|this|it|itu)\b",
+        r"\b(ini|this)\b.*\b(ingat|inget|catat|simpan|remember|memorize)\b",
+        r"^(ingat|inget|catat|simpan|remember|memorize)[:\s]",
+        r"\bjangan (lupa|lupakan)\b",
+        r"\b(don.?t forget)\b",
+    ]
+    return any(re.search(p, lower) for p in patterns)
+
+
 async def evaluate_and_store(
     provider: LLMProvider,
     memory_engine,
@@ -161,12 +175,16 @@ async def evaluate_and_store(
     if not result:
         return None
 
+    # Detect explicit "remember this" → permanent memory
+    permanent = _is_explicit_remember(user_message)
+    
     mem_id = await memory_engine.store_if_new(
         content=result["content"],
         category=result["category"],
         source="user_confirmed",
         user_id=user_id,
         importance=result["importance"],
+        permanent=permanent,
     )
 
     if mem_id:

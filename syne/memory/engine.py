@@ -22,18 +22,28 @@ class MemoryEngine:
         source: str = "user_confirmed",
         user_id: Optional[int] = None,
         importance: float = 0.5,
+        permanent: bool = False,
     ) -> int:
-        """Store a memory with its embedding vector."""
+        """Store a memory with its embedding vector.
+        
+        Args:
+            permanent: If True, memory never decays (explicit "remember this").
+                      If False (default), memory has recall_count that decays over conversations.
+        """
+        from ..db.models import get_config
+        
         # Generate embedding
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector
+        
+        initial_count = int(await get_config("memory.initial_recall_count", "1")) if not permanent else 0
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO memory (content, category, embedding, source, user_id, importance)
-                VALUES ($1, $2, $3::vector, $4, $5, $6)
+                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
                 RETURNING id
-            """, content, category, str(vector), source, user_id, importance)
+            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
 
             return row["id"]
 
@@ -110,11 +120,13 @@ class MemoryEngine:
                     results.append(dict(row))
                     ids_to_update.append(row["id"])
 
-            # Update access stats
+            # Update access stats + recall_count (for non-permanent memories)
             if ids_to_update:
                 await conn.execute("""
                     UPDATE memory
-                    SET access_count = access_count + 1, accessed_at = NOW()
+                    SET access_count = access_count + 1,
+                        accessed_at = NOW(),
+                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 1 END
                     WHERE id = ANY($1)
                 """, ids_to_update)
 
@@ -229,6 +241,7 @@ class MemoryEngine:
         importance: float = 0.5,
         similarity_threshold: float = 0.85,
         conflict_threshold: float = 0.70,
+        permanent: bool = False,
     ) -> Optional[int]:
         """Store a memory with conflict resolution.
 
@@ -300,7 +313,7 @@ class MemoryEngine:
             )
 
         # No similar memory at all — insert new
-        return await self.store(content, category, source, user_id, importance)
+        return await self.store(content, category, source, user_id, importance, permanent=permanent)
 
     async def _update_memory(
         self,
@@ -411,3 +424,48 @@ class MemoryEngine:
             "kept_ids": [d["keep_id"] for d in duplicates_found],
             "details": duplicates_found,
         }
+
+    async def run_decay(self):
+        """Run memory decay based on conversation count.
+        
+        Called periodically (e.g. after every conversation).
+        Increments global conversation counter. Every N conversations,
+        decays non-permanent memories by reducing recall_count.
+        Memories with recall_count <= 0 are deleted.
+        """
+        from ..db.models import get_config, set_config
+        
+        # Increment global conversation counter
+        current = int(await get_config("memory.conversation_counter", "0"))
+        current += 1
+        await set_config("memory.conversation_counter", str(current))
+        
+        # Check if it's time to decay
+        interval = int(await get_config("memory.decay_interval", "50"))
+        if current % interval != 0:
+            return  # Not time yet
+        
+        decay_amount = int(await get_config("memory.decay_amount", "2"))
+        
+        async with get_connection() as conn:
+            # Decay non-permanent memories
+            await conn.execute("""
+                UPDATE memory
+                SET recall_count = recall_count - $1,
+                    updated_at = NOW()
+                WHERE permanent = false
+                  AND recall_count > 0
+            """, decay_amount)
+            
+            # Delete memories with recall_count <= 0
+            deleted = await conn.fetch("""
+                DELETE FROM memory
+                WHERE permanent = false
+                  AND recall_count <= 0
+                RETURNING id, content
+            """)
+            
+            if deleted:
+                logger.info(f"Memory decay: deleted {len(deleted)} forgotten memories")
+                for row in deleted:
+                    logger.debug(f"  Forgotten: [{row['id']}] {row['content'][:60]}...")

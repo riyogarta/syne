@@ -883,4 +883,14 @@ class ConversationManager:
             extra_context=extra_context,
             inbound=inbound,
         )
-        return await conv.chat(message, message_metadata=message_metadata)
+        response = await conv.chat(message, message_metadata=message_metadata)
+        
+        # Run memory decay (conversation-based, fire-and-forget)
+        if self.memory:
+            try:
+                await self.memory.run_decay()
+            except Exception as e:
+                import logging
+                logging.getLogger("syne.memory").warning(f"Memory decay error: {e}")
+        
+        return response
