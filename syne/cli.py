@@ -1888,10 +1888,74 @@ def _do_update(syne_dir: str):
     except Exception:
         pass
 
+    # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
+    _run_schema_migration(syne_dir)
+
     # Restart systemd service if active
     _restart_service()
 
     return True
+
+
+def _run_schema_migration(syne_dir: str):
+    """Run schema.sql to apply any new tables/columns.
+    
+    Safe to run repeatedly — uses CREATE TABLE IF NOT EXISTS
+    and DO $$ ALTER TABLE ADD COLUMN IF NOT EXISTS patterns.
+    """
+    import asyncio
+
+    schema_path = os.path.join(syne_dir, "syne", "db", "schema.sql")
+    if not os.path.exists(schema_path):
+        return
+
+    # Load .env for DATABASE_URL
+    env_path = os.path.join(syne_dir, ".env")
+    db_url = None
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SYNE_DATABASE_URL="):
+                    db_url = line.split("=", 1)[1].strip()
+                    break
+
+    if not db_url:
+        # Try to construct from individual vars
+        db_user = db_pass = db_name = None
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SYNE_DB_USER="):
+                        db_user = line.split("=", 1)[1].strip()
+                    elif line.startswith("SYNE_DB_PASSWORD="):
+                        db_pass = line.split("=", 1)[1].strip()
+                    elif line.startswith("SYNE_DB_NAME="):
+                        db_name = line.split("=", 1)[1].strip()
+        if db_user and db_pass and db_name:
+            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5432/{db_name}"
+
+    if not db_url:
+        console.print("[dim]⏭ Schema migration skipped (no DB config)[/dim]")
+        return
+
+    with open(schema_path) as f:
+        schema = f.read()
+
+    async def _migrate():
+        import asyncpg
+        conn = await asyncpg.connect(db_url)
+        try:
+            await conn.execute(schema)
+        finally:
+            await conn.close()
+
+    try:
+        asyncio.run(_migrate())
+        console.print("[green]✅ Schema up to date[/green]")
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Schema migration: {e}[/yellow]")
 
 
 def _restart_service():
