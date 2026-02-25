@@ -4,7 +4,11 @@ Standalone OAuth flow — NO dependency on Claude Code CLI.
 User logs in via browser with their claude.ai account.
 Requires claude.ai Pro/Max/Team subscription.
 
-Flow:
+Two flows supported:
+  A) Authorization Code + PKCE (interactive — needs localhost callback)
+  B) Device Code Flow / RFC 8628 (headless — no localhost needed)
+
+Flow A (Auth Code + PKCE):
   1. Start local HTTP server for callback
   2. Open browser to claude.ai/oauth/authorize
   3. User logs in with their claude.ai account
@@ -12,6 +16,14 @@ Flow:
   5. Exchange code for tokens via platform.claude.com
   6. Tokens saved to PostgreSQL database
   7. Auto-refresh when expired
+
+Flow B (Device Code — headless):
+  1. POST to /v1/oauth/device/code → get user_code + verification_uri
+  2. User opens verification_uri in ANY browser (phone, laptop, etc.)
+  3. User enters the user_code
+  4. Syne polls token endpoint until authorized
+  5. Tokens saved to PostgreSQL database
+  6. Auto-refresh when expired
 """
 
 import asyncio
@@ -297,6 +309,145 @@ async def login_claude() -> ClaudeCredentials:
 
     finally:
         server.shutdown()
+
+
+# ============================================================
+# Device Code Flow (RFC 8628) — headless servers
+# ============================================================
+
+_DEVICE_CODE_URL = f"https://platform.claude.com/v1/oauth/device/code"
+_DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
+
+
+async def login_claude_device() -> ClaudeCredentials:
+    """Run Claude Device Code Flow (RFC 8628).
+
+    No localhost callback needed. Works on headless servers.
+    User opens a URL on ANY device (phone, laptop) and enters a code.
+
+    1. POST to device/code endpoint → get user_code + verification_uri
+    2. Display code to user
+    3. Poll token endpoint until authorized
+    4. Return credentials
+    """
+    print("\n🔐 Claude Device Code Authentication (headless)")
+    print("   No browser needed on this machine.\n")
+
+    # Step 1: Request device code
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            _DEVICE_CODE_URL,
+            data={
+                "client_id": _CLIENT_ID,
+                "scope": _SCOPES,
+            },
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "anthropic-beta": _BETA_HEADER,
+            },
+        )
+        if resp.status_code != 200:
+            error_body = resp.text
+            raise RuntimeError(
+                f"Device code request failed ({resp.status_code}): {error_body}"
+            )
+        device_data = resp.json()
+
+    user_code = device_data["user_code"]
+    verification_uri = device_data.get("verification_uri_complete") or device_data["verification_uri"]
+    device_code = device_data["device_code"]
+    interval = device_data.get("interval", 5)
+    expires_in = device_data.get("expires_in", 600)
+
+    # Step 2: Display instructions
+    print(f"   1. Open this URL on any device:")
+    print(f"      {verification_uri}")
+    print()
+    print(f"   2. Enter this code:  [  {user_code}  ]")
+    print()
+    print(f"   ⏳ Waiting for authorization (expires in {expires_in // 60} minutes)...")
+
+    # Step 3: Poll token endpoint
+    deadline = time.time() + expires_in
+    poll_interval = interval
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        while time.time() < deadline:
+            await asyncio.sleep(poll_interval)
+
+            resp = await client.post(
+                _TOKEN_URL,
+                data={
+                    "grant_type": _DEVICE_CODE_GRANT,
+                    "client_id": _CLIENT_ID,
+                    "device_code": device_code,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "anthropic-beta": _BETA_HEADER,
+                },
+            )
+
+            if resp.status_code == 200:
+                token_data = resp.json()
+                break
+
+            # Handle polling responses
+            try:
+                error_data = resp.json()
+            except Exception:
+                error_data = {"error": "unknown", "error_description": resp.text}
+
+            error = error_data.get("error", "")
+
+            if error == "authorization_pending":
+                # User hasn't authorized yet — keep polling
+                continue
+            elif error == "slow_down":
+                # Server wants us to slow down
+                poll_interval = min(poll_interval + 5, 30)
+                logger.debug(f"Slowing down polling to {poll_interval}s")
+                continue
+            elif error == "expired_token":
+                raise RuntimeError(
+                    "Device code expired. Please run authentication again."
+                )
+            elif error == "access_denied":
+                raise RuntimeError(
+                    "Authorization denied by user."
+                )
+            else:
+                raise RuntimeError(
+                    f"Device code auth error: {error} — "
+                    f"{error_data.get('error_description', '')}"
+                )
+        else:
+            raise TimeoutError(
+                "Device code authorization timed out. Please try again."
+            )
+
+    # Step 4: Extract tokens
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in_token = token_data.get("expires_in", 3600)
+
+    if not access_token or not refresh_token:
+        raise RuntimeError(
+            "Token exchange failed — missing access or refresh token."
+        )
+
+    expires_at = time.time() + expires_in_token - 300  # 5 min buffer
+
+    email = await _get_user_profile(access_token)
+
+    print(f"\n✅ Claude authentication successful{f' ({email})' if email else ''}")
+
+    return ClaudeCredentials(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_at=expires_at,
+        email=email,
+    )
 
 
 async def get_credentials(auto_refresh: bool = True) -> Optional[ClaudeCredentials]:

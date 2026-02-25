@@ -330,6 +330,7 @@ class SubAgentManager:
                 "session_id": 0,
                 "access_level": access_level,
                 "config": self.abilities.get(name).config or {},
+                "_registry": self.abilities,  # For call_ability() support
             }
             ability_result = await self.abilities.execute(name, args, ability_context)
             if ability_result.get("success"):

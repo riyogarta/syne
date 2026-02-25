@@ -141,6 +141,34 @@ class Ability(ABC):
         """
         return None
     
+    async def call_ability(self, name: str, params: dict, context: dict) -> dict:
+        """Call another ability by name from within this ability.
+        
+        This delegates to the AbilityRegistry so abilities can compose
+        each other (e.g. schedule_daily_prayer calls prayer_times).
+        
+        Args:
+            name: Target ability name
+            params: Parameters for the target ability
+            context: Execution context (passed through from this ability's execute())
+            
+        Returns:
+            Result dict from the target ability
+        """
+        # Import here to avoid circular imports
+        from .registry import AbilityRegistry
+        
+        # Access the global registry via the context
+        registry: AbilityRegistry = context.get("_registry")
+        if registry is None:
+            return {
+                "success": False,
+                "error": f"Cannot call ability '{name}': no registry in context. "
+                         "Ensure context['_registry'] is set by the engine.",
+            }
+        
+        return await registry.execute(name, params, context)
+
     @abstractmethod
     async def execute(self, params: dict, context: dict) -> dict:
         """Execute the ability with given parameters.
