@@ -2492,7 +2492,6 @@ Or just send me a message!"""
         buttons = [
             [InlineKeyboardButton("🤖 Change Model", callback_data=f"grp:model_list:{group_id}")],
             [InlineKeyboardButton("👥 Members", callback_data=f"grp:members:{group_id}")],
-            [InlineKeyboardButton("⚙️ Settings", callback_data=f"grp:settings:{group_id}")],
             [
                 InlineKeyboardButton(
                     "⛔ Disable" if group.get("enabled") else "✅ Enable",
