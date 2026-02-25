@@ -52,9 +52,9 @@ _CCA_HEADERS = {
 # Standard Gemini API endpoint (used with API keys)
 _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 
-# Retry configuration — match OpenClaw
+# Retry configuration — match OpenClaw exactly
 _MAX_RETRIES = 3
-_BASE_DELAY_MS = 10_000
+_BASE_DELAY_MS = 1_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
@@ -343,15 +343,6 @@ class GoogleProvider(LLMProvider):
 
         self._use_cca = credentials is not None
 
-    # Class-level lock — serialize ALL CCA requests across all instances.
-    _cca_lock: Optional[asyncio.Lock] = None
-
-    @classmethod
-    def _get_cca_lock(cls) -> asyncio.Lock:
-        if cls._cca_lock is None:
-            cls._cca_lock = asyncio.Lock()
-        return cls._cca_lock
-
     @property
     def name(self) -> str:
         return "google"
@@ -495,8 +486,7 @@ class GoogleProvider(LLMProvider):
         model = model or self.chat_model
 
         if self._use_cca:
-            async with self._get_cca_lock():
-                return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
+            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
         else:
             return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
 
