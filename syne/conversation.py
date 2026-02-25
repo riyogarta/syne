@@ -215,11 +215,23 @@ class Conversation:
         # the response, which meant trim_context could silently drop
         # messages and cause amnesia.
         # ═══════════════════════════════════════════════════════════════
-        if self._message_cache and self.context_mgr.should_compact(
+        # Compaction gate: trigger on EITHER context fullness OR message count/char threshold
+        # Two paths: (1) context window >90% full, (2) message count or chars exceed config thresholds
+        context_full = self._message_cache and self.context_mgr.should_compact(
             self._message_cache,
             threshold=0.90,
-        ):
-            logger.info(f"Context at 75%+, compacting BEFORE LLM call for session {self.session_id}")
+        )
+        from .db.models import get_config as _gc
+        _msg_thresh = await _gc("session.max_messages", 100)
+        _chr_thresh = await _gc("session.compaction_threshold", 80000)
+        msg_count = len(self._message_cache) if self._message_cache else 0
+        count_exceeded = msg_count >= _msg_thresh
+        # Quick char estimate from message cache
+        char_total = sum(len(m.content or "") for m in self._message_cache) if self._message_cache else 0
+        chars_exceeded = char_total >= _chr_thresh
+
+        if context_full or count_exceeded or chars_exceeded:
+            logger.info(f"Compaction triggered for session {self.session_id}: context_full={context_full}, msgs={msg_count}/{_msg_thresh}, chars={char_total}/{_chr_thresh}")
             if self._mgr and self._mgr._status_callback:
                 try:
                     await self._mgr._status_callback(
