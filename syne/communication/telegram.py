@@ -2971,14 +2971,7 @@ Or just send me a message!"""
 
         args = context.args or []
         if not args:
-            await update.message.reply_text(
-                "👥 <b>Global Member Management</b>\n\n"
-                "<code>/members list</code> — list all registered users\n"
-                "<code>/members set &lt;id&gt; owner|family|public|blocked</code> — set access level\n\n"
-                "This sets the <b>global</b> access level (Rule 700/760).\n"
-                "For per-group aliases, use <code>/group alias</code>.",
-                parse_mode="HTML",
-            )
+            await self._members_menu_main(update)
             return
 
         subcommand = args[0].lower()
@@ -2989,6 +2982,110 @@ Or just send me a message!"""
             await self._members_set(update, args[1], args[2])
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /members for help.")
+
+    async def _members_menu_main(self, update=None, query=None):
+        """Show global members list as interactive menu."""
+        from ..db.models import list_users
+        users = await list_users(platform="telegram")
+        
+        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4, "blocked": 5}
+        users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
+        
+        buttons = []
+        for u in users:
+            access = u.get("access_level", "public")
+            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤", "approved": "✅", "pending": "⏳", "blocked": "🚫"}.get(access, "❓")
+            name = u.get("display_name") or u.get("name", "?")
+            pid = u.get("platform_id", "?")
+            buttons.append([InlineKeyboardButton(
+                f"{icon} {name} — {access}",
+                callback_data=f"mbr:view:{pid}",
+            )])
+        
+        text = "👥 <b>Global Members</b>\n\nTap a user to manage:" if users else "👥 <b>Global Members</b>\n\nNo users registered."
+        markup = InlineKeyboardMarkup(buttons)
+        
+        if query:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _members_menu_detail(self, query, platform_id: str):
+        """Show user detail with access level options."""
+        from ..db.models import get_user, get_first_owner
+        user = await get_user("telegram", platform_id)
+        if not user:
+            await query.edit_message_text(f"❌ User {platform_id} not found.")
+            return
+        
+        name = user.get("display_name") or user.get("name", "Unknown")
+        access = user.get("access_level", "public")
+        
+        first_owner = await get_first_owner("telegram")
+        is_first_owner = first_owner and first_owner.get("platform_id") == platform_id
+        
+        text = f"👤 <b>{name}</b>\n\nID: <code>{platform_id}</code>\nAccess: <b>{access}</b>"
+        if is_first_owner:
+            text += "\n🔒 <i>First owner (immutable)</i>"
+        
+        # Access level buttons
+        levels = ["owner", "family", "public", "blocked"]
+        access_buttons = []
+        for lvl in levels:
+            check = " ✓" if lvl == access else ""
+            cb = f"mbr:set:{platform_id}:{lvl}"
+            access_buttons.append(InlineKeyboardButton(f"{lvl}{check}", callback_data=cb))
+        
+        buttons = [access_buttons]
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="mbr:main")])
+        
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _handle_members_callback(self, query, data: str):
+        """Handle interactive members menu callbacks."""
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        
+        # Owner check
+        from ..db.models import get_user
+        db_user = await get_user("telegram", str(query.from_user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await query.answer("⚠️ Owner only", show_alert=True)
+            return
+        
+        if action == "main":
+            await self._members_menu_main(query=query)
+        
+        elif action == "view" and len(parts) >= 3:
+            await self._members_menu_detail(query, parts[2])
+        
+        elif action == "set" and len(parts) >= 4:
+            platform_id = parts[2]
+            new_level = parts[3]
+            
+            from ..db.models import get_user as gu, update_user, get_first_owner
+            
+            # First owner protection
+            first_owner = await get_first_owner("telegram")
+            if first_owner and first_owner.get("platform_id") == platform_id and new_level != "owner":
+                await query.answer("🔒 First owner cannot be changed!", show_alert=True)
+                return
+            
+            # Self-downgrade protection
+            if platform_id == str(query.from_user.id) and new_level != "owner":
+                await query.answer("⚠️ Can't downgrade yourself!", show_alert=True)
+                return
+            
+            result = await update_user("telegram", platform_id, access_level=new_level)
+            if result:
+                await query.answer(f"Access set to {new_level}")
+            else:
+                await query.answer("Failed to update", show_alert=True)
+            
+            await self._members_menu_detail(query, platform_id)
+        
+        else:
+            await query.answer("Unknown action")
 
     async def _members_list(self, update: Update):
         """List all registered users with access levels."""
@@ -4111,6 +4208,10 @@ Or just send me a message!"""
                 pending_key = f"pending_notify:{target_user_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
+
+        elif data.startswith("mbr:"):
+            # Interactive global members menu
+            await self._handle_members_callback(query, data)
 
         elif data.startswith("grp:"):
             # Interactive group management menu
