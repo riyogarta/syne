@@ -22,6 +22,7 @@ from telegram.ext import (
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
 from .outbound import strip_server_paths, extract_media, split_message, process_outbound
+from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
 from ..db.models import (
     get_group,
     get_user,
@@ -35,6 +36,76 @@ from ..db.models import (
 
 
 logger = logging.getLogger("syne.telegram")
+
+
+def _classify_error(e: Exception) -> str:
+    """Classify any exception into a user-friendly message for Telegram."""
+    # 1-4: Typed LLM exceptions (from CCA streaming)
+    if isinstance(e, LLMRateLimitError):
+        return "⚠️ Rate limited. Please wait a moment and try again."
+    if isinstance(e, LLMAuthError):
+        return "⚠️ Authentication error. Owner may need to refresh credentials."
+    if isinstance(e, LLMBadRequestError):
+        return "⚠️ LLM rejected the request. This may be a conversation format issue — try /clear to start fresh."
+    if isinstance(e, LLMEmptyResponseError):
+        return "⚠️ LLM returned an empty response. Please try again."
+
+    # 5: httpx HTTP status errors (from non-CCA drivers)
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        if code == 429:
+            return "⚠️ Rate limited. Please wait a moment and try again."
+        if code in (401, 403):
+            return "⚠️ Authentication error. Owner may need to refresh credentials."
+        if code == 400:
+            return "⚠️ LLM rejected the request. This may be a conversation format issue — try /clear to start fresh."
+        if 500 <= code < 600:
+            return "⚠️ LLM provider is having server issues. Please try again later."
+        return f"⚠️ LLM provider returned HTTP {code}. Please try again later."
+
+    # 6: RuntimeError with known message patterns (from Anthropic/other drivers)
+    if isinstance(e, RuntimeError):
+        msg = str(e)
+        if "429" in msg or "rate" in msg.lower():
+            return "⚠️ Rate limited. Please wait a moment and try again."
+        if "401" in msg or "403" in msg or "auth" in msg.lower():
+            return "⚠️ Authentication error. Owner may need to refresh credentials."
+        if "400" in msg or "bad request" in msg.lower():
+            return "⚠️ LLM rejected the request. This may be a conversation format issue — try /clear to start fresh."
+        if "overloaded" in msg.lower() or "529" in msg:
+            return "⚠️ LLM provider is overloaded. Please try again later."
+
+    # 7-8: Database errors
+    try:
+        import asyncpg
+        if isinstance(e, asyncpg.InterfaceError):
+            return "⚠️ Database connection pool exhausted. Please try again in a moment."
+        if isinstance(e, asyncpg.PostgresError):
+            return "⚠️ Database error. Please try again later."
+    except ImportError:
+        pass
+
+    # 9-10: Network / timeout errors
+    if isinstance(e, httpx.ConnectError):
+        return "⚠️ Cannot connect to LLM provider. Please check connectivity and try again."
+    if isinstance(e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ConnectTimeout)):
+        return "⚠️ Request timed out. Please try again."
+
+    # 11: asyncio timeout
+    if isinstance(e, asyncio.TimeoutError):
+        return "⚠️ Request timed out. Please try again."
+
+    # 12: Unexpected response shape
+    if isinstance(e, (KeyError, IndexError)):
+        return "⚠️ Unexpected response format from LLM provider. Please try again."
+
+    # 13: Not implemented
+    if isinstance(e, NotImplementedError):
+        return "⚠️ This feature is not supported by the current LLM provider."
+
+    # 14: Fallback — include type name for debugging
+    type_name = type(e).__name__
+    return f"⚠️ Something went wrong ({type_name}). Check logs for details."
 
 
 class _TypingIndicator:
@@ -355,10 +426,7 @@ class TelegramChannel:
         except Exception as e:
             logger.error(f"Error processing scheduled message: {e}", exc_info=True)
             try:
-                await self.app.bot.send_message(
-                    chat_id,
-                    f"⚠️ Scheduled task failed: {str(e)[:100]}"
-                )
+                await self.app.bot.send_message(chat_id, _classify_error(e))
             except Exception:
                 pass
 
@@ -535,27 +603,7 @@ class TelegramChannel:
                 return
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
-                # Classify by exception type first, then fall back to string matching
-                from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
-                if isinstance(e, LLMRateLimitError):
-                    await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
-                elif isinstance(e, LLMAuthError):
-                    await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
-                elif isinstance(e, LLMBadRequestError):
-                    await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
-                elif isinstance(e, LLMEmptyResponseError):
-                    await update.message.reply_text("⚠️ LLM returned an empty response. Please try again.")
-                else:
-                    # Fall back to string matching for non-CCA errors
-                    error_msg = str(e)
-                    if "429" in error_msg:
-                        await update.message.reply_text("⚠️ Rate limited. Please wait a moment and try again.")
-                    elif "400" in error_msg:
-                        await update.message.reply_text("⚠️ LLM request failed (bad request). This may be a conversation format issue — try /clear to start fresh.")
-                    elif "401" in error_msg or "403" in error_msg:
-                        await update.message.reply_text("⚠️ Authentication error. Owner may need to refresh credentials.")
-                    else:
-                        await update.message.reply_text("⚠️ Something went wrong. Check logs for details.")
+                await update.message.reply_text(_classify_error(e))
             finally:
                 self._active_tasks.pop(chat.id, None)
 
@@ -929,7 +977,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
-                await update.message.reply_text("⚠️ Something went wrong processing that photo. Check logs for details.")
+                await update.message.reply_text(_classify_error(e))
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle voice messages and audio files — transcribe via STT and process as text."""
@@ -1032,7 +1080,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling voice: {e}", exc_info=True)
-                await update.message.reply_text("⚠️ Something went wrong processing that voice message. Check logs for details.")
+                await update.message.reply_text(_classify_error(e))
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document/file uploads — download, save to disk, pass path to LLM."""
@@ -1163,7 +1211,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling document: {e}", exc_info=True)
-                await update.message.reply_text("⚠️ Something went wrong processing that file. Check logs for details.")
+                await update.message.reply_text(_classify_error(e))
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""
@@ -1260,6 +1308,7 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling location: {e}", exc_info=True)
+                await update.message.reply_text(_classify_error(e))
 
     async def _reverse_geocode(self, lat: float, lng: float) -> str | None:
         """Reverse geocode coordinates to address using Google Maps API."""
