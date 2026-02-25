@@ -2179,19 +2179,8 @@ Or just send me a message!"""
 
         args = context.args or []
         if not args:
-            await update.message.reply_text(
-                "📋 <b>Group Management</b>\n\n"
-                "<code>/group add &lt;group_id&gt;</code> — manually register a group\n"
-                "<code>/group list</code> — list registered groups\n"
-                "<code>/group model &lt;group&gt; [model_key]</code> — get/set model override\n"
-                "<code>/group members &lt;group&gt;</code> — list members\n"
-                "<code>/group set &lt;group&gt; &lt;id&gt; owner|family|public</code> — set access\n"
-                "<code>/group alias &lt;group&gt; &lt;id&gt; &lt;name&gt;</code> — set alias\n"
-                "<code>/group settings &lt;group&gt;</code> — view group settings\n"
-                "<code>/group settings &lt;group&gt; &lt;key&gt; &lt;value&gt;</code> — set a setting\n"
-                "<code>/group settings &lt;group&gt; &lt;key&gt; --delete</code> — remove a setting\n",
-                parse_mode="HTML",
-            )
+            # Show interactive menu with group list
+            await self._group_menu_main(update)
             return
 
         subcommand = args[0].lower()
@@ -2227,6 +2216,291 @@ Or just send me a message!"""
                 await update.message.reply_text("❌ Usage: /group settings <group> [key] [value|--delete]")
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
+
+    async def _handle_group_callback(self, query, data: str):
+        """Handle interactive group menu callbacks."""
+        parts = data.split(":")
+        # grp:action:param1:param2...
+        action = parts[1] if len(parts) > 1 else ""
+        
+        # Owner check
+        user = query.from_user
+        from ..db.models import get_user
+        db_user = await get_user("telegram", str(user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await query.answer("⚠️ Owner only", show_alert=True)
+            return
+        
+        if action == "main":
+            await self._group_menu_main(None, query=query)
+        
+        elif action == "view" and len(parts) >= 3:
+            group_id = parts[2]
+            await self._group_menu_view(query, group_id)
+        
+        elif action == "model_list" and len(parts) >= 3:
+            group_id = parts[2]
+            await self._group_menu_model_list(query, group_id)
+        
+        elif action == "model_set" and len(parts) >= 4:
+            group_id = parts[2]
+            model_key = parts[3]
+            
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            if not group:
+                await query.answer("Group not found", show_alert=True)
+                return
+            
+            settings = group.get("settings") or {}
+            
+            if model_key == "__default__":
+                settings.pop("model", None)
+            else:
+                settings["model"] = model_key
+            
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
+                    json.dumps(settings), group_id,
+                )
+            
+            # Clear cached conversation
+            self._clear_group_conversation(group_id)
+            
+            label = model_key if model_key != "__default__" else "default"
+            await query.answer(f"Model set to {label}")
+            
+            # Refresh model list view
+            await self._group_menu_model_list(query, group_id)
+        
+        elif action == "members" and len(parts) >= 3:
+            group_id = parts[2]
+            await self._group_menu_members(query, group_id)
+        
+        elif action == "settings" and len(parts) >= 3:
+            group_id = parts[2]
+            await self._group_menu_settings(query, group_id)
+        
+        elif action == "toggle" and len(parts) >= 3:
+            group_id = parts[2]
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            if not group:
+                await query.answer("Group not found", show_alert=True)
+                return
+            
+            new_enabled = not group.get("enabled", True)
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET enabled = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
+                    new_enabled, group_id,
+                )
+            
+            status = "enabled" if new_enabled else "disabled"
+            await query.answer(f"Group {status}")
+            await self._group_menu_view(query, group_id)
+        
+        elif action == "delete_confirm" and len(parts) >= 3:
+            group_id = parts[2]
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            name = (group or {}).get("name", group_id)
+            
+            buttons = [
+                [
+                    InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"grp:delete:{group_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"grp:view:{group_id}"),
+                ]
+            ]
+            await query.edit_message_text(
+                f"⚠️ Delete group <b>{name}</b>?\n\nThis removes all group config and member data.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+        
+        elif action == "delete" and len(parts) >= 3:
+            group_id = parts[2]
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                    group_id,
+                )
+            self._clear_group_conversation(group_id)
+            await query.answer("Group deleted")
+            await self._group_menu_main(None, query=query)
+        
+        elif action == "add_prompt":
+            await query.edit_message_text(
+                "➕ <b>Add Group</b>\n\n"
+                "Send the group ID to register:\n"
+                "<code>/group add &lt;group_id&gt;</code>\n\n"
+                "To find group ID: add the bot to the group, "
+                "or forward a message from the group to @userinfobot.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Back", callback_data="grp:main")]
+                ]),
+            )
+        
+        else:
+            await query.answer("Unknown action")
+
+    async def _group_menu_main(self, update: Update, query=None):
+        """Show main group menu — list of groups + add button."""
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT platform_group_id, name, enabled, settings FROM groups WHERE platform = 'telegram' ORDER BY name"
+            )
+        
+        buttons = []
+        for row in rows:
+            gid = row["platform_group_id"]
+            name = row["name"] or gid
+            emoji = "✅" if row["enabled"] else "⛔"
+            buttons.append([InlineKeyboardButton(
+                f"{emoji} {name}", callback_data=f"grp:view:{gid}"
+            )])
+        
+        buttons.append([InlineKeyboardButton("➕ Add Group", callback_data="grp:add_prompt")])
+        
+        text = "📋 <b>Group Management</b>\n\nSelect a group to manage:"
+        if not rows:
+            text = "📋 <b>Group Management</b>\n\nNo groups registered yet."
+        
+        markup = InlineKeyboardMarkup(buttons)
+        if query:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _group_menu_view(self, query, group_id: str):
+        """Show group detail menu with action buttons."""
+        from ..db.models import get_group
+        group = await get_group("telegram", group_id)
+        if not group:
+            await query.edit_message_text(f"❌ Group {group_id} not found.")
+            return
+        
+        name = group.get("name", group_id)
+        settings = group.get("settings") or {}
+        model = settings.get("model", "default")
+        enabled = "✅ Enabled" if group.get("enabled") else "⛔ Disabled"
+        mention = "Yes" if group.get("require_mention") else "No"
+        
+        text = (
+            f"📋 <b>{name}</b>\n\n"
+            f"ID: <code>{group_id}</code>\n"
+            f"Status: {enabled}\n"
+            f"Require mention: {mention}\n"
+            f"Model: <code>{model}</code>\n"
+        )
+        
+        # Add custom settings
+        custom_keys = [k for k in settings if k != "model" and k != "members"]
+        if custom_keys:
+            text += "\nSettings:\n"
+            for k in custom_keys:
+                text += f"  • {k}: {settings[k]}\n"
+        
+        buttons = [
+            [InlineKeyboardButton("🤖 Change Model", callback_data=f"grp:model_list:{group_id}")],
+            [InlineKeyboardButton("👥 Members", callback_data=f"grp:members:{group_id}")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data=f"grp:settings:{group_id}")],
+            [
+                InlineKeyboardButton(
+                    "⛔ Disable" if group.get("enabled") else "✅ Enable",
+                    callback_data=f"grp:toggle:{group_id}"
+                ),
+                InlineKeyboardButton("🗑 Delete", callback_data=f"grp:delete_confirm:{group_id}"),
+            ],
+            [InlineKeyboardButton("⬅️ Back", callback_data="grp:main")],
+        ]
+        
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _group_menu_model_list(self, query, group_id: str):
+        """Show model selection for a group."""
+        from ..db.models import get_config, get_group
+        
+        group = await get_group("telegram", group_id)
+        current_model = ((group or {}).get("settings") or {}).get("model")
+        
+        models = await get_config("provider.models", [])
+        buttons = []
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            check = " ✓" if key == current_model else ""
+            buttons.append([InlineKeyboardButton(
+                f"{label}{check}", callback_data=f"grp:model_set:{group_id}:{key}"
+            )])
+        
+        # Add "default" option
+        check = " ✓" if not current_model else ""
+        buttons.append([InlineKeyboardButton(
+            f"🔄 Default{check}", callback_data=f"grp:model_set:{group_id}:__default__"
+        )])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")])
+        
+        name = (group or {}).get("name", group_id)
+        await query.edit_message_text(
+            f"🤖 <b>Select Model for {name}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _group_menu_members(self, query, group_id: str):
+        """Show group members list."""
+        from ..db.models import get_group
+        group = await get_group("telegram", group_id)
+        if not group:
+            await query.edit_message_text("❌ Group not found.")
+            return
+        
+        name = group.get("name", group_id)
+        members = ((group.get("settings") or {}).get("members") or {})
+        
+        if not members:
+            text = f"👥 <b>{name} — Members</b>\n\nNo members collected yet."
+        else:
+            text = f"👥 <b>{name} — Members</b>\n\n"
+            for mid, info in sorted(members.items(), key=lambda x: x[1].get("name", "")):
+                m_name = info.get("alias") or info.get("name", "Unknown")
+                access = info.get("access", "public")
+                emoji = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤"}.get(access, "👤")
+                text += f"{emoji} {m_name} ({mid}) — {access}\n"
+        
+        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _group_menu_settings(self, query, group_id: str):
+        """Show group settings with edit options."""
+        from ..db.models import get_group
+        group = await get_group("telegram", group_id)
+        if not group:
+            await query.edit_message_text("❌ Group not found.")
+            return
+        
+        name = group.get("name", group_id)
+        settings = group.get("settings") or {}
+        custom = {k: v for k, v in settings.items() if k not in ("members", "model")}
+        
+        if custom:
+            text = f"⚙️ <b>{name} — Settings</b>\n\n"
+            for k, v in custom.items():
+                text += f"• <code>{k}</code>: {v}\n"
+        else:
+            text = f"⚙️ <b>{name} — Settings</b>\n\nNo custom settings."
+        
+        text += "\n\nTo set: <code>/group settings " + name + " key value</code>"
+        
+        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _group_get_model(self, update: Update, group_ref: str):
         """Show current model override for a group."""
@@ -3710,6 +3984,10 @@ Or just send me a message!"""
                 pending_key = f"pending_notify:{target_user_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
+
+        elif data.startswith("grp:"):
+            # Interactive group management menu
+            await self._handle_group_callback(query, data)
 
         elif data.startswith("group_approve:") or data.startswith("group_reject:"):
             # Group approval/rejection
