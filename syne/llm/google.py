@@ -729,7 +729,7 @@ class GoogleProvider(LLMProvider):
                     logger.warning(f"CCA empty stream retry failed: {e}")
 
         if not streamed:
-            logger.warning(f"CCA empty response for {model}")
+            raise Exception(f"Cloud Code Assist API returned an empty response for {model}")
 
         content = "".join(text_parts)
         thinking = "".join(thinking_parts) if thinking_parts else None
