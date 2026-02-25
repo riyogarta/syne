@@ -54,7 +54,7 @@ _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 
 # Retry configuration — match OpenClaw
 _MAX_RETRIES = 3
-_BASE_DELAY_MS = 1000
+_BASE_DELAY_MS = 10_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
@@ -693,6 +693,8 @@ class GoogleProvider(LLMProvider):
                 if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
                     # #2: Use server-provided delay or exponential backoff
                     server_delay = _extract_retry_delay(error_text, e.response.headers)
+                    if not server_delay:
+                        logger.debug(f"CCA no server delay parsed. Headers: {dict(e.response.headers)}. Body snippet: {error_text[:300]}")
                     delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
 
                     # Cap at max delay
