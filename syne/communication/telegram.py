@@ -4140,6 +4140,11 @@ Or just send me a message!"""
 
         # Universal outbound processing (path strip + narration strip + cleanup)
         text = process_outbound(text)
+
+        # Guard: empty text after processing — don't send empty message to Telegram
+        if not text or not text.strip():
+            logger.warning(f"Empty response after outbound processing for chat {chat_id}, skipping send")
+            return None
         
         # Get bot instance — from context if available, otherwise from app
         bot = context.bot if context else self.app.bot
