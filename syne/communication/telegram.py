@@ -2340,6 +2340,81 @@ Or just send me a message!"""
             await query.answer("Group deleted")
             await self._group_menu_main(None, query=query)
         
+        elif action == "member" and len(parts) >= 4:
+            group_id = parts[2]
+            member_id = parts[3]
+            await self._group_menu_member_detail(query, group_id, member_id)
+        
+        elif action == "member_access" and len(parts) >= 5:
+            group_id = parts[2]
+            member_id = parts[3]
+            new_level = parts[4]
+            
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            if not group:
+                await query.answer("Group not found", show_alert=True)
+                return
+            
+            # Check first owner protection
+            settings = group.get("settings") or {}
+            members = settings.get("members") or {}
+            
+            if member_id in members:
+                members[member_id]["access"] = new_level
+            else:
+                members[member_id] = {"access": new_level}
+            
+            settings["members"] = members
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
+                    json.dumps(settings), group_id,
+                )
+            
+            # Also update global users table if needed
+            from ..db.models import get_user, update_user
+            db_user = await get_user("telegram", member_id)
+            if db_user:
+                # Check first owner protection before changing global level
+                if db_user.get("access_level") == "owner":
+                    from ..db.connection import get_connection as gc
+                    async with gc() as conn:
+                        first_owner = await conn.fetchrow(
+                            "SELECT platform_id FROM users WHERE platform = 'telegram' AND access_level = 'owner' ORDER BY created_at LIMIT 1"
+                        )
+                    if first_owner and first_owner["platform_id"] == member_id:
+                        if new_level != "owner":
+                            await query.answer("Cannot demote first owner!", show_alert=True)
+                            await self._group_menu_member_detail(query, group_id, member_id)
+                            return
+                
+                await update_user("telegram", member_id, access_level=new_level)
+            
+            await query.answer(f"Access set to {new_level}")
+            await self._group_menu_member_detail(query, group_id, member_id)
+        
+        elif action == "member_alias_prompt" and len(parts) >= 4:
+            group_id = parts[2]
+            member_id = parts[3]
+            
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            members = ((group or {}).get("settings") or {}).get("members") or {}
+            info = members.get(member_id, {})
+            current = info.get("alias", "none")
+            m_name = info.get("name", member_id)
+            
+            text = (
+                f"\u270f\ufe0f <b>Set Alias for {m_name}</b>\n\n"
+                f"Current alias: {current}\n\n"
+                f"Send the new alias as a message:\n"
+                f"<code>/group alias {group_id} {member_id} NewAlias</code>"
+            )
+            buttons = [[InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=f"grp:member:{group_id}:{member_id}")]]
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+        
         elif action == "add_prompt":
             await query.edit_message_text(
                 "➕ <b>Add Group</b>\n\n"
