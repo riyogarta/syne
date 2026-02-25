@@ -772,8 +772,23 @@ class ConversationManager:
             inbound=inbound,
         )
 
+        # ═══════════════════════════════════════════════════════════════
+        # Per-group/per-user model override
+        # ═══════════════════════════════════════════════════════════════
+        conv_provider = self.provider  # default
+        if inbound and inbound.is_group and inbound.chat_id:
+            from .db.models import get_group
+            group = await get_group(platform, str(inbound.chat_id))
+            if group:
+                group_model = (group.get("settings") or {}).get("model")
+                if group_model and hasattr(self, '_agent') and self._agent:
+                    override = await self._agent.create_provider_for_model(group_model)
+                    if override:
+                        conv_provider = override
+                        logger.info(f"Group {inbound.chat_id} using model override: {group_model}")
+
         conv = Conversation(
-            provider=self.provider,
+            provider=conv_provider,
             memory=self.memory,
             tools=self.tools,
             context_mgr=self.context_mgr,

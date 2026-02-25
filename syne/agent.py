@@ -133,6 +133,7 @@ class SyneAgent:
             subagents=self.subagents,
         )
         self.conversations.workspace_outputs = self.workspace_outputs
+        self.conversations._agent = self  # Back-reference for per-group model override
 
         self._running = True
 
@@ -187,6 +188,28 @@ class SyneAgent:
         # Update sub-agent manager
         if self.subagents:
             self.subagents.provider = new_provider
+
+    async def create_provider_for_model(self, model_key: str):
+        """Create a provider for a specific model key from the registry.
+        
+        Used for per-group/per-user model overrides.
+        Returns None if model key not found.
+        """
+        from .llm.drivers import get_model_from_list, create_hybrid_provider
+        
+        models = await get_config("provider.models", None)
+        if not models:
+            return None
+        
+        model_entry = get_model_from_list(models, model_key)
+        if not model_entry:
+            return None
+        
+        try:
+            return await create_hybrid_provider(model_entry)
+        except Exception as e:
+            logger.warning(f"Failed to create provider for model '{model_key}': {e}")
+            return None
 
     def _get_oauth_provider(self):
         """Get the actual OAuth-capable provider (unwrap HybridProvider if needed)."""

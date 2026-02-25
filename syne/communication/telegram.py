@@ -2183,6 +2183,7 @@ Or just send me a message!"""
                 "📋 <b>Group Management</b>\n\n"
                 "<code>/group add &lt;group_id&gt;</code> — manually register a group\n"
                 "<code>/group list</code> — list registered groups\n"
+                "<code>/group model &lt;group&gt; [model_key]</code> — get/set model override\n"
                 "<code>/group members &lt;group&gt;</code> — list members\n"
                 "<code>/group set &lt;group&gt; &lt;id&gt; owner|family|public</code> — set access\n"
                 "<code>/group alias &lt;group&gt; &lt;id&gt; &lt;name&gt;</code> — set alias\n"
@@ -2206,6 +2207,13 @@ Or just send me a message!"""
         elif subcommand == "alias" and len(args) >= 4:
             alias_name = " ".join(args[3:])  # Allow multi-word aliases
             await self._group_set_alias(update, args[1], args[2], alias_name)
+        elif subcommand == "model":
+            if len(args) >= 3:
+                await self._group_set_model(update, args[1], args[2])
+            elif len(args) >= 2:
+                await self._group_get_model(update, args[1])
+            else:
+                await update.message.reply_text("❌ Usage: /group model <group> [model_key]")
         elif subcommand == "settings" and len(args) >= 2:
             if len(args) == 2:
                 # View settings
@@ -2219,6 +2227,91 @@ Or just send me a message!"""
                 await update.message.reply_text("❌ Usage: /group settings <group> [key] [value|--delete]")
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
+
+    async def _group_get_model(self, update: Update, group_ref: str):
+        """Show current model override for a group."""
+        from ..db.models import get_group
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+        
+        model = (group.get("settings") or {}).get("model")
+        name = group.get("name", group.get("platform_group_id"))
+        if model:
+            await update.message.reply_text(f"🤖 {name}: model = `{model}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"🤖 {name}: using default model (no override)")
+
+    async def _group_set_model(self, update: Update, group_ref: str, model_key: str):
+        """Set model override for a group."""
+        group = await self._resolve_group(group_ref)
+        if not group:
+            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+            return
+        
+        group_id = group["platform_group_id"]
+        name = group.get("name", group_id)
+        
+        # "default" or "none" clears the override
+        if model_key.lower() in ("default", "none", "clear"):
+            settings = group.get("settings") or {}
+            settings.pop("model", None)
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
+                    json.dumps(settings), group_id,
+                )
+            # Clear cached conversation so new provider takes effect
+            self._clear_group_conversation(group_id)
+            await update.message.reply_text(f"✅ {name}: model override cleared (using default)")
+            return
+        
+        # Validate model key exists in registry
+        from ..db.models import get_config
+        models = await get_config("provider.models", None)
+        if models:
+            from ..llm.drivers import get_model_from_list
+            entry = get_model_from_list(models, model_key)
+            if not entry:
+                available = ", ".join(f"`{m.get('key')}`" for m in models if m.get("key"))
+                await update.message.reply_text(
+                    f"❌ Model `{model_key}` not found.\n\nAvailable: {available}",
+                    parse_mode="Markdown",
+                )
+                return
+        
+        # Save to group settings
+        settings = group.get("settings") or {}
+        settings["model"] = model_key
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            await conn.execute(
+                "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
+                json.dumps(settings), group_id,
+            )
+        
+        # Clear cached conversation so new provider takes effect
+        self._clear_group_conversation(group_id)
+        
+        label = ""
+        if models:
+            from ..llm.drivers import get_model_from_list as gm
+            e = gm(models, model_key)
+            if e:
+                label = f" ({e.get('label', '')})"
+        
+        await update.message.reply_text(f"✅ {name}: model set to `{model_key}`{label}", parse_mode="Markdown")
+
+    def _clear_group_conversation(self, group_id: str):
+        """Clear cached conversation for a group so model override takes effect."""
+        if not self.agent or not self.agent.conversations:
+            return
+        key = f"telegram:{group_id}"
+        if key in self.agent.conversations._active:
+            del self.agent.conversations._active[key]
+            logger.info(f"Cleared cached conversation for group {group_id}")
 
     async def _group_add(self, update: Update, group_id_str: str):
         """Manually register a group by ID."""
