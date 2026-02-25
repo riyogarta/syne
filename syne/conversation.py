@@ -1,5 +1,6 @@
 """Conversation manager — session handling, message history, context building."""
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -313,17 +314,24 @@ class Conversation:
         # Evaluate memory (only if auto_capture enabled)
         # Rule 760: Only owner and family can write to global memory.
         # Non-family messages stay in session history only.
+        # Fire-and-forget with delay to avoid CCA rate limit collision.
         from .db.models import get_config
         access_level = self.user.get("access_level", "public")
         can_write_memory = access_level in ("owner", "family")
         auto_capture = await get_config("memory.auto_capture", False)
         if auto_capture and can_write_memory:
-            await evaluate_and_store(
-                provider=self.provider,
-                memory_engine=self.memory,
-                user_message=user_message,
-                user_id=self.user.get("id"),
-            )
+            async def _deferred_evaluate():
+                try:
+                    await asyncio.sleep(40)  # Wait for CCA rate limit window (~36s)
+                    await evaluate_and_store(
+                        provider=self.provider,
+                        memory_engine=self.memory,
+                        user_message=user_message,
+                        user_id=self.user.get("id"),
+                    )
+                except Exception as e:
+                    logger.warning(f"Deferred memory evaluation failed: {e}")
+            asyncio.create_task(_deferred_evaluate())
 
         self._processing = False
         return final_response
