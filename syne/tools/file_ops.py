@@ -5,7 +5,7 @@ Rule 700: Only the owner can use these tools.
 Security restrictions for file_write:
 - CAN write to CWD (working directory) or descendants
 - CAN write to syne/abilities/ (for dynamic ability creation)
-- CANNOT write to syne/ core directories (engine, tools, channels, db, llm, security)
+- CANNOT write to syne/ anything else (whitelist approach — only abilities/ is writable)
 
 This follows the self-edit pattern: abilities are editable, core is not.
 """
@@ -22,19 +22,8 @@ logger = logging.getLogger("syne.tools.file_ops")
 # Project root (syne/ parent directory)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Syne core directories that CANNOT be written to
-_SYNE_CORE_DIRS = frozenset({
-    "syne/engine",
-    "syne/tools",
-    "syne/channels",
-    "syne/db",
-    "syne/llm",
-    "syne/security",
-    "syne/auth",
-    "syne/memory",
-})
-
-# Allowed to write even inside syne/
+# Allowed to write inside syne/ — WHITELIST approach.
+# Everything else under syne/ is BLOCKED.
 _SYNE_WRITABLE_PATHS = frozenset({
     "syne/abilities",
 })
@@ -53,7 +42,7 @@ _owner_dm: bool = False
 
 def set_workspace(workspace_path: str) -> None:
     """Set the workspace directory for file_write resolution.
-    
+
     Called by SyneAgent at startup. When set, relative paths in file_write
     resolve to workspace/ instead of os.getcwd().
     """
@@ -63,10 +52,10 @@ def set_workspace(workspace_path: str) -> None:
 
 def set_owner_dm(is_owner_dm: bool) -> None:
     """Set whether current execution context is an owner DM.
-    
+
     When True, file security restrictions are bypassed because
     the owner's identity is platform-verified and cannot be spoofed.
-    
+
     Called by conversation layer before tool execution.
     """
     global _owner_dm
@@ -91,62 +80,60 @@ def _is_path_under(path: Path, parent: Path) -> bool:
 
 def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     """Check if writing to this path is allowed.
-    
+
     Owner DM bypass: When _owner_dm is True, ALL write restrictions are
     skipped. Owner identity is platform-verified (Telegram ID), making
     prompt injection impossible in this context.
-    
-    Normal mode (non-owner or group): Blacklist approach — Syne can write
-    ANYWHERE except syne/ core, .env, schema.sql.
-    
+
+    Normal mode (non-owner or group): WHITELIST approach for syne/ —
+    ONLY syne/abilities/ is writable. Everything else under syne/ is blocked.
+    Outside syne/, can write anywhere except .env and schema.sql.
+
     Args:
         path: Absolute path to check
         cwd: Current working directory (context)
-        
+
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
     # Owner DM = unrestricted write access
     if _owner_dm:
         return True, ""
-    
+
     resolved = path.resolve()
     fname = resolved.name.lower()
-    
+
     # Block .env files everywhere
     if fname in {".env", ".env.local", ".env.production", ".env.development"}:
         return False, "Cannot write to .env files (credential protection)."
-    
+
     # Block schema.sql
     if fname == "schema.sql" and _is_path_under(resolved, _PROJECT_ROOT):
         return False, "Cannot write to schema.sql (database schema is protected)."
-    
-    # Check syne/ paths
+
+    # Check syne/ paths — WHITELIST approach
+    # Only syne/abilities/ is writable. Everything else under syne/ is BLOCKED.
     syne_dir = _PROJECT_ROOT / "syne"
     if _is_path_under(resolved, syne_dir):
-        # Allow syne/abilities/ (self-edit pattern)
+        # Check if path is under any whitelisted path
         for writable in _SYNE_WRITABLE_PATHS:
             writable_path = _PROJECT_ROOT / writable
             if _is_path_under(resolved, writable_path):
                 return True, ""
-        
-        # Block syne/ core directories
-        for core_dir in _SYNE_CORE_DIRS:
-            core_path = _PROJECT_ROOT / core_dir
-            if _is_path_under(resolved, core_path):
-                return False, f"Cannot write to Syne core directory. Path is inside protected area."
-        
-        # Block direct files in syne/ root (like syne/agent.py)
-        if resolved.parent == syne_dir:
-            return False, f"Cannot write directly to syne/. Only syne/abilities/ is writable."
-    
-    # Everything else is allowed
+
+        # Not in whitelist — BLOCKED
+        return False, (
+            "Cannot write to syne/ core. Only syne/abilities/ is writable. "
+            "All other syne/ paths are protected."
+        )
+
+    # Everything outside syne/ is allowed
     return True, ""
 
 
 def _read_env_redacted(file_path: Path) -> str:
     """Read .env file with all values redacted.
-    
+
     Shows KEY=*** for each variable so the agent can diagnose
     which variables are set without seeing actual credentials.
     """
@@ -158,7 +145,7 @@ def _read_env_redacted(file_path: Path) -> str:
         return f"Error: Permission denied: {file_path}"
     except Exception as e:
         return f"Error reading {file_path.name}: {e}"
-    
+
     redacted = []
     for line in lines:
         stripped = line.strip()
@@ -179,7 +166,7 @@ def _read_env_redacted(file_path: Path) -> str:
                 redacted.append(f"{key}=(empty)")
         else:
             redacted.append("# (non-standard line redacted)")
-    
+
     header = f"📄 {file_path.name} (values redacted for security):\n"
     return header + "\n".join(redacted)
 
@@ -190,28 +177,28 @@ async def file_read_handler(
     limit: int = _MAX_LINES,
 ) -> str:
     """Read file contents.
-    
+
     Args:
         path: Path to the file (absolute or relative to CWD)
         offset: Line number to start from (1-indexed)
         limit: Maximum number of lines to read
-        
+
     Returns:
         File contents or error message
     """
     if not path:
         return "Error: path is required."
-    
+
     # Get max read size from config
     max_read_size = await get_config("file_ops.max_read_size", _DEFAULT_MAX_READ_SIZE)
-    
+
     # Resolve path
     file_path = Path(path)
     if not file_path.is_absolute():
         file_path = Path.cwd() / file_path
-    
+
     file_path = file_path.resolve()
-    
+
     # Block sensitive files — credentials must never reach the LLM
     # Owner DM bypass: owner can read anything (identity is platform-verified)
     if not _owner_dm:
@@ -223,13 +210,13 @@ async def file_read_handler(
             return _read_env_redacted(file_path)
         if any(p in fname_lower for p in _BLOCKED_PATTERNS):
             return f"Error: Access denied — {file_path.name} contains credentials and cannot be read."
-    
+
     if not file_path.exists():
         return f"Error: File not found: {path}"
-    
+
     if not file_path.is_file():
         return f"Error: Not a file: {path}"
-    
+
     # Check file size
     file_size = file_path.stat().st_size
     if file_size > max_read_size:
@@ -238,11 +225,11 @@ async def file_read_handler(
             f"Max allowed: {max_read_size:,} bytes. "
             f"Increase via update_config(key='file_ops.max_read_size', value='{max_read_size * 2}')"
         )
-    
+
     # Read file
     offset = max(1, offset)
     limit = min(limit, _MAX_LINES)
-    
+
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
@@ -250,29 +237,29 @@ async def file_read_handler(
         return f"Error: Permission denied: {path}"
     except Exception as e:
         return f"Error reading file: {e}"
-    
+
     total = len(all_lines)
-    
+
     if total == 0:
         return f"📄 {path} (empty file)"
-    
+
     start_idx = offset - 1  # 1-indexed to 0-indexed
     end_idx = min(start_idx + limit, total)
-    
+
     if start_idx >= total:
         return f"Error: offset {offset} exceeds file length ({total} lines)."
-    
+
     selected = all_lines[start_idx:end_idx]
-    
+
     header = f"📄 {path} (lines {offset}-{end_idx} of {total})"
     if end_idx < total:
         header += f" — use offset={end_idx + 1} to continue"
-    
+
     # Add line numbers
     numbered = []
     for i, line in enumerate(selected, start=offset):
         numbered.append(f"{i:4d} | {line.rstrip()}")
-    
+
     return header + "\n" + "\n".join(numbered)
 
 
@@ -282,27 +269,27 @@ async def file_write_handler(
     workdir: str = "",
 ) -> str:
     """Write content to a file.
-    
+
     Security: Only allows writing to:
     - Files inside the working directory (CWD)
     - Files inside syne/abilities/ (for dynamic ability creation)
-    
+
     Will auto-create parent directories.
-    
+
     Args:
         path: Path to the file (absolute or relative to workdir/CWD)
         content: Content to write
         workdir: Working directory context (defaults to CWD)
-        
+
     Returns:
         Success message or error
     """
     if not path:
         return "Error: path is required."
-    
+
     if content is None:
         return "Error: content is required (use empty string for empty file)."
-    
+
     # Determine working directory
     # Priority: explicit workdir > workspace (Telegram) > process CWD (CLI)
     if workdir:
@@ -311,7 +298,7 @@ async def file_write_handler(
         cwd = Path(_workspace_dir).resolve()
     else:
         cwd = Path.cwd()  # CLI mode — user's actual directory
-    
+
     # Resolve path
     file_path = Path(path)
     if not file_path.is_absolute():
@@ -322,15 +309,15 @@ async def file_write_handler(
             file_path = _PROJECT_ROOT / file_path
         else:
             file_path = cwd / file_path
-    
+
     file_path = file_path.resolve()
-    
+
     # Security check
     allowed, reason = _check_write_allowed(file_path, cwd)
     if not allowed:
         logger.warning(f"file_write blocked: {file_path} — {reason}")
         return f"Error: {reason}"
-    
+
     # Create parent directories
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,7 +325,7 @@ async def file_write_handler(
         return f"Error: Permission denied creating directory: {file_path.parent}"
     except Exception as e:
         return f"Error creating directories: {e}"
-    
+
     # Write file
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -347,10 +334,10 @@ async def file_write_handler(
         return f"Error: Permission denied writing to: {path}"
     except Exception as e:
         return f"Error writing file: {e}"
-    
+
     size = len(content.encode("utf-8"))
     logger.info(f"file_write: {file_path} ({size} bytes)")
-    
+
     # Return filename only — never expose server paths to LLM (which may echo them to users)
     display_name = file_path.name
     return f"✅ File written: {display_name} ({size:,} bytes)"
