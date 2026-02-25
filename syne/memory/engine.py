@@ -140,7 +140,7 @@ class MemoryEngine:
                     UPDATE memory
                     SET access_count = access_count + 1,
                         accessed_at = NOW(),
-                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 1 END
+                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 2 END
                     WHERE id = ANY($1)
                 """, ids_to_update)
 
@@ -459,7 +459,7 @@ class MemoryEngine:
         if current % interval != 0:
             return  # Not time yet
         
-        decay_amount = int(await get_config("memory.decay_amount", "2"))
+        decay_amount = int(await get_config("memory.decay_amount", "1"))
         
         async with get_connection() as conn:
             # Decay non-permanent memories

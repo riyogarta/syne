@@ -327,7 +327,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '10', 'Max memories to recall per query'),
     ('memory.decay_interval', '50', 'Decay every N conversations'),
-    ('memory.decay_amount', '2', 'How much recall_count decreases per decay'),
+    ('memory.decay_amount', '1', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '1', 'Starting recall_count for new memories'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Token count threshold for compaction'),
