@@ -14,6 +14,14 @@ from . import __version__
 console = Console()
 
 
+def _strip_env_quotes(value: str) -> str:
+    """Strip surrounding quotes from .env values (handles both ' and \")."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__, prog_name="syne")
 @click.pass_context
@@ -212,7 +220,7 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
             for line in f:
                 line = line.strip()
                 if line.startswith("SYNE_DATABASE_URL="):
-                    db_url = line.split("=", 1)[1].strip()
+                    db_url = _strip_env_quotes(line.split("=", 1)[1])
                     break
     if not db_url:
         # Try individual vars
@@ -222,11 +230,11 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
                 for line in f:
                     line = line.strip()
                     if line.startswith("SYNE_DB_USER="):
-                        db_user = line.split("=", 1)[1].strip()
+                        db_user = _strip_env_quotes(line.split("=", 1)[1])
                     elif line.startswith("SYNE_DB_PASSWORD="):
-                        db_pass = line.split("=", 1)[1].strip()
+                        db_pass = _strip_env_quotes(line.split("=", 1)[1])
                     elif line.startswith("SYNE_DB_NAME="):
-                        db_name = line.split("=", 1)[1].strip()
+                        db_name = _strip_env_quotes(line.split("=", 1)[1])
         if db_user and db_pass and db_name:
             db_url = f"postgresql://{db_user}:{db_pass}@localhost:5433/{db_name}"
 
@@ -856,7 +864,7 @@ def init():
                 line = line.strip()
                 if "=" in line and not line.startswith("#"):
                     k, v = line.split("=", 1)
-                    existing_env[k.strip()] = v.strip()
+                    existing_env[k.strip()] = _strip_env_quotes(v)
 
     if existing_env.get("SYNE_DB_USER") and existing_env.get("SYNE_DB_PASSWORD"):
         db_user = existing_env["SYNE_DB_USER"]
@@ -1693,7 +1701,8 @@ def repair(fix):
                 """)
             table_names = [t["tablename"] for t in tables]
             expected = ["abilities", "capabilities", "config", "identity", "memory",
-                       "messages", "rules", "sessions", "soul", "subagent_runs", "users"]
+                       "messages", "rules", "scheduled_tasks", "sessions", "soul",
+                       "subagent_runs", "users"]
             missing = [t for t in expected if t not in table_names]
 
             if missing:
@@ -1871,6 +1880,41 @@ def repair(fix):
                 console.print("   [green]  → Fixed: container started[/green]")
         else:
             console.print("   [yellow]⚠ Container not found[/yellow]")
+
+        # ── 7. .env security ──
+        console.print("\n[bold]7. Security[/bold]")
+        syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(syne_dir, ".env")
+        if os.path.exists(env_path):
+            env_stat = os.stat(env_path)
+            env_mode = oct(env_stat.st_mode)[-3:]
+            if env_mode == "600":
+                console.print(f"   [green]✓ .env permissions: {env_mode} (owner-only)[/green]")
+            else:
+                issues.append(f".env has insecure permissions: {env_mode} (should be 600)")
+                console.print(f"   [red]✗ .env permissions: {env_mode} (should be 600)[/red]")
+                if fix:
+                    os.chmod(env_path, 0o600)
+                    fixed.append("Fixed .env permissions to 600")
+                    console.print("   [green]  → Fixed: chmod 600[/green]")
+        else:
+            console.print("   [yellow]⚠ .env not found[/yellow]")
+
+        # Check .gitignore includes .env
+        gitignore_path = os.path.join(syne_dir, ".gitignore")
+        if os.path.exists(gitignore_path):
+            with open(gitignore_path) as f:
+                gitignore = f.read()
+            if ".env" in gitignore:
+                console.print("   [green]✓ .env in .gitignore[/green]")
+            else:
+                issues.append(".env not in .gitignore — risk of committing secrets")
+                console.print("   [red]✗ .env not in .gitignore[/red]")
+                if fix:
+                    with open(gitignore_path, "a") as f:
+                        f.write("\n.env\n")
+                    fixed.append("Added .env to .gitignore")
+                    console.print("   [green]  → Fixed: added to .gitignore[/green]")
 
         # ── Summary ──
         console.print()
@@ -2083,7 +2127,7 @@ def _run_schema_migration(syne_dir: str):
             for line in f:
                 line = line.strip()
                 if line.startswith("SYNE_DATABASE_URL="):
-                    db_url = line.split("=", 1)[1].strip()
+                    db_url = _strip_env_quotes(line.split("=", 1)[1])
                     break
 
     if not db_url:
@@ -2094,11 +2138,11 @@ def _run_schema_migration(syne_dir: str):
                 for line in f:
                     line = line.strip()
                     if line.startswith("SYNE_DB_USER="):
-                        db_user = line.split("=", 1)[1].strip()
+                        db_user = _strip_env_quotes(line.split("=", 1)[1])
                     elif line.startswith("SYNE_DB_PASSWORD="):
-                        db_pass = line.split("=", 1)[1].strip()
+                        db_pass = _strip_env_quotes(line.split("=", 1)[1])
                     elif line.startswith("SYNE_DB_NAME="):
-                        db_name = line.split("=", 1)[1].strip()
+                        db_name = _strip_env_quotes(line.split("=", 1)[1])
         if db_user and db_pass and db_name:
             db_url = f"postgresql://{db_user}:{db_pass}@localhost:5433/{db_name}"
 
@@ -2185,7 +2229,7 @@ def reauth():
                 for line in f:
                     line = line.strip()
                     if line.startswith("SYNE_DATABASE_URL="):
-                        dsn = line.split("=", 1)[1].strip()
+                        dsn = _strip_env_quotes(line.split("=", 1)[1])
                         break
         if not dsn:
             dsn = os.environ.get("SYNE_DATABASE_URL", "")
