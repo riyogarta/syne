@@ -11,7 +11,52 @@ from .shared import console
 def cli(ctx):
     """Syne — AI Agent Framework with Unlimited Memory"""
     if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
+        _show_help()
+
+
+def _show_help():
+    """Show all available commands grouped by category."""
+    console.print(f"[bold]Syne v{__version__}[/bold] — AI Agent Framework with Unlimited Memory\n")
+
+    groups = {
+        "Setup": [
+            ("init", "Initialize Syne: authenticate, setup database, configure"),
+            ("repair", "Diagnose and repair Syne installation (--fix to auto-repair)"),
+            ("update", "Update to latest release"),
+            ("updatedev", "Update from git (dev, always reinstall)"),
+            ("reauth", "Re-authenticate OAuth provider"),
+            ("uninstall", "Completely remove Syne"),
+        ],
+        "Usage": [
+            ("start", "Start Syne agent (Telegram bot)"),
+            ("cli", "Interactive CLI chat"),
+            ("status", "Show agent status"),
+        ],
+        "Data": [
+            ("identity", "View or set agent identity"),
+            ("prompt", "Show current system prompt"),
+            ("memory stats", "Show memory statistics"),
+            ("memory search", "Search memories by similarity"),
+            ("memory add", "Manually add a memory"),
+            ("db init", "Initialize database schema"),
+            ("db reset", "Reset database (DROP ALL + re-init)"),
+            ("backup", "Backup database to .sql.gz file"),
+            ("restore", "Restore database from backup file"),
+        ],
+        "Service": [
+            ("autostart", "Configure systemd autostart (--enable/--disable)"),
+            ("stop", "Stop running Syne process"),
+            ("restart", "Restart Syne (stop + start)"),
+        ],
+    }
+
+    for category, commands in groups.items():
+        console.print(f"  [bold cyan]{category}[/bold cyan]")
+        for name, desc in commands:
+            console.print(f"    [bold]syne {name:16s}[/bold] {desc}")
+        console.print()
+
+    console.print("[dim]Run 'syne <command> --help' for details on a specific command.[/dim]")
 
 
 # Import all command modules (registers commands onto cli group)
@@ -26,6 +71,12 @@ from . import cmd_service  # noqa: E402, F401
 from . import cmd_update  # noqa: E402, F401
 from . import cmd_uninstall  # noqa: E402, F401
 from . import cmd_backup  # noqa: E402, F401
+
+
+@cli.command(name="help", hidden=True)
+def help_cmd():
+    """Show all available commands."""
+    _show_help()
 
 
 def main():
