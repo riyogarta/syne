@@ -89,10 +89,16 @@ class SyneAgent:
         ability_count = await load_all_abilities(self.abilities)
         logger.info(f"Abilities loaded: {ability_count}")
 
-        # 6. Context Manager
-        max_context = await get_config("session.compaction_threshold", 150000)
-        self.context_mgr = ContextManager(max_context_tokens=max_context)
-        logger.info(f"Context window: {max_context} tokens")
+        # 6. Context Manager — read context_window from active model entry
+        models = await get_config("provider.models", None)
+        active_key = await get_config("provider.active_model", None)
+        ctx_window = 128000  # safe default
+        if models and active_key:
+            entry = get_model_from_list(models, active_key)
+            if entry:
+                ctx_window = int(entry.get("context_window", 128000))
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window)
+        logger.info(f"Context window: {ctx_window} tokens")
 
         # 6.5. Rate Limiter
         logger.info("Rate limiter initialized.")
@@ -151,9 +157,9 @@ class SyneAgent:
 
     async def reload_provider(self):
         """Hot-reload the LLM provider from DB config.
-        
+
         Called after /model switch to apply the new provider without restart.
-        Updates: self.provider, memory engine, conversation manager, sub-agents.
+        Updates: self.provider, memory engine, context manager, conversation manager, sub-agents.
         """
         new_provider = await self._init_provider()
         self.provider = new_provider
@@ -162,14 +168,35 @@ class SyneAgent:
         # Update memory engine
         self.memory = MemoryEngine(new_provider)
 
-        # Update conversation manager's provider + memory
+        # Recreate ContextManager from new model's context_window
+        models = await get_config("provider.models", None)
+        active_key = await get_config("provider.active_model", None)
+        ctx_window = 128000
+        if models and active_key:
+            entry = get_model_from_list(models, active_key)
+            if entry:
+                ctx_window = int(entry.get("context_window", 128000))
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window)
+        logger.info(f"Context window updated: {ctx_window} tokens")
+
+        # Auto-adjust compaction_threshold (chars) = 75% of context * 3.5 chars/token
+        new_threshold = int(ctx_window * 0.75 * 3.5)
+        await set_config("session.compaction_threshold", new_threshold)
+
+        # Scale keep_recent proportional to context window
+        new_keep = max(20, min(200, ctx_window // 5000))
+        await set_config("session.compaction_keep_recent", new_keep)
+        logger.info(f"Compaction adjusted: threshold={new_threshold} chars, keep_recent={new_keep}")
+
+        # Update conversation manager's provider + memory + context_mgr
         if self.conversations:
             self.conversations.provider = new_provider
             self.conversations.memory = self.memory
-            # Update all active conversations
+            self.conversations.context_mgr = self.context_mgr
             for conv in self.conversations._active.values():
                 conv.provider = new_provider
                 conv.memory = self.memory
+                conv.context_mgr = self.context_mgr
 
         # Update sub-agent manager
         if self.subagents:

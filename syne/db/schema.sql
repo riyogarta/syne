@@ -343,7 +343,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.decay_amount', '1', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '1', 'Starting recall_count for new memories'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
-    ('session.compaction_threshold', '80000', 'Token count threshold for compaction'),
+    ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),

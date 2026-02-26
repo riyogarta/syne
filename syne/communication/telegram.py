@@ -2166,14 +2166,7 @@ Or just send me a message!"""
             await set_config("provider.active_model", model_key)
             await set_config("provider.chat_model", model_entry.get("model_id", model_key))
             
-            # Auto-adjust compaction threshold based on context window
-            ctx_window = int(model_entry.get("context_window", 0))
-            if ctx_window:
-                new_threshold = int(ctx_window * 0.75 * 3.5)
-                await set_config("session.compaction_threshold", new_threshold)
-                logger.info(f"Auto-adjusted compaction threshold to {new_threshold} chars for {ctx_window} token context")
-            
-            # Hot-reload provider in the running agent
+            # Hot-reload provider in the running agent (handles context manager + compaction adjustment)
             await self.agent.reload_provider()
             
             return True, model_entry.get("label", model_key)

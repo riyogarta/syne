@@ -12,6 +12,8 @@ from .llm.provider import LLMProvider, ChatMessage
 
 logger = logging.getLogger("syne.compaction")
 
+MAX_SUMMARIZE_CHARS = 400_000
+
 # ── Initial summary prompt (no previous summary exists) ─────
 
 COMPACTION_PROMPT = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
@@ -203,8 +205,10 @@ async def compact_session(
         summarized_chars = sum(len(r["content"]) for r in old_rows)
         conv_text = _serialize_messages(old_rows)
 
-        # No cap — send full conversation to summarizer
-        # Context limit of the summarizer model is the natural constraint
+        # Cap input to summarizer to prevent exceeding its own context window
+        if len(conv_text) > MAX_SUMMARIZE_CHARS:
+            conv_text = conv_text[-MAX_SUMMARIZE_CHARS:]
+            logger.info(f"Truncated summarizer input to {MAX_SUMMARIZE_CHARS} chars (from {summarized_chars})")
 
         logger.info(
             f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary"
