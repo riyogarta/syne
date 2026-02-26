@@ -693,17 +693,12 @@ def init():
     elif embed_choice == 3:
         console.print("\n[bold green]✓ Ollama selected for embeddings (FREE, local)[/bold green]")
         _ensure_ollama()
-        _ensure_evaluator_model()  # Also pull the memory evaluator model
         embedding_config = {
             "driver": "ollama",
             "model": "qwen3-embedding:0.6b",
             "dimensions": 1024,
             "_ollama": True,  # Flag: no API key needed
         }
-
-    # 2b. Evaluator model (for memory auto_capture — non-fatal)
-    if embed_choice != 3:  # Already pulled during Ollama embedding setup
-        _ensure_evaluator_model()
 
     # 3. Telegram bot
     console.print("\n[bold]Step 3: Telegram Bot[/bold]")
@@ -744,6 +739,29 @@ def init():
         console.print("[green]✓ Brave Search API key saved[/green]")
     else:
         console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
+
+    # 3c. Auto-capture memory
+    console.print("\n[bold]Step 3c: Auto-capture Memory[/bold]")
+    console.print("  When enabled, Syne automatically remembers important facts from conversations")
+    console.print("  (e.g. \"I live in Jakarta\", \"My wife's name is Yuli\").")
+    console.print()
+    console.print("  Uses a small local AI model ([bold]qwen3:0.6b[/bold], ~500MB) via Ollama —")
+    console.print("  no extra API costs, no rate limit impact.")
+    console.print()
+    console.print("  1. ON  [green](recommended)[/green]")
+    console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
+    console.print()
+    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1)
+    auto_capture_enabled = auto_capture_choice == 1
+
+    if auto_capture_enabled:
+        # Ensure Ollama is installed (may already be if embedding uses Ollama)
+        if embed_choice != 3:
+            _ensure_ollama()
+        _ensure_evaluator_model()
+        console.print("[green]✓ Auto-capture enabled[/green]")
+    else:
+        console.print("[dim]  Auto-capture disabled — you can enable it later via /autocapture or chat.[/dim]")
 
     # 4. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 4: Database[/bold]")
@@ -1023,6 +1041,11 @@ def init():
             await set_config("provider.embedding_models", [embed_entry])
             await set_config("provider.active_embedding", active_key)
             console.print(f"[green]✓ Embedding config saved to database[/green]")
+        # Save auto_capture setting
+        await set_config("memory.auto_capture", auto_capture_enabled)
+        if auto_capture_enabled:
+            await set_config("memory.evaluator_driver", "ollama")
+            await set_config("memory.evaluator_model", "qwen3:0.6b")
         await close_db()
 
     asyncio.run(_save_identity())
