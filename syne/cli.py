@@ -255,7 +255,11 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
 
     if enabled:
         console.print("[dim]Auto-capture is enabled — ensuring Ollama + evaluator model...[/dim]")
-        _ensure_ollama()
+        try:
+            _ensure_ollama()
+        except SystemExit:
+            console.print("[yellow]⚠️ Ollama setup failed — auto_capture may not work until fixed.[/yellow]")
+            return
         _ensure_evaluator_model()
     else:
         console.print("[dim]⏭ Auto-capture disabled — skipping evaluator model[/dim]")
@@ -1262,109 +1266,115 @@ def status():
         except Exception:
             pass
 
-        # DB connection
+        # DB connection — single pool for all DB sections
+        db_ok = False
         try:
-            pool = await init_db(settings.database_url)
-            async with pool.acquire() as conn:
-                # Counts
-                mem = await conn.fetchrow("SELECT COUNT(*) as c FROM memory")
-                users = await conn.fetchrow("SELECT COUNT(*) as c FROM users")
-                sessions = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions WHERE status = 'active'")
-                msgs = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
-
-                # Identity
-                identity = await conn.fetchrow("SELECT value FROM identity WHERE key = 'name'")
-                agent_name = identity["value"] if identity else "Syne"
-
-            table.add_row("Database", "[green]Connected[/green]")
-            table.add_row("Agent", agent_name)
-            table.add_row("Memories", str(mem["c"]))
-            table.add_row("Users", str(users["c"]))
-            table.add_row("Active Sessions", str(sessions["c"]))
-            table.add_row("Total Messages", str(msgs["c"]))
-
-            await close_db()
+            await init_db(settings.database_url)
+            db_ok = True
         except Exception as e:
             table.add_row("Database", f"[red]Error: {e}[/red]")
 
-        # Provider (from DB)
-        try:
-            from .db.models import get_config
-            pool2 = await init_db(settings.database_url)
+        if db_ok:
+            try:
+                from .db.connection import get_connection
+                from .db.models import get_config
 
-            provider_cfg = await get_config("provider.primary")
-            if isinstance(provider_cfg, dict):
-                table.add_row("Provider", f"{provider_cfg.get('driver', '?')} ({provider_cfg.get('auth', '?')})")
-            elif provider_cfg:
-                table.add_row("Provider", str(provider_cfg))
-            else:
-                table.add_row("Provider", "not configured")
+                # Counts
+                async with get_connection() as conn:
+                    mem = await conn.fetchrow("SELECT COUNT(*) as c FROM memory")
+                    users = await conn.fetchrow("SELECT COUNT(*) as c FROM users")
+                    sessions = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions WHERE status = 'active'")
+                    msgs = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
+                    identity = await conn.fetchrow("SELECT value FROM identity WHERE key = 'name'")
+                    agent_name = identity["value"] if identity else "Syne"
 
-            # OAuth token status
-            import time as _time
-            driver = provider_cfg.get("driver", "") if isinstance(provider_cfg, dict) else ""
-            auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
-            if auth_type == "oauth" and driver in ("codex", "google", "anthropic"):
-                if driver == "codex":
-                    expires_at = await get_config("credential.codex_expires_at", 0)
-                elif driver == "google":
-                    expires_at_str = await get_config("credential.google_token_expiry", "")
-                    try:
-                        from datetime import datetime
-                        expires_at = datetime.fromisoformat(expires_at_str).timestamp() if expires_at_str else 0
-                    except Exception:
+                table.add_row("Database", "[green]Connected[/green]")
+                table.add_row("Agent", agent_name)
+                table.add_row("Memories", str(mem["c"]))
+                table.add_row("Users", str(users["c"]))
+                table.add_row("Active Sessions", str(sessions["c"]))
+                table.add_row("Total Messages", str(msgs["c"]))
+
+                # Provider
+                provider_cfg = await get_config("provider.primary")
+                if isinstance(provider_cfg, dict):
+                    table.add_row("Provider", f"{provider_cfg.get('driver', '?')} ({provider_cfg.get('auth', '?')})")
+                elif provider_cfg:
+                    table.add_row("Provider", str(provider_cfg))
+                else:
+                    table.add_row("Provider", "not configured")
+
+                # OAuth token status
+                import time as _time
+                driver = provider_cfg.get("driver", "") if isinstance(provider_cfg, dict) else ""
+                auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
+                if auth_type == "oauth" and driver in ("codex", "google", "google_cca", "anthropic"):
+                    if driver == "codex":
+                        expires_at = await get_config("credential.codex_expires_at", 0)
+                    elif driver in ("google", "google_cca"):
+                        expires_at_str = await get_config("credential.google_token_expiry", "")
+                        try:
+                            from datetime import datetime
+                            expires_at = datetime.fromisoformat(expires_at_str).timestamp() if expires_at_str else 0
+                        except Exception:
+                            expires_at = 0
+                    else:
                         expires_at = 0
+
+                    expires_at = float(expires_at or 0)
+                    now = _time.time()
+                    if expires_at <= 0:
+                        table.add_row("OAuth Token", "[yellow]Unknown expiry[/yellow]")
+                    elif now >= expires_at:
+                        elapsed = int(now - expires_at)
+                        table.add_row("OAuth Token", f"[red]EXPIRED ({elapsed}s ago)[/red]")
+                    else:
+                        remaining = int(expires_at - now)
+                        hours = remaining // 3600
+                        mins = (remaining % 3600) // 60
+                        table.add_row("OAuth Token", f"[green]Valid ({hours}h {mins}m remaining)[/green]")
+
+                # Embedding provider
+                embed_cfg = await get_config("provider.embedding")
+                if isinstance(embed_cfg, dict):
+                    table.add_row("Embedding", f"{embed_cfg.get('driver', '?')} ({embed_cfg.get('model', '?')})")
+                elif embed_cfg:
+                    table.add_row("Embedding", str(embed_cfg))
                 else:
-                    expires_at = 0
+                    table.add_row("Embedding", "same as chat provider")
 
-                expires_at = float(expires_at or 0)
-                now = _time.time()
-                if expires_at <= 0:
-                    table.add_row("OAuth Token", "[yellow]Unknown expiry[/yellow]")
-                elif now >= expires_at:
-                    elapsed = int(now - expires_at)
-                    table.add_row("OAuth Token", f"[red]EXPIRED ({elapsed}s ago)[/red]")
+                # Scheduler/cron
+                async with get_connection() as conn:
+                    sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM scheduled_tasks WHERE enabled = true")
+                if sched_count and sched_count["c"] > 0:
+                    table.add_row("Scheduled Jobs", f"{sched_count['c']} active")
                 else:
-                    remaining = int(expires_at - now)
-                    hours = remaining // 3600
-                    mins = (remaining % 3600) // 60
-                    table.add_row("OAuth Token", f"[green]Valid ({hours}h {mins}m remaining)[/green]")
+                    table.add_row("Scheduled Jobs", "none")
 
-            # Embedding provider
-            embed_cfg = await get_config("provider.embedding")
-            if isinstance(embed_cfg, dict):
-                table.add_row("Embedding", f"{embed_cfg.get('driver', '?')} ({embed_cfg.get('model', '?')})")
-            elif embed_cfg:
-                table.add_row("Embedding", str(embed_cfg))
-            else:
-                table.add_row("Embedding", "same as chat provider")
+                # Telegram (check DB first, then env)
+                tg_status = "Not configured"
+                try:
+                    from .db.credentials import get_telegram_bot_token
+                    db_token = await get_telegram_bot_token()
+                    if db_token:
+                        tg_status = "✓ Configured"
+                    elif settings.telegram_bot_token:
+                        tg_status = "✓ Configured (env)"
+                except Exception:
+                    if settings.telegram_bot_token:
+                        tg_status = "✓ Configured (env)"
+                table.add_row("Telegram", tg_status)
 
-            # Scheduler/cron
-            from .db.connection import get_connection
-            async with get_connection() as conn:
-                sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM scheduled_tasks WHERE enabled = true")
-            if sched_count and sched_count["c"] > 0:
-                table.add_row("Scheduled Jobs", f"{sched_count['c']} active")
-            else:
-                table.add_row("Scheduled Jobs", "none")
-
-            await close_db()
-        except Exception as e:
-            table.add_row("Provider", f"[red]Error: {e}[/red]")
-
-        # Telegram (check DB first, then env)
-        tg_status = "Not configured"
-        try:
-            from .db.credentials import get_telegram_bot_token
-            db_token = await get_telegram_bot_token()
-            if db_token:
-                tg_status = "✓ Configured"
-            elif settings.telegram_bot_token:
-                tg_status = "✓ Configured (env)"
-        except Exception:
+            except Exception as e:
+                table.add_row("Provider", f"[red]Error: {e}[/red]")
+            finally:
+                await close_db()
+        else:
+            # DB failed — check Telegram from env only
             if settings.telegram_bot_token:
-                tg_status = "✓ Configured (env)"
-        table.add_row("Telegram", tg_status)
+                table.add_row("Telegram", "✓ Configured (env)")
+            else:
+                table.add_row("Telegram", "Not configured")
 
         console.print(table)
 
@@ -1417,6 +1427,7 @@ def db_reset():
             await conn.execute("""
                 DROP TABLE IF EXISTS messages CASCADE;
                 DROP TABLE IF EXISTS subagent_runs CASCADE;
+                DROP TABLE IF EXISTS scheduled_tasks CASCADE;
                 DROP TABLE IF EXISTS sessions CASCADE;
                 DROP TABLE IF EXISTS memory CASCADE;
                 DROP TABLE IF EXISTS abilities CASCADE;
@@ -1463,6 +1474,13 @@ def identity(key, value):
         if key and value:
             await set_identity(key, value)
             console.print(f"[green]✓ {key} = {value}[/green]")
+        elif key:
+            data = await get_identity()
+            val = data.get(key)
+            if val is not None:
+                console.print(f"[bold]{key}[/bold] = {val}")
+            else:
+                console.print(f"[yellow]Key '{key}' not found.[/yellow]")
         else:
             data = await get_identity()
             table = Table(title="🪪 Identity", show_header=True)
@@ -1575,7 +1593,7 @@ def memory_search(query, limit):
         await init_db(settings.database_url)
 
         # Need a provider for embedding
-        provider = _get_provider(settings)
+        provider = await _get_provider_async()
         engine = MemoryEngine(provider)
 
         results = await engine.recall(query, limit=limit)
@@ -1611,7 +1629,7 @@ def memory_add(content, category):
         settings = load_settings()
         await init_db(settings.database_url)
 
-        provider = _get_provider(settings)
+        provider = await _get_provider_async()
         engine = MemoryEngine(provider)
 
         mem_id = await engine.store_if_new(content=content, category=category)
@@ -1772,10 +1790,6 @@ def repair(fix):
             issues.append(f"OAuth token refresh failed: {e}")
             console.print(f"   [red]✗ Token refresh failed: {e}[/red]")
             console.print("   [dim]Run 'syne init' to re-authenticate[/dim]")
-        else:
-            issues.append("No Google credentials found")
-            console.print("   [yellow]⚠ No credentials at {creds_path}[/yellow]")
-            console.print("   [dim]Run 'syne init' to set up OAuth[/dim]")
 
         # ── 3. Telegram Bot ──
         console.print("\n[bold]3. Telegram Bot[/bold]")
@@ -1957,32 +1971,44 @@ def restart():
 
     syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
-    subprocess.Popen(
-        [venv_python, "-m", "syne.main"],
-        cwd=syne_dir,
-        stdout=open("/tmp/syne.log", "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    if not os.path.exists(venv_python):
+        console.print(f"[red]Venv not found at {venv_python}. Run 'syne init' first.[/red]")
+        return
+    log_file = open("/tmp/syne.log", "a")
+    try:
+        subprocess.Popen(
+            [venv_python, "-m", "syne.main"],
+            cwd=syne_dir,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    finally:
+        log_file.close()
     console.print("[green]✓ Service restarted (PID in background)[/green]")
     console.print("[dim]Logs: tail -f /tmp/syne.log[/dim]")
 
 
 # ── Helpers ──────────────────────────────────────────────────
 
-def _get_provider(settings):
-    """Quick provider init for CLI commands. Reads config from DB."""
-    from .llm.drivers import create_chat_provider
+async def _get_provider_async():
+    """Async provider init for CLI commands. Reads model registry from DB."""
+    from .db.models import get_config
+    from .llm.drivers import create_hybrid_provider, get_model_from_list
 
-    async def _make():
-        return await create_chat_provider()
+    models = await get_config("provider.models", None)
+    active_key = await get_config("provider.active_model", None)
 
-    try:
-        return asyncio.run(_make())
-    except Exception as e:
-        console.print(f"[red]Failed to initialize provider: {e}[/red]")
-        console.print("[dim]Run 'syne init' to configure a provider.[/dim]")
+    if not models or not active_key:
+        console.print("[red]No provider configured. Run 'syne init' first.[/red]")
         sys.exit(1)
+
+    model_entry = get_model_from_list(models, active_key)
+    if not model_entry:
+        console.print(f"[red]Model '{active_key}' not found in registry.[/red]")
+        sys.exit(1)
+
+    return await create_hybrid_provider(model_entry)
 
 
 def _do_update(syne_dir: str):
@@ -2150,15 +2176,24 @@ def reauth():
     import asyncio
 
     async def _reauth():
-        import os
-        from dotenv import load_dotenv
-        load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
-        dsn = os.environ.get("SYNE_DATABASE_URL", "")
+        # Read DB URL from .env (manual parsing — no dotenv dependency)
+        syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env_path = os.path.join(syne_dir, ".env")
+        dsn = None
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SYNE_DATABASE_URL="):
+                        dsn = line.split("=", 1)[1].strip()
+                        break
+        if not dsn:
+            dsn = os.environ.get("SYNE_DATABASE_URL", "")
         if not dsn:
             console.print("[red]❌ SYNE_DATABASE_URL not set. Is .env configured?[/red]")
             return
 
-        from .db.connection import init_db
+        from .db.connection import init_db, close_db
         from .db.models import get_config, set_config
 
         await init_db(dsn)
@@ -2184,7 +2219,7 @@ def reauth():
                 console.print(f"[red]❌ Codex re-auth failed: {e}[/red]")
                 return
 
-        elif driver == "google":
+        elif driver in ("google", "google_cca"):
             console.print("[bold]🔄 Re-authenticating Google Gemini OAuth...[/bold]")
             from .auth.google_oauth import login_google
             try:
@@ -2204,11 +2239,10 @@ def reauth():
             console.print(f"[yellow]⚠️ Provider '{driver}' doesn't use OAuth. No re-auth needed.[/yellow]")
             return
 
+        await close_db()
+
         # Restart service to pick up new tokens
-        console.print("[dim]Restarting Syne service...[/dim]")
-        import subprocess
-        subprocess.run(["systemctl", "--user", "restart", "syne"], capture_output=True)
-        console.print("[green]✅ Service restarted with new tokens.[/green]")
+        _restart_service()
 
     asyncio.run(_reauth())
 
@@ -2245,7 +2279,7 @@ def update():
     console.print(f"[yellow]📦 New version available: v{remote_version} (current: v{current_version})[/yellow]")
 
     console.print("📥 Pulling latest code...")
-    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+    result = subprocess.run(["git", "pull", "origin", "main"], cwd=syne_dir, capture_output=True, text=True)
     if result.returncode != 0:
         console.print(f"[red]Git pull failed: {result.stderr}[/red]")
         return
@@ -2273,7 +2307,7 @@ def update_dev():
     syne_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     console.print("📥 Pulling latest code...")
-    result = subprocess.run(["git", "pull"], cwd=syne_dir, capture_output=True, text=True)
+    result = subprocess.run(["git", "pull", "origin", "main"], cwd=syne_dir, capture_output=True, text=True)
     if result.returncode != 0:
         console.print(f"[red]Git pull failed: {result.stderr}[/red]")
         return
@@ -2318,26 +2352,32 @@ def uninstall():
 
     # 1. Stop and remove systemd service
     console.print("[bold]1/6[/bold] Removing systemd service...")
-    subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
-    subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
-    if service_file.exists():
-        service_file.unlink()
-    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-    console.print("  [green]✓ Service removed[/green]")
+    try:
+        subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
+        if service_file.exists():
+            service_file.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        console.print("  [green]✓ Service removed[/green]")
+    except FileNotFoundError:
+        console.print("  [dim]systemctl not found — skipping[/dim]")
 
     # 2. Stop and remove Docker containers + volume + image
     console.print("[bold]2/6[/bold] Removing Docker containers and data...")
-    if os.path.isfile(compose_file):
-        subprocess.run(
-            ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
-            capture_output=True, cwd=syne_dir,
-        )
-    # Also clean up any leftover containers
-    for name in ["syne-db", "syne-agent"]:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-    # Remove Docker image
-    subprocess.run(["docker", "rmi", "pgvector/pgvector:pg16"], capture_output=True)
-    console.print("  [green]✓ Containers, data, and images removed[/green]")
+    try:
+        if os.path.isfile(compose_file):
+            subprocess.run(
+                ["docker", "compose", "-f", compose_file, "down", "-v", "--remove-orphans"],
+                capture_output=True, cwd=syne_dir,
+            )
+        # Also clean up any leftover containers
+        for name in ["syne-db", "syne-agent"]:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        # Remove Docker image
+        subprocess.run(["docker", "rmi", "pgvector/pgvector:pg16"], capture_output=True)
+        console.print("  [green]✓ Containers, data, and images removed[/green]")
+    except FileNotFoundError:
+        console.print("  [dim]docker not found — skipping[/dim]")
 
     # 3. Remove CLI symlink
     console.print("[bold]3/6[/bold] Removing CLI symlink...")
@@ -2373,16 +2413,23 @@ def uninstall():
             except Exception:
                 pass
 
-    # 5. Remove Ollama embedding model if present
+    # 5. Remove Ollama models if present
     console.print("[bold]5/6[/bold] Cleaning up Ollama models...")
-    result = subprocess.run(
-        ["ollama", "rm", "qwen3-embedding:0.6b"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        console.print("  [green]✓ Removed qwen3-embedding:0.6b[/green]")
-    else:
-        console.print("  [dim]No Ollama model to remove[/dim]")
+    try:
+        removed = []
+        for model in ["qwen3-embedding:0.6b", "qwen3:0.6b"]:
+            result = subprocess.run(
+                ["ollama", "rm", model],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                removed.append(model)
+        if removed:
+            console.print(f"  [green]✓ Removed {', '.join(removed)}[/green]")
+        else:
+            console.print("  [dim]No Ollama models to remove[/dim]")
+    except FileNotFoundError:
+        console.print("  [dim]ollama not found — skipping[/dim]")
 
     # 6. Remove source code (self-destruct — must be last)
     console.print("[bold]6/6[/bold] Removing source code...")
