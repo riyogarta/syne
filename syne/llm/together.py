@@ -58,7 +58,7 @@ class TogetherProvider(LLMProvider):
         usage = data.get("usage", {})
 
         return ChatResponse(
-            content=choice["message"]["content"],
+            content=choice["message"]["content"] or "",
             model=model,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),

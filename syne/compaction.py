@@ -304,8 +304,8 @@ async def auto_compact_check(
 ) -> Optional[dict]:
     """Check and compact if needed using config thresholds. Returns result dict or None."""
     # Get thresholds from config
-    msg_threshold = await get_config("session.max_messages", 100)
-    char_threshold = await get_config("session.compaction_threshold", 150000)
+    msg_threshold = int(await get_config("session.max_messages", 100))
+    char_threshold = int(await get_config("session.compaction_threshold", 150000))
 
     needs_compact = (
         await should_compact(session_id, msg_threshold)

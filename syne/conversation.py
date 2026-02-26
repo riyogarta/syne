@@ -226,8 +226,8 @@ class Conversation:
             threshold=0.90,
         )
         from .db.models import get_config as _gc
-        _msg_thresh = await _gc("session.max_messages", 100)
-        _chr_thresh = await _gc("session.compaction_threshold", 150000)
+        _msg_thresh = int(await _gc("session.max_messages", 100))
+        _chr_thresh = int(await _gc("session.compaction_threshold", 150000))
         msg_count = len(self._message_cache) if self._message_cache else 0
         count_exceeded = msg_count >= _msg_thresh
         # Quick char estimate from message cache
@@ -382,9 +382,7 @@ class Conversation:
         user_platform_id = self.user.get("platform_id")
         set_current_user(int(user_platform_id) if user_platform_id else None)
 
-        max_rounds = await get_config("session.max_tool_rounds", 25)
-        if isinstance(max_rounds, str):
-            max_rounds = int(max_rounds)
+        max_rounds = int(await get_config("session.max_tool_rounds", 25))
 
         current = response
         limit_reached = False
