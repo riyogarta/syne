@@ -1910,6 +1910,20 @@ Or just send me a message!"""
             return
 
         enabled = toggle == "on"
+        if enabled:
+            # Check if evaluator model is available before enabling
+            eval_driver = await get_config("memory.evaluator_driver", "ollama")
+            if eval_driver == "ollama":
+                eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+                from ..memory.evaluator import check_model_available
+                available = await check_model_available(model=eval_model)
+                if not available:
+                    await update.message.reply_text(
+                        f"❌ Evaluator model `{eval_model}` not available.\n"
+                        f"Run `ollama pull {eval_model}` first, or set evaluator driver to `provider`.",
+                        parse_mode="Markdown",
+                    )
+                    return
         await set_config("memory.auto_capture", enabled)
         if enabled:
             await update.message.reply_text(
@@ -4266,6 +4280,19 @@ Or just send me a message!"""
         elif data.startswith("autocapture:"):
             toggle = data.split(":", 1)[1]
             enabled = toggle == "on"
+            if enabled:
+                eval_driver = await get_config("memory.evaluator_driver", "ollama")
+                if eval_driver == "ollama":
+                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+                    from ..memory.evaluator import check_model_available
+                    available = await check_model_available(model=eval_model)
+                    if not available:
+                        await query.edit_message_text(
+                            f"❌ Evaluator model `{eval_model}` not available.\n"
+                            f"Run `ollama pull {eval_model}` first.",
+                            parse_mode="Markdown",
+                        )
+                        return
             await set_config("memory.auto_capture", enabled)
             buttons = [
                 InlineKeyboardButton(f"{'✅ ' if enabled else ''}ON", callback_data="autocapture:on"),

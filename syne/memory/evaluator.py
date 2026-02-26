@@ -2,6 +2,7 @@
 
 import logging
 from typing import Optional
+import httpx
 from ..llm.provider import LLMProvider, ChatMessage
 
 logger = logging.getLogger("syne.memory.evaluator")
@@ -149,6 +150,105 @@ async def evaluate_message(
         return None
 
 
+async def evaluate_message_ollama(
+    user_message: str,
+    model: str = "qwen3:0.6b",
+    base_url: str = "http://localhost:11434",
+) -> Optional[dict]:
+    """Evaluate if a user message contains info worth storing, using Ollama locally.
+
+    Same logic as evaluate_message() but calls Ollama /api/chat directly,
+    avoiding main LLM provider rate limits.
+
+    Returns dict with {category, importance, content} or None if SKIP.
+    """
+    # Quick filters — same as evaluate_message()
+    stripped = user_message.strip().lower()
+    if len(stripped) < 5:
+        return None
+
+    skip_patterns = [
+        "ok", "oke", "okay", "thanks", "thank you", "terima kasih",
+        "makasih", "hi", "halo", "hello", "hey", "lanjut", "next",
+        "yes", "no", "ya", "tidak", "gak", "nggak", "yep", "nope",
+        "good", "nice", "cool", "bagus", "sip",
+    ]
+    if stripped in skip_patterns:
+        return None
+
+    question_only = stripped.startswith(("apa ", "what ", "how ", "gimana ", "kapan ", "when ",
+                                          "where ", "dimana ", "siapa ", "who ", "kenapa ", "why "))
+    if question_only and len(stripped) < 30:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{base_url.rstrip('/')}/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": EVALUATE_PROMPT},
+                        {"role": "user", "content": f'User message: "{user_message}"'},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.1},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        result = data.get("message", {}).get("content", "").strip()
+        # qwen3 with /think — strip thinking tags if present
+        if "<think>" in result:
+            import re
+            result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+
+        if result.startswith("SKIP"):
+            return None
+
+        if result.startswith("STORE|"):
+            parts = result.split("|", 3)
+            if len(parts) == 4:
+                _, category, importance_str, content = parts
+                try:
+                    importance = float(importance_str.strip())
+                    importance = max(0.1, min(1.0, importance))
+                except ValueError:
+                    importance = 0.5
+                return {
+                    "category": category.strip(),
+                    "importance": importance,
+                    "content": content.strip(),
+                }
+
+        logger.warning(f"Unexpected Ollama evaluator response: {result[:200]}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Ollama memory evaluation failed: {e}")
+        return None
+
+
+async def check_model_available(
+    model: str = "qwen3:0.6b",
+    base_url: str = "http://localhost:11434",
+) -> bool:
+    """Check if an Ollama model is available locally."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{base_url.rstrip('/')}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+        model_base = model.split(":")[0]
+        for m in data.get("models", []):
+            if model_base in m.get("name", ""):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def _is_explicit_remember(message: str) -> bool:
     """Detect if user explicitly asked to remember/store something."""
     import re
@@ -168,9 +268,25 @@ async def evaluate_and_store(
     memory_engine,
     user_message: str,
     user_id: Optional[int] = None,
+    evaluator_driver: str = "provider",
+    evaluator_model: str = "qwen3:0.6b",
 ) -> Optional[int]:
-    """Evaluate a message and store if worthy. Returns memory ID or None."""
-    result = await evaluate_message(provider, user_message)
+    """Evaluate a message and store if worthy. Returns memory ID or None.
+
+    Args:
+        evaluator_driver: "ollama" (local, no rate limit) or "provider" (main LLM)
+        evaluator_model: Ollama model name when driver == "ollama"
+    """
+    result = None
+    if evaluator_driver == "ollama":
+        result = await evaluate_message_ollama(user_message, model=evaluator_model)
+        if result is None:
+            # Could be a quick-filter SKIP (not an error) — only fallback on error
+            # We check by running quick filters ourselves
+            logger.debug("Ollama evaluator returned None (SKIP or error)")
+        # No fallback to provider — if Ollama says SKIP, trust it
+    else:
+        result = await evaluate_message(provider, user_message)
 
     if not result:
         return None

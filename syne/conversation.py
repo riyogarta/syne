@@ -126,9 +126,13 @@ class Conversation:
         #    Memory is GLOBAL — all sessions (DM + group) recall from the same pool.
         #    Rule 760 filtering ensures family-private info only goes to family.
         #    History is STRICTLY per-session (enforced by session_id in load_history).
+        from .db.models import get_config as _get_recall_config
+        recall_limit = await _get_recall_config("memory.recall_limit", 5)
+        if isinstance(recall_limit, str):
+            recall_limit = int(recall_limit)
         memories = await self.memory.recall(
             query=user_message,
-            limit=10,
+            limit=recall_limit,
             user_id=self.user.get("id"),
             requester_access_level=access_level,  # Pass access level for Rule 760
         )
@@ -326,20 +330,25 @@ class Conversation:
         # Evaluate memory (only if auto_capture enabled)
         # Rule 760: Only owner and family can write to global memory.
         # Non-family messages stay in session history only.
-        # Fire-and-forget with delay to avoid CCA rate limit collision.
+        # Fire-and-forget. Delay only when using main provider (rate limit).
         from .db.models import get_config
         access_level = self.user.get("access_level", "public")
         can_write_memory = access_level in ("owner", "family")
         auto_capture = await get_config("memory.auto_capture", False)
         if auto_capture and can_write_memory:
+            eval_driver = await get_config("memory.evaluator_driver", "ollama")
+            eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
             async def _deferred_evaluate():
                 try:
-                    await asyncio.sleep(40)  # Wait for CCA rate limit window (~36s)
+                    if eval_driver != "ollama":
+                        await asyncio.sleep(40)  # CCA rate limit window (~36s)
                     await evaluate_and_store(
                         provider=self.provider,
                         memory_engine=self.memory,
                         user_message=user_message,
                         user_id=self.user.get("id"),
+                        evaluator_driver=eval_driver,
+                        evaluator_model=eval_model,
                     )
                 except Exception as e:
                     logger.warning(f"Deferred memory evaluation failed: {e}")
@@ -373,7 +382,7 @@ class Conversation:
         user_platform_id = self.user.get("platform_id")
         set_current_user(int(user_platform_id) if user_platform_id else None)
 
-        max_rounds = await get_config("session.max_tool_rounds", 100)
+        max_rounds = await get_config("session.max_tool_rounds", 25)
         if isinstance(max_rounds, str):
             max_rounds = int(max_rounds)
 

@@ -325,7 +325,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.auto_capture', 'false', 'Auto-evaluate messages for memory storage (default OFF — user must explicitly ask to remember)'),
     ('memory.auto_evaluate', 'true', 'Use LLM to judge what is worth storing (only when auto_capture is ON)'),
     ('memory.max_importance', '1.0', 'Maximum importance score'),
-    ('memory.recall_limit', '10', 'Max memories to recall per query'),
+    ('memory.recall_limit', '5', 'Max memories to recall per query'),
     ('memory.decay_interval', '50', 'Decay every N conversations'),
     ('memory.decay_amount', '1', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '1', 'Starting recall_count for new memories'),
@@ -334,7 +334,7 @@ INSERT INTO config (key, value, description) VALUES
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
-    ('session.max_tool_rounds', '100', 'Max tool call rounds per turn (safety limit). Agent notifies user if reached.'),
+    ('session.max_tool_rounds', '25', 'Max tool call rounds per turn (safety limit). Agent notifies user if reached.'),
     -- Telegram channel config
     ('telegram.dm_policy', '"open"', 'DM policy: open (accept all) or registered (only known users)'),
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
@@ -355,7 +355,10 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models'),
     -- Embedding model registry (same pattern as chat model registry)
     ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
-    ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key')
+    ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key'),
+    -- Memory evaluator config (local Ollama to avoid main LLM rate limits)
+    ('memory.evaluator_driver', '"ollama"', 'Driver for memory evaluator: "ollama" (local) or "provider" (main LLM)'),
+    ('memory.evaluator_model', '"qwen3:0.6b"', 'Ollama model for memory evaluation')
 ON CONFLICT (key) DO NOTHING;
 
 -- Add memory decay columns (permanent flag + recall_count for conversation-based decay)
@@ -381,3 +384,9 @@ END $$;
 -- ============================================================
 -- v0.9.0: decay_amount changed from 2 to 1 (recall +2, decay -1)
 UPDATE config SET value = '1' WHERE key = 'memory.decay_amount' AND value = '2';
+
+-- v0.10.0: token optimization — lower max_tool_rounds from 100 to 25
+UPDATE config SET value = '25' WHERE key = 'session.max_tool_rounds' AND value = '100';
+
+-- v0.10.0: token optimization — lower recall_limit from 10 to 5
+UPDATE config SET value = '5' WHERE key = 'memory.recall_limit' AND value = '10';

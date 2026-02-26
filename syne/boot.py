@@ -508,17 +508,10 @@ async def build_system_prompt(
     # [3.5] PROPOSE BEFORE EXECUTE — high priority, early in prompt
     parts.append(_get_propose_before_execute_section())
 
-    # [4] TOOLS — Dynamically built from registered tools
-    if tools:
-        tools_section = _format_tools_section(tools)
-        if tools_section:
-            parts.append(tools_section)
-
-    # [5] ABILITIES — Dynamically built from enabled abilities
-    if abilities:
-        abilities_section = _format_abilities_section(abilities)
-        if abilities_section:
-            parts.append(abilities_section)
+    # [4-5] TOOLS & ABILITIES
+    # Tool/ability descriptions are sent via provider.chat(tools=...) as function
+    # calling schema. No need to duplicate them as text in the system prompt.
+    # _format_tools_section() and _format_abilities_section() kept for debugging.
 
     # [6] FUNCTION CALLING INSTRUCTIONS
     parts.append(_get_function_calling_section())
@@ -529,24 +522,17 @@ async def build_system_prompt(
     # [6.6] WORKSPACE RULES
     parts.append(_get_workspace_section())
 
-    # [7] ABILITY STATUS — shows what's configured vs needs setup
-    ability_status = await _build_ability_status_section()
-    if ability_status:
-        parts.append(ability_status)
+    # [7-8] ABILITY STATUS & CONFIG — removed to save ~520 tokens.
+    # Agent can query via update_ability(action='list') and update_config(action='list').
 
-    # [8] CURRENT CONFIGURATION — so Syne knows all settings and values
-    config_section = await _build_config_section()
-    if config_section:
-        parts.append(config_section)
-
-    # [9] SOUL MANAGEMENT INSTRUCTIONS
-    parts.append(_get_soul_management_section())
+    # [9] SOUL MANAGEMENT — removed to save ~140 tokens.
+    # Only needed for personality changes; agent can use update_soul tool.
 
     # [10] MEMORY BEHAVIOR INSTRUCTIONS
     parts.append(_get_memory_behavior_section())
 
-    # [10.5] SUB-AGENT AUTO-DELEGATION
-    parts.append(_get_subagent_behavior_section())
+    # [10.5] SUB-AGENT DELEGATION — removed to save ~115 tokens.
+    # Sub-agents have their own prompt (build_subagent_prompt).
 
     # [10.7] SELF-HEALING BEHAVIOR
     parts.append(_get_self_healing_section())

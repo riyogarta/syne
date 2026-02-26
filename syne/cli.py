@@ -157,6 +157,45 @@ def _ensure_ollama():
     console.print(f"[green]✓ Model {model_name} ready[/green]")
 
 
+def _ensure_evaluator_model():
+    """Ensure the Ollama evaluator model (qwen3:0.6b) is available.
+
+    Non-fatal: if Ollama is not installed or pull fails, just warn.
+    The evaluator model is small (~500MB) and used for memory auto_capture.
+    """
+    import shutil
+    import subprocess
+
+    model_name = "qwen3:0.6b"
+
+    if not shutil.which("ollama"):
+        console.print("[dim]⏭ Ollama not installed — skipping evaluator model[/dim]")
+        return
+
+    # Check if model already exists
+    try:
+        result = subprocess.run(
+            ["ollama", "list"], capture_output=True, text=True, timeout=10,
+        )
+        if model_name.split(":")[0] in result.stdout:
+            console.print(f"[green]✓ Evaluator model {model_name} already available[/green]")
+            return
+    except Exception:
+        pass
+
+    # Pull model
+    console.print(f"\n[bold]Downloading evaluator model {model_name} (~500MB)...[/bold]")
+    console.print("[dim]Used for memory auto-capture (local, no API costs).[/dim]")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    ret = os.system(f"ollama pull {model_name}")
+    if ret != 0:
+        console.print(f"[yellow]⚠️ Failed to pull {model_name} — auto_capture will need manual setup.[/yellow]")
+        console.print(f"[dim]Try manually: ollama pull {model_name}[/dim]")
+        return
+    console.print(f"[green]✓ Evaluator model {model_name} ready[/green]")
+
+
 def _ensure_system_deps():
     """Ensure python3-venv and pip are available. Install via apt if missing."""
     import shutil
@@ -654,12 +693,17 @@ def init():
     elif embed_choice == 3:
         console.print("\n[bold green]✓ Ollama selected for embeddings (FREE, local)[/bold green]")
         _ensure_ollama()
+        _ensure_evaluator_model()  # Also pull the memory evaluator model
         embedding_config = {
             "driver": "ollama",
             "model": "qwen3-embedding:0.6b",
             "dimensions": 1024,
             "_ollama": True,  # Flag: no API key needed
         }
+
+    # 2b. Evaluator model (for memory auto_capture — non-fatal)
+    if embed_choice != 3:  # Already pulled during Ollama embedding setup
+        _ensure_evaluator_model()
 
     # 3. Telegram bot
     console.print("\n[bold]Step 3: Telegram Bot[/bold]")
@@ -1901,6 +1945,9 @@ def _do_update(syne_dir: str):
 
     # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
     _run_schema_migration(syne_dir)
+
+    # Ensure evaluator model is available (non-fatal)
+    _ensure_evaluator_model()
 
     # Restart systemd service if active
     _restart_service()

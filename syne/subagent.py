@@ -214,7 +214,7 @@ class SubAgentManager:
         tool_schemas = self._get_tool_schemas(access_level)
 
         # Get max tool rounds from config
-        max_rounds = await get_config("session.max_tool_rounds", 100)
+        max_rounds = await get_config("session.max_tool_rounds", 25)
         if isinstance(max_rounds, str):
             max_rounds = int(max_rounds)
         # Sub-agents get same limit as main session

@@ -1416,7 +1416,21 @@ class SyneAgent:
             except json.JSONDecodeError:
                 parsed = value  # Store as string
             await set_config(key, parsed)
-            
+
+            # Guard: check evaluator model availability when enabling auto_capture
+            if key == "memory.auto_capture" and parsed:
+                eval_driver = await get_config("memory.evaluator_driver", "ollama")
+                if eval_driver == "ollama":
+                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+                    from .memory.evaluator import check_model_available
+                    available = await check_model_available(model=eval_model)
+                    if not available:
+                        await set_config(key, False)  # Revert
+                        return (
+                            f"❌ Cannot enable auto_capture: evaluator model `{eval_model}` not available.\n"
+                            f"Run `ollama pull {eval_model}` first, or set `memory.evaluator_driver` to `\"provider\"`."
+                        )
+
             # Auto-sync: if chat_model changes, find matching model in registry
             # and update active_model to keep them in sync
             if key == "provider.chat_model":
