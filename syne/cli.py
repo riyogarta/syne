@@ -196,6 +196,71 @@ def _ensure_evaluator_model():
     console.print(f"[green]✓ Evaluator model {model_name} ready[/green]")
 
 
+def _ensure_evaluator_if_enabled(syne_dir: str):
+    """Check DB if auto_capture is ON, and if so ensure Ollama + evaluator model.
+
+    Called during `syne update` / `syne updatedev`. Reads the config table
+    directly via asyncpg to avoid importing the full Syne stack.
+    Non-fatal: if DB is unreachable or auto_capture is OFF, silently skip.
+    """
+    import asyncio
+
+    env_path = os.path.join(syne_dir, ".env")
+    db_url = None
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("SYNE_DATABASE_URL="):
+                    db_url = line.split("=", 1)[1].strip()
+                    break
+    if not db_url:
+        # Try individual vars
+        db_user = db_pass = db_name = None
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("SYNE_DB_USER="):
+                        db_user = line.split("=", 1)[1].strip()
+                    elif line.startswith("SYNE_DB_PASSWORD="):
+                        db_pass = line.split("=", 1)[1].strip()
+                    elif line.startswith("SYNE_DB_NAME="):
+                        db_name = line.split("=", 1)[1].strip()
+        if db_user and db_pass and db_name:
+            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5432/{db_name}"
+
+    if not db_url:
+        return
+
+    async def _check():
+        import asyncpg
+        conn = await asyncpg.connect(db_url)
+        try:
+            row = await conn.fetchrow(
+                "SELECT value FROM config WHERE key = 'memory.auto_capture'"
+            )
+            if row:
+                import json
+                val = json.loads(row["value"])
+                return bool(val)
+            return False
+        finally:
+            await conn.close()
+
+    try:
+        enabled = asyncio.run(_check())
+    except Exception:
+        return
+
+    if enabled:
+        console.print("[dim]Auto-capture is enabled — ensuring Ollama + evaluator model...[/dim]")
+        _ensure_ollama()
+        _ensure_evaluator_model()
+    else:
+        console.print("[dim]⏭ Auto-capture disabled — skipping evaluator model[/dim]")
+
+
 def _ensure_system_deps():
     """Ensure python3-venv and pip are available. Install via apt if missing."""
     import shutil
@@ -1969,8 +2034,8 @@ def _do_update(syne_dir: str):
     # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
     _run_schema_migration(syne_dir)
 
-    # Ensure evaluator model is available (non-fatal)
-    _ensure_evaluator_model()
+    # Ensure Ollama + evaluator model if auto_capture is enabled (non-fatal)
+    _ensure_evaluator_if_enabled(syne_dir)
 
     # Restart systemd service if active
     _restart_service()
