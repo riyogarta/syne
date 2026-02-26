@@ -271,11 +271,23 @@ class MemoryEngine:
 
         Returns memory ID (new or updated) or None if duplicate/skipped.
         """
-        # Find the most similar existing memory
-        results = await self.recall(content, limit=1, min_similarity=conflict_threshold)
+        # Embed ONCE — reuse vector for similarity search + store/update
+        embedding_resp = await self.provider.embed(content)
+        vector = embedding_resp.vector
 
-        if results:
-            existing = results[0]
+        # Find most similar existing memory using pre-computed vector
+        async with get_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT id, content, source, importance,
+                       1 - (embedding <=> $1::vector) as similarity
+                FROM memory
+                WHERE 1 - (embedding <=> $1::vector) >= $2
+                ORDER BY embedding <=> $1::vector
+                LIMIT 1
+            """, str(vector), conflict_threshold)
+
+        if rows:
+            existing = dict(rows[0])
             sim = existing["similarity"]
 
             if sim >= similarity_threshold:
@@ -304,7 +316,7 @@ class MemoryEngine:
                     f"Updating #{old_id}."
                 )
                 return await self._update_memory(
-                    old_id, content, category, source, importance
+                    old_id, content, category, source, importance, vector=vector
                 )
 
             if new_priority < old_priority:
@@ -323,11 +335,36 @@ class MemoryEngine:
                 f"Updating #{old_id}."
             )
             return await self._update_memory(
-                old_id, content, category, source, importance
+                old_id, content, category, source, importance, vector=vector
             )
 
-        # No similar memory at all — insert new
-        return await self.store(content, category, source, user_id, importance, permanent=permanent)
+        # No similar memory at all — insert new (reuse vector)
+        return await self._store_with_vector(
+            content, vector, category, source, user_id, importance, permanent
+        )
+
+    async def _store_with_vector(
+        self,
+        content: str,
+        vector: list,
+        category: str = "fact",
+        source: str = "user_confirmed",
+        user_id: Optional[int] = None,
+        importance: float = 0.5,
+        permanent: bool = False,
+    ) -> int:
+        """Store a memory with a pre-computed embedding vector."""
+        from ..db.models import get_config
+        initial_count = int(await get_config("memory.initial_recall_count", "1")) if not permanent else 0
+
+        async with get_connection() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                RETURNING id
+            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
+
+            return row["id"]
 
     async def _update_memory(
         self,
@@ -336,10 +373,15 @@ class MemoryEngine:
         category: str,
         source: str,
         importance: float,
+        vector: Optional[list] = None,
     ) -> int:
-        """Update an existing memory with new content and embedding."""
-        embedding_resp = await self.provider.embed(content)
-        vector = embedding_resp.vector
+        """Update an existing memory with new content and embedding.
+
+        If vector is provided, reuses it instead of re-embedding.
+        """
+        if vector is None:
+            embedding_resp = await self.provider.embed(content)
+            vector = embedding_resp.vector
 
         async with get_connection() as conn:
             await conn.execute("""

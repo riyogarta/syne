@@ -24,6 +24,7 @@ import logging
 import re
 import time
 import random
+from collections import deque
 import httpx
 from typing import Optional
 from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
@@ -58,6 +59,12 @@ _BASE_DELAY_MS = 1_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
+
+# Default CCA rate limit (requests per minute).
+# Google Account (OAuth free): documented as 60 RPM, but internal CCA
+# endpoint may enforce lower limits. Conservative default; configurable
+# per model via "rpm_limit" field in model registry.
+_DEFAULT_CCA_RPM = 10
 
 # Tool call ID counter
 _tool_call_counter = 0
@@ -332,6 +339,7 @@ class GoogleProvider(LLMProvider):
         api_key: Optional[str] = None,
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
+        cca_rpm: Optional[int] = None,
     ):
         self.credentials = credentials
         self.api_key = api_key
@@ -342,6 +350,11 @@ class GoogleProvider(LLMProvider):
             raise ValueError("Either credentials (OAuth) or api_key is required")
 
         self._use_cca = credentials is not None
+        # Limit concurrent embed calls to prevent burst 429s
+        self._embed_semaphore = asyncio.Semaphore(3)
+        # Sliding window throttle for CCA chat requests
+        self._cca_rpm = cca_rpm or _DEFAULT_CCA_RPM
+        self._request_times: deque = deque()
 
     @property
     def name(self) -> str:
@@ -474,6 +487,48 @@ class GoogleProvider(LLMProvider):
 
         return system_text, contents
 
+    async def _throttle_cca(self):
+        """Sliding window rate limiter for CCA chat requests.
+
+        Tracks request timestamps in a 60-second window. When approaching
+        the RPM limit, adds proportional delay to spread requests out.
+        When at the limit, waits until the oldest request exits the window.
+        """
+        if not self._use_cca or not self._cca_rpm:
+            return
+
+        now = time.monotonic()
+        window = 60.0
+
+        # Remove timestamps outside the window
+        while self._request_times and self._request_times[0] < now - window:
+            self._request_times.popleft()
+
+        used = len(self._request_times)
+        threshold = max(1, self._cca_rpm - 2)  # Start throttling 2 before limit
+
+        if used >= self._cca_rpm:
+            # Hard limit — wait for oldest request to exit the window
+            wait = self._request_times[0] + window - now
+            if wait > 0:
+                logger.info(f"CCA throttle: {used}/{self._cca_rpm} RPM, waiting {wait:.1f}s")
+                await asyncio.sleep(wait)
+                now = time.monotonic()
+                while self._request_times and self._request_times[0] < now - window:
+                    self._request_times.popleft()
+        elif used >= threshold:
+            # Approaching limit — spread remaining requests across remaining time
+            elapsed = now - self._request_times[0] if self._request_times else 0
+            remaining_time = window - elapsed
+            remaining_slots = self._cca_rpm - used
+            if remaining_slots > 0 and remaining_time > 0:
+                spacing = remaining_time / remaining_slots
+                if spacing > 1.0:
+                    logger.debug(f"CCA pre-throttle: {used}/{self._cca_rpm} RPM, spacing {spacing:.1f}s")
+                    await asyncio.sleep(spacing)
+
+        self._request_times.append(time.monotonic())
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -486,6 +541,7 @@ class GoogleProvider(LLMProvider):
         model = model or self.chat_model
 
         if self._use_cca:
+            await self._throttle_cca()
             return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
         else:
             return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
@@ -841,7 +897,10 @@ class GoogleProvider(LLMProvider):
         text: str,
         model: Optional[str] = None,
     ) -> EmbeddingResponse:
-        """Embedding — always uses Gemini API (CCA doesn't have embed endpoint)."""
+        """Embedding — always uses Gemini API (CCA doesn't have embed endpoint).
+
+        Includes retry with exponential backoff for transient errors (429, 5xx).
+        """
         model = model or self.embedding_model
         url = f"{_GEMINI_API}/models/{model}:embedContent"
 
@@ -850,27 +909,56 @@ class GoogleProvider(LLMProvider):
             "content": {"parts": [{"text": text}]},
         }
 
-        if self._use_cca:
-            token = await self.credentials.get_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            params = {}
-        else:
-            headers = {}
-            params = {"key": self.api_key}
+        async with self._embed_semaphore:
+            for attempt in range(_MAX_RETRIES + 1):
+                if self._use_cca:
+                    token = await self.credentials.get_token()
+                    headers = {"Authorization": f"Bearer {token}"}
+                    params = {}
+                else:
+                    headers = {}
+                    params = {"key": self.api_key}
 
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url, json=body, headers=headers, params=params)
-            resp.raise_for_status()
-            data = resp.json()
+                try:
+                    async with httpx.AsyncClient(timeout=30) as client:
+                        resp = await client.post(url, json=body, headers=headers, params=params)
+                        resp.raise_for_status()
+                        data = resp.json()
 
-        vector = data["embedding"]["values"]
-        return EmbeddingResponse(vector=vector, model=model, dimensions=len(vector))
+                    vector = data["embedding"]["values"]
+                    return EmbeddingResponse(vector=vector, model=model, dimensions=len(vector))
+
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
+                    if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
+                        server_delay = _extract_retry_delay(error_text, e.response.headers)
+                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                            raise LLMRateLimitError(
+                                f"Embed rate limited (429). Server requested {server_delay // 1000}s wait."
+                            ) from e
+                        logger.warning(f"Embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                        await asyncio.sleep(delay_ms / 1000)
+                        continue
+                    if status == 429:
+                        raise LLMRateLimitError(f"Embed rate limited (429) after {attempt + 1} attempts.") from e
+                    raise
+
+                except (httpx.ConnectError, httpx.ReadTimeout) as e:
+                    if attempt < _MAX_RETRIES:
+                        delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                        logger.warning(f"Embed network error: {e}, retrying in {delay_ms}ms")
+                        await asyncio.sleep(delay_ms / 1000)
+                        continue
+                    raise
 
     async def embed_batch(
         self,
         texts: list[str],
         model: Optional[str] = None,
     ) -> list[EmbeddingResponse]:
+        """Batch embedding with retry + exponential backoff."""
         model = model or self.embedding_model
         url = f"{_GEMINI_API}/models/{model}:batchEmbedContents"
 
@@ -879,22 +967,50 @@ class GoogleProvider(LLMProvider):
             for t in texts
         ]
 
-        if self._use_cca:
-            token = await self.credentials.get_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            params = {}
-        else:
-            headers = {}
-            params = {"key": self.api_key}
+        async with self._embed_semaphore:
+            for attempt in range(_MAX_RETRIES + 1):
+                if self._use_cca:
+                    token = await self.credentials.get_token()
+                    headers = {"Authorization": f"Bearer {token}"}
+                    params = {}
+                else:
+                    headers = {}
+                    params = {"key": self.api_key}
 
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                url, json={"requests": requests}, headers=headers, params=params
-            )
-            resp.raise_for_status()
-            data = resp.json()
+                try:
+                    async with httpx.AsyncClient(timeout=60) as client:
+                        resp = await client.post(
+                            url, json={"requests": requests}, headers=headers, params=params
+                        )
+                        resp.raise_for_status()
+                        data = resp.json()
 
-        return [
-            EmbeddingResponse(vector=emb["values"], model=model, dimensions=len(emb["values"]))
-            for emb in data["embeddings"]
-        ]
+                    return [
+                        EmbeddingResponse(vector=emb["values"], model=model, dimensions=len(emb["values"]))
+                        for emb in data["embeddings"]
+                    ]
+
+                except httpx.HTTPStatusError as e:
+                    status = e.response.status_code
+                    error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
+                    if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
+                        server_delay = _extract_retry_delay(error_text, e.response.headers)
+                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                            raise LLMRateLimitError(
+                                f"Batch embed rate limited. Server requested {server_delay // 1000}s wait."
+                            ) from e
+                        logger.warning(f"Batch embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                        await asyncio.sleep(delay_ms / 1000)
+                        continue
+                    if status == 429:
+                        raise LLMRateLimitError(f"Batch embed rate limited (429) after {attempt + 1} attempts.") from e
+                    raise
+
+                except (httpx.ConnectError, httpx.ReadTimeout) as e:
+                    if attempt < _MAX_RETRIES:
+                        delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                        logger.warning(f"Batch embed network error: {e}, retrying in {delay_ms}ms")
+                        await asyncio.sleep(delay_ms / 1000)
+                        continue
+                    raise

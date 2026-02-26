@@ -86,6 +86,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
         return GoogleProvider(
             credentials=creds,
             chat_model=model_id,
+            cca_rpm=model_entry.get("rpm_limit"),
         )
     
     # ═══════════════════════════════════════════════════════════════
