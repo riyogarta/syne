@@ -188,6 +188,7 @@ async def update_user(
     display_name: Optional[str] = None,
     aliases: Optional[dict] = None,
     access_level: Optional[str] = None,
+    preferences: Optional[dict] = None,
 ) -> Optional[dict]:
     """Update user fields. Returns updated user or None if not found."""
     import json
@@ -211,7 +212,12 @@ async def update_user(
             updates.append(f"access_level = ${param_idx}")
             params.append(access_level)
             param_idx += 1
-        
+
+        if preferences is not None:
+            updates.append(f"preferences = ${param_idx}::jsonb")
+            params.append(json.dumps(preferences))
+            param_idx += 1
+
         if not updates:
             return await get_user(platform, platform_id)
         

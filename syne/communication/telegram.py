@@ -3159,10 +3159,12 @@ Or just send me a message!"""
         first_owner = await get_first_owner("telegram")
         is_first_owner = first_owner and first_owner.get("platform_id") == platform_id
         
-        text = f"👤 <b>{name}</b>\n\nID: <code>{platform_id}</code>\nAccess: <b>{access}</b>"
+        user_model = ((user.get("preferences") or {}).get("model"))
+        model_label = f"<code>{user_model}</code>" if user_model else "<i>default</i>"
+        text = f"👤 <b>{name}</b>\n\nID: <code>{platform_id}</code>\nAccess: <b>{access}</b>\nModel: {model_label}"
         if is_first_owner:
             text += "\n🔒 <i>First owner (immutable)</i>"
-        
+
         # Access level buttons
         levels = ["owner", "family", "public", "blocked"]
         access_buttons = []
@@ -3170,11 +3172,42 @@ Or just send me a message!"""
             check = " ✓" if lvl == access else ""
             cb = f"mbr:set:{platform_id}:{lvl}"
             access_buttons.append(InlineKeyboardButton(f"{lvl}{check}", callback_data=cb))
-        
+
         buttons = [access_buttons]
+        buttons.append([InlineKeyboardButton("🤖 Change Model", callback_data=f"mbr:model_list:{platform_id}")])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="mbr:main")])
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _members_menu_model_list(self, query, platform_id: str):
+        """Show model selection for a user."""
+        from ..db.models import get_config, get_user
+        user = await get_user("telegram", platform_id)
+        current_model = ((user or {}).get("preferences") or {}).get("model")
+
+        models = await get_config("provider.models", [])
+        buttons = []
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            check = " ✓" if key == current_model else ""
+            buttons.append([InlineKeyboardButton(
+                f"{label}{check}", callback_data=f"mbr:model_set:{platform_id}:{key}"
+            )])
+
+        # Add "default" option
+        check = " ✓" if not current_model else ""
+        buttons.append([InlineKeyboardButton(
+            f"🔄 Default{check}", callback_data=f"mbr:model_set:{platform_id}:__default__"
+        )])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mbr:view:{platform_id}")])
+
+        name = (user or {}).get("display_name") or (user or {}).get("name", platform_id)
+        await query.edit_message_text(
+            f"🤖 <b>Select Model for {name}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
 
     async def _handle_members_callback(self, query, data: str):
         """Handle interactive members menu callbacks."""
@@ -3218,7 +3251,42 @@ Or just send me a message!"""
                 await query.answer("Failed to update", show_alert=True)
             
             await self._members_menu_detail(query, platform_id)
-        
+
+        elif action == "model_list" and len(parts) >= 3:
+            await self._members_menu_model_list(query, parts[2])
+
+        elif action == "model_set" and len(parts) >= 4:
+            platform_id = parts[2]
+            model_key = parts[3]
+
+            from ..db.models import get_user as gu2, update_user
+            user = await gu2("telegram", platform_id)
+            if not user:
+                await query.answer("User not found", show_alert=True)
+                return
+
+            prefs = user.get("preferences") or {}
+            if model_key == "__default__":
+                prefs.pop("model", None)
+            else:
+                prefs["model"] = model_key
+
+            result = await update_user("telegram", platform_id, preferences=prefs)
+            if not result:
+                await query.answer("Failed to update", show_alert=True)
+                return
+
+            # Clear cached DM conversation so new provider takes effect
+            if self.agent and self.agent.conversations:
+                key = f"telegram:{platform_id}"
+                if key in self.agent.conversations._active:
+                    del self.agent.conversations._active[key]
+                    logger.info(f"Cleared cached conversation for user {platform_id}")
+
+            label = model_key if model_key != "__default__" else "default"
+            await query.answer(f"Model set to {label}")
+            await self._members_menu_detail(query, platform_id)
+
         else:
             await query.answer("Unknown action")
 

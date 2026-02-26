@@ -800,6 +800,15 @@ class ConversationManager:
                         conv_provider = override
                         logger.info(f"Group {inbound.chat_id} using model override: {group_model}")
 
+        # Per-user model override (DM only — group model takes precedence)
+        if conv_provider is self.provider and user:
+            user_model = (user.get("preferences") or {}).get("model")
+            if user_model and hasattr(self, '_agent') and self._agent:
+                override = await self._agent.create_provider_for_model(user_model)
+                if override:
+                    conv_provider = override
+                    logger.info(f"User {user.get('platform_id')} using model override: {user_model}")
+
         conv = Conversation(
             provider=conv_provider,
             memory=self.memory,
