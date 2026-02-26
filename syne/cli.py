@@ -228,7 +228,7 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
                     elif line.startswith("SYNE_DB_NAME="):
                         db_name = line.split("=", 1)[1].strip()
         if db_user and db_pass and db_name:
-            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5432/{db_name}"
+            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5433/{db_name}"
 
     if not db_url:
         return
@@ -433,11 +433,13 @@ def _setup_update_check():
 
     # Run a small Python script to create the task via DB
     script = """
-import asyncio
+import asyncio, os
 async def setup():
     from syne.db.connection import init_db, close_db
-    from syne.db.models import get_config
-    await init_db()
+    db_url = os.environ.get("SYNE_DATABASE_URL")
+    if not db_url:
+        return  # No DB config — skip silently
+    await init_db(db_url)
 
     # Check if task already exists
     from syne.scheduler import list_tasks
@@ -654,7 +656,7 @@ def init():
     elif choice == 4:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key")
-        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key}
+        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.openai.com/v1"}
 
     elif choice == 5:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
@@ -664,13 +666,13 @@ def init():
     elif choice == 6:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key")
-        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key}
+        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.together.xyz/v1"}
 
     elif choice == 7:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.groq.com[/dim]")
         api_key = click.prompt("Groq API key")
-        provider_config = {"driver": "openai_compat", "model": "llama-3.3-70b-versatile", "auth": "api_key", "_api_key": api_key}
+        provider_config = {"driver": "openai_compat", "model": "llama-3.3-70b-versatile", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.groq.com/openai/v1"}
 
     # 2. Embedding provider (for memory)
     console.print("\n[bold]Step 2: Choose embedding provider (for memory)[/bold]")
@@ -816,7 +818,13 @@ def init():
     console.print("  1. ON  [green](recommended)[/green]")
     console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
     console.print()
-    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1)
+    if not ollama_available and embed_choice != 3:
+        # System doesn't meet Ollama requirements and Ollama wasn't installed for embedding
+        console.print(f"  [yellow]⚠️  Your system may be too small for local AI: {ollama_reason}[/yellow]")
+        console.print(f"  [dim]Auto-capture requires Ollama (~1.3GB RAM when active).[/dim]")
+        console.print()
+
+    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if (ollama_available or embed_choice == 3) else 2)
     auto_capture_enabled = auto_capture_choice == 1
 
     if auto_capture_enabled:
@@ -956,7 +964,7 @@ def init():
     # Save identity + credentials to DB
     async def _save_identity():
         from .db.connection import init_db, close_db
-        from .db.models import set_identity
+        from .db.models import set_identity, set_config
         pool = await init_db(db_url)
         await set_identity("name", name)
         await set_identity("motto", motto)
@@ -967,7 +975,6 @@ def init():
             console.print("[green]✓ Telegram bot token saved to database[/green]")
         # Save Brave Search API key to DB if provided
         if brave_api_key:
-            from .db.models import set_config
             await set_config("web_search.api_key", brave_api_key)
             console.print("[green]✓ Brave Search API key saved to database[/green]")
         # Save Google OAuth credentials to DB if collected
@@ -976,14 +983,12 @@ def init():
             console.print(f"[green]✓ Google OAuth credentials saved to database ({google_creds.email})[/green]")
         # Save Codex OAuth credentials to DB if collected
         if codex_creds:
-            from .db.models import set_config
             await set_config("credential.codex_access_token", codex_creds["access_token"])
             await set_config("credential.codex_refresh_token", codex_creds["refresh_token"])
             await set_config("credential.codex_expires_at", codex_creds["expires_at"])
             console.print("[green]✓ ChatGPT OAuth credentials saved to database[/green]")
         # Save Claude OAuth credentials to DB if collected
         if provider_config and provider_config.get("_claude_creds"):
-            from .auth.claude_oauth import ClaudeCredentials
             from .db.credentials import set_claude_oauth_credentials
             cdata = provider_config["_claude_creds"]
             await set_claude_oauth_credentials(
@@ -995,13 +1000,11 @@ def init():
             console.print(f"[green]✓ Claude OAuth credentials saved to database ({cdata.get('email', 'unknown')})[/green]")
         # Save API key to DB if provided (not in .env!)
         if provider_config and provider_config.get("_api_key"):
-            from .db.models import set_config
             driver = provider_config["driver"]
             await set_config(f"credential.{driver}_api_key", provider_config["_api_key"])
             console.print(f"[green]✓ API key saved to database[/green]")
         # Save provider config to DB
         if provider_config:
-            from .db.models import set_config
             # Strip internal _api_key before saving
             db_config = {k: v for k, v in provider_config.items() if not k.startswith("_")}
             await set_config("provider.primary", db_config)
@@ -1032,16 +1035,8 @@ def init():
             elif driver == "openai_compat":
                 # OpenAI API key, Together AI, or Groq — needs base_url + credential_key
                 active_key = model_id.split("/")[-1].replace(".", "-")  # e.g. "gpt-4o", "llama-3-3-70b-versatile"
-                # Determine base_url and credential_key from model/provider context
-                if "groq" in model_id or "groq" in provider_config.get("_api_key", ""):
-                    base_url = "https://api.groq.com/openai/v1"
-                    cred_key = "credential.openai_compat_api_key"
-                elif "together" in model_id.lower() or "llama" in model_id.lower() or "meta-llama" in model_id:
-                    base_url = "https://api.together.xyz/v1"
-                    cred_key = "credential.openai_compat_api_key"
-                else:
-                    base_url = "https://api.openai.com/v1"
-                    cred_key = "credential.openai_compat_api_key"
+                base_url = provider_config.get("_base_url", "https://api.openai.com/v1")
+                cred_key = "credential.openai_compat_api_key"
                 models_registry = [
                     {"key": active_key, "label": model_id, "driver": "openai_compat", "model_id": model_id, "auth": auth, "base_url": base_url, "credential_key": cred_key},
                 ]
@@ -1056,7 +1051,6 @@ def init():
             console.print(f"[green]✓ Provider config saved to database[/green]")
         # Save embedding config to DB
         if embedding_config:
-            from .db.models import set_config
             await set_config("provider.embedding_model", embedding_config["model"])
             await set_config("provider.embedding_dimensions", embedding_config["dimensions"])
             await set_config("provider.embedding_driver", embedding_config["driver"])
@@ -2080,7 +2074,7 @@ def _run_schema_migration(syne_dir: str):
                     elif line.startswith("SYNE_DB_NAME="):
                         db_name = line.split("=", 1)[1].strip()
         if db_user and db_pass and db_name:
-            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5432/{db_name}"
+            db_url = f"postgresql://{db_user}:{db_pass}@localhost:5433/{db_name}"
 
     if not db_url:
         console.print("[dim]⏭ Schema migration skipped (no DB config)[/dim]")
