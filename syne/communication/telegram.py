@@ -748,20 +748,24 @@ class TelegramChannel:
             ]
         ]
         
-        try:
-            await self.app.bot.send_message(
-                chat_id=owner_chat_id,
-                text=(
-                    f"🔔 **New user wants access:**\n\n"
-                    f"• Name: {user_name}{username_str}\n"
-                    f"• ID: `{user.id}`\n\n"
-                    f"Approve or reject?"
-                ),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-        except Exception as e:
-            logger.error(f"Failed to notify owner about pending user: {e}")
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(
+                    chat_id=owner_chat_id,
+                    text=(
+                        f"🔔 **New user wants access:**\n\n"
+                        f"• Name: {user_name}{username_str}\n"
+                        f"• ID: `{user.id}`\n\n"
+                        f"Approve or reject?"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                break
+            except Exception as e:
+                logger.error(f"Failed to notify owner about pending user (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
 
     async def _handle_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle when bot is added to or removed from a group.
@@ -782,7 +786,8 @@ class TelegramChannel:
             return
         
         # Bot was added to group (status changed to "member" or "administrator")
-        if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
+        # Check old_status broadly — covers "left", "kicked", AND "restricted"
+        if new_status in ("member", "administrator") and old_status not in ("member", "administrator"):
             logger.info(f"Bot added to group: {chat.title} ({chat.id})")
             
             # Check if group is already registered
@@ -815,24 +820,28 @@ class TelegramChannel:
                 ]
             ]
             
-            try:
-                await self.app.bot.send_message(
-                    chat_id=owner_chat_id,
-                    text=(
-                        f"🔔 **Bot added to a new group:**\n\n"
-                        f"• Group: {chat.title}\n"
-                        f"• ID: `{chat.id}`\n"
-                        f"• Added by: {added_by_name}{added_by_username}\n\n"
-                        f"Approve this group?"
-                    ),
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify owner about group addition: {e}")
+            for attempt in range(3):
+                try:
+                    await self.app.bot.send_message(
+                        chat_id=owner_chat_id,
+                        text=(
+                            f"🔔 **Bot added to a new group:**\n\n"
+                            f"• Group: {chat.title}\n"
+                            f"• ID: `{chat.id}`\n"
+                            f"• Added by: {added_by_name}{added_by_username}\n\n"
+                            f"Approve this group?"
+                        ),
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup(buttons),
+                    )
+                    break
+                except Exception as e:
+                    logger.error(f"Failed to notify owner about group addition (attempt {attempt + 1}/3): {e}")
+                    if attempt < 2:
+                        await asyncio.sleep(2 ** attempt)
         
-        # Bot was removed from group
-        elif new_status in ("left", "kicked") and old_status in ("member", "administrator"):
+        # Bot was removed from group (covers "member", "administrator", AND "restricted")
+        elif new_status in ("left", "kicked") and old_status not in ("left", "kicked"):
             logger.info(f"Bot removed from group: {chat.title} ({chat.id})")
             
             # Delete group from DB — clean slate if re-added later

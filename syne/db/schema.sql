@@ -349,7 +349,7 @@ INSERT INTO config (key, value, description) VALUES
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
     ('session.max_tool_rounds', '25', 'Max tool call rounds per turn (safety limit). Agent notifies user if reached.'),
     -- Telegram channel config
-    ('telegram.dm_policy', '"open"', 'DM policy: open (accept all) or registered (only known users)'),
+    ('telegram.dm_policy', '"approval"', 'DM policy: approval (owner approves new users) or open (accept all)'),
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
     ('telegram.require_mention', 'true', 'Default require_mention for new groups'),
     ('telegram.bot_trigger_name', 'null', 'Bot trigger name (auto-reads from identity.name if null)'),
