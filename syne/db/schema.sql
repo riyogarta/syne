@@ -81,9 +81,22 @@ CREATE TABLE IF NOT EXISTS memory (
     recall_count INTEGER DEFAULT 1        -- conversation-based decay counter
 );
 
--- NOTE: Vector index is created dynamically after embedding provider is selected
--- (dimensions must be known). See _ensure_vector_index() in telegram.py / cli.py.
--- Example: CREATE INDEX idx_memory_embedding ON memory USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- HNSW vector index — created dynamically because embedding dimensions vary per provider.
+-- Call SELECT ensure_memory_hnsw_index() after embeddings exist to create/rebuild.
+CREATE OR REPLACE FUNCTION ensure_memory_hnsw_index() RETURNS void AS $$
+DECLARE
+    dim INT;
+BEGIN
+    SELECT vector_dims(embedding) INTO dim FROM memory WHERE embedding IS NOT NULL LIMIT 1;
+    IF dim IS NULL THEN RETURN; END IF;
+    DROP INDEX IF EXISTS idx_memory_embedding_hnsw;
+    EXECUTE format(
+        'CREATE INDEX idx_memory_embedding_hnsw ON memory USING hnsw ((embedding::vector(%s)) vector_cosine_ops) WITH (m = 16, ef_construction = 64)',
+        dim
+    );
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE INDEX IF NOT EXISTS idx_memory_category ON memory (category);
 CREATE INDEX IF NOT EXISTS idx_memory_user ON memory (user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory (importance DESC);
