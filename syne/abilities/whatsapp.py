@@ -52,11 +52,19 @@ class WhatsAppAbility(Ability):
     # ── Dependencies ────────────────────────────────────────────
 
     async def ensure_dependencies(self) -> tuple[bool, str]:
-        """Check for wacli binary; install if missing."""
+        """Check for wacli binary; install if missing.
+
+        Install strategy:
+        1. Check PATH and ~/.local/bin
+        2. go install (if Go available)
+        3. macOS only: download pre-built binary from GitHub releases
+        4. Linux: install Go via apt, then go install
+        5. Fail with clear instructions
+        """
+        # Already installed?
         if shutil.which("wacli"):
             return True, ""
 
-        # Also check ~/.local/bin in case it's not in PATH
         local_bin = os.path.join(_WACLI_INSTALL_DIR, "wacli")
         if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
             self._wacli_path = local_bin
@@ -64,22 +72,30 @@ class WhatsAppAbility(Ability):
 
         logger.info("wacli not found, attempting to install...")
 
-        # Try go install first (works on any platform)
+        # 1. Try go install (works on any platform if Go is available)
         ok, msg = await self._install_via_go()
         if ok:
             return True, msg
 
-        # Try downloading pre-built binary from GitHub releases
-        ok, msg = await self._install_from_release()
-        if ok:
-            return True, msg
+        # 2. macOS: try pre-built binary from GitHub releases
+        if platform.system().lower() == "darwin":
+            ok, msg = await self._install_from_release()
+            if ok:
+                return True, msg
+
+        # 3. Linux: install Go via apt, then retry go install
+        if platform.system().lower() == "linux" and not shutil.which("go"):
+            ok, msg = await self._install_go_then_wacli()
+            if ok:
+                return True, msg
 
         return False, (
-            "wacli binary not found and auto-install failed. "
+            "wacli binary not found and auto-install failed.\n"
             "Install manually:\n"
-            "  Option 1: go install github.com/steipete/wacli@latest\n"
-            "  Option 2: Download from https://github.com/steipete/wacli/releases\n"
-            "Then run: wacli auth (to scan QR code)"
+            "  1. Install Go: sudo apt install -y golang-go\n"
+            "  2. Build wacli: go install github.com/steipete/wacli@latest\n"
+            "  3. Authenticate: ~/.local/bin/wacli auth\n"
+            "Then retry enabling WhatsApp."
         )
 
     async def _install_via_go(self) -> tuple[bool, str]:
@@ -88,44 +104,57 @@ class WhatsAppAbility(Ability):
             return False, "Go not available"
 
         try:
+            os.makedirs(_WACLI_INSTALL_DIR, exist_ok=True)
             proc = await asyncio.create_subprocess_exec(
                 "go", "install", f"github.com/{_WACLI_REPO}@latest",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, "GOBIN": _WACLI_INSTALL_DIR},
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180)
             if proc.returncode == 0:
                 wacli_path = os.path.join(_WACLI_INSTALL_DIR, "wacli")
                 if os.path.isfile(wacli_path):
                     self._wacli_path = wacli_path
                     logger.info(f"wacli installed via go install → {wacli_path}")
                     return True, f"wacli installed to {wacli_path}"
-            logger.warning(f"go install failed: {stderr.decode()[:200]}")
-            return False, "go install failed"
+            logger.warning(f"go install failed: {stderr.decode()[:300]}")
+            return False, f"go install failed: {stderr.decode()[:200]}"
         except asyncio.TimeoutError:
-            return False, "go install timed out"
+            return False, "go install timed out (180s)"
         except Exception as e:
             return False, f"go install error: {e}"
 
+    async def _install_go_then_wacli(self) -> tuple[bool, str]:
+        """Linux: install Go via apt, then build wacli."""
+        logger.info("Go not found, attempting to install via apt...")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "apt", "install", "-y", "golang-go",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
+                logger.warning(f"apt install golang-go failed: {stderr.decode()[:200]}")
+                return False, "Failed to install Go via apt"
+            logger.info("Go installed via apt")
+        except asyncio.TimeoutError:
+            return False, "apt install golang-go timed out"
+        except Exception as e:
+            return False, f"Failed to install Go: {e}"
+
+        # Now try go install again
+        return await self._install_via_go()
+
     async def _install_from_release(self) -> tuple[bool, str]:
-        """Try downloading pre-built wacli binary from GitHub releases."""
+        """macOS: download pre-built wacli binary from GitHub releases."""
         import urllib.request
         import tarfile
 
-        system = platform.system().lower()   # linux, darwin
-        machine = platform.machine().lower()  # x86_64, aarch64, arm64
+        # Only macOS has pre-built binaries
+        asset_name = "wacli-macos-universal.tar.gz"
 
-        # Map to GitHub release naming
-        if system == "darwin":
-            asset_name = "wacli-macos-universal.tar.gz"
-        elif system == "linux":
-            arch = "amd64" if machine in ("x86_64", "amd64") else "arm64"
-            asset_name = f"wacli-linux-{arch}.tar.gz"
-        else:
-            return False, f"Unsupported platform: {system}"
-
-        # Get latest release download URL
         api_url = f"https://api.github.com/repos/{_WACLI_REPO}/releases/latest"
         try:
             req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
@@ -144,7 +173,6 @@ class WhatsAppAbility(Ability):
         except Exception as e:
             return False, f"Failed to query GitHub releases: {e}"
 
-        # Download and extract
         try:
             os.makedirs(_WACLI_INSTALL_DIR, exist_ok=True)
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -155,7 +183,6 @@ class WhatsAppAbility(Ability):
                 with tarfile.open(archive_path, "r:gz") as tar:
                     tar.extractall(tmpdir)
 
-                # Find the wacli binary in extracted files
                 extracted = Path(tmpdir)
                 for candidate in extracted.rglob("wacli"):
                     if candidate.is_file():
@@ -167,7 +194,6 @@ class WhatsAppAbility(Ability):
                         return True, f"wacli downloaded and installed to {dest}"
 
             return False, "wacli binary not found in release archive"
-
         except Exception as e:
             return False, f"Failed to download/install wacli: {e}"
 
