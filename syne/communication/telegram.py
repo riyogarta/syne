@@ -2248,7 +2248,7 @@ Or just send me a message!"""
         )
 
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /cancel command — abort active operation or auth flow."""
+        """Handle /cancel command — abort active operation, auth flow, or running sub-agents."""
         user = update.effective_user
         chat = update.effective_chat
         cancelled = False
@@ -2265,8 +2265,21 @@ Or just send me a message!"""
             self._auth_state.pop(user.id, None)
             cancelled = True
 
+        # Cancel running sub-agents for this chat's session
+        subagent_cancelled = 0
+        if self.agent.subagents and self.agent.conversations:
+            key = f"telegram:{chat.id}"
+            conv = self.agent.conversations._active.get(key)
+            if conv:
+                subagent_cancelled = await self.agent.subagents.cancel_by_session(conv.session_id)
+                if subagent_cancelled:
+                    cancelled = True
+
         if cancelled:
-            await update.message.reply_text("✋ Cancelled.")
+            parts = ["✋ Cancelled."]
+            if subagent_cancelled:
+                parts.append(f"({subagent_cancelled} sub-agent(s) stopped)")
+            await update.message.reply_text(" ".join(parts))
         else:
             await update.message.reply_text("Nothing to cancel.")
 

@@ -403,6 +403,23 @@ class SubAgentManager:
             return True
         return False
 
+    async def cancel_by_session(self, parent_session_id: int) -> int:
+        """Cancel all running sub-agents spawned from a specific session.
+
+        Returns number of cancelled runs.
+        """
+        async with get_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT run_id FROM subagent_runs
+                WHERE parent_session_id = $1 AND status = 'running'
+            """, parent_session_id)
+
+        count = 0
+        for row in rows:
+            if await self.cancel(row["run_id"]):
+                count += 1
+        return count
+
     async def cancel_all(self):
         """Cancel all running sub-agents."""
         for run_id in list(self._active_runs.keys()):
