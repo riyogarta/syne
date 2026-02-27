@@ -43,13 +43,44 @@ class OpenAIProvider(LLMProvider):
 
     @property
     def context_window(self) -> int:
+        m = self.chat_model.lower()
+        if "gpt-5" in m:
+            return 400_000
         return 128_000  # GPT-4o default
+
+    @property
+    def reserved_output_tokens(self) -> int:
+        m = self.chat_model.lower()
+        if "gpt-5" in m:
+            return 32_000  # GPT-5.x can output up to 128K; reserve conservatively
+        return 4096
 
     def _get_headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    @staticmethod
+    def _thinking_to_reasoning_effort(thinking_budget: Optional[int]) -> str:
+        """Map thinking_budget to OpenAI reasoning_effort level.
+
+        Budget thresholds (in tokens) → effort:
+            None or 0 → "none" (no reasoning)
+            1–2048    → "low"
+            2049–8192 → "medium"
+            8193–16K  → "high"
+            >16K      → "xhigh"
+        """
+        if not thinking_budget:
+            return "none"
+        if thinking_budget <= 2048:
+            return "low"
+        if thinking_budget <= 8192:
+            return "medium"
+        if thinking_budget <= 16384:
+            return "high"
+        return "xhigh"
 
     def _format_messages(
         self,
@@ -92,12 +123,20 @@ class OpenAIProvider(LLMProvider):
         thinking_budget: Optional[int] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
+        is_reasoning = "gpt-5" in model.lower() or "o3" in model.lower() or "o1" in model.lower()
 
         body: dict = {
             "model": model,
             "messages": self._format_messages(messages, tools),
-            "temperature": temperature,
         }
+
+        # Reasoning models (GPT-5.x, o3, o1) ignore temperature; use reasoning_effort instead
+        if is_reasoning:
+            effort = self._thinking_to_reasoning_effort(thinking_budget)
+            if effort != "none":
+                body["reasoning_effort"] = effort
+        else:
+            body["temperature"] = temperature
 
         if max_tokens:
             body["max_tokens"] = max_tokens
@@ -148,12 +187,20 @@ class OpenAIProvider(LLMProvider):
                     "id": tc.get("id"),
                 })
 
+        # Extract reasoning summary from GPT-5.x (if present)
+        thinking = None
+        reasoning = usage.get("completion_tokens_details", {})
+        if reasoning.get("reasoning_tokens"):
+            # GPT-5.x returns reasoning summary in message
+            thinking = message.get("reasoning_summary") or message.get("reasoning")
+
         return ChatResponse(
             content=message.get("content") or "",
             model=data.get("model", model),
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
             tool_calls=tool_calls,
+            thinking=thinking,
         )
 
     async def embed(

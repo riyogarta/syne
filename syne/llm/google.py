@@ -842,8 +842,19 @@ class GoogleProvider(LLMProvider):
             gen_config["temperature"] = temperature
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
+        # #8: Thinking config — thinkingLevel for Gemini 3, thinkingBudget for 2.5
         if thinking_budget is not None and thinking_budget > 0:
-            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+            is_gemini_3 = "gemini-3" in model.lower()
+            if is_gemini_3:
+                gen_config["thinkingConfig"] = {
+                    "includeThoughts": True,
+                    "thinkingLevel": "HIGH" if thinking_budget > 8192 else "MEDIUM" if thinking_budget > 2048 else "LOW",
+                }
+            else:
+                gen_config["thinkingConfig"] = {
+                    "includeThoughts": True,
+                    "thinkingBudget": thinking_budget,
+                }
 
         # #13: Only set if non-empty
         if gen_config:
