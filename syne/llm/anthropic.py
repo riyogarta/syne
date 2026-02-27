@@ -220,11 +220,16 @@ class AnthropicProvider(LLMProvider):
         
         return merged
 
+    # Claude-specific defaults — tuned for quality over creativity
+    DEFAULT_TEMPERATURE = 0.3
+    DEFAULT_MAX_TOKENS = 16384
+    DEFAULT_THINKING_BUDGET = 10240  # ~high; None=use this, 0=off, >0=use that
+
     async def chat(
         self,
         messages: list[ChatMessage],
         model: Optional[str] = None,
-        temperature: float = 0.7,
+        temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
@@ -304,18 +309,20 @@ class AnthropicProvider(LLMProvider):
         body: dict = {
             "model": model,
             "messages": conversation,
-            "max_tokens": max_tokens or 4096,
+            "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
         }
-        
+
         if system_text:
             body["system"] = system_text
-        
-        if thinking_budget and thinking_budget > 0:
+
+        # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
+        effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
+        if effective_budget > 0:
             body["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": thinking_budget,
+                "budget_tokens": effective_budget,
             }
-            body["temperature"] = 1
+            body["temperature"] = 1  # required by Anthropic when thinking is on
         else:
             body["temperature"] = temperature
         
