@@ -54,12 +54,11 @@ class WhatsAppAbility(Ability):
     async def ensure_dependencies(self) -> tuple[bool, str]:
         """Check for wacli binary; install if missing.
 
-        Install strategy:
+        Install strategy (no sudo — never escalate privileges):
         1. Check PATH and ~/.local/bin
         2. go install (if Go available)
         3. macOS only: download pre-built binary from GitHub releases
-        4. Linux: install Go via apt, then go install
-        5. Fail with clear instructions
+        4. Fail with instructions for the owner
         """
         # Already installed?
         if shutil.which("wacli"):
@@ -73,9 +72,10 @@ class WhatsAppAbility(Ability):
         logger.info("wacli not found, attempting to install...")
 
         # 1. Try go install (works on any platform if Go is available)
-        ok, msg = await self._install_via_go()
-        if ok:
-            return True, msg
+        if shutil.which("go"):
+            ok, msg = await self._install_via_go()
+            if ok:
+                return True, msg
 
         # 2. macOS: try pre-built binary from GitHub releases
         if platform.system().lower() == "darwin":
@@ -83,19 +83,20 @@ class WhatsAppAbility(Ability):
             if ok:
                 return True, msg
 
-        # 3. Linux: install Go via apt, then retry go install
-        if platform.system().lower() == "linux" and not shutil.which("go"):
-            ok, msg = await self._install_go_then_wacli()
-            if ok:
-                return True, msg
+        # Can't auto-install — tell the owner what to do
+        if not shutil.which("go"):
+            return False, (
+                "wacli requires Go to build from source (no Linux binary available).\n"
+                "Owner harus install dulu di server:\n"
+                "  sudo apt install -y golang-go\n"
+                "Setelah itu retry enable WhatsApp — wacli akan di-build otomatis."
+            )
 
         return False, (
-            "wacli binary not found and auto-install failed.\n"
-            "Install manually:\n"
-            "  1. Install Go: sudo apt install -y golang-go\n"
-            "  2. Build wacli: go install github.com/steipete/wacli@latest\n"
-            "  3. Authenticate: ~/.local/bin/wacli auth\n"
-            "Then retry enabling WhatsApp."
+            "wacli build failed. Owner harus install manual di server:\n"
+            "  go install github.com/steipete/wacli@latest\n"
+            "  wacli auth  (scan QR code)\n"
+            "Setelah itu retry enable WhatsApp."
         )
 
     async def _install_via_go(self) -> tuple[bool, str]:
@@ -124,28 +125,6 @@ class WhatsAppAbility(Ability):
             return False, "go install timed out (180s)"
         except Exception as e:
             return False, f"go install error: {e}"
-
-    async def _install_go_then_wacli(self) -> tuple[bool, str]:
-        """Linux: install Go via apt, then build wacli."""
-        logger.info("Go not found, attempting to install via apt...")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "sudo", "apt", "install", "-y", "golang-go",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-            if proc.returncode != 0:
-                logger.warning(f"apt install golang-go failed: {stderr.decode()[:200]}")
-                return False, "Failed to install Go via apt"
-            logger.info("Go installed via apt")
-        except asyncio.TimeoutError:
-            return False, "apt install golang-go timed out"
-        except Exception as e:
-            return False, f"Failed to install Go: {e}"
-
-        # Now try go install again
-        return await self._install_via_go()
 
     async def _install_from_release(self) -> tuple[bool, str]:
         """macOS: download pre-built wacli binary from GitHub releases."""
