@@ -1541,6 +1541,22 @@ class SyneAgent:
             ok, msg = await self.abilities.enable(name)
             if ok:
                 await self.conversations.refresh_system_prompts()
+                # WhatsApp: check auth and trigger QR flow if needed
+                if name == "whatsapp":
+                    wa = self.abilities.get("whatsapp")
+                    if wa and not wa.instance.is_authenticated():
+                        qr_path = await wa.instance.start_auth_flow(self)
+                        if qr_path:
+                            return (
+                                f"{msg}\n"
+                                "Scan QR code ini dengan WhatsApp di HP.\n\n"
+                                f"MEDIA: {qr_path}"
+                            )
+                        return (
+                            f"{msg}\n"
+                            "Butuh autentikasi tapi gagal capture QR. "
+                            "Jalankan manual di server: wacli auth"
+                        )
             return msg
 
         if action == "disable":
