@@ -66,14 +66,17 @@ class OpenAIProvider(LLMProvider):
         """Map thinking_budget to OpenAI reasoning_effort level.
 
         Budget thresholds (in tokens) → effort:
-            None or 0 → "none" (no reasoning)
+            None      → "high" (default — reduces hallucination)
+            0         → "low"  (minimal reasoning, never fully off)
             1–2048    → "low"
             2049–8192 → "medium"
             8193–16K  → "high"
             >16K      → "xhigh"
         """
-        if not thinking_budget:
-            return "none"
+        if thinking_budget is None:
+            return "high"
+        if thinking_budget == 0:
+            return "low"
         if thinking_budget <= 2048:
             return "low"
         if thinking_budget <= 8192:
@@ -130,11 +133,11 @@ class OpenAIProvider(LLMProvider):
             "messages": self._format_messages(messages, tools),
         }
 
-        # Reasoning models (GPT-5.x, o3, o1) ignore temperature; use reasoning_effort instead
+        # Reasoning models (GPT-5.x, o3, o1) ignore temperature; use reasoning_effort instead.
+        # Default to "high" — reduces hallucination significantly vs "none"/"low".
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)
-            if effort != "none":
-                body["reasoning_effort"] = effort
+            body["reasoning_effort"] = effort
         else:
             body["temperature"] = temperature
 
