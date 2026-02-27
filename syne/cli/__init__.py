@@ -81,4 +81,20 @@ def help_cmd():
 
 def main():
     """CLI entry point."""
-    cli()
+    import sys
+    try:
+        cli(standalone_mode=False)
+    except click.UsageError as e:
+        if e.ctx:
+            click.echo(e.ctx.command.get_usage(e.ctx), err=True)
+        click.echo(f"Try 'syne help' for help.\n", err=True)
+        click.echo(f"Error: {e.format_message()}", err=True)
+        sys.exit(2)
+    except click.ClickException as e:
+        e.show()
+        sys.exit(e.exit_code)
+    except click.exceptions.Exit as e:
+        sys.exit(e.code)
+    except click.Abort:
+        click.echo("Aborted!", err=True)
+        sys.exit(1)

@@ -1615,25 +1615,43 @@ Or just send me a message!"""
         if session_row:
             msg_count = session_row["message_count"]
             compactions = session_row["compactions"]
-            
+
             # Estimate context usage
             stats = await get_session_stats(session_row["id"])
             chars = stats["total_chars"]
-            # Rough token estimate (chars / 3.5)
             est_tokens = int(chars / 3.5)
-            max_tokens = context_window
-            pct = round(est_tokens / max_tokens * 100)
-            
+            reserved = self.agent.provider.reserved_output_tokens if self.agent else 4096
+            available = context_window - reserved
+            pct = round(est_tokens / available * 100) if available > 0 else 0
+
             # Format context window for display
-            if max_tokens >= 1000000:
-                ctx_display = f"{max_tokens / 1000000:.1f}M"
+            if context_window >= 1000000:
+                ctx_display = f"{context_window / 1000000:.1f}M"
             else:
-                ctx_display = f"{max_tokens // 1000}K"
-            
+                ctx_display = f"{context_window // 1000}K"
+
+            # Compaction thresholds
+            msg_thresh = int(await get_config("session.max_messages", 100))
+            chr_thresh = int(await get_config("session.compaction_threshold", 150000))
+
+            # Build progress bar (10 blocks)
+            filled = min(10, pct // 10)
+            bar = "█" * filled + "░" * (10 - filled)
+
+            # Compact trigger indicators
+            token_trigger = pct >= 90
+            msg_trigger = msg_count >= msg_thresh
+            char_trigger = chars >= chr_thresh
+
             session_info = (
-                f"📋 Messages: {msg_count} | ~{est_tokens:,}/{max_tokens:,} tokens ({pct}%)\n"
-                f"📐 Context window: {ctx_display}\n"
+                f"📐 Context: {ctx_display} ({available:,} usable)\n"
+                f"`[{bar}]` {pct}% — ~{est_tokens:,}/{available:,} tokens\n"
+                f"📋 Messages: {msg_count}/{msg_thresh}"
+                f"{' ⚠️' if msg_trigger else ''}\n"
+                f"📝 Chars: {chars:,}/{chr_thresh:,}"
+                f"{' ⚠️' if char_trigger else ''}\n"
                 f"🧹 Compactions: {compactions}"
+                f"{' | ⚡ compact soon' if (token_trigger or msg_trigger or char_trigger) else ''}"
             )
 
         from .. import __version__ as syne_version
@@ -1989,19 +2007,28 @@ Or just send me a message!"""
 
         # Arrange buttons in rows of 2
         keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-        
+
         # Get current model label and context window
         current_model = next((m for m in models if m.get("key") == active_model_key), None)
         current_label = current_model.get("label", active_model_key) if current_model else active_model_key
         ctx_window = int(current_model.get("context_window", 0)) if current_model else None
-        
+
         ctx_info = ""
+        ctx_display = ""
         if ctx_window:
             if ctx_window >= 1000000:
-                ctx_info = f"\n📐 Context window: {ctx_window / 1000000:.1f}M tokens"
+                ctx_display = f"{ctx_window / 1000000:.1f}M"
+                ctx_info = f"\n📐 Context window: {ctx_display} tokens"
             else:
-                ctx_info = f"\n📐 Context window: {ctx_window // 1000}K tokens"
-        
+                ctx_display = f"{ctx_window // 1000}K"
+                ctx_info = f"\n📐 Context window: {ctx_display} tokens"
+
+        # Add context window edit button
+        if ctx_display:
+            keyboard.append([InlineKeyboardButton(
+                f"📐 Context: {ctx_display}", callback_data="model:ctx"
+            )])
+
         await update.message.reply_text(
             f"🤖 **Current model:** {current_label}{ctx_info}",
             parse_mode="Markdown",
@@ -3498,6 +3525,8 @@ Or just send me a message!"""
             return await self._process_addmodel_input(user_id, chat_id, text, state, context)
         elif auth_type == "addembed":
             return await self._process_addembed_input(user_id, chat_id, text, state, context)
+        elif auth_type == "ctx_window":
+            return await self._process_ctx_window_input(user_id, chat_id, text, state, context)
 
         return False
 
@@ -3706,6 +3735,54 @@ Or just send me a message!"""
             return True
 
         return False
+
+    async def _process_ctx_window_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle custom context window text input."""
+        bot = context.bot if context else self.app.bot
+        text = text.strip()
+
+        try:
+            new_ctx = int(text.replace(",", "").replace("_", ""))
+        except ValueError:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="Enter a number (e.g. <code>1000000</code>), or /cancel to abort.",
+                parse_mode="HTML",
+            )
+            return True
+
+        if new_ctx < 1000:
+            await bot.send_message(chat_id=chat_id, text="Value too small. Minimum 1,000 tokens.")
+            return True
+
+        # Update registry
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        updated = False
+        model_label = active_key
+        for m in models:
+            if m.get("key") == active_key:
+                m["context_window"] = new_ctx
+                model_label = m.get("label", active_key)
+                updated = True
+                break
+
+        if updated:
+            await set_config("provider.models", models)
+            if self.agent:
+                await self.agent.reload_provider()
+
+            ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Context window for <b>{model_label}</b> set to <b>{ctx_display}</b> ({new_ctx:,} tokens)",
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text="Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
 
     async def _process_addembed_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
         """Multi-step embedding provider addition flow."""
@@ -4356,21 +4433,163 @@ Or just send me a message!"""
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
 
+        elif data == "model:ctx":
+            # Show context window presets for active model
+            models = await get_config("provider.models", [])
+            active_key = await get_config("provider.active_model", "gemini-pro")
+            current = next((m for m in models if m.get("key") == active_key), None)
+            current_ctx = int(current.get("context_window", 0)) if current else 0
+            label = current.get("label", active_key) if current else active_key
+
+            presets = [
+                (128000, "128K"),
+                (200000, "200K"),
+                (500000, "500K"),
+                (1000000, "1M"),
+                (1048576, "1M (exact)"),
+            ]
+            buttons = []
+            for value, display in presets:
+                check = " ✓" if value == current_ctx else ""
+                buttons.append(InlineKeyboardButton(
+                    f"{display}{check}", callback_data=f"model:ctx:{value}"
+                ))
+            keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+            keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="model:ctx:custom")])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="model:ctx:back")])
+
+            ctx_display = f"{current_ctx/1000000:.1f}M" if current_ctx >= 1000000 else f"{current_ctx//1000}K"
+            await query.edit_message_text(
+                f"📐 <b>Context Window — {label}</b>\n\n"
+                f"Current: <b>{ctx_display}</b> ({current_ctx:,} tokens)\n\n"
+                f"Select a preset or enter custom value:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("model:ctx:"):
+            ctx_action = data.split(":", 2)[2]
+
+            if ctx_action == "back":
+                # Re-render /model menu
+                models = await get_config("provider.models", [])
+                active_key = await get_config("provider.active_model", "gemini-pro")
+                buttons = []
+                for m in models:
+                    key = m.get("key", "")
+                    mlabel = m.get("label", key)
+                    is_active = (key == active_key)
+                    btn_label = f"✅ {mlabel}" if is_active else mlabel
+                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
+                keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+                current = next((m for m in models if m.get("key") == active_key), None)
+                current_label = current.get("label", active_key) if current else active_key
+                ctx_window = int(current.get("context_window", 0)) if current else 0
+                ctx_info = ""
+                ctx_disp = ""
+                if ctx_window:
+                    if ctx_window >= 1000000:
+                        ctx_disp = f"{ctx_window / 1000000:.1f}M"
+                    else:
+                        ctx_disp = f"{ctx_window // 1000}K"
+                    ctx_info = f"\n📐 Context window: {ctx_disp} tokens"
+                if ctx_disp:
+                    keyboard.append([InlineKeyboardButton(
+                        f"📐 Context: {ctx_disp}", callback_data="model:ctx"
+                    )])
+                await query.edit_message_text(
+                    f"🤖 **Current model:** {current_label}{ctx_info}",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+
+            elif ctx_action == "custom":
+                # Enter text input mode for custom context window
+                user = query.from_user
+                self._auth_state[user.id] = {
+                    "type": "ctx_window",
+                    "step": "input",
+                    "chat_id": query.message.chat_id,
+                    "message_id": query.message.message_id,
+                }
+                await query.edit_message_text(
+                    "📐 <b>Custom Context Window</b>\n\n"
+                    "Send the context window size in tokens (number only).\n"
+                    "Examples: <code>1000000</code>, <code>200000</code>, <code>2000000</code>\n\n"
+                    "Send /cancel to abort.",
+                    parse_mode="HTML",
+                )
+
+            else:
+                # Apply preset context window value
+                try:
+                    new_ctx = int(ctx_action)
+                except ValueError:
+                    await query.answer("Invalid value", show_alert=True)
+                    return
+
+                models = await get_config("provider.models", [])
+                active_key = await get_config("provider.active_model", "gemini-pro")
+                updated = False
+                for m in models:
+                    if m.get("key") == active_key:
+                        m["context_window"] = new_ctx
+                        updated = True
+                        break
+
+                if updated:
+                    await set_config("provider.models", models)
+                    # Reload provider to apply new context window
+                    if self.agent:
+                        await self.agent.reload_provider()
+
+                    ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
+                    model_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
+                    await query.answer(f"Context window set to {ctx_display}")
+
+                    # Re-render preset menu with updated checkmark
+                    presets = [
+                        (128000, "128K"),
+                        (200000, "200K"),
+                        (500000, "500K"),
+                        (1000000, "1M"),
+                        (1048576, "1M (exact)"),
+                    ]
+                    buttons = []
+                    for value, display in presets:
+                        check = " ✓" if value == new_ctx else ""
+                        buttons.append(InlineKeyboardButton(
+                            f"{display}{check}", callback_data=f"model:ctx:{value}"
+                        ))
+                    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+                    keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="model:ctx:custom")])
+                    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="model:ctx:back")])
+
+                    await query.edit_message_text(
+                        f"📐 <b>Context Window — {model_label}</b>\n\n"
+                        f"Current: <b>{ctx_display}</b> ({new_ctx:,} tokens)\n\n"
+                        f"Select a preset or enter custom value:",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    await query.answer("Model not found", show_alert=True)
+
         elif data.startswith("model:"):
             model_key = data.split(":", 1)[1]
-            
+
             # Get model registry
             models = await get_config("provider.models", [])
             model_entry = next((m for m in models if m.get("key") == model_key), None)
-            
+
             if model_entry:
                 # Test and apply model
                 chat_id = query.message.chat_id
                 success, result = await self._apply_model(model_key, chat_id, context)
-                
+
                 # Get updated active model
                 active_model_key = model_key if success else await get_config("provider.active_model", "gemini-pro")
-                
+
                 # Rebuild buttons
                 buttons = []
                 for m in models:
@@ -4380,7 +4599,7 @@ Or just send me a message!"""
                     btn_label = f"✅ {label}" if is_active else label
                     buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
                 keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-                
+
                 if success:
                     await query.edit_message_text(
                         f"✅ **Switched to:** {result}\n\n⚠️ Use /restart to fully apply.",
