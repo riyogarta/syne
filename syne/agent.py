@@ -115,6 +115,7 @@ class SyneAgent:
         )
         self.subagents.tools = self.tools
         self.subagents.abilities = self.abilities
+        await self.subagents.cleanup_stale_runs()
         logger.info("Sub-agent manager ready (with tool access).")
 
         # 8. Conversation Manager

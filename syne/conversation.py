@@ -683,7 +683,7 @@ class ConversationManager:
         if self.subagents:
             self.subagents.set_completion_callback(self._on_subagent_complete)
 
-    async def _on_subagent_complete(self, run_id: str, status: str, result: str):
+    async def _on_subagent_complete(self, run_id: str, status: str, result: str, parent_session_id: int):
         """Called when a sub-agent finishes. Delivers result to the parent session."""
         if status == "completed":
             msg = f"✅ Sub-agent completed (run: {run_id[:8]})\n\n{result}"
@@ -693,7 +693,7 @@ class ConversationManager:
         # Deliver via callback if set (e.g., send Telegram message)
         if self._delivery_callback:
             try:
-                await self._delivery_callback(msg)
+                await self._delivery_callback(msg, parent_session_id)
             except Exception as e:
                 logger.error(f"Failed to deliver sub-agent result: {e}")
         else:
@@ -701,8 +701,8 @@ class ConversationManager:
 
     def set_delivery_callback(self, callback):
         """Set callback for delivering sub-agent results to the user.
-        
-        callback(message: str) -> None
+
+        callback(message: str, parent_session_id: int) -> None
         """
         self._delivery_callback = callback
 

@@ -37,12 +37,12 @@ class SubAgentManager:
         self.tools = None          # ToolRegistry — set by agent after init
         self.abilities = None      # AbilityRegistry — set by agent after init
         self._active_runs: dict[str, asyncio.Task] = {}
-        self._on_complete: Optional[Callable[[str, str, str], Awaitable[None]]] = None
+        self._on_complete: Optional[Callable[[str, str, str, int], Awaitable[None]]] = None
 
-    def set_completion_callback(self, callback: Callable[[str, str, str], Awaitable[None]]):
+    def set_completion_callback(self, callback: Callable[[str, str, str, int], Awaitable[None]]):
         """Set callback for when sub-agent completes.
-        
-        callback(run_id: str, status: str, result_or_error: str)
+
+        callback(run_id: str, status: str, result_or_error: str, parent_session_id: int)
         """
         self._on_complete = callback
 
@@ -352,6 +352,13 @@ class SubAgentManager:
                 WHERE run_id = $4
             """, status, result, error, run_id)
 
+            # Fetch parent_session_id for routing the result
+            row = await conn.fetchrow(
+                "SELECT parent_session_id FROM subagent_runs WHERE run_id = $1",
+                run_id,
+            )
+            parent_session_id = row["parent_session_id"] if row else 0
+
         # Clean up from active runs
         if run_id in self._active_runs:
             del self._active_runs[run_id]
@@ -360,7 +367,7 @@ class SubAgentManager:
         if self._on_complete:
             output = result if status == "completed" else f"Error: {error}"
             try:
-                await self._on_complete(run_id, status, output)
+                await self._on_complete(run_id, status, output, parent_session_id)
             except Exception as e:
                 logger.error(f"Completion callback failed for {run_id}: {e}")
 
@@ -400,3 +407,16 @@ class SubAgentManager:
         """Cancel all running sub-agents."""
         for run_id in list(self._active_runs.keys()):
             await self.cancel(run_id)
+
+    async def cleanup_stale_runs(self):
+        """Mark any 'running' DB records as failed (stale from previous bot run)."""
+        async with get_connection() as conn:
+            result = await conn.execute("""
+                UPDATE subagent_runs
+                SET status = 'failed', error = 'Bot restarted', completed_at = NOW()
+                WHERE status = 'running'
+            """)
+            # result is "UPDATE N" — extract count
+            count = int(result.split()[-1]) if result else 0
+            if count:
+                logger.info(f"Cleaned up {count} stale sub-agent run(s)")

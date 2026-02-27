@@ -5251,39 +5251,29 @@ Or just send me a message!"""
 
         return last_msg
 
-    async def _deliver_subagent_result(self, message: str):
-        """Deliver sub-agent results to the last active Telegram chat."""
-        # Find the most recently active conversation
-        if not self.agent.conversations._active:
-            logger.warning("No active conversation to deliver sub-agent result")
-            return
-
-        # Get the last active chat_id
-        last_key = max(
-            self.agent.conversations._active.keys(),
-            key=lambda k: getattr(
-                self.agent.conversations._active[k], '_last_activity', 0
-            ) if hasattr(self.agent.conversations._active[k], '_last_activity') else 0,
-        )
-
-        # Extract chat_id from key (format: "telegram:chat_id")
-        parts = last_key.split(":", 1)
-        if len(parts) == 2 and parts[0] == "telegram":
-            chat_id = int(parts[1])
-            try:
-                # Split if too long
-                max_len = 4096
-                if len(message) <= max_len:
-                    await self._bot.send_message(chat_id=chat_id, text=message)
-                else:
-                    # Send first chunk with note
-                    await self._bot.send_message(
-                        chat_id=chat_id,
-                        text=message[:max_len - 50] + "\n\n_(truncated — result too long)_",
-                        parse_mode="Markdown",
-                    )
-            except Exception as e:
-                logger.error(f"Failed to deliver sub-agent result to {chat_id}: {e}")
+    async def _deliver_subagent_result(self, message: str, parent_session_id: int):
+        """Deliver sub-agent results to the chat that spawned it."""
+        # Find chat_id from active conversations by parent_session_id
+        # Same pattern as _send_status_message
+        for key, conv in self.agent.conversations._active.items():
+            if conv.session_id == parent_session_id:
+                parts = key.split(":", 1)
+                if len(parts) == 2 and parts[0] == "telegram":
+                    chat_id = int(parts[1])
+                    try:
+                        max_len = 4096
+                        if len(message) <= max_len:
+                            await self._bot.send_message(chat_id=chat_id, text=message)
+                        else:
+                            await self._bot.send_message(
+                                chat_id=chat_id,
+                                text=message[:max_len - 50] + "\n\n_(truncated — result too long)_",
+                                parse_mode="Markdown",
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to deliver sub-agent result to {chat_id}: {e}")
+                return
+        logger.warning(f"No active chat found for parent session {parent_session_id}")
 
     async def _send_status_message(self, session_id: int, message: str):
         """Send a status notification to the chat associated with a session."""
