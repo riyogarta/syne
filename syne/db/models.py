@@ -244,6 +244,16 @@ async def update_user(
         return result
 
 
+async def delete_user(platform: str, platform_id: str) -> bool:
+    """Delete a user from the database. Returns True if a row was deleted."""
+    async with get_connection() as conn:
+        result = await conn.execute(
+            "DELETE FROM users WHERE platform = $1 AND platform_id = $2",
+            platform, platform_id,
+        )
+        return result == "DELETE 1"
+
+
 async def get_user_alias(user: dict, group_id: str = None) -> str:
     """Get the display name/alias for a user, optionally for a specific group."""
     aliases = user.get("aliases") or {}

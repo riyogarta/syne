@@ -3128,31 +3128,55 @@ Or just send me a message!"""
             await update.message.reply_text("❌ Invalid syntax. Use /members for help.")
 
     async def _members_menu_main(self, update=None, query=None):
-        """Show global members list as interactive menu."""
+        """Show global members list as interactive menu (blocked users excluded)."""
         from ..db.models import list_users
         users = await list_users(platform="telegram")
-        
-        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4, "blocked": 5}
-        users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
-        
+
+        active_users = [u for u in users if u.get("access_level") != "blocked"]
+        blocked_count = len(users) - len(active_users)
+
+        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4}
+        active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
+
         buttons = []
-        for u in users:
+        for u in active_users:
             access = u.get("access_level", "public")
-            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤", "approved": "✅", "pending": "⏳", "blocked": "🚫"}.get(access, "❓")
+            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤", "approved": "✅", "pending": "⏳"}.get(access, "❓")
             name = u.get("display_name") or u.get("name", "?")
             pid = u.get("platform_id", "?")
             buttons.append([InlineKeyboardButton(
                 f"{icon} {name} — {access}",
                 callback_data=f"mbr:view:{pid}",
             )])
-        
-        text = "👥 <b>Global Members</b>\n\nTap a user to manage:" if users else "👥 <b>Global Members</b>\n\nNo users registered."
+
+        if blocked_count > 0:
+            buttons.append([InlineKeyboardButton(f"🚫 Blocked Users ({blocked_count})", callback_data="mbr:blocked_list")])
+
+        text = "👥 <b>Global Members</b>\n\nTap a user to manage:" if active_users else "👥 <b>Global Members</b>\n\nNo active users."
         markup = InlineKeyboardMarkup(buttons)
-        
+
         if query:
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
         else:
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _members_menu_blocked(self, query):
+        """Show blocked users submenu."""
+        from ..db.models import list_users
+        users = await list_users(platform="telegram")
+        blocked = [u for u in users if u.get("access_level") == "blocked"]
+        blocked.sort(key=lambda u: u.get("display_name") or u.get("name", ""))
+
+        buttons = []
+        for u in blocked:
+            name = u.get("display_name") or u.get("name", "?")
+            pid = u.get("platform_id", "?")
+            buttons.append([InlineKeyboardButton(f"🚫 {name}", callback_data=f"mbr:blocked_view:{pid}")])
+
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="mbr:main")])
+
+        text = "🚫 <b>Blocked Users</b>\n\nTap a user to manage:" if blocked else "🚫 <b>Blocked Users</b>\n\nNo blocked users."
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _members_menu_detail(self, query, platform_id: str):
         """Show user detail with access level options."""
@@ -3183,8 +3207,18 @@ Or just send me a message!"""
             access_buttons.append(InlineKeyboardButton(f"{lvl}{check}", callback_data=cb))
 
         buttons = [access_buttons]
+
+        # Contextual action buttons
+        caller_id = str(query.from_user.id)
+        action_row = []
+        if not is_first_owner and access not in ("owner", "pending") and platform_id != caller_id:
+            action_row.append(InlineKeyboardButton("🗑 Release", callback_data=f"mbr:release:{platform_id}"))
+        if action_row:
+            buttons.append(action_row)
+
         buttons.append([InlineKeyboardButton("🤖 Change Model", callback_data=f"mbr:model_list:{platform_id}")])
-        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="mbr:main")])
+        back_target = "mbr:blocked_list" if access == "blocked" else "mbr:main"
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=back_target)])
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -3232,7 +3266,13 @@ Or just send me a message!"""
         
         if action == "main":
             await self._members_menu_main(query=query)
-        
+
+        elif action == "blocked_list":
+            await self._members_menu_blocked(query)
+
+        elif action == "blocked_view" and len(parts) >= 3:
+            await self._members_menu_detail(query, parts[2])
+
         elif action == "view" and len(parts) >= 3:
             await self._members_menu_detail(query, parts[2])
         
@@ -3260,6 +3300,53 @@ Or just send me a message!"""
                 await query.answer("Failed to update", show_alert=True)
             
             await self._members_menu_detail(query, platform_id)
+
+        elif action == "unblock" and len(parts) >= 3:
+            platform_id = parts[2]
+            from ..db.models import get_user as gu_ub, update_user, get_first_owner
+
+            first_owner = await get_first_owner("telegram")
+            if first_owner and first_owner.get("platform_id") == platform_id:
+                await query.answer("🔒 First owner cannot be changed!", show_alert=True)
+                return
+            if platform_id == str(query.from_user.id):
+                await query.answer("⚠️ Can't modify yourself!", show_alert=True)
+                return
+
+            result = await update_user("telegram", platform_id, access_level="pending")
+            if result:
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(f"pending_notify:{platform_id}")
+                await query.answer("User set to pending")
+            else:
+                await query.answer("Failed to update", show_alert=True)
+            await self._members_menu_blocked(query)
+
+        elif action == "release" and len(parts) >= 3:
+            platform_id = parts[2]
+            from ..db.models import get_first_owner, delete_user
+
+            first_owner = await get_first_owner("telegram")
+            if first_owner and first_owner.get("platform_id") == platform_id:
+                await query.answer("🔒 First owner cannot be released!", show_alert=True)
+                return
+            if platform_id == str(query.from_user.id):
+                await query.answer("⚠️ Can't release yourself!", show_alert=True)
+                return
+
+            deleted = await delete_user("telegram", platform_id)
+            if deleted:
+                # Clear cached DM conversation
+                if self.agent and self.agent.conversations:
+                    key = f"telegram:{platform_id}"
+                    if key in self.agent.conversations._active:
+                        del self.agent.conversations._active[key]
+                if hasattr(self, '_pending_notified'):
+                    self._pending_notified.discard(f"pending_notify:{platform_id}")
+                await query.answer("User released")
+            else:
+                await query.answer("Failed to delete user", show_alert=True)
+            await self._members_menu_main(query=query)
 
         elif action == "model_list" and len(parts) >= 3:
             await self._members_menu_model_list(query, parts[2])
@@ -3300,20 +3387,23 @@ Or just send me a message!"""
             await query.answer("Unknown action")
 
     async def _members_list(self, update: Update):
-        """List all registered users with access levels."""
+        """List all registered users with access levels (blocked excluded)."""
         from ..db.models import list_users
         users = await list_users(platform="telegram")
         if not users:
             await update.message.reply_text("No users registered.")
             return
 
+        active_users = [u for u in users if u.get("access_level") != "blocked"]
+        blocked_count = len(users) - len(active_users)
+
         lines = ["👥 <b>Registered Users</b>\n"]
 
         # Sort: owner first, then family, then public, then others
-        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4, "blocked": 5}
-        users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("name", "")))
+        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4}
+        active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("name", "")))
 
-        for u in users:
+        for u in active_users:
             access = u.get("access_level", "public")
             access_icon = {
                 "owner": "👑",
@@ -3321,19 +3411,21 @@ Or just send me a message!"""
                 "public": "👤",
                 "approved": "✅",
                 "pending": "⏳",
-                "blocked": "🚫",
             }.get(access, "❓")
 
             name = u.get("display_name") or u.get("name", "?")
             platform_id = u.get("platform_id", "?")
             lines.append(f"{access_icon} <b>{name}</b> — {access}\n   ID: <code>{platform_id}</code>")
 
+        if blocked_count > 0:
+            lines.append(f"\n🚫 <i>{blocked_count} blocked user(s) hidden</i>")
+
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def _members_set(self, update: Update, member_id: str, level: str):
         """Set a user's global access level."""
         level = level.lower()
-        valid_levels = ("owner", "family", "public", "blocked")
+        valid_levels = ("owner", "family", "public", "pending", "blocked")
         if level not in valid_levels:
             await update.message.reply_text(
                 f"❌ Access level must be one of: {', '.join(valid_levels)}"
@@ -4401,13 +4493,17 @@ Or just send me a message!"""
                     parse_mode="Markdown",
                 )
                 # Notify the user they've been approved
-                try:
-                    await self.app.bot.send_message(
-                        chat_id=int(target_user_id),
-                        text="✅ Your access has been approved! You can now send messages.",
-                    )
-                except Exception:
-                    pass  # User may have blocked the bot
+                for attempt in range(3):
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=int(target_user_id),
+                            text="✅ Your access has been approved! You can now send messages.",
+                        )
+                        break
+                    except Exception as e:
+                        logger.error(f"Failed to notify approved user {target_user_id} (attempt {attempt + 1}/3): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(2 ** attempt)
                 
                 # Clear pending notification tracker
                 pending_key = f"pending_notify:{target_user_id}"
@@ -4421,13 +4517,17 @@ Or just send me a message!"""
                     parse_mode="Markdown",
                 )
                 # Notify the user
-                try:
-                    await self.app.bot.send_message(
-                        chat_id=int(target_user_id),
-                        text="Sorry, your access request was not approved.",
-                    )
-                except Exception:
-                    pass
+                for attempt in range(3):
+                    try:
+                        await self.app.bot.send_message(
+                            chat_id=int(target_user_id),
+                            text="Sorry, your access request was not approved.",
+                        )
+                        break
+                    except Exception as e:
+                        logger.error(f"Failed to notify rejected user {target_user_id} (attempt {attempt + 1}/3): {e}")
+                        if attempt < 2:
+                            await asyncio.sleep(2 ** attempt)
                 
                 # Clear pending notification tracker
                 pending_key = f"pending_notify:{target_user_id}"
