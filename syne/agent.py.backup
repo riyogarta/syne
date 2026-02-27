@@ -421,8 +421,8 @@ class SyneAgent:
         
         # Build model registry based on detected provider
         default_models = [
-            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "rpm_limit": 10},
-            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "rpm_limit": 10},
+            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
+            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
             {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
         ]
 
@@ -723,24 +723,6 @@ class SyneAgent:
             handler=self._tool_memory_store,
             requires_access_level="family",
         )
-        # Memory delete tool
-        self.tools.register(
-            name="memory_delete",
-            description="Delete memory entries by ID. Use with caution as this is destructive.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "memory_ids": {
-                        "type": "string",
-                        "description": "Comma-separated memory IDs to delete (e.g., "35,57")",
-                    },
-                },
-                "required": ["memory_ids"],
-            },
-            handler=self._tool_memory_delete,
-            requires_access_level="owner",
-        )
-
 
         # Sub-agent spawn tool
         self.tools.register(
@@ -824,13 +806,13 @@ class SyneAgent:
         # ── User Management ──
         self.tools.register(
             name="manage_user",
-            description="View, update user settings including aliases/display names per group.",
+            description="View, update user settings including aliases/display names per group, and manage per-user model preferences.",
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "update", "get"],
+                        "enum": ["list", "update", "get", "set-model", "clear-model"],
                         "description": "Action to perform",
                     },
                     "user_id": {
@@ -850,6 +832,14 @@ class SyneAgent:
                         "enum": ["owner", "admin", "family", "friend", "public"],
                         "description": "User access level",
                     },
+                    "preferred_model": {
+                        "type": "string",
+                        "description": "Preferred model for this user (model key). Use empty string to clear.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model key to set for user (for set-model action)",
+                    }
                 },
                 "required": ["action"],
             },
@@ -1672,12 +1662,6 @@ class SyneAgent:
         if not results:
             return "No relevant memories found."
 
-    async def _tool_memory_delete(self, memory_ids: str) -> str:
-        """Tool handler: delete memory entries by ID."""
-        from .tools.memory_delete import memory_delete
-        return await memory_delete(memory_ids)
-
-
         lines = []
         for mem in results:
             score = f"{mem['similarity']:.0%}"
@@ -1790,6 +1774,8 @@ class SyneAgent:
         display_name: str = "",
         aliases: str = "",
         access_level: str = "",
+        preferred_model: str = "",
+        model: str = "",
         # Context passed by conversation handler
         _caller_user: dict = None,
     ) -> str:
@@ -1811,7 +1797,16 @@ class SyneAgent:
                 alias_info = ""
                 if user_aliases.get("default"):
                     alias_info = f" (alias: {user_aliases['default']})"
-                lines.append(f"- {level_icon} **{display}** (`{u['platform_id']}`) — {level}{alias_info}")
+                # Get model info
+                from .llm.model_resolver import get_user_model_info
+                try:
+                    model_info = await get_user_model_info(u['platform_id'])
+                    model_suffix = ""
+                    if model_info['is_custom']:
+                        model_suffix = f" 🤖{model_info['display_name']}"
+                    lines.append(f"- {level_icon} **{display}** (`{u['platform_id']}`) — {level}{alias_info}{model_suffix}")
+                except:
+                    lines.append(f"- {level_icon} **{display}** (`{u['platform_id']}`) — {level}{alias_info}")
             return "\n".join(lines)
 
         if action == "get":
@@ -1834,6 +1829,17 @@ class SyneAgent:
             if prefs:
                 lines.append(f"- Preferences: `{json.dumps(prefs)}`")
             
+            # Show model info
+            from .llm.model_resolver import get_user_model_info
+            try:
+                model_info = await get_user_model_info(user_id)
+                if model_info['is_custom']:
+                    lines.append(f"- Custom model: **{model_info['display_name']}** (`{model_info['user_model']}`)")
+                else:
+                    lines.append(f"- Using default model: **{model_info['display_name']}**")
+            except Exception as e:
+                lines.append(f"- Model info: Error retrieving ({e})")
+            
             return "\n".join(lines)
 
         if action == "update":
@@ -1852,7 +1858,25 @@ class SyneAgent:
                 except json.JSONDecodeError:
                     return "Error: aliases must be valid JSON"
             
-            updated = await update_user(
+            
+            # Handle preferred model
+            if preferred_model is not None:
+                from .llm.model_resolver import set_user_model, get_available_models
+                
+                if preferred_model == "":
+                    # Clear user model preference
+                    await set_user_model(user_id, None)
+                else:
+                    # Validate model exists
+                    available_models = await get_available_models()
+                    model_keys = [m.get("key") if isinstance(m, dict) else m for m in available_models]
+                    
+                    if preferred_model not in model_keys:
+                        return f"Error: Model '{preferred_model}' not available. Available models: {', '.join(model_keys)}"
+                    
+                    # Set user model preference
+                    await set_user_model(user_id, preferred_model)
+updated = await update_user(
                 platform="telegram",
                 platform_id=user_id,
                 display_name=display_name or None,
@@ -1863,6 +1887,37 @@ class SyneAgent:
             if updated:
                 return f"User updated: {updated.get('display_name') or updated['name']} (level: {updated.get('access_level')})"
             return "No changes made."
+
+
+        # Model management actions
+        if action == "set-model":
+            if not user_id:
+                return "Error: user_id is required for set-model action."
+            if not model:
+                return "Error: model is required for set-model action."
+            
+            from .llm.model_resolver import set_user_model, get_available_models
+            try:
+                available = await get_available_models()
+                if model not in available:
+                    model_list = "\n".join([f"- {k}: {v}" for k, v in available.items()])
+                    return f"Error: Invalid model. Available models:\n{model_list}"
+                
+                await set_user_model(user_id, model)
+                return f"Model set for user {user_id}: {available[model]}"
+            except Exception as e:
+                return f"Error setting model: {str(e)}"
+        
+        if action == "clear-model":
+            if not user_id:
+                return "Error: user_id is required for clear-model action."
+            
+            from .llm.model_resolver import remove_user_model
+            try:
+                await remove_user_model(user_id)
+                return f"Cleared custom model for user {user_id} (will use group/global default)"
+            except Exception as e:
+                return f"Error clearing model: {str(e)}"
 
         return f"Unknown action: {action}"
 
