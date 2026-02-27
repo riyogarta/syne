@@ -1,5 +1,6 @@
 """Ability Registry — manages loading, enabling, and executing abilities."""
 
+import asyncio
 import json
 import logging
 from typing import Optional
@@ -9,6 +10,12 @@ from .base import Ability
 from ..db.connection import get_connection
 
 logger = logging.getLogger("syne.abilities.registry")
+
+# Execution timeout (seconds) — prevents hung abilities from blocking the agent
+EXECUTE_TIMEOUT = 120
+
+# Auto-disable after this many consecutive failures
+MAX_CONSECUTIVE_FAILURES = 5
 
 
 @dataclass
@@ -24,6 +31,7 @@ class RegisteredAbility:
     enabled: bool = True
     requires_access_level: str = "family"
     db_id: Optional[int] = None
+    consecutive_failures: int = 0
 
 
 class AbilityRegistry:
@@ -201,24 +209,53 @@ class AbilityRegistry:
         exec_context = {**context, "config": ability.config}
 
         try:
-            result = await ability.instance.execute(params, exec_context)
+            result = await asyncio.wait_for(
+                ability.instance.execute(params, exec_context),
+                timeout=EXECUTE_TIMEOUT,
+            )
+            # Reset failure counter on success
+            if result.get("success"):
+                ability.consecutive_failures = 0
+            else:
+                ability.consecutive_failures += 1
             return result
+        except asyncio.TimeoutError:
+            ability.consecutive_failures += 1
+            logger.error(f"Ability '{name}' timed out after {EXECUTE_TIMEOUT}s")
+            await self._check_auto_disable(ability)
+            return {"success": False, "error": f"Ability timed out after {EXECUTE_TIMEOUT}s."}
         except Exception as e:
+            ability.consecutive_failures += 1
             logger.exception(f"Error executing ability '{name}'")
+            await self._check_auto_disable(ability)
             return {"success": False, "error": f"Execution error: {str(e)}"}
 
-    async def enable(self, name: str) -> bool:
-        """Enable an ability.
-        
+    async def enable(self, name: str) -> tuple[bool, str]:
+        """Enable an ability, installing dependencies if needed.
+
+        Calls ``ensure_dependencies()`` before enabling. If dependency
+        installation fails, the ability stays disabled.
+
         Args:
             name: Ability name
-            
+
         Returns:
-            True if successful, False if ability not found
+            (True, message) on success, (False, error) on failure
         """
         ability = self.get(name)
         if not ability:
-            return False
+            return False, f"Ability '{name}' not found."
+
+        # Install dependencies first
+        try:
+            dep_ok, dep_msg = await ability.instance.ensure_dependencies()
+        except Exception as e:
+            logger.error(f"ensure_dependencies() failed for '{name}': {e}")
+            return False, f"Dependency check failed: {e}"
+
+        if not dep_ok:
+            logger.error(f"Cannot enable '{name}': {dep_msg}")
+            return False, dep_msg
 
         ability.enabled = True
 
@@ -226,8 +263,11 @@ class AbilityRegistry:
         if ability.db_id:
             await self._update_db_enabled(ability.db_id, True)
 
+        status = f"Ability '{name}' enabled."
+        if dep_msg:
+            status += f" ({dep_msg})"
         logger.info(f"Enabled ability: {name}")
-        return True
+        return True, status
 
     async def disable(self, name: str) -> bool:
         """Disable an ability.
@@ -262,6 +302,26 @@ class AbilityRegistry:
                 )
         except Exception as e:
             logger.error(f"Failed to update ability enabled status in DB: {e}")
+
+    async def _check_auto_disable(self, ability: RegisteredAbility):
+        """Auto-disable an ability after too many consecutive failures."""
+        if ability.consecutive_failures < MAX_CONSECUTIVE_FAILURES:
+            return
+        if ability.source == "bundled":
+            # Never auto-disable bundled abilities — only warn
+            logger.warning(
+                f"Bundled ability '{ability.name}' has failed "
+                f"{ability.consecutive_failures} times consecutively"
+            )
+            return
+        logger.error(
+            f"Auto-disabling ability '{ability.name}' after "
+            f"{ability.consecutive_failures} consecutive failures"
+        )
+        ability.enabled = False
+        ability.consecutive_failures = 0
+        if ability.db_id:
+            await self._update_db_enabled(ability.db_id, False)
 
     async def update_config(self, name: str, config: dict) -> bool:
         """Update ability configuration.

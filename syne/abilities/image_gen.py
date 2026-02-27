@@ -128,6 +128,28 @@ class ImageGenAbility(Ability):
             },
         }
     
+    def get_guide(self, enabled: bool, config: dict) -> str:
+        has_key = bool(
+            config.get("TOGETHER_API_KEY")
+            or config.get("together_api_key")
+            or config.get("api_key")
+        )
+        if enabled and has_key:
+            return (
+                "- Status: **ready** (Together AI FLUX.1-schnell)\n"
+                "- Use: `image_gen(prompt='...')` to generate 1024x1024 images"
+            )
+        reasons = []
+        if not enabled:
+            reasons.append("ability disabled")
+        if not has_key:
+            reasons.append("no API key")
+        return (
+            f"- Status: **not ready** ({', '.join(reasons)})\n"
+            "- Setup: `update_ability(action='config', name='image_gen', "
+            "config='{\"api_key\": \"TOGETHER_KEY\"}')`"
+        )
+
     def get_required_config(self) -> list[str]:
         """API key is required but can come from environment."""
         # Not strictly required from config since we fallback to env

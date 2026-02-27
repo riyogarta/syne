@@ -29,11 +29,13 @@ def get_bundled_ability_classes() -> list[Type[Ability]]:
     from .image_gen import ImageGenAbility
     from .image_analysis import ImageAnalysisAbility
     from .maps import MapsAbility
-    
+    from .whatsapp import WhatsAppAbility
+
     return [
         ImageGenAbility,
         ImageAnalysisAbility,
         MapsAbility,
+        WhatsAppAbility,
     ]
 
 

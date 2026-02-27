@@ -146,6 +146,26 @@ async def run():
                 "Set via DB (credential.telegram_bot_token) or .env (SYNE_TELEGRAM_BOT_TOKEN)."
             )
 
+        # Start WhatsApp bridge if enabled (registered as ability)
+        from .db.models import get_config
+        wa_enabled = await get_config("whatsapp.enabled", False)
+        if wa_enabled:
+            wa_reg = agent.abilities.get("whatsapp")
+            if wa_reg:
+                # Ensure wacli is installed before starting bridge
+                dep_ok, dep_msg = await wa_reg.instance.ensure_dependencies()
+                if not dep_ok:
+                    logger.warning(f"WhatsApp enabled but dependency check failed: {dep_msg}")
+                else:
+                    wa_path = await get_config("whatsapp.wacli_path", "wacli")
+                    if await wa_reg.instance.start_bridge(agent, wacli_path=wa_path):
+                        channels.append(wa_reg.instance)
+                        logger.info("WhatsApp bridge active.")
+                    else:
+                        logger.warning("WhatsApp enabled but failed to start.")
+            else:
+                logger.warning("WhatsApp enabled but ability not registered.")
+
         # Start scheduler
         scheduler = Scheduler(on_task_execute=_scheduler_callback)
         await scheduler.start()

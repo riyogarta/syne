@@ -209,6 +209,38 @@ def _get_self_healing_section() -> str:
 3. Truncated output ≠ broken code. Read more before concluding something is broken.
 4. Verify with import (`python3 -c 'from X import Y'`) before reporting syntax errors.
 
+## Ability Self-Healing
+When a user-created ability fails:
+1. Read the error and the ability source (`read_source`)
+2. Diagnose: syntax error? wrong API response? missing config?
+3. Fix the file (`file_write` to `syne/abilities/<name>.py`)
+4. Re-register: `update_ability(action='create', name='<name>')`
+5. Verify: try executing the ability again
+6. Report the fix to the user
+
+You CANNOT fix bundled abilities — only user-created ones.
+For bundled ability failures: report the error clearly, suggest workarounds.
+
+## Ability Upgrade (Legacy Compatibility)
+Some user-created abilities may have been created before the current format.
+When you encounter an ability that fails validation or is missing methods,
+**proactively upgrade it** — don't just report the error.
+
+Required methods that older abilities may be missing:
+- `get_guide(self, enabled: bool, config: dict) -> str` — MANDATORY, returns status/usage for system prompt
+- `ensure_dependencies(self) -> tuple[bool, str]` — optional, auto-install external deps when enabled
+
+How to upgrade:
+1. Read the ability source: `read_source(action="read", path="syne/abilities/<name>.py")`
+2. Add the missing methods (see template in "Creating a New Ability")
+3. Rewrite: `file_write(path="syne/abilities/<name>.py", content="...")`
+4. Re-register: `update_ability(action='create', name='<name>')`
+5. Tell the user what you changed
+
+When a user asks about or tries to use a legacy ability:
+- If it fails with "missing get_guide" or similar → fix it silently, tell user it's been upgraded
+- If user asks "update my abilities" → scan all user-created abilities and upgrade them
+
 ## Source Code Access
 - `read_source(action="tree/read/search")` — read-only access to entire codebase
 - You can READ all source. You can only WRITE to `syne/abilities/`.
@@ -219,11 +251,25 @@ def _get_self_healing_section() -> str:
 - DB driver: asyncpg (NOT psycopg). Connection: `SYNE_DATABASE_URL`
 - Read your own source when unsure about internals.
 
-## "Can't Do It" → Create an Ability
-If you can't do something, evaluate: can a new ability solve it?
-- YES → offer to create it in `syne/abilities/`
-- NO (hardware/platform limit) → explain honestly
-- Default assumption: you CAN, you just haven't built it yet.
+## User Asks Something You Can't Do → Offer to Create an Ability
+When a user requests something and no existing ability or tool can handle it:
+1. Recognize the gap — don't just say "I can't do that"
+2. Evaluate: can a new ability solve this?
+   - YES → proactively offer: "I don't have that yet, but I can create an ability for it. Want me to build it?"
+   - NO (hardware/platform/security limit) → explain honestly why
+3. If the user agrees, create it (see "Creating a New Ability" in the Abilities section)
+4. Default assumption: you CAN build it, you just haven't yet.
+
+Examples of when to offer:
+- "Can you check the weather?" → offer to create a weather ability
+- "Remind me to take medicine" → offer to create a scheduler-based reminder ability
+- "Convert this PDF to text" → offer to create a PDF extraction ability
+- "Can you post to my Twitter?" → offer, but note it needs API credentials
+
+Do NOT offer for things that are:
+- Already covered by an existing ability or tool
+- Trivially answerable from your knowledge (no tool needed)
+- One-off questions that don't need a persistent capability
 """
 
 
@@ -295,10 +341,21 @@ async def _build_channel_context_section() -> str:
         parts.append("- When addressing a user in a specific group, check their aliases for that group")
         parts.append("- Format: aliases.groups[group_id] or aliases.default")
         parts.append("")
-        
+
         return "\n".join(parts)
     except Exception as e:
         return f"# Channel Configuration\n(Error loading: {e})\n"
+
+
+async def _build_ability_guide_section() -> str:
+    """Build setup/usage guide for all registered abilities.
+
+    Delegates to abilities.ability_guide module which handles:
+    - Bundled abilities (core, not user-editable)
+    - User-created abilities (via ability_guide_user.py, user-editable)
+    """
+    from .abilities.ability_guide import build
+    return await build()
 
 
 async def _build_config_section() -> str:
@@ -544,6 +601,11 @@ async def build_system_prompt(
     channel_context = await _build_channel_context_section()
     if channel_context:
         parts.append(channel_context)
+
+    # [12] ABILITY GUIDES (setup instructions for each ability)
+    ability_guide = await _build_ability_guide_section()
+    if ability_guide:
+        parts.append(ability_guide)
 
     return "\n".join(parts)
 

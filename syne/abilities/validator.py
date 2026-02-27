@@ -39,7 +39,7 @@ def validate_structure(code: str, source_label: str = "<ability>") -> tuple[bool
     Checks:
     - At least one class inherits from Ability (or BaseAbility/Ability pattern)
     - Class has required attributes: name, description
-    - Class has required methods: execute, get_schema
+    - Class has required methods: execute, get_schema, get_guide
     
     Args:
         code: Python source code string
@@ -80,7 +80,8 @@ def validate_structure(code: str, source_label: str = "<ability>") -> tuple[bool
         has_description = False
         has_execute = False
         has_get_schema = False
-        
+        has_get_guide = False
+
         for item in cls_node.body:
             # Class-level assignments: name = "...", description = "..."
             if isinstance(item, ast.Assign):
@@ -90,21 +91,23 @@ def validate_structure(code: str, source_label: str = "<ability>") -> tuple[bool
                             has_name = True
                         elif target.id == "description":
                             has_description = True
-            
+
             # Annotated assignments: name: str = "..."
             elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 if item.target.id == "name" and item.value is not None:
                     has_name = True
                 elif item.target.id == "description" and item.value is not None:
                     has_description = True
-            
+
             # Methods
             elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if item.name == "execute":
                     has_execute = True
                 elif item.name == "get_schema":
                     has_get_schema = True
-        
+                elif item.name == "get_guide":
+                    has_get_guide = True
+
         if not has_name:
             errors.append(f"Class '{cls_name}' missing 'name' attribute")
         if not has_description:
@@ -113,6 +116,8 @@ def validate_structure(code: str, source_label: str = "<ability>") -> tuple[bool
             errors.append(f"Class '{cls_name}' missing 'execute()' method")
         if not has_get_schema:
             errors.append(f"Class '{cls_name}' missing 'get_schema()' method")
+        if not has_get_guide:
+            errors.append(f"Class '{cls_name}' missing 'get_guide()' method")
     
     if errors:
         return False, f"Structure errors in {source_label}: " + "; ".join(errors)
@@ -243,8 +248,20 @@ def validate_ability_instance(instance: Ability, ability_name: str = "") -> tupl
         schema = instance.get_schema()
     except Exception as e:
         return False, f"Ability '{name}' get_schema() raised {type(e).__name__}: {e}"
-    
-    return validate_tool_schema(schema, name)
+
+    ok, err = validate_tool_schema(schema, name)
+    if not ok:
+        return False, err
+
+    # Call get_guide() to verify it doesn't crash
+    try:
+        guide = instance.get_guide(True, {})
+        if not isinstance(guide, str):
+            return False, f"Ability '{name}' get_guide() returned {type(guide).__name__}, expected str"
+    except Exception as e:
+        return False, f"Ability '{name}' get_guide() raised {type(e).__name__}: {e}"
+
+    return True, ""
 
 
 def validate_ability_file(filepath: str) -> tuple[bool, str]:

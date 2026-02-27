@@ -315,6 +315,29 @@ class MapsAbility(Ability):
             },
         }
 
+    def get_guide(self, enabled: bool, config: dict) -> str:
+        has_key = bool(
+            config.get("GOOGLE_MAPS_API_KEY")
+            or config.get("GOOGLE_PLACES_API_KEY")
+            or config.get("google_maps_api_key")
+            or config.get("api_key")
+        )
+        if enabled and has_key:
+            return (
+                "- Status: **ready** (Google Maps Platform)\n"
+                "- Actions: search (places), directions, geocode, reverse_geocode"
+            )
+        reasons = []
+        if not enabled:
+            reasons.append("ability disabled")
+        if not has_key:
+            reasons.append("no Google Maps API key")
+        return (
+            f"- Status: **not ready** ({', '.join(reasons)})\n"
+            "- Setup: `update_ability(action='config', name='maps', "
+            "config='{\"api_key\": \"GOOGLE_MAPS_KEY\"}')`"
+        )
+
     def get_required_config(self) -> list[str]:
         """API key can come from config or environment."""
         return []

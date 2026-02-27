@@ -15,6 +15,7 @@ Bulk operations:
 - 'bulk_delete': Delete multiple tasks by ID range or list (pass 'task_ids' as comma-separated)
 """
 
+import contextvars
 import json
 import logging
 from datetime import datetime, timezone
@@ -22,20 +23,20 @@ from typing import Optional
 
 logger = logging.getLogger("syne.tools.scheduler")
 
-# Current user context — set by conversation layer before tool execution.
-# Used to auto-fill created_by when creating tasks.
-_current_user_platform_id: Optional[int] = None
+# Current user context — ContextVar for async safety.
+# Set by conversation layer before tool execution, so that
+# manage_schedule can auto-fill created_by without relying on the LLM.
+_current_user_platform_id: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
+    "current_user_platform_id", default=None
+)
 
 
 def set_current_user(platform_id: Optional[int]) -> None:
     """Set the current user's platform ID for task creation.
-    
-    Called by conversation layer before executing tools, so that
-    manage_schedule can auto-fill created_by without relying on
-    the LLM to pass it.
+
+    Uses contextvars — safe for concurrent async contexts.
     """
-    global _current_user_platform_id
-    _current_user_platform_id = platform_id
+    _current_user_platform_id.set(platform_id)
 
 
 async def manage_schedule_handler(
@@ -105,7 +106,7 @@ async def manage_schedule_handler(
             schedule_type=schedule_type,
             schedule_value=schedule_value,
             payload=payload,
-            created_by=_current_user_platform_id,
+            created_by=_current_user_platform_id.get(),
             end_date=parsed_end_date,
         )
         
@@ -278,7 +279,7 @@ async def manage_schedule_handler(
                 schedule_type=t_type,
                 schedule_value=t_value,
                 payload=t_payload,
-                created_by=_current_user_platform_id,
+                created_by=_current_user_platform_id.get(),
                 end_date=parsed_end,
             )
             

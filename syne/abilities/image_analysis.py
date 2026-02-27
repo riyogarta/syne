@@ -252,5 +252,23 @@ class ImageAnalysisAbility(Ability):
             },
         }
 
+    def get_guide(self, enabled: bool, config: dict) -> str:
+        provider = config.get("provider", "")
+        has_key = bool(config.get("api_key"))
+        ready = enabled and (provider == "google" or has_key)
+        if ready:
+            label = provider or "google"
+            return (
+                f"- Status: **ready** (provider: {label})\n"
+                "- Automatically analyzes images sent by users (ability-first)\n"
+                "- Also callable: `image_analysis(image_url='...', prompt='...')`"
+            )
+        return (
+            "- Status: **not ready**\n"
+            "- Providers: google (OAuth, no key needed), together, openai (need api_key)\n"
+            "- Setup: `update_ability(action='config', name='image_analysis', "
+            "config='{\"provider\": \"google\"}')`"
+        )
+
     def get_required_config(self) -> list[str]:
         return []

@@ -191,6 +191,23 @@ class Ability(ABC):
         pass
     
     @abstractmethod
+    def get_guide(self, enabled: bool, config: dict) -> str:
+        """Return system prompt guide for this ability.
+
+        Called during system prompt build. Must return concise status
+        and usage/setup instructions based on current config state.
+
+        Args:
+            enabled: Whether this ability is enabled in DB
+            config: Ability config dict from DB
+
+        Returns:
+            Multi-line string with status and instructions.
+            Placed under a ``## {name}`` header automatically.
+        """
+        pass
+
+    @abstractmethod
     def get_schema(self) -> dict:
         """Return JSON schema for LLM function calling.
         
@@ -210,9 +227,21 @@ class Ability(ABC):
         """
         pass
     
+    async def ensure_dependencies(self) -> tuple[bool, str]:
+        """Check and install external dependencies required by this ability.
+
+        Called automatically when the ability is enabled.  Override in
+        subclasses that need external binaries, packages, or services.
+
+        Returns:
+            (True, message) on success — message may describe what was installed.
+            (False, error) on failure — the ability will NOT be enabled.
+        """
+        return True, ""
+
     def get_required_config(self) -> list[str]:
         """Return list of required config keys (e.g., API keys).
-        
+
         These keys must be present in the ability's config for it to work.
         """
         return []

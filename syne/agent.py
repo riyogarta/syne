@@ -1538,10 +1538,10 @@ class SyneAgent:
             return f"✅ Ability '{name}' created and registered. It is now available as a tool."
 
         if action == "enable":
-            ok = await self.abilities.enable(name)
+            ok, msg = await self.abilities.enable(name)
             if ok:
                 await self.conversations.refresh_system_prompts()
-            return f"Ability '{name}' enabled." if ok else f"Ability '{name}' not found."
+            return msg
 
         if action == "disable":
             ok = await self.abilities.disable(name)

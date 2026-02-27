@@ -10,6 +10,7 @@ Security restrictions for file_write:
 This follows the self-edit pattern: abilities are editable, core is not.
 """
 
+import contextvars
 import os
 import logging
 from pathlib import Path
@@ -28,16 +29,34 @@ _SYNE_WRITABLE_PATHS = frozenset({
     "syne/abilities",
 })
 
+# Protected files WITHIN writable paths — infrastructure and bundled abilities.
+# These exist inside syne/abilities/ but are NOT user-created.
+# The bot can create NEW ability files but cannot overwrite these.
+_SYNE_PROTECTED_FILES = frozenset({
+    # Infrastructure
+    "__init__.py",
+    "base.py",
+    "registry.py",
+    "validator.py",
+    "loader.py",
+    "ability_guide.py",
+    # Bundled abilities
+    "image_gen.py",
+    "image_analysis.py",
+    "maps.py",
+    "whatsapp.py",
+})
+
 # Workspace directory — set by agent at startup for non-CLI channels.
 # When set, file_write resolves relative paths here instead of process CWD.
 _workspace_dir: Optional[str] = None
 
-# Owner DM context — when True, all security restrictions are bypassed.
-# Set by the conversation layer before tool execution when the request
-# comes from a verified owner in a direct message (not group, not other users).
-# This is safe because owner identity is verified by the PLATFORM (Telegram ID),
-# not by message content — making prompt injection impossible.
-_owner_dm: bool = False
+# Owner DM context — ContextVar for async safety.
+# When True, file security restrictions are bypassed because
+# the owner's identity is platform-verified (Telegram ID) and cannot be spoofed.
+# Uses contextvars instead of a global to prevent race conditions
+# when multiple conversations are processed concurrently in asyncio.
+_owner_dm: contextvars.ContextVar[bool] = contextvars.ContextVar("owner_dm", default=False)
 
 
 def set_workspace(workspace_path: str) -> None:
@@ -57,9 +76,9 @@ def set_owner_dm(is_owner_dm: bool) -> None:
     the owner's identity is platform-verified and cannot be spoofed.
 
     Called by conversation layer before tool execution.
+    Uses contextvars — safe for concurrent async contexts.
     """
-    global _owner_dm
-    _owner_dm = is_owner_dm
+    _owner_dm.set(is_owner_dm)
 
 
 # Default max read size (100KB)
@@ -97,7 +116,7 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
         Tuple of (allowed: bool, reason: str)
     """
     # Owner DM = unrestricted write access
-    if _owner_dm:
+    if _owner_dm.get():
         return True, ""
 
     resolved = path.resolve()
@@ -119,6 +138,13 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
         for writable in _SYNE_WRITABLE_PATHS:
             writable_path = _PROJECT_ROOT / writable
             if _is_path_under(resolved, writable_path):
+                # Path is in a writable directory — but check protected files.
+                # Infrastructure and bundled abilities cannot be overwritten.
+                if fname in _SYNE_PROTECTED_FILES:
+                    return False, (
+                        f"Cannot overwrite '{fname}' — this is a core/bundled file. "
+                        "Only user-created ability files can be written."
+                    )
                 return True, ""
 
         # Not in whitelist — BLOCKED
@@ -201,7 +227,7 @@ async def file_read_handler(
 
     # Block sensitive files — credentials must never reach the LLM
     # Owner DM bypass: owner can read anything (identity is platform-verified)
-    if not _owner_dm:
+    if not _owner_dm.get():
         _BLOCKED_FILENAMES = {".env", ".env.local", ".env.production", ".env.development"}
         _BLOCKED_PATTERNS = {"secrets", ".pem", ".key", "id_rsa", "id_ed25519"}
         fname_lower = file_path.name.lower()
