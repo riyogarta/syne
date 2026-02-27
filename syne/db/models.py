@@ -245,13 +245,22 @@ async def update_user(
 
 
 async def delete_user(platform: str, platform_id: str) -> bool:
-    """Delete a user from the database. Returns True if a row was deleted."""
+    """Delete a user and all related data from the database. Returns True if deleted."""
     async with get_connection() as conn:
-        result = await conn.execute(
-            "DELETE FROM users WHERE platform = $1 AND platform_id = $2",
+        # Get user id first
+        row = await conn.fetchrow(
+            "SELECT id FROM users WHERE platform = $1 AND platform_id = $2",
             platform, platform_id,
         )
-        return result == "DELETE 1"
+        if not row:
+            return False
+        user_id = row["id"]
+
+        # Delete dependent rows (messages cascade from sessions)
+        await conn.execute("DELETE FROM memory WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+        return True
 
 
 async def get_user_alias(user: dict, group_id: str = None) -> str:
