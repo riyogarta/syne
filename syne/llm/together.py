@@ -27,6 +27,10 @@ class TogetherProvider(LLMProvider):
     def supports_vision(self) -> bool:
         return False
 
+    @property
+    def context_window(self) -> int:
+        return 128_000  # Llama 3.3 70B default
+
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
 

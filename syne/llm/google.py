@@ -364,6 +364,10 @@ class GoogleProvider(LLMProvider):
     def supports_vision(self) -> bool:
         return True
 
+    @property
+    def context_window(self) -> int:
+        return 1_000_000  # Gemini 2.5 Pro default
+
     def _format_messages(self, messages: list[ChatMessage], model: str = "") -> tuple[Optional[str], list[dict]]:
         """Convert ChatMessages to Gemini format. Returns (system_text, contents).
 

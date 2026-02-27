@@ -50,6 +50,10 @@ class CodexProvider(LLMProvider):
         return "codex"
 
     @property
+    def context_window(self) -> int:
+        return 1_000_000  # GPT-5.2 default
+
+    @property
     def supports_vision(self) -> bool:
         return True
 

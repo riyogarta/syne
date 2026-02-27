@@ -47,6 +47,10 @@ class AnthropicProvider(LLMProvider):
         return True
 
     @property
+    def context_window(self) -> int:
+        return 200_000  # Claude Sonnet 4 default; Opus 4.6 = 1M (set in model registry)
+
+    @property
     def reserved_output_tokens(self) -> int:
         return self.DEFAULT_MAX_TOKENS + self.DEFAULT_THINKING_BUDGET  # 26624
 

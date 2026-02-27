@@ -41,6 +41,10 @@ class OpenAIProvider(LLMProvider):
         # Groq Llama models don't support vision well
         return self._provider_name == "openai"
 
+    @property
+    def context_window(self) -> int:
+        return 128_000  # GPT-4o default
+
     def _get_headers(self) -> dict:
         return {
             "Authorization": f"Bearer {self.api_key}",

@@ -103,6 +103,14 @@ class LLMProvider(ABC):
         ...
 
     @property
+    def context_window(self) -> int:
+        """Maximum context window size in tokens for the default model.
+
+        Override per-provider. Model registry in DB takes precedence if set.
+        """
+        return 200_000
+
+    @property
     def reserved_output_tokens(self) -> int:
         """Tokens to reserve for output (response + thinking).
 

@@ -89,14 +89,15 @@ class SyneAgent:
         ability_count = await load_all_abilities(self.abilities)
         logger.info(f"Abilities loaded: {ability_count}")
 
-        # 6. Context Manager — read context_window from active model entry
+        # 6. Context Manager — read context_window from active model entry, fallback to provider default
         models = await get_config("provider.models", None)
         active_key = await get_config("provider.active_model", None)
-        ctx_window = 128000  # safe default
+        ctx_window = None
         if models and active_key:
             entry = get_model_from_list(models, active_key)
             if entry:
-                ctx_window = int(entry.get("context_window", 128000))
+                ctx_window = int(entry.get("context_window", 0)) or None
+        ctx_window = ctx_window or self.provider.context_window
         reserved = self.provider.reserved_output_tokens
         self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
         logger.info(f"Context window: {ctx_window} tokens (reserved output: {reserved})")
@@ -172,11 +173,12 @@ class SyneAgent:
         # Recreate ContextManager from new model's context_window
         models = await get_config("provider.models", None)
         active_key = await get_config("provider.active_model", None)
-        ctx_window = 128000
+        ctx_window = None
         if models and active_key:
             entry = get_model_from_list(models, active_key)
             if entry:
-                ctx_window = int(entry.get("context_window", 128000))
+                ctx_window = int(entry.get("context_window", 0)) or None
+        ctx_window = ctx_window or self.provider.context_window
         reserved = self.provider.reserved_output_tokens
         self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
         logger.info(f"Context window updated: {ctx_window} tokens (reserved output: {reserved})")

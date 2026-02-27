@@ -30,6 +30,14 @@ class HybridProvider(LLMProvider):
     def supports_vision(self) -> bool:
         return self._chat.supports_vision
 
+    @property
+    def context_window(self) -> int:
+        return self._chat.context_window
+
+    @property
+    def reserved_output_tokens(self) -> int:
+        return self._chat.reserved_output_tokens
+
     async def chat(
         self,
         messages: list[ChatMessage],
