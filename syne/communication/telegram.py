@@ -597,7 +597,6 @@ class TelegramChannel:
 
             except asyncio.CancelledError:
                 logger.info(f"Processing cancelled by user for chat {chat.id}")
-                await update.message.reply_text("✋ Cancelled.")
                 return
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
