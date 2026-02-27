@@ -368,6 +368,40 @@ class GoogleProvider(LLMProvider):
     def context_window(self) -> int:
         return 1_000_000  # Gemini 2.5 Pro default
 
+    @staticmethod
+    def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Optional[dict]:
+        """Build thinkingConfig for Gemini models.
+
+        Defaults (when thinking_budget is None):
+          - Gemini 3: thinkingLevel HIGH
+          - Gemini 2.5: thinkingBudget -1 (dynamic, model decides, max 8192)
+
+        Explicit thinking_budget=0 → minimal thinking (LOW / budget 128).
+        """
+        is_gemini_3 = "gemini-3" in model.lower()
+
+        if is_gemini_3:
+            if thinking_budget is None:
+                level = "HIGH"
+            elif thinking_budget == 0:
+                level = "LOW"
+            elif thinking_budget > 8192:
+                level = "HIGH"
+            elif thinking_budget > 2048:
+                level = "MEDIUM"
+            else:
+                level = "LOW"
+            return {"includeThoughts": True, "thinkingLevel": level}
+
+        # Gemini 2.5 — thinkingBudget
+        if thinking_budget is None:
+            budget = -1  # dynamic thinking
+        elif thinking_budget == 0:
+            budget = 128  # minimum allowed
+        else:
+            budget = thinking_budget
+        return {"includeThoughts": True, "thinkingBudget": budget}
+
     def _format_messages(self, messages: list[ChatMessage], model: str = "") -> tuple[Optional[str], list[dict]]:
         """Convert ChatMessages to Gemini format. Returns (system_text, contents).
 
@@ -581,20 +615,8 @@ class GoogleProvider(LLMProvider):
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
 
-        # #8: Thinking config — includeThoughts + thinkingLevel for Gemini 3
-        if thinking_budget is not None and thinking_budget > 0:
-            is_gemini_3 = "gemini-3" in model.lower()
-            if is_gemini_3:
-                # Gemini 3 uses thinkingLevel instead of thinkingBudget
-                gen_config["thinkingConfig"] = {
-                    "includeThoughts": True,
-                    "thinkingLevel": "HIGH" if thinking_budget > 8192 else "MEDIUM" if thinking_budget > 2048 else "LOW",
-                }
-            else:
-                gen_config["thinkingConfig"] = {
-                    "includeThoughts": True,
-                    "thinkingBudget": thinking_budget,
-                }
+        # #8: Thinking config — always on, model-appropriate defaults
+        gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
 
         # #13: Only set generationConfig if non-empty
         if gen_config:
@@ -842,19 +864,8 @@ class GoogleProvider(LLMProvider):
             gen_config["temperature"] = temperature
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
-        # #8: Thinking config — thinkingLevel for Gemini 3, thinkingBudget for 2.5
-        if thinking_budget is not None and thinking_budget > 0:
-            is_gemini_3 = "gemini-3" in model.lower()
-            if is_gemini_3:
-                gen_config["thinkingConfig"] = {
-                    "includeThoughts": True,
-                    "thinkingLevel": "HIGH" if thinking_budget > 8192 else "MEDIUM" if thinking_budget > 2048 else "LOW",
-                }
-            else:
-                gen_config["thinkingConfig"] = {
-                    "includeThoughts": True,
-                    "thinkingBudget": thinking_budget,
-                }
+        # #8: Thinking config — always on, model-appropriate defaults
+        gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
 
         # #13: Only set if non-empty
         if gen_config:
