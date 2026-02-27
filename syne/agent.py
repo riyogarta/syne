@@ -732,7 +732,7 @@ class SyneAgent:
                 "properties": {
                     "memory_ids": {
                         "type": "string",
-                        "description": "Comma-separated memory IDs to delete (e.g., "35,57")",
+                        "description": "Comma-separated memory IDs to delete (e.g., '35,57')",
                     },
                 },
                 "required": ["memory_ids"],
@@ -1672,12 +1672,6 @@ class SyneAgent:
         if not results:
             return "No relevant memories found."
 
-    async def _tool_memory_delete(self, memory_ids: str) -> str:
-        """Tool handler: delete memory entries by ID."""
-        from .tools.memory_delete import memory_delete
-        return await memory_delete(memory_ids)
-
-
         lines = []
         for mem in results:
             score = f"{mem['similarity']:.0%}"
@@ -1694,6 +1688,39 @@ class SyneAgent:
         if mem_id:
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
+
+    async def _tool_memory_delete(self, memory_ids: str) -> str:
+        """Tool handler: delete memory entries by ID."""
+        from .db.connection import get_connection
+
+        ids = []
+        for s in memory_ids.split(","):
+            s = s.strip()
+            if s:
+                try:
+                    ids.append(int(s))
+                except ValueError:
+                    return f"Error: '{s}' is not a valid memory ID"
+
+        if not ids:
+            return "Error: No valid memory IDs provided"
+
+        deleted = 0
+        not_found = []
+        async with get_connection() as conn:
+            for mid in ids:
+                result = await conn.execute("DELETE FROM memory WHERE id = $1", mid)
+                if "DELETE 1" in str(result):
+                    deleted += 1
+                else:
+                    not_found.append(str(mid))
+
+        parts = []
+        if deleted:
+            parts.append(f"Deleted {deleted} memory entries")
+        if not_found:
+            parts.append(f"Not found: {', '.join(not_found)}")
+        return ". ".join(parts) or "No action taken"
 
     async def _tool_manage_group(
         self,
