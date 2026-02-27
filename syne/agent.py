@@ -97,8 +97,9 @@ class SyneAgent:
             entry = get_model_from_list(models, active_key)
             if entry:
                 ctx_window = int(entry.get("context_window", 128000))
-        self.context_mgr = ContextManager(max_context_tokens=ctx_window)
-        logger.info(f"Context window: {ctx_window} tokens")
+        reserved = self.provider.reserved_output_tokens
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
+        logger.info(f"Context window: {ctx_window} tokens (reserved output: {reserved})")
 
         # 6.5. Rate Limiter
         logger.info("Rate limiter initialized.")
@@ -176,8 +177,9 @@ class SyneAgent:
             entry = get_model_from_list(models, active_key)
             if entry:
                 ctx_window = int(entry.get("context_window", 128000))
-        self.context_mgr = ContextManager(max_context_tokens=ctx_window)
-        logger.info(f"Context window updated: {ctx_window} tokens")
+        reserved = self.provider.reserved_output_tokens
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
+        logger.info(f"Context window updated: {ctx_window} tokens (reserved output: {reserved})")
 
         # Auto-adjust compaction_threshold (chars) = 75% of context * 3.5 chars/token
         new_threshold = int(ctx_window * 0.75 * 3.5)

@@ -46,6 +46,10 @@ class AnthropicProvider(LLMProvider):
     def supports_vision(self) -> bool:
         return True
 
+    @property
+    def reserved_output_tokens(self) -> int:
+        return self.DEFAULT_MAX_TOKENS + self.DEFAULT_THINKING_BUDGET  # 26624
+
     async def _load_token(self) -> str:
         """Load Anthropic token from DB or environment.
         

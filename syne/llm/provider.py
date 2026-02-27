@@ -101,3 +101,12 @@ class LLMProvider(ABC):
     def supports_vision(self) -> bool:
         """Whether this provider supports image input."""
         ...
+
+    @property
+    def reserved_output_tokens(self) -> int:
+        """Tokens to reserve for output (response + thinking).
+
+        ContextManager uses this to limit how much input context to keep.
+        Override in providers that need more room (e.g. extended thinking).
+        """
+        return 4096
