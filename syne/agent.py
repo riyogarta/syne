@@ -1544,7 +1544,7 @@ class SyneAgent:
                 # WhatsApp: check auth and trigger QR flow if needed
                 if name == "whatsapp":
                     wa = self.abilities.get("whatsapp")
-                    if wa and not wa.instance.is_authenticated():
+                    if wa and not await wa.instance.is_authenticated():
                         qr_path = await wa.instance.start_auth_flow(self)
                         if qr_path:
                             return (

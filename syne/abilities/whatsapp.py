@@ -183,20 +183,36 @@ class WhatsAppAbility(Ability):
 
     # ── Authentication ─────────────────────────────────────────
 
-    def is_authenticated(self) -> bool:
-        """Check if wacli has an active WhatsApp session.
+    async def is_authenticated(self) -> bool:
+        """Check if wacli has a valid WhatsApp session.
 
-        Looks for session files in ~/.wacli/ — if the store directory
-        has device data, wacli is authenticated.
+        Fast path: no ~/.wacli/ dir → definitely not authed.
+        Then actually probe via `wacli chats list` — catches expired sessions.
         """
         store_dir = Path.home() / ".wacli"
         if not store_dir.is_dir():
             return False
-        # wacli stores session in container.db or similar files
-        for f in store_dir.iterdir():
-            if f.is_file() and f.stat().st_size > 0:
-                return True
-        return False
+
+        # Find wacli binary
+        wacli = self._wacli_path
+        if not shutil.which(wacli):
+            local_bin = os.path.join(_WACLI_INSTALL_DIR, "wacli")
+            if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
+                wacli = local_bin
+            else:
+                return False
+
+        # Actually validate: run a quick command that requires auth
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                wacli, "chats", "list", "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(proc.communicate(), timeout=15)
+            return proc.returncode == 0
+        except (asyncio.TimeoutError, Exception):
+            return False
 
     async def start_auth_flow(self, agent) -> Optional[str]:
         """Run `wacli auth`, capture QR code, render as PNG.

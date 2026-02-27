@@ -156,7 +156,7 @@ async def run():
                 dep_ok, dep_msg = await wa_reg.instance.ensure_dependencies()
                 if not dep_ok:
                     logger.warning(f"WhatsApp enabled but dependency check failed: {dep_msg}")
-                elif not wa_reg.instance.is_authenticated():
+                elif not await wa_reg.instance.is_authenticated():
                     logger.warning(
                         "WhatsApp enabled but not authenticated. "
                         "Owner harus kirim 'enable whatsapp' via Telegram untuk scan QR."
