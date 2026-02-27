@@ -222,7 +222,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
-        self.app.add_handler(CommandHandler("think", self._cmd_think))
         self.app.add_handler(CommandHandler("reasoning", self._cmd_reasoning))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
@@ -301,7 +300,6 @@ class TelegramChannel:
             BotCommand("status", "Agent status"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("compact", "Compact conversation history"),
-            BotCommand("think", "Set thinking level"),
             BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("clear", "Clear current conversation"),
@@ -1519,7 +1517,6 @@ class TelegramChannel:
 /status — Show agent status
 /memory — Show memory stats
 /compact — Compact conversation history
-/think — Set thinking level (off/low/medium/high/max)
 /reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
 /model — Switch LLM model
@@ -1805,65 +1802,6 @@ Or just send me a message!"""
         self.agent.conversations._active.pop(key, None)
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
-
-    # Shared thinking level definitions
-    THINK_LEVELS = {
-        "off": 0,
-        "low": 1024,
-        "medium": 4096,
-        "high": 8192,
-        "max": 24576,
-    }
-
-    async def _cmd_think(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /think command — show inline buttons or set directly."""
-        user = update.effective_user
-
-        # Only owner can change thinking
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can change thinking settings.")
-            return
-
-        # Parse argument
-        args = update.message.text.split(maxsplit=1)
-        level = args[1].strip().lower() if len(args) > 1 else None
-
-        if level is None:
-            # Show current + inline buttons
-            saved = await get_config("session.thinking_budget", None)
-            current = self._budget_to_level(saved)
-
-            buttons = []
-            for name in self.THINK_LEVELS:
-                label = f"✅ {name}" if name == current else name
-                buttons.append(InlineKeyboardButton(label, callback_data=f"think:{name}"))
-            # 3 buttons per row
-            keyboard = [buttons[:3], buttons[3:]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(
-                f"💭 **Thinking:** {current}",
-                parse_mode="Markdown",
-                reply_markup=reply_markup,
-            )
-            return
-
-        if level not in self.THINK_LEVELS:
-            await update.message.reply_text(
-                f"❌ Unknown level: `{level}`\nUse: `off`, `low`, `medium`, `high`, `max`",
-                parse_mode="Markdown",
-            )
-            return
-
-        await self._apply_thinking(level)
-        budget = self.THINK_LEVELS[level]
-        emoji = "💭" if budget > 0 else "🔇"
-        await update.message.reply_text(
-            f"{emoji} Thinking set to **{level}**" + (f" ({budget} tokens)" if budget > 0 else ""),
-            parse_mode="Markdown",
-        )
 
     async def _cmd_reasoning(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /reasoning command — toggle with inline buttons."""
@@ -4359,31 +4297,29 @@ Or just send me a message!"""
 
     # ── Helpers ───────────────────────────────────────────────
 
-    @staticmethod
-    def _format_thinking_level(budget) -> str:
+    def _format_thinking_level(self, budget) -> str:
         """Format thinking budget as human-readable level."""
         if budget is None:
-            return "default"
+            # Resolve actual default from driver
+            driver_default = getattr(self.agent.provider, 'DEFAULT_THINKING_BUDGET', None) if self.agent else None
+            if driver_default is None:
+                # Check chat provider for HybridProvider
+                chat_prov = getattr(self.agent.provider, '_chat', None) if self.agent else None
+                driver_default = getattr(chat_prov, 'DEFAULT_THINKING_BUDGET', None) if chat_prov else None
+            if driver_default and driver_default > 0:
+                levels = {1024: "low", 4096: "medium", 8192: "high", 10240: "high", 24576: "max"}
+                level_name = levels.get(driver_default, f"{driver_default}")
+                return f"ON — {level_name} ({driver_default:,} tokens)"
+            elif driver_default == 0:
+                return "OFF (driver default)"
+            return "OFF (not supported)"
         budget = int(budget)
-        levels = {0: "off", 1024: "low", 4096: "medium", 8192: "high", 24576: "max"}
-        return levels.get(budget, f"{budget} tokens")
+        if budget == 0:
+            return "OFF"
+        levels = {1024: "low", 4096: "medium", 8192: "high", 24576: "max"}
+        level_name = levels.get(budget, "custom")
+        return f"ON — {level_name} ({budget:,} tokens)"
 
-    def _budget_to_level(self, budget) -> str:
-        """Convert budget value to level name."""
-        if budget is None:
-            return "default"
-        budget = int(budget)
-        for name, val in self.THINK_LEVELS.items():
-            if budget == val:
-                return name
-        return f"{budget} tokens"
-
-    async def _apply_thinking(self, level: str):
-        """Apply thinking level to DB and all active conversations."""
-        budget = self.THINK_LEVELS[level]
-        await set_config("session.thinking_budget", budget)
-        for k, c in self.agent.conversations._active.items():
-            c.thinking_budget = budget
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle inline button callbacks."""
@@ -4400,25 +4336,7 @@ Or just send me a message!"""
             await query.edit_message_text("⚠️ Owner only.")
             return
 
-        if data.startswith("think:"):
-            level = data.split(":", 1)[1]
-            if level in self.THINK_LEVELS:
-                await self._apply_thinking(level)
-                budget = self.THINK_LEVELS[level]
-                # Rebuild buttons with new checkmark
-                buttons = []
-                for name in self.THINK_LEVELS:
-                    label = f"✅ {name}" if name == level else name
-                    buttons.append(InlineKeyboardButton(label, callback_data=f"think:{name}"))
-                keyboard = [buttons[:3], buttons[3:]]
-                emoji = "💭" if budget > 0 else "🔇"
-                await query.edit_message_text(
-                    f"{emoji} **Thinking:** {level}" + (f" ({budget} tokens)" if budget > 0 else ""),
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-        elif data.startswith("reasoning:"):
+        if data.startswith("reasoning:"):
             toggle = data.split(":", 1)[1]
             visible = toggle == "on"
             await set_config("session.reasoning_visible", visible)
