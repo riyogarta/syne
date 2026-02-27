@@ -1,49 +1,64 @@
-"""memory_delete — Delete memory entries by ID.
-
-Allows deletion of specific memory entries by ID.
-Use with caution as this is destructive.
-"""
+"""Memory deletion functionality."""
 
 import logging
-from syne.db.connection import get_pool
+from typing import List
+from ..engine.memory import MemoryEngine
 
 logger = logging.getLogger("syne.tools.memory_delete")
 
-
 async def memory_delete(memory_ids: str) -> str:
-    """Delete memory entries by ID.
+    """
+    Delete memory entries by comma-separated IDs.
     
     Args:
-        memory_ids: Comma-separated memory IDs to delete (e.g., "35,57")
-    
+        memory_ids: Comma-separated memory IDs (e.g., "35,57")
+        
     Returns:
-        Result message
+        Status message
     """
     try:
-        # Parse memory IDs
-        ids = [int(id_str.strip()) for id_str in memory_ids.split(",")]
+        # Parse IDs
+        ids = []
+        for id_str in memory_ids.split(","):
+            id_str = id_str.strip()
+            if id_str:
+                ids.append(int(id_str))
         
         if not ids:
-            return "❌ No memory IDs provided"
+            return "Error: No valid memory IDs provided"
         
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            # Delete memories
-            result = await conn.execute(
-                "DELETE FROM memory WHERE id = ANY($1)",
-                ids
-            )
-            
-            # Parse result to get count
-            deleted_count = int(result.split()[-1]) if result.startswith("DELETE") else 0
-            
-            if deleted_count > 0:
-                return f"✅ Deleted {deleted_count} memory entries (IDs: {memory_ids})"
-            else:
-                return f"❌ No memory entries found with IDs: {memory_ids}"
+        memory_engine = MemoryEngine()
+        deleted_count = 0
+        errors = []
+        
+        for mem_id in ids:
+            try:
+                # Check if memory exists first
+                existing = await memory_engine.search(f"id:{mem_id}", limit=1)
+                if not existing:
+                    errors.append(f"Memory ID {mem_id} not found")
+                    continue
                 
-    except ValueError:
-        return f"❌ Invalid memory IDs format: {memory_ids}"
+                # Delete the memory
+                await memory_engine.delete(mem_id)
+                deleted_count += 1
+                logger.info(f"Deleted memory ID {mem_id}")
+                
+            except Exception as e:
+                errors.append(f"Error deleting memory ID {mem_id}: {str(e)}")
+        
+        # Build result message
+        result_parts = []
+        if deleted_count > 0:
+            result_parts.append(f"Successfully deleted {deleted_count} memory entries")
+        
+        if errors:
+            result_parts.append(f"Errors: {'; '.join(errors)}")
+        
+        return ". ".join(result_parts) if result_parts else "No action taken"
+        
+    except ValueError as e:
+        return f"Error: Invalid memory ID format - {str(e)}"
     except Exception as e:
-        logger.error(f"Error deleting memories: {e}")
-        return f"❌ Error deleting memories: {e}"
+        logger.error(f"Error in memory_delete: {e}")
+        return f"Error: {str(e)}"
