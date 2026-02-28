@@ -68,6 +68,10 @@ class LLMProvider(ABC):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
         """Send a chat completion request."""
         ...

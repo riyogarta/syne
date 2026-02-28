@@ -198,10 +198,17 @@ class SyneAgent:
             self.conversations.provider = new_provider
             self.conversations.memory = self.memory
             self.conversations.context_mgr = self.context_mgr
+            # Reload per-model params and reasoning_visible for active conversations
+            _active_model_entry = None
+            if models and active_key:
+                _active_model_entry = get_model_from_list(models, active_key)
             for conv in self.conversations._active.values():
                 conv.provider = new_provider
                 conv.memory = self.memory
                 conv.context_mgr = self.context_mgr
+                if _active_model_entry:
+                    conv.model_params = _active_model_entry.get("params") or conv.model_params
+                    conv.reasoning_visible = bool(_active_model_entry.get("reasoning_visible", False))
 
         # Update sub-agent manager
         if self.subagents:

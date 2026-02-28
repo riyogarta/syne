@@ -575,14 +575,18 @@ class GoogleProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
 
         if self._use_cca:
             await self._throttle_cca()
-            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget)
+            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k)
         else:
-            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget)
+            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k)
 
     async def _chat_cca(
         self,
@@ -592,6 +596,8 @@ class GoogleProvider(LLMProvider):
         max_tokens: Optional[int],
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> ChatResponse:
         """Chat via Cloud Code Assist (OAuth, free)."""
         token = await self.credentials.get_token()
@@ -614,6 +620,10 @@ class GoogleProvider(LLMProvider):
             gen_config["temperature"] = temperature
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
+        if top_p is not None:
+            gen_config["topP"] = top_p
+        if top_k is not None:
+            gen_config["topK"] = top_k
 
         # #8: Thinking config — always on, model-appropriate defaults
         gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
@@ -849,6 +859,8 @@ class GoogleProvider(LLMProvider):
         max_tokens: Optional[int],
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
     ) -> ChatResponse:
         """Chat via standard Gemini API (API key, paid)."""
         system_text, contents = self._format_messages(messages, model)
@@ -864,6 +876,10 @@ class GoogleProvider(LLMProvider):
             gen_config["temperature"] = temperature
         if max_tokens:
             gen_config["maxOutputTokens"] = max_tokens
+        if top_p is not None:
+            gen_config["topP"] = top_p
+        if top_k is not None:
+            gen_config["topK"] = top_k
         # #8: Thinking config — always on, model-appropriate defaults
         gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
 

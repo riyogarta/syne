@@ -253,6 +253,10 @@ class AnthropicProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         
@@ -346,9 +350,14 @@ class AnthropicProvider(LLMProvider):
         else:
             body["temperature"] = temperature
         
+        if top_p is not None:
+            body["top_p"] = top_p
+        if top_k is not None:
+            body["top_k"] = top_k
+
         if tools:
             body["tools"] = self._convert_tools(tools)
-        
+
         token = await self._load_token()
         headers = self._build_headers(token)
         

@@ -562,7 +562,12 @@ async def _handle_cli_command(
         ability_count = len(agent.abilities.list_all()) if agent.abilities else 0
 
         auto_capture = await get_config("memory.auto_capture", False)
-        thinking = await get_config("session.thinking_budget", "default")
+        # Read thinking from active model params
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        _active_entry = next((m for m in models if m.get("key") == active_key), {})
+        _model_params = _active_entry.get("params") or {}
+        thinking = _model_params.get("thinking_budget", "default")
 
         from .. import __version__ as syne_version
 
@@ -610,11 +615,10 @@ async def _handle_cli_command(
     elif cmd == "/think":
         if args:
             return False  # Let agent handle
-        thinking = await agent.conversations._active.get(
-            f"cli:{chat_id}", None
-        )
-        if thinking:
-            console.print(f"[bold]Thinking budget:[/bold] {thinking.thinking_budget or 'default'}")
+        conv = agent.conversations._active.get(f"cli:{chat_id}", None)
+        if conv:
+            tb = conv.model_params.get("thinking_budget")
+            console.print(f"[bold]Thinking budget:[/bold] {tb if tb is not None else 'default'}")
         return True
 
     # Unknown command — pass to agent

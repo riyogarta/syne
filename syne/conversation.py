@@ -50,8 +50,8 @@ class Conversation:
         self.is_group: bool = inbound.is_group if inbound else False
         self.chat_name: Optional[str] = inbound.group_subject if inbound else None
         self.chat_id: Optional[str] = inbound.chat_id if inbound else None
-        self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
-        self.model_params: dict = {}  # Per-model LLM params (temperature, max_tokens, thinking_budget)
+        self.model_params: dict = {}  # Per-model LLM params (all 7: temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty)
+        self.reasoning_visible: bool = False  # Per-model reasoning visibility
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
@@ -184,6 +184,18 @@ class Conversation:
 
         return messages
 
+    def _build_chat_kwargs(self) -> dict:
+        """Extract all LLM parameters from self.model_params for provider.chat()."""
+        kwargs = {}
+        p = self.model_params
+        for key in ("thinking_budget", "temperature", "top_p", "top_k",
+                     "frequency_penalty", "presence_penalty"):
+            if p.get(key) is not None:
+                kwargs[key] = p[key]
+        if p.get("max_tokens") is not None:
+            kwargs["max_tokens"] = p["max_tokens"]
+        return kwargs
+
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Process a user message and return agent response.
         
@@ -292,18 +304,11 @@ class Conversation:
         if self.is_group and should_filter_tools_for_group(self.is_group):
             tool_schemas = filter_tools_for_group(tool_schemas)
 
-        # Call LLM — thinking: session override > model params > driver default
-        _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
-        _extra = {}
-        if "temperature" in self.model_params:
-            _extra["temperature"] = self.model_params["temperature"]
-        if self.model_params.get("max_tokens") is not None:
-            _extra["max_tokens"] = self.model_params["max_tokens"]
+        # Call LLM with all params from model registry
         response = await self.provider.chat(
             messages=context,
             tools=tool_schemas if tool_schemas else None,
-            thinking_budget=_tb,
-            **_extra,
+            **self._build_chat_kwargs(),
         )
 
         # Check for auth failures (expired OAuth tokens etc.)
@@ -526,17 +531,10 @@ class Conversation:
                 context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
             # Get next response — may contain more tool calls
-            _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
-            _extra = {}
-            if "temperature" in self.model_params:
-                _extra["temperature"] = self.model_params["temperature"]
-            if self.model_params.get("max_tokens") is not None:
-                _extra["max_tokens"] = self.model_params["max_tokens"]
             current = await self.provider.chat(
                 messages=context,
-                thinking_budget=_tb,
                 tools=tool_schemas if tool_schemas else None,
-                **_extra,
+                **self._build_chat_kwargs(),
             )
         else:
             # Loop exhausted without breaking — limit reached
@@ -560,17 +558,10 @@ class Conversation:
                     role="system",
                     content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done so far and what remains.",
                 ))
-                _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
-                _extra = {}
-                if "temperature" in self.model_params:
-                    _extra["temperature"] = self.model_params["temperature"]
-                if self.model_params.get("max_tokens") is not None:
-                    _extra["max_tokens"] = self.model_params["max_tokens"]
                 current = await self.provider.chat(
                     messages=context,
-                    thinking_budget=_tb,
                     tools=None,  # No tools — force text response
-                    **_extra,
+                    **self._build_chat_kwargs(),
                 )
                 current = ChatResponse(
                     content=(current.content or "") + notice,
@@ -850,13 +841,8 @@ class ConversationManager:
         # in build_context). This is the fix for restart amnesia.
         await conv.load_history()
 
-        # Load thinking budget from DB config
-        from .db.models import get_config as _get_config
-        saved_budget = await _get_config("session.thinking_budget", None)
-        if saved_budget is not None:
-            conv.thinking_budget = int(saved_budget)
-
         # Load per-model LLM params from model registry
+        from .db.models import get_config as _get_config
         active_models = await _get_config("provider.models", [])
         # Resolve effective model key: group override > user override > global default
         effective_key = await _get_config("provider.active_model", "gemini-pro")
@@ -877,12 +863,17 @@ class ConversationManager:
         if not conv.model_params:
             _driver = model_entry.get("driver", "")
             _defaults = {
-                "google_cca": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
-                "codex": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
-                "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
-                "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+                "google_cca":   {"temperature": 0.7, "max_tokens": 8192,  "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
+                "codex":        {"temperature": 0.7, "max_tokens": 16384, "thinking_budget": 8192,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+                "anthropic":    {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
+                "openai_compat":{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+                "together":     {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+                "ollama":       {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
+                "_default":     {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
             }
-            conv.model_params = _defaults.get(_driver, {})
+            conv.model_params = _defaults.get(_driver, _defaults["_default"]).copy()
+        # Load per-model reasoning_visible
+        conv.reasoning_visible = bool(model_entry.get("reasoning_visible", False))
 
         self._active[key] = conv
         return conv

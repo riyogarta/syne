@@ -46,8 +46,16 @@ class HybridProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
-        return await self._chat.chat(messages, model, temperature, max_tokens, tools, thinking_budget)
+        return await self._chat.chat(
+            messages, model, temperature, max_tokens, tools, thinking_budget,
+            top_p=top_p, top_k=top_k,
+            frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+        )
 
     async def embed(
         self,

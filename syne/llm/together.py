@@ -41,6 +41,11 @@ class TogetherProvider(LLMProvider):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
 
@@ -48,6 +53,14 @@ class TogetherProvider(LLMProvider):
         body: dict = {"model": model, "messages": msgs, "temperature": temperature}
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if top_p is not None:
+            body["top_p"] = top_p
+        if top_k is not None:
+            body["top_k"] = top_k
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(

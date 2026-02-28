@@ -222,7 +222,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
-        self.app.add_handler(CommandHandler("reasoning", self._cmd_reasoning))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
@@ -569,16 +568,15 @@ class TelegramChannel:
                     )
 
                 if response:
-                    # Check if reasoning visibility is ON — prepend thinking if available
-                    reasoning_visible = await get_config("session.reasoning_visible", False)
-                    if reasoning_visible:
-                        if browse_cwd:
-                            import getpass as _gp
-                            key = f"cli:cli:{_gp.getuser()}:{browse_cwd}"
-                        else:
-                            key = f"telegram:{chat.id}"
-                        conv = self.agent.conversations._active.get(key)
-                        thinking = getattr(conv, '_last_thinking', None) if conv else None
+                    # Check if per-model reasoning visibility is ON — prepend thinking if available
+                    if browse_cwd:
+                        import getpass as _gp
+                        key = f"cli:cli:{_gp.getuser()}:{browse_cwd}"
+                    else:
+                        key = f"telegram:{chat.id}"
+                    conv = self.agent.conversations._active.get(key)
+                    if conv and conv.reasoning_visible:
+                        thinking = getattr(conv, '_last_thinking', None)
                         if thinking:
                             thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
                             response = thinking_block + response
@@ -1531,7 +1529,6 @@ class TelegramChannel:
 /status — Show agent status
 /memory — Show memory stats
 /compact — Compact conversation history
-/reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
 /models — Manage LLM models
 /embedding — Manage embedding models
@@ -1607,8 +1604,10 @@ Or just send me a message!"""
             chat_model = await get_config("provider.chat_model", "unknown")
         
         auto_capture = await get_config("memory.auto_capture", False)
-        thinking_budget = await get_config("session.thinking_budget", None)
-        reasoning_visible = await get_config("session.reasoning_visible", False)
+        # Read thinking/reasoning from active model entry (per-model, not global)
+        _model_params = (active_model_entry.get("params") or {}) if active_model_entry else {}
+        thinking_budget = _model_params.get("thinking_budget")
+        reasoning_visible = bool(active_model_entry.get("reasoning_visible", False)) if active_model_entry else False
 
         # Context window and driver name from registry
         context_window = int(active_model_entry.get("context_window", 128000)) if active_model_entry else 128000
@@ -1850,45 +1849,6 @@ Or just send me a message!"""
         self.agent.conversations._active.pop(key, None)
 
         await update.message.reply_text("Session cleared. Starting fresh! 🔄")
-
-    async def _cmd_reasoning(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /reasoning command — toggle with inline buttons."""
-        user = update.effective_user
-
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can change reasoning settings.")
-            return
-
-        args = update.message.text.split(maxsplit=1)
-        toggle = args[1].strip().lower() if len(args) > 1 else None
-
-        if toggle is None:
-            current = await get_config("session.reasoning_visible", False)
-            state = "ON" if current else "OFF"
-            buttons = [
-                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="reasoning:on"),
-                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="reasoning:off"),
-            ]
-            await update.message.reply_text(
-                f"🔍 **Reasoning visibility:** {state}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
-            return
-
-        if toggle not in ("on", "off"):
-            await update.message.reply_text(f"❌ Use: `on` or `off`", parse_mode="Markdown")
-            return
-
-        visible = toggle == "on"
-        await set_config("session.reasoning_visible", visible)
-        emoji = "🔍" if visible else "🔇"
-        await update.message.reply_text(
-            f"{emoji} Reasoning visibility set to **{toggle.upper()}**",
-            parse_mode="Markdown",
-        )
 
     async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /evaluator command — manage evaluator model for auto-capture."""
@@ -2285,10 +2245,18 @@ Or just send me a message!"""
         ctx_display = f"{ctx/1000000:.1f}M" if ctx >= 1000000 else f"{ctx//1000}K" if ctx else "?"
         is_default = model_key == active_key
 
+        # Thinking / reasoning info from model entry
+        params = entry.get("params") or {}
+        thinking_budget = params.get("thinking_budget")
+        thinking_label = self._format_thinking_level(thinking_budget)
+        reasoning_on = bool(entry.get("reasoning_visible", False))
+
         text = (
             f"🤖 <b>{label}</b>\n\n"
             f"Driver: <code>{driver}</code> | Model: <code>{model_id}</code>\n"
-            f"Context: {ctx_display} tokens"
+            f"Context: {ctx_display} tokens\n"
+            f"💭 Thinking: {thinking_label}\n"
+            f"💬 Reasoning: {'ON' if reasoning_on else 'OFF'}"
         )
         if is_default:
             text += "\n⭐ <b>Default model</b>"
@@ -2298,6 +2266,8 @@ Or just send me a message!"""
         if not is_default:
             buttons.append([InlineKeyboardButton("⭐ Set as Default", callback_data=f"models:set_default:{model_key}")])
         buttons.append([InlineKeyboardButton(f"📐 Context Window: {ctx_display}", callback_data="models:ctx")])
+        buttons.append([InlineKeyboardButton(f"💭 Thinking: {thinking_label}", callback_data=f"models:thinking:{model_key}")])
+        buttons.append([InlineKeyboardButton(f"💬 Reasoning: {'ON' if reasoning_on else 'OFF'}", callback_data=f"models:reasoning:{model_key}")])
         if auth_type == "oauth":
             buttons.append([InlineKeyboardButton("🔄 Re-authenticate", callback_data=f"models:reauth:{model_key}")])
         elif auth_type == "api_key":
@@ -2487,6 +2457,92 @@ Or just send me a message!"""
                 f"Send /cancel to abort.",
                 parse_mode="HTML",
             )
+
+        elif data.startswith("models:thinking:"):
+            # Show thinking level picker for a specific model
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            current_tb = (entry.get("params") or {}).get("thinking_budget")
+            levels = [
+                (None, "OFF"),
+                (1024, "Low (1K)"),
+                (4096, "Medium (4K)"),
+                (8192, "High (8K)"),
+                (24576, "Max (24K)"),
+                (-1, "Dynamic"),
+            ]
+            buttons = []
+            for value, display in levels:
+                check = " ✓" if current_tb == value else ""
+                # Encode None as "none" in callback
+                val_str = "none" if value is None else str(value)
+                buttons.append(InlineKeyboardButton(
+                    f"{display}{check}", callback_data=f"models:thinking_set:{model_key}:{val_str}"
+                ))
+            keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"models:detail:{model_key}")])
+            await query.edit_message_text(
+                f"💭 <b>Thinking Level — {entry.get('label', model_key)}</b>\n\n"
+                f"Current: <b>{self._format_thinking_level(current_tb)}</b>\n\n"
+                f"OFF = no thinking budget\n"
+                f"Dynamic = model decides (Gemini default)\n\n"
+                f"Select a level:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("models:thinking_set:"):
+            # Apply thinking level to model params
+            parts = data.split(":", 3)
+            model_key = parts[2]
+            val_str = parts[3]
+            if val_str == "none":
+                new_tb = None
+            else:
+                new_tb = int(val_str)
+            models = await get_config("provider.models", [])
+            updated = False
+            for m in models:
+                if m.get("key") == model_key:
+                    if "params" not in m or not m["params"]:
+                        driver = m.get("driver", "")
+                        m["params"] = self._DRIVER_DEFAULT_PARAMS.get(driver, self._DRIVER_DEFAULT_PARAMS["_default"]).copy()
+                    m["params"]["thinking_budget"] = new_tb
+                    updated = True
+                    break
+            if updated:
+                await set_config("provider.models", models)
+                if self.agent:
+                    await self.agent.reload_provider()
+                await query.answer(f"Thinking → {self._format_thinking_level(new_tb)}")
+            await self._models_menu_detail(query, model_key)
+
+        elif data.startswith("models:reasoning:"):
+            # Toggle reasoning_visible for a specific model
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            updated = False
+            for m in models:
+                if m.get("key") == model_key:
+                    current = bool(m.get("reasoning_visible", False))
+                    m["reasoning_visible"] = not current
+                    updated = True
+                    break
+            if updated:
+                await set_config("provider.models", models)
+                # Update active conversation's reasoning_visible
+                if self.agent:
+                    active_key = await get_config("provider.active_model", "gemini-pro")
+                    if model_key == active_key:
+                        for conv in self.agent.conversations._active.values():
+                            conv.reasoning_visible = not current
+                new_state = "ON" if not current else "OFF"
+                await query.answer(f"Reasoning → {new_state}")
+            await self._models_menu_detail(query, model_key)
 
         elif data.startswith("models:delete_confirm:"):
             model_key = data.split(":", 2)[2]
@@ -4542,12 +4598,15 @@ Or just send me a message!"""
         "together": "api_key",
     }
 
-    # Default LLM parameters per driver
+    # Default LLM parameters per driver (all 7 keys)
     _DRIVER_DEFAULT_PARAMS = {
-        "google_cca": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
-        "codex": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
-        "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
-        "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+        "google_cca":   {"temperature": 0.7, "max_tokens": 8192,  "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
+        "codex":        {"temperature": 0.7, "max_tokens": 16384, "thinking_budget": 8192,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+        "anthropic":    {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
+        "openai_compat":{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+        "together":     {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+        "ollama":       {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
+        "_default":     {"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
     }
 
     async def _process_addmodel_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
@@ -4640,7 +4699,8 @@ Or just send me a message!"""
                 "model_id": state["model_id"],
                 "auth": auth_type,
                 "context_window": ctx_window,
-                "params": self._DRIVER_DEFAULT_PARAMS.get(driver, {}).copy(),
+                "params": self._DRIVER_DEFAULT_PARAMS.get(driver, self._DRIVER_DEFAULT_PARAMS["_default"]).copy(),
+                "reasoning_visible": False,
             }
             # Include base_url and credential_key for API key models
             if state.get("base_url"):
@@ -4767,8 +4827,24 @@ Or just send me a message!"""
                 errors.append("max_tokens: must be a positive integer or null")
         if "thinking_budget" in params:
             tb = params["thinking_budget"]
-            if tb is not None and (not isinstance(tb, int) or tb < 0):
-                errors.append("thinking_budget: must be an integer >= 0 or null")
+            if tb is not None and (not isinstance(tb, int) or tb < -1):
+                errors.append("thinking_budget: must be an integer >= 0, -1 (dynamic), or null")
+        if "top_p" in params:
+            tp = params["top_p"]
+            if tp is not None and (not isinstance(tp, (int, float)) or tp < 0.0 or tp > 1.0):
+                errors.append("top_p: must be a number 0.0–1.0 or null")
+        if "top_k" in params:
+            tk = params["top_k"]
+            if tk is not None and (not isinstance(tk, int) or tk <= 0):
+                errors.append("top_k: must be a positive integer or null")
+        if "frequency_penalty" in params:
+            fp = params["frequency_penalty"]
+            if fp is not None and (not isinstance(fp, (int, float)) or fp < -2.0 or fp > 2.0):
+                errors.append("frequency_penalty: must be a number -2.0–2.0 or null")
+        if "presence_penalty" in params:
+            pp = params["presence_penalty"]
+            if pp is not None and (not isinstance(pp, (int, float)) or pp < -2.0 or pp > 2.0):
+                errors.append("presence_penalty: must be a number -2.0–2.0 or null")
 
         if errors:
             await bot.send_message(
@@ -5436,25 +5512,15 @@ Or just send me a message!"""
     def _format_thinking_level(self, budget) -> str:
         """Format thinking budget as human-readable level."""
         if budget is None:
-            # Resolve actual default from driver
-            driver_default = getattr(self.agent.provider, 'DEFAULT_THINKING_BUDGET', None) if self.agent else None
-            if driver_default is None:
-                # Check chat provider for HybridProvider
-                chat_prov = getattr(self.agent.provider, '_chat', None) if self.agent else None
-                driver_default = getattr(chat_prov, 'DEFAULT_THINKING_BUDGET', None) if chat_prov else None
-            if driver_default and driver_default > 0:
-                levels = {1024: "low", 4096: "medium", 8192: "high", 10240: "high", 24576: "max"}
-                level_name = levels.get(driver_default, f"{driver_default}")
-                return f"ON — {level_name} ({driver_default:,} tokens)"
-            elif driver_default == 0:
-                return "OFF (driver default)"
-            return "OFF (not supported)"
+            return "OFF"
         budget = int(budget)
         if budget == 0:
             return "OFF"
-        levels = {1024: "low", 4096: "medium", 8192: "high", 24576: "max"}
+        if budget == -1:
+            return "Dynamic"
+        levels = {1024: "Low", 4096: "Medium", 8192: "High", 10240: "High", 24576: "Max"}
         level_name = levels.get(budget, "custom")
-        return f"ON — {level_name} ({budget:,} tokens)"
+        return f"{level_name} ({budget:,})"
 
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5472,22 +5538,7 @@ Or just send me a message!"""
             await query.edit_message_text("⚠️ Owner only.")
             return
 
-        if data.startswith("reasoning:"):
-            toggle = data.split(":", 1)[1]
-            visible = toggle == "on"
-            await set_config("session.reasoning_visible", visible)
-            buttons = [
-                InlineKeyboardButton(f"{'✅ ' if visible else ''}ON", callback_data="reasoning:on"),
-                InlineKeyboardButton(f"{'✅ ' if not visible else ''}OFF", callback_data="reasoning:off"),
-            ]
-            emoji = "🔍" if visible else "🔇"
-            await query.edit_message_text(
-                f"{emoji} **Reasoning visibility:** {'ON' if visible else 'OFF'}",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
-
-        elif data.startswith("models:"):
+        if data.startswith("models:"):
             await self._handle_models_callback(query, data)
 
         elif data.startswith("embed:"):

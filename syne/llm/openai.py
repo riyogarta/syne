@@ -125,6 +125,10 @@ class OpenAIProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         is_reasoning = "gpt-5" in model.lower() or "o3" in model.lower() or "o1" in model.lower()
@@ -144,6 +148,12 @@ class OpenAIProvider(LLMProvider):
 
         if max_tokens:
             body["max_tokens"] = max_tokens
+        if top_p is not None:
+            body["top_p"] = top_p
+        if frequency_penalty is not None:
+            body["frequency_penalty"] = frequency_penalty
+        if presence_penalty is not None:
+            body["presence_penalty"] = presence_penalty
         if tools:
             body["tools"] = tools
 

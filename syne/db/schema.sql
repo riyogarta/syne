@@ -364,7 +364,7 @@ INSERT INTO config (key, value, description) VALUES
     ('web_search.api_key', '""', 'Brave Search API key (get from https://brave.com/search/api/)'),
     ('web_fetch.timeout', '30', 'Web fetch timeout in seconds'),
     -- Model registry (driver-based model system)
-    ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": null}}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": null}}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": null}}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240}}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240}}]', 'Available LLM models with driver configuration'),
+    ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": 8192, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": 8192, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": 16384, "thinking_budget": 8192, "top_p": 1.0, "top_k": null, "frequency_penalty": 0, "presence_penalty": 0}, "reasoning_visible": false}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}]', 'Available LLM models with driver configuration'),
     ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models'),
     -- Embedding model registry (same pattern as chat model registry)
     ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
@@ -434,6 +434,81 @@ BEGIN
             model := jsonb_set(model, '{params}', defaults);
             changed := true;
         END IF;
+        updated := updated || jsonb_build_array(model);
+    END LOOP;
+
+    IF changed THEN
+        UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
+    END IF;
+END $$;
+
+-- v0.12.3: expand params 3→7 keys, add reasoning_visible per model, migrate global thinking_budget
+DO $$
+DECLARE
+    models JSONB;
+    model JSONB;
+    driver TEXT;
+    defaults JSONB;
+    merged JSONB;
+    k TEXT;
+    v JSONB;
+    updated JSONB := '[]'::jsonb;
+    changed BOOLEAN := false;
+    global_tb JSONB;
+    global_rv JSONB;
+BEGIN
+    SELECT value INTO models FROM config WHERE key = 'provider.models';
+    IF models IS NULL THEN RETURN; END IF;
+
+    -- Read global values for migration
+    SELECT value INTO global_tb FROM config WHERE key = 'session.thinking_budget';
+    SELECT value INTO global_rv FROM config WHERE key = 'session.reasoning_visible';
+
+    FOR model IN SELECT jsonb_array_elements(models)
+    LOOP
+        -- Expand params: start with driver defaults, overlay non-null existing values
+        IF model->'params' IS NOT NULL AND model->'params' != 'null'::jsonb THEN
+            driver := model->>'driver';
+            defaults := CASE driver
+                WHEN 'google_cca'    THEN '{"temperature": 0.7, "max_tokens": 8192,  "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
+                WHEN 'codex'         THEN '{"temperature": 0.7, "max_tokens": 16384, "thinking_budget": 8192,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
+                WHEN 'anthropic'     THEN '{"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
+                WHEN 'openai_compat' THEN '{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": null,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
+                WHEN 'together'      THEN '{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": null,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
+                WHEN 'ollama'        THEN '{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": null,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
+                ELSE                      '{"temperature": 0.7, "max_tokens": 4096,  "thinking_budget": null,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
+            END;
+            -- Smart merge: start with defaults, then overlay only non-null values from existing params
+            merged := defaults;
+            FOR k, v IN SELECT * FROM jsonb_each(model->'params')
+            LOOP
+                IF v IS NOT NULL AND v != 'null'::jsonb THEN
+                    merged := jsonb_set(merged, ARRAY[k], v);
+                END IF;
+            END LOOP;
+            model := jsonb_set(model, '{params}', merged);
+            changed := true;
+        END IF;
+
+        -- Add reasoning_visible if missing
+        IF model->'reasoning_visible' IS NULL THEN
+            -- Migrate from global session.reasoning_visible if it was true
+            IF global_rv IS NOT NULL AND global_rv = 'true'::jsonb THEN
+                model := jsonb_set(model, '{reasoning_visible}', 'true'::jsonb);
+            ELSE
+                model := jsonb_set(model, '{reasoning_visible}', 'false'::jsonb);
+            END IF;
+            changed := true;
+        END IF;
+
+        -- Migrate global thinking_budget to models that have null thinking_budget
+        IF global_tb IS NOT NULL AND global_tb != 'null'::jsonb THEN
+            IF (model->'params'->>'thinking_budget') IS NULL OR (model->'params'->'thinking_budget') = 'null'::jsonb THEN
+                model := jsonb_set(model, '{params,thinking_budget}', global_tb);
+                changed := true;
+            END IF;
+        END IF;
+
         updated := updated || jsonb_build_array(model);
     END LOOP;
 
