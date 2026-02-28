@@ -51,6 +51,7 @@ class Conversation:
         self.chat_name: Optional[str] = inbound.group_subject if inbound else None
         self.chat_id: Optional[str] = inbound.chat_id if inbound else None
         self.thinking_budget: Optional[int] = None  # None = model default, 0 = off
+        self.model_params: dict = {}  # Per-model LLM params (temperature, max_tokens, thinking_budget)
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
@@ -291,11 +292,18 @@ class Conversation:
         if self.is_group and should_filter_tools_for_group(self.is_group):
             tool_schemas = filter_tools_for_group(tool_schemas)
 
-        # Call LLM
+        # Call LLM — thinking: session override > model params > driver default
+        _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
+        _extra = {}
+        if "temperature" in self.model_params:
+            _extra["temperature"] = self.model_params["temperature"]
+        if self.model_params.get("max_tokens") is not None:
+            _extra["max_tokens"] = self.model_params["max_tokens"]
         response = await self.provider.chat(
             messages=context,
             tools=tool_schemas if tool_schemas else None,
-            thinking_budget=self.thinking_budget,
+            thinking_budget=_tb,
+            **_extra,
         )
 
         # Check for auth failures (expired OAuth tokens etc.)
@@ -518,10 +526,17 @@ class Conversation:
                 context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
             # Get next response — may contain more tool calls
+            _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
+            _extra = {}
+            if "temperature" in self.model_params:
+                _extra["temperature"] = self.model_params["temperature"]
+            if self.model_params.get("max_tokens") is not None:
+                _extra["max_tokens"] = self.model_params["max_tokens"]
             current = await self.provider.chat(
                 messages=context,
-                thinking_budget=self.thinking_budget,
+                thinking_budget=_tb,
                 tools=tool_schemas if tool_schemas else None,
+                **_extra,
             )
         else:
             # Loop exhausted without breaking — limit reached
@@ -545,10 +560,17 @@ class Conversation:
                     role="system",
                     content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done so far and what remains.",
                 ))
+                _tb = self.thinking_budget if self.thinking_budget is not None else self.model_params.get("thinking_budget")
+                _extra = {}
+                if "temperature" in self.model_params:
+                    _extra["temperature"] = self.model_params["temperature"]
+                if self.model_params.get("max_tokens") is not None:
+                    _extra["max_tokens"] = self.model_params["max_tokens"]
                 current = await self.provider.chat(
                     messages=context,
-                    thinking_budget=self.thinking_budget,
+                    thinking_budget=_tb,
                     tools=None,  # No tools — force text response
+                    **_extra,
                 )
                 current = ChatResponse(
                     content=(current.content or "") + notice,
@@ -833,6 +855,24 @@ class ConversationManager:
         saved_budget = await _get_config("session.thinking_budget", None)
         if saved_budget is not None:
             conv.thinking_budget = int(saved_budget)
+
+        # Load per-model LLM params from model registry
+        active_models = await _get_config("provider.models", [])
+        # Resolve effective model key: group override > user override > global default
+        effective_key = await _get_config("provider.active_model", "gemini-pro")
+        if inbound and inbound.is_group and inbound.chat_id:
+            from .db.models import get_group as _get_group
+            _group = await _get_group(platform, str(inbound.chat_id))
+            if _group:
+                _gm = (_group.get("settings") or {}).get("model")
+                if _gm:
+                    effective_key = _gm
+        elif user:
+            _um = (user.get("preferences") or {}).get("model")
+            if _um:
+                effective_key = _um
+        model_entry = next((m for m in active_models if m.get("key") == effective_key), {})
+        conv.model_params = model_entry.get("params", {})
 
         self._active[key] = conv
         return conv

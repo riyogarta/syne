@@ -353,19 +353,21 @@ class AnthropicProvider(LLMProvider):
         headers = self._build_headers(token)
         
         async with httpx.AsyncClient(timeout=120) as client:
-            for attempt in range(3):
+            for attempt in range(2):
                 resp = await client.post(
                     ANTHROPIC_API_URL,
                     json=body,
                     headers=headers,
+                    timeout=30 if attempt > 0 else 120,
                 )
-                
+
                 if resp.status_code == 429:
-                    wait = 2 ** attempt
-                    logger.warning(f"Rate limited (429), retrying in {wait}s (attempt {attempt + 1}/3)")
-                    await asyncio.sleep(wait)
-                    continue
-                
+                    if attempt < 1:
+                        logger.warning(f"Rate limited (429), retrying in 1s (attempt {attempt + 1}/2)")
+                        await asyncio.sleep(1)
+                        continue
+                    raise RuntimeError("Rate limited (429) after 2 attempts")
+
                 if resp.status_code == 401:
                     # Try refreshing token once
                     if self._claude_creds and attempt == 0:
@@ -381,27 +383,26 @@ class AnthropicProvider(LLMProvider):
                         "Claude OAuth token expired or invalid. "
                         "Run 'syne init' to re-authenticate."
                     )
-                
+
                 if resp.status_code == 400:
                     error_text = resp.text[:500]
                     logger.error(f"Anthropic 400 Bad Request: {error_text}")
                     raise RuntimeError(f"Anthropic API error 400: {error_text}")
-                
+
                 if 500 <= resp.status_code < 600:
                     error_text = resp.text[:500]
                     logger.error(f"Anthropic {resp.status_code} Server Error: {error_text}")
                     logger.debug(f"Request body model={body.get('model')}, messages_count={len(body.get('messages', []))}, has_tools={bool(body.get('tools'))}")
-                    if attempt < 2:
-                        wait = 2 ** attempt
-                        logger.warning(f"Server error ({resp.status_code}), retrying in {wait}s (attempt {attempt + 1}/3)")
-                        await asyncio.sleep(wait)
+                    if attempt < 1:
+                        logger.warning(f"Server error ({resp.status_code}), retrying in 1s (attempt {attempt + 1}/2)")
+                        await asyncio.sleep(1)
                         continue
                     resp.raise_for_status()
 
                 resp.raise_for_status()
                 break
             else:
-                raise RuntimeError("Anthropic API failed after 3 retries")
+                raise RuntimeError("Rate limited (429) after 2 attempts")
         
         data = resp.json()
         

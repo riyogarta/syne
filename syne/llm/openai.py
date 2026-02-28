@@ -150,11 +150,12 @@ class OpenAIProvider(LLMProvider):
         logger.debug(f"Request: model={model}, messages={len(messages)}, tools={len(tools) if tools else 0}")
 
         async with httpx.AsyncClient(timeout=120) as client:
-          for attempt in range(3):
+          for attempt in range(2):
             resp = await client.post(
                 f"{self.base_url}/chat/completions",
                 json=body,
                 headers=self._get_headers(),
+                timeout=30 if attempt > 0 else 120,
             )
 
             if resp.status_code == 429:
@@ -167,17 +168,16 @@ class OpenAIProvider(LLMProvider):
                     response=resp,
                 )
 
-            if 500 <= resp.status_code < 600 and attempt < 2:
-                wait = 2 ** attempt
-                logger.warning(f"OpenAI {resp.status_code}, retrying in {wait}s (attempt {attempt + 1}/3): {resp.text[:200]}")
-                await asyncio.sleep(wait)
+            if 500 <= resp.status_code < 600 and attempt < 1:
+                logger.warning(f"OpenAI {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {resp.text[:200]}")
+                await asyncio.sleep(1)
                 continue
 
             resp.raise_for_status()
             data = resp.json()
             break
           else:
-            raise RuntimeError("OpenAI API failed after 3 retries")
+            raise RuntimeError("OpenAI API failed after 2 attempts")
 
         choice = data["choices"][0]
         message = choice["message"]

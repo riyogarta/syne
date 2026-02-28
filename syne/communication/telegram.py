@@ -2295,6 +2295,7 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton("🔄 Re-authenticate", callback_data=f"models:reauth:{model_key}")])
         elif auth_type == "api_key":
             buttons.append([InlineKeyboardButton("🔐 Update API Key", callback_data=f"models:apikey:{model_key}")])
+        buttons.append([InlineKeyboardButton("⚙️ Parameters", callback_data=f"models:params:{model_key}")])
         buttons.append([InlineKeyboardButton("✏️ Edit Label", callback_data=f"models:edit_label:{model_key}")])
         buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"models:delete_confirm:{model_key}")])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="models:main")])
@@ -2436,6 +2437,29 @@ Or just send me a message!"""
                     )
                 else:
                     await query.answer("Model not found", show_alert=True)
+
+        elif data.startswith("models:params:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            driver = entry.get("driver", "")
+            params = entry.get("params", self._DRIVER_DEFAULT_PARAMS.get(driver, {}))
+            import json as _json
+            params_json = _json.dumps(params, indent=2)
+            self._auth_state[user.id] = {
+                "type": "models_params",
+                "model_key": model_key,
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                f"⚙️ <b>Parameters — {entry.get('label', model_key)}</b>\n\n"
+                f"<pre>{params_json}</pre>\n\n"
+                f"Send new JSON to update, or /cancel to abort.",
+                parse_mode="HTML",
+            )
 
         elif data.startswith("models:edit_label:"):
             model_key = data.split(":", 2)[2]
@@ -4382,6 +4406,8 @@ Or just send me a message!"""
             return await self._process_addembed_input(user_id, chat_id, text, state, context)
         elif auth_type == "ctx_window":
             return await self._process_ctx_window_input(user_id, chat_id, text, state, context)
+        elif auth_type == "models_params":
+            return await self._process_models_params(user_id, chat_id, text, state, context)
         elif auth_type == "models_edit_label":
             return await self._process_models_edit_label(user_id, chat_id, text, state, context)
         elif auth_type == "embed_edit_label":
@@ -4508,6 +4534,14 @@ Or just send me a message!"""
         "together": "api_key",
     }
 
+    # Default LLM parameters per driver
+    _DRIVER_DEFAULT_PARAMS = {
+        "google_cca": {"temperature": 0.7, "thinking_budget": None},
+        "codex": {},
+        "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
+        "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+    }
+
     async def _process_addmodel_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
         """Multi-step model addition flow."""
         bot = context.bot if context else self.app.bot
@@ -4598,6 +4632,7 @@ Or just send me a message!"""
                 "model_id": state["model_id"],
                 "auth": auth_type,
                 "context_window": ctx_window,
+                "params": self._DRIVER_DEFAULT_PARAMS.get(driver, {}).copy(),
             }
             # Include base_url and credential_key for API key models
             if state.get("base_url"):
@@ -4681,6 +4716,78 @@ Or just send me a message!"""
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"✅ Context window for <b>{model_label}</b> set to <b>{ctx_display}</b> ({new_ctx:,} tokens)",
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text="Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_models_params(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle JSON input for editing model LLM parameters."""
+        bot = context.bot if context else self.app.bot
+        text = text.strip()
+        model_key = state.get("model_key", "")
+
+        # Parse JSON
+        try:
+            params = json.loads(text)
+        except json.JSONDecodeError as e:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Invalid JSON: {e}\n\nSend valid JSON or /cancel to abort.",
+            )
+            return True
+
+        if not isinstance(params, dict):
+            await bot.send_message(
+                chat_id=chat_id,
+                text="❌ Must be a JSON object (dict), not a list or value.\n\nSend valid JSON or /cancel to abort.",
+            )
+            return True
+
+        # Validate known keys
+        errors = []
+        if "temperature" in params:
+            t = params["temperature"]
+            if not isinstance(t, (int, float)) or t < 0.0 or t > 2.0:
+                errors.append("temperature: must be a number 0.0–2.0")
+        if "max_tokens" in params:
+            mt = params["max_tokens"]
+            if mt is not None and (not isinstance(mt, int) or mt <= 0):
+                errors.append("max_tokens: must be a positive integer or null")
+        if "thinking_budget" in params:
+            tb = params["thinking_budget"]
+            if tb is not None and (not isinstance(tb, int) or tb < 0):
+                errors.append("thinking_budget: must be an integer >= 0 or null")
+
+        if errors:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="❌ Validation errors:\n• " + "\n• ".join(errors) + "\n\nFix and resend, or /cancel to abort.",
+            )
+            return True
+
+        # Save to model entry
+        models = await get_config("provider.models", [])
+        updated = False
+        label = model_key
+        for m in models:
+            if m.get("key") == model_key:
+                m["params"] = params
+                label = m.get("label", model_key)
+                updated = True
+                break
+
+        if updated:
+            await set_config("provider.models", models)
+            if self.agent:
+                await self.agent.reload_provider()
+            import json as _json
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Parameters updated for <b>{label}</b>:\n<pre>{_json.dumps(params, indent=2)}</pre>",
                 parse_mode="HTML",
             )
         else:

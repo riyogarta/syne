@@ -277,9 +277,12 @@ class CodexProvider(LLMProvider):
         actual_model = model
 
         async with httpx.AsyncClient(timeout=180) as client:
-          for attempt in range(3):
+          for attempt in range(2):
+            # Shorter timeout for retry attempt to avoid long waits
+            req_timeout = 30 if attempt > 0 else 180
             async with client.stream(
                 "POST", url, json=body, headers=headers,
+                timeout=req_timeout,
             ) as resp:
                 if resp.status_code == 429:
                     error_text = ""
@@ -292,13 +295,12 @@ class CodexProvider(LLMProvider):
                         response=resp,
                     )
 
-                if 500 <= resp.status_code < 600 and attempt < 2:
+                if 500 <= resp.status_code < 600 and attempt < 1:
                     error_text = ""
                     async for chunk in resp.aiter_text():
                         error_text += chunk
-                    wait = 2 ** attempt
-                    logger.warning(f"Codex {resp.status_code}, retrying in {wait}s (attempt {attempt + 1}/3): {error_text[:200]}")
-                    await asyncio.sleep(wait)
+                    logger.warning(f"Codex {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {error_text[:200]}")
+                    await asyncio.sleep(1)
                     continue
 
                 if resp.status_code != 200:
@@ -378,7 +380,7 @@ class CodexProvider(LLMProvider):
 
             break  # success — exit retry loop
           else:
-            raise RuntimeError("Codex API failed after 3 retries")
+            raise RuntimeError("Codex API failed after 2 attempts")
 
         # Convert tool calls to Syne format
         parsed_tool_calls = None
