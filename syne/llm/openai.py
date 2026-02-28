@@ -143,11 +143,12 @@ class OpenAIProvider(LLMProvider):
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)
             body["reasoning_effort"] = effort
+            # Don't set max_tokens for reasoning models — the limit includes
+            # reasoning tokens, so capping it risks truncating actual output.
         else:
             body["temperature"] = temperature
-
-        if max_tokens:
-            body["max_tokens"] = max_tokens
+            if max_tokens:
+                body["max_tokens"] = max_tokens
         if top_p is not None:
             body["top_p"] = top_p
         if frequency_penalty is not None:
