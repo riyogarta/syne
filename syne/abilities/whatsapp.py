@@ -51,29 +51,74 @@ class WhatsAppAbility(Ability):
 
     # ── Dependencies ────────────────────────────────────────────
 
+    async def _resolve_wacli(self) -> Optional[str]:
+        """Find wacli binary — check PATH, DB config, and Go binary dirs.
+
+        Returns full path if found, None otherwise.
+        """
+        # 1. PATH
+        found = shutil.which("wacli")
+        if found:
+            return found
+
+        # 2. DB config (previously saved full path)
+        try:
+            from ..db.models import get_config
+            saved = await get_config("whatsapp.wacli_path")
+            if saved and os.path.isfile(saved) and os.access(saved, os.X_OK):
+                return saved
+        except Exception:
+            pass
+
+        # 3. Common locations — resolve dynamically, no hardcoded paths
+        candidates = [os.path.join(_WACLI_INSTALL_DIR, "wacli")]  # ~/.local/bin
+
+        # Ask Go where its binaries go (works for any user/setup)
+        if shutil.which("go"):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "go", "env", "GOPATH",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                gopath = out.decode().strip()
+                if gopath:
+                    candidates.append(os.path.join(gopath, "bin", "wacli"))
+            except Exception:
+                pass
+
+        # Fallback: ~/go/bin (Go default when GOPATH not set)
+        candidates.append(os.path.expanduser("~/go/bin/wacli"))
+
+        for candidate in candidates:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+
+        return None
+
+    async def _save_wacli_path(self, path: str):
+        """Persist resolved wacli path to DB so start_bridge() can find it."""
+        try:
+            from ..db.models import set_config
+            await set_config("whatsapp.wacli_path", path)
+            logger.info(f"Saved wacli path to DB: {path}")
+        except Exception as e:
+            logger.warning(f"Failed to save wacli path to DB: {e}")
+
     async def ensure_dependencies(self) -> tuple[bool, str]:
         """Check for wacli binary; install if missing.
 
         Install strategy (no sudo — never escalate privileges):
-        1. Check PATH and ~/.local/bin
+        1. Resolve via PATH, DB config, or Go binary dirs
         2. go install (if Go available)
         3. macOS only: download pre-built binary from GitHub releases
         4. Fail with instructions for the owner
         """
-        # Already installed?
-        if shutil.which("wacli"):
+        found = await self._resolve_wacli()
+        if found:
+            self._wacli_path = found
+            await self._save_wacli_path(found)
             return True, ""
-
-        # Check common binary locations that may not be in service PATH
-        for candidate in (
-            os.path.join(_WACLI_INSTALL_DIR, "wacli"),       # ~/.local/bin/wacli
-            os.path.expanduser("~/go/bin/wacli"),             # go install default
-            os.path.join(os.environ.get("GOPATH", ""), "bin", "wacli"),  # $GOPATH/bin
-        ):
-            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                self._wacli_path = candidate
-                logger.info(f"Found wacli at {candidate}")
-                return True, ""
 
         logger.info("wacli not found, attempting to install...")
 
@@ -123,6 +168,7 @@ class WhatsAppAbility(Ability):
                 wacli_path = os.path.join(_WACLI_INSTALL_DIR, "wacli")
                 if os.path.isfile(wacli_path):
                     self._wacli_path = wacli_path
+                    await self._save_wacli_path(wacli_path)
                     logger.info(f"wacli installed via go install → {wacli_path}")
                     return True, f"wacli installed to {wacli_path}"
             logger.warning(f"go install failed: {stderr.decode()[:300]}")
@@ -175,6 +221,7 @@ class WhatsAppAbility(Ability):
                         shutil.copy2(str(candidate), dest)
                         os.chmod(dest, os.stat(dest).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
                         self._wacli_path = dest
+                        await self._save_wacli_path(dest)
                         logger.info(f"wacli installed from release → {dest}")
                         return True, f"wacli downloaded and installed to {dest}"
 
@@ -259,29 +306,16 @@ class WhatsAppAbility(Ability):
         """
         global _bridge_instance
         self._agent = agent
-        self._wacli_path = wacli_path
 
-        # Resolve wacli path — shutil.which may fail if ~/go/bin not in service PATH
-        resolved = shutil.which(self._wacli_path)
+        # Resolve wacli — uses DB config, PATH, and Go binary dirs
+        resolved = await self._resolve_wacli()
         if resolved:
             self._wacli_path = resolved
-        elif not os.path.isfile(self._wacli_path):
-            # Try common locations
-            for candidate in (
-                os.path.expanduser("~/go/bin/wacli"),
-                os.path.join(os.environ.get("GOPATH", ""), "bin", "wacli"),
-                os.path.join(_WACLI_INSTALL_DIR, "wacli"),
-            ):
-                if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                    self._wacli_path = candidate
-                    logger.info(f"Resolved wacli path: {candidate}")
-                    break
-            else:
-                logger.error(
-                    f"wacli binary not found at '{self._wacli_path}' or common locations. "
-                    "Install from https://github.com/steipete/wacli"
-                )
-                return False
+        else:
+            logger.error(
+                "wacli binary not found. Install: go install github.com/steipete/wacli@latest"
+            )
+            return False
 
         try:
             self._process = await asyncio.create_subprocess_exec(
