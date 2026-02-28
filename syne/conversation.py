@@ -172,14 +172,13 @@ class Conversation:
                 memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}{flag}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
             # Log recalled memories for debugging
-            import logging
-            _log = logging.getLogger("syne.conversation")
-            _log.info(f"Recalled {len(memories)} memories for query: {user_message[:50]}")
+            _actual_query = recall_query or user_message
+            logger.info(f"Recalled {len(memories)} memories for query: {_actual_query[:80]}")
             for mem in memories[:3]:
-                _log.info(f"  Memory #{mem['id']} (sim={mem['similarity']:.3f}): {mem['content'][:60]}")
+                logger.info(f"  Memory #{mem['id']} (sim={mem['similarity']:.3f}): {mem['content'][:60]}")
         else:
-            import logging
-            logging.getLogger("syne.conversation").info(f"No memories recalled for query: {user_message[:50]}")
+            _actual_query = recall_query or user_message
+            logger.info(f"No memories recalled for query: {_actual_query[:80]}")
 
         # 5. Current user message (with optional image metadata)
         msg_metadata = getattr(self, '_message_metadata', None)
