@@ -130,6 +130,36 @@ def status():
                 else:
                     table.add_row("Embedding", "same as chat provider")
 
+                # Credentials summary
+                try:
+                    import time as _cred_time
+                    from syne.db.credentials import get_google_oauth_credentials, get_credential
+                    cred_parts = []
+                    g_creds = await get_google_oauth_credentials()
+                    if g_creds and g_creds.get("refresh_token"):
+                        exp = g_creds.get("expires_at", 0)
+                        status_str = "[green]OK[/green]" if _cred_time.time() < exp else "[yellow]expired[/yellow]"
+                        cred_parts.append(f"Google {status_str}")
+                    codex_token = await get_credential("credential.codex_access_token")
+                    if codex_token:
+                        exp = float(await get_credential("credential.codex_expires_at", 0) or 0)
+                        status_str = "[green]OK[/green]" if _cred_time.time() < exp else "[yellow]expired[/yellow]"
+                        cred_parts.append(f"Codex {status_str}")
+                    together_key = await get_credential("credential.together_api_key")
+                    if together_key:
+                        masked = str(together_key)[:8] + "..."
+                        cred_parts.append(f"Together [green]{masked}[/green]")
+                    groq_key = await get_credential("credential.groq_api_key")
+                    if groq_key:
+                        masked = str(groq_key)[:8] + "..."
+                        cred_parts.append(f"Groq [green]{masked}[/green]")
+                    if cred_parts:
+                        table.add_row("Credentials", ", ".join(cred_parts))
+                    else:
+                        table.add_row("Credentials", "[dim]none configured[/dim]")
+                except Exception:
+                    pass
+
                 # Scheduler/cron
                 async with get_connection() as conn:
                     sched_count = await conn.fetchrow("SELECT COUNT(*) as c FROM scheduled_tasks WHERE enabled = true")

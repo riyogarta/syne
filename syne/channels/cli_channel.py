@@ -527,7 +527,7 @@ async def _handle_cli_command(
             "[bold]CLI Commands[/bold]\n\n"
             "/help          — Show this help\n"
             "/status        — Show agent status\n"
-            "/model         — Show/switch model\n"
+            "/models        — Show/switch model\n"
             "/memory        — Search memories\n"
             "/compact       — Compact conversation\n"
             "/clear         — Clear conversation history\n"
@@ -600,7 +600,7 @@ async def _handle_cli_command(
         # Forward to agent as regular message
         return False
 
-    elif cmd == "/model":
+    elif cmd == "/models":
         if args:
             # Forward model switch to agent
             return False

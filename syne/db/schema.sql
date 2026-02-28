@@ -371,7 +371,10 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key'),
     -- Memory evaluator config (local Ollama to avoid main LLM rate limits)
     ('memory.evaluator_driver', '"ollama"', 'Driver for memory evaluator: "ollama" (local) or "provider" (main LLM)'),
-    ('memory.evaluator_model', '"qwen3:0.6b"', 'Ollama model for memory evaluation')
+    ('memory.evaluator_model', '"qwen3:0.6b"', 'Ollama model for memory evaluation'),
+    -- Evaluator model registry (CRUD via /evaluator)
+    ('memory.evaluator_models', '[{"key":"qwen3-0-6b","label":"qwen3:0.6b (Ollama)","driver":"ollama","model_id":"qwen3:0.6b","base_url":"http://localhost:11434"}]', 'Evaluator model registry'),
+    ('memory.active_evaluator', '"qwen3-0-6b"', 'Active evaluator model key')
 ON CONFLICT (key) DO NOTHING;
 
 -- Add memory decay columns (permanent flag + recall_count for conversation-based decay)

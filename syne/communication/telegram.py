@@ -226,11 +226,11 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
-        self.app.add_handler(CommandHandler("model", self._cmd_model))
+        self.app.add_handler(CommandHandler("models", self._cmd_models))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
+        self.app.add_handler(CommandHandler("evaluator", self._cmd_evaluator))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
-        self.app.add_handler(CommandHandler("auth", self._cmd_auth))
-        self.app.add_handler(CommandHandler("group", self._cmd_group))
+        self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Update commands removed — use `syne update` / `syne updatedev` from CLI
@@ -304,10 +304,10 @@ class TelegramChannel:
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("clear", "Clear current conversation"),
             BotCommand("identity", "Show agent identity"),
-            BotCommand("model", "Switch LLM model (owner only)"),
-            BotCommand("embedding", "Switch embedding model (owner only)"),
-            BotCommand("auth", "Manage credentials (OAuth & API keys)"),
-            BotCommand("group", "Manage groups, members & aliases"),
+            BotCommand("models", "Manage LLM models (owner only)"),
+            BotCommand("embedding", "Manage embedding models (owner only)"),
+            BotCommand("evaluator", "Manage evaluator model (owner only)"),
+            BotCommand("groups", "Manage groups, members & aliases"),
             BotCommand("members", "Manage global user access levels"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
@@ -487,7 +487,7 @@ class TelegramChannel:
         # ═══════════════════════════════════════════════════════════════
         if not is_group and self._contains_credential(text):
             await update.message.reply_text(
-                "⚠️ Credential detected in message. Use `/auth` to manage credentials.\n"
+                "⚠️ Credential detected in message. Use `/models` to manage credentials.\n"
                 "This message was NOT saved to history or memory.",
                 parse_mode="Markdown",
             )
@@ -1518,8 +1518,11 @@ class TelegramChannel:
 /compact — Compact conversation history
 /reasoning — Toggle reasoning visibility (on/off)
 /autocapture — Toggle auto memory capture (on/off)
-/model — Switch LLM model
-/auth — Manage credentials (OAuth & API keys)
+/models — Manage LLM models
+/embedding — Manage embedding models
+/evaluator — Manage evaluator model
+/groups — Manage groups & members
+/members — Manage global user access
 /clear — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
@@ -1664,6 +1667,30 @@ Or just send me a message!"""
             f"💭 Thinking: {self._format_thinking_level(thinking_budget)} | Reasoning: {'ON' if reasoning_visible else 'OFF'}",
             f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
         ]
+
+        # Credential summary
+        try:
+            cred_parts = []
+            from ..db.credentials import get_google_oauth_credentials, get_credential
+            import time as _time
+            g_creds = await get_google_oauth_credentials()
+            if g_creds and g_creds.get("refresh_token"):
+                exp = g_creds.get("expires_at", 0)
+                cred_parts.append("Google " + ("✅" if _time.time() < exp else "⚠️"))
+            codex_token = await get_credential("credential.codex_access_token")
+            if codex_token:
+                exp = float(await get_credential("credential.codex_expires_at", 0) or 0)
+                cred_parts.append("Codex " + ("✅" if _time.time() < exp else "⚠️"))
+            together_key = await get_credential("credential.together_api_key")
+            if together_key:
+                cred_parts.append("Together ✅")
+            groq_key = await get_credential("credential.groq_api_key")
+            if groq_key:
+                cred_parts.append("Groq ✅")
+            if cred_parts:
+                status_lines.append(f"🔐 Credentials: {' | '.join(cred_parts)}")
+        except Exception:
+            pass
 
         # Browse mode indicator
         browse_cwd = self._browse_cwd.get(update.effective_user.id)
@@ -1841,6 +1868,281 @@ Or just send me a message!"""
             parse_mode="Markdown",
         )
 
+    async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /evaluator command — manage evaluator model for auto-capture."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage the evaluator.")
+            return
+        await self._eval_menu_main(update)
+
+    async def _eval_menu_main(self, update_or_query):
+        """Render evaluator model list + auto-capture toggle."""
+        eval_models = await get_config("memory.evaluator_models", [])
+        active_key = await get_config("memory.active_evaluator", "qwen3-0-6b")
+        auto_capture = await get_config("memory.auto_capture", False)
+        ac_label = "ON" if auto_capture else "OFF"
+
+        buttons = []
+        for m in eval_models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            prefix = "✅ " if key == active_key else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"eval:detail:{key}"
+            )])
+        buttons.append([InlineKeyboardButton("➕ Add Evaluator", callback_data="eval:add_menu")])
+        buttons.append([InlineKeyboardButton(
+            f"{'✅ ' if auto_capture else '⬜ '}Auto-capture: {ac_label}",
+            callback_data="eval:toggle_ac",
+        )])
+
+        count = len(eval_models)
+        text = f"🔬 <b>Evaluator</b> — {count} registered | Auto-capture: <b>{ac_label}</b>"
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _eval_menu_detail(self, query, eval_key: str):
+        """Show evaluator model detail submenu."""
+        eval_models = await get_config("memory.evaluator_models", [])
+        active_key = await get_config("memory.active_evaluator", "qwen3-0-6b")
+        entry = next((m for m in eval_models if m.get("key") == eval_key), None)
+        if not entry:
+            await query.edit_message_text("❌ Evaluator model not found.")
+            return
+
+        label = entry.get("label", eval_key)
+        driver = entry.get("driver", "?")
+        model_id = entry.get("model_id", "?")
+        is_active = eval_key == active_key
+
+        text = (
+            f"🔬 <b>{label}</b>\n\n"
+            f"Driver: <code>{driver}</code> | Model: <code>{model_id}</code>"
+        )
+        if is_active:
+            text += "\n✅ <b>Active</b>"
+
+        buttons = []
+        if not is_active:
+            buttons.append([InlineKeyboardButton("✅ Set Active", callback_data=f"eval:set_active:{eval_key}")])
+        buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"eval:delete_confirm:{eval_key}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="eval:main")])
+
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _handle_eval_callback(self, query, data: str):
+        """Handle all eval:* callback routing."""
+        user = query.from_user
+
+        if data == "eval:main":
+            await self._eval_menu_main(query)
+
+        elif data.startswith("eval:detail:"):
+            eval_key = data.split(":", 2)[2]
+            await self._eval_menu_detail(query, eval_key)
+
+        elif data.startswith("eval:set_active:"):
+            eval_key = data.split(":", 2)[2]
+            eval_models = await get_config("memory.evaluator_models", [])
+            entry = next((m for m in eval_models if m.get("key") == eval_key), None)
+            if not entry:
+                await query.answer("Evaluator not found", show_alert=True)
+                return
+            await set_config("memory.active_evaluator", eval_key)
+            await set_config("memory.evaluator_driver", entry.get("driver", "ollama"))
+            await set_config("memory.evaluator_model", entry.get("model_id", ""))
+            await query.answer(f"Active → {entry.get('label', eval_key)}")
+            await self._eval_menu_main(query)
+
+        elif data == "eval:toggle_ac":
+            auto_capture = await get_config("memory.auto_capture", False)
+            new_val = not auto_capture
+            if new_val:
+                # Check if evaluator model is available before enabling
+                eval_driver = await get_config("memory.evaluator_driver", "ollama")
+                if eval_driver == "ollama":
+                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+                    from ..memory.evaluator import check_model_available
+                    available = await check_model_available(model=eval_model)
+                    if not available:
+                        await query.answer(
+                            f"Evaluator model '{eval_model}' not available. Run: ollama pull {eval_model}",
+                            show_alert=True,
+                        )
+                        return
+            await set_config("memory.auto_capture", new_val)
+            await query.answer(f"Auto-capture {'ON' if new_val else 'OFF'}")
+            await self._eval_menu_main(query)
+
+        elif data.startswith("eval:delete_confirm:"):
+            eval_key = data.split(":", 2)[2]
+            eval_models = await get_config("memory.evaluator_models", [])
+            entry = next((m for m in eval_models if m.get("key") == eval_key), None)
+            if not entry:
+                await query.answer("Evaluator not found", show_alert=True)
+                return
+            await query.edit_message_text(
+                f"🗑 <b>Delete {entry.get('label', eval_key)}?</b>",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"eval:delete:{eval_key}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"eval:detail:{eval_key}"),
+                    ],
+                ]),
+            )
+
+        elif data.startswith("eval:delete:"):
+            eval_key = data.split(":", 2)[2]
+            eval_models = await get_config("memory.evaluator_models", [])
+            active_key = await get_config("memory.active_evaluator", "qwen3-0-6b")
+            eval_models = [m for m in eval_models if m.get("key") != eval_key]
+            await set_config("memory.evaluator_models", eval_models)
+            if eval_key == active_key and eval_models:
+                new_active = eval_models[0]
+                await set_config("memory.active_evaluator", new_active["key"])
+                await set_config("memory.evaluator_driver", new_active.get("driver", "ollama"))
+                await set_config("memory.evaluator_model", new_active.get("model_id", ""))
+            await query.answer("Evaluator deleted")
+            await self._eval_menu_main(query)
+
+        elif data == "eval:add_menu":
+            drivers = [
+                ("ollama", "Ollama (local, FREE)"),
+                ("provider", "Use main chat LLM"),
+            ]
+            buttons = [
+                InlineKeyboardButton(label, callback_data=f"eval:add:{key}")
+                for key, label in drivers
+            ]
+            buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="eval:main"))
+            keyboard = [[btn] for btn in buttons]
+            await query.edit_message_text(
+                "🔬 <b>Add Evaluator</b>\n\n"
+                "Choose a driver:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("eval:add:"):
+            driver = data.split(":", 2)[2]
+            if driver == "provider":
+                # Use the active chat model directly
+                active_model_key = await get_config("provider.active_model", "gemini-pro")
+                models = await get_config("provider.models", [])
+                chat_entry = next((m for m in models if m.get("key") == active_model_key), None)
+                chat_label = chat_entry.get("label", active_model_key) if chat_entry else active_model_key
+                chat_model_id = chat_entry.get("model_id", active_model_key) if chat_entry else active_model_key
+
+                entry = {
+                    "key": f"provider-{active_model_key}",
+                    "label": f"{chat_label} (main LLM)",
+                    "driver": "provider",
+                    "model_id": chat_model_id,
+                }
+                eval_models = await get_config("memory.evaluator_models", [])
+                existing = next((m for m in eval_models if m["key"] == entry["key"]), None)
+                if existing:
+                    await query.answer("Already registered", show_alert=True)
+                    return
+                eval_models.append(entry)
+                await set_config("memory.evaluator_models", eval_models)
+                await query.answer(f"Added: {entry['label']}")
+                await self._eval_menu_main(query)
+            else:
+                # Ollama — multi-step: ask for model_id
+                self._auth_state[user.id] = {
+                    "type": "eval_add",
+                    "driver": driver,
+                    "step": "model_id",
+                }
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await (query._bot or self.app.bot).send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        "🔬 <b>Add Evaluator — Ollama</b>\n\n"
+                        "Send the model ID (e.g. <code>qwen3:0.6b</code>, <code>gemma3:1b</code>).\n\n"
+                        "Send /cancel to abort."
+                    ),
+                    parse_mode="HTML",
+                )
+
+    async def _process_addeval_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Multi-step evaluator model addition flow."""
+        bot = context.bot if context else self.app.bot
+        step = state.get("step", "")
+        text = text.strip()
+
+        if step == "model_id":
+            state["model_id"] = text
+            state["step"] = "label"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Model ID: <code>{text}</code>\n\n"
+                     f"Send a <b>display label</b> (e.g. <code>qwen3:0.6b (Ollama)</code>).\n"
+                     f"Or send <code>.</code> to auto-generate.",
+                parse_mode="HTML",
+            )
+            return True
+
+        elif step == "label":
+            model_id = state.get("model_id", "")
+            driver = state.get("driver", "ollama")
+            if text == ".":
+                label = f"{model_id} (Ollama)"
+            else:
+                label = text
+
+            entry = {
+                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower(),
+                "label": label,
+                "driver": driver,
+                "model_id": model_id,
+            }
+            if driver == "ollama":
+                entry["base_url"] = "http://localhost:11434"
+
+            eval_models = await get_config("memory.evaluator_models", [])
+            existing = next((m for m in eval_models if m["key"] == entry["key"]), None)
+            if existing:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"⚠️ Evaluator <code>{entry['key']}</code> already exists.",
+                    parse_mode="HTML",
+                )
+                self._auth_state.pop(user_id, None)
+                return True
+
+            eval_models.append(entry)
+            await set_config("memory.evaluator_models", eval_models)
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ <b>Evaluator added:</b>\n\n"
+                    f"• Key: <code>{entry['key']}</code>\n"
+                    f"• Label: {entry['label']}\n"
+                    f"• Driver: {driver}\n\n"
+                    f"Use /evaluator to manage."
+                ),
+                parse_mode="HTML",
+            )
+            logger.info(f"Evaluator added: {entry}")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        return False
+
     async def _cmd_autocapture(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /autocapture command — toggle with inline buttons."""
         user = update.effective_user
@@ -1884,7 +2186,7 @@ Or just send me a message!"""
                 if not available:
                     await update.message.reply_text(
                         f"❌ Evaluator model `{eval_model}` not available.\n"
-                        f"Run `ollama pull {eval_model}` first, or set evaluator driver to `provider`.",
+                        f"Run `ollama pull {eval_model}` first, or use /evaluator to configure.",
                         parse_mode="Markdown",
                     )
                     return
@@ -1911,112 +2213,597 @@ Or just send me a message!"""
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
-    async def _cmd_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /model command — switch LLM model with inline buttons.
-        
-        Uses driver-based model registry from DB (provider.models).
-        Tests the model before switching; rolls back on failure.
-        """
+    async def _cmd_models(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /models command — CRUD model management menu."""
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
         if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can switch models.")
+            await update.message.reply_text("⚠️ Only the owner can manage models.")
             return
+        await self._models_menu_main(update)
 
-        # Get model registry from DB
+    async def _models_menu_main(self, update_or_query):
+        """Render CRUD model list — reusable for command + back button."""
         models = await get_config("provider.models", [])
-        if not models:
-            await update.message.reply_text("⚠️ No models configured. Check provider.models in config.")
-            return
-        
-        # Get current active model
-        active_model_key = await get_config("provider.active_model", "gemini-pro")
+        active_key = await get_config("provider.active_model", "gemini-pro")
 
-        # Build buttons from DB entries
         buttons = []
-        for model in models:
-            key = model.get("key", "")
-            label = model.get("label", key)
-            is_active = (key == active_model_key)
-            btn_label = f"✅ {label}" if is_active else label
-            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
-
-        # Arrange buttons in rows of 2
-        keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-
-        # Get current model label and context window
-        current_model = next((m for m in models if m.get("key") == active_model_key), None)
-        current_label = current_model.get("label", active_model_key) if current_model else active_model_key
-        ctx_window = int(current_model.get("context_window", 0)) if current_model else None
-
-        ctx_info = ""
-        ctx_display = ""
-        if ctx_window:
-            if ctx_window >= 1000000:
-                ctx_display = f"{ctx_window / 1000000:.1f}M"
-                ctx_info = f"\n📐 Context window: {ctx_display} tokens"
-            else:
-                ctx_display = f"{ctx_window // 1000}K"
-                ctx_info = f"\n📐 Context window: {ctx_display} tokens"
-
-        # Add context window edit button
-        if ctx_display:
-            keyboard.append([InlineKeyboardButton(
-                f"📐 Context: {ctx_display}", callback_data="model:ctx"
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            prefix = "⭐ " if key == active_key else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"models:detail:{key}"
             )])
+        buttons.append([InlineKeyboardButton("➕ Add Model", callback_data="models:add_menu")])
 
-        await update.message.reply_text(
-            f"🤖 **Current model:** {current_label}{ctx_info}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        count = len(models)
+        text = f"🤖 <b>Models</b> — {count} registered"
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _models_menu_detail(self, query, model_key: str):
+        """Show model detail submenu."""
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        entry = next((m for m in models if m.get("key") == model_key), None)
+        if not entry:
+            await query.edit_message_text("❌ Model not found.")
+            return
+
+        label = entry.get("label", model_key)
+        driver = entry.get("driver", "?")
+        model_id = entry.get("model_id", "?")
+        ctx = int(entry.get("context_window", 0))
+        ctx_display = f"{ctx/1000000:.1f}M" if ctx >= 1000000 else f"{ctx//1000}K" if ctx else "?"
+        is_default = model_key == active_key
+
+        text = (
+            f"🤖 <b>{label}</b>\n\n"
+            f"Driver: <code>{driver}</code> | Model: <code>{model_id}</code>\n"
+            f"Context: {ctx_display} tokens"
         )
+        if is_default:
+            text += "\n⭐ <b>Default model</b>"
+
+        auth_type = entry.get("auth", "")
+        buttons = []
+        if not is_default:
+            buttons.append([InlineKeyboardButton("⭐ Set as Default", callback_data=f"models:set_default:{model_key}")])
+        buttons.append([InlineKeyboardButton(f"📐 Context Window: {ctx_display}", callback_data="models:ctx")])
+        if auth_type == "oauth":
+            buttons.append([InlineKeyboardButton("🔄 Re-authenticate", callback_data=f"models:reauth:{model_key}")])
+        elif auth_type == "api_key":
+            buttons.append([InlineKeyboardButton("🔐 Update API Key", callback_data=f"models:apikey:{model_key}")])
+        buttons.append([InlineKeyboardButton("✏️ Edit Label", callback_data=f"models:edit_label:{model_key}")])
+        buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"models:delete_confirm:{model_key}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="models:main")])
+
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _handle_models_callback(self, query, data: str):
+        """Handle all models:* callback routing."""
+        user = query.from_user
+
+        if data == "models:main":
+            await self._models_menu_main(query)
+
+        elif data.startswith("models:detail:"):
+            model_key = data.split(":", 2)[2]
+            await self._models_menu_detail(query, model_key)
+
+        elif data.startswith("models:set_default:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            await set_config("provider.active_model", model_key)
+            await set_config("provider.chat_model", entry["model_id"])
+            if self.agent:
+                await self.agent.reload_provider()
+            await query.answer(f"Default → {entry.get('label', model_key)}")
+            await self._models_menu_main(query)
+
+        elif data == "models:ctx":
+            # Show context window presets for active model
+            models = await get_config("provider.models", [])
+            active_key = await get_config("provider.active_model", "gemini-pro")
+            current = next((m for m in models if m.get("key") == active_key), None)
+            current_ctx = int(current.get("context_window", 0)) if current else 0
+            label = current.get("label", active_key) if current else active_key
+
+            presets = [
+                (128000, "128K"),
+                (200000, "200K"),
+                (500000, "500K"),
+                (1000000, "1M"),
+                (1048576, "1M (exact)"),
+            ]
+            buttons = []
+            for value, display in presets:
+                check = " ✓" if value == current_ctx else ""
+                buttons.append(InlineKeyboardButton(
+                    f"{display}{check}", callback_data=f"models:ctx:{value}"
+                ))
+            keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+            keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="models:ctx:custom")])
+            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="models:ctx:back")])
+
+            ctx_display = f"{current_ctx/1000000:.1f}M" if current_ctx >= 1000000 else f"{current_ctx//1000}K"
+            await query.edit_message_text(
+                f"📐 <b>Context Window — {label}</b>\n\n"
+                f"Current: <b>{ctx_display}</b> ({current_ctx:,} tokens)\n\n"
+                f"Select a preset or enter custom value:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("models:ctx:"):
+            ctx_action = data.split(":", 2)[2]
+
+            if ctx_action == "back":
+                # Back to model detail (active model)
+                active_key = await get_config("provider.active_model", "gemini-pro")
+                await self._models_menu_detail(query, active_key)
+
+            elif ctx_action == "custom":
+                self._auth_state[user.id] = {
+                    "type": "ctx_window",
+                    "step": "input",
+                    "chat_id": query.message.chat_id,
+                    "message_id": query.message.message_id,
+                }
+                await query.edit_message_text(
+                    "📐 <b>Custom Context Window</b>\n\n"
+                    "Send the context window size in tokens (number only).\n"
+                    "Examples: <code>1000000</code>, <code>200000</code>, <code>2000000</code>\n\n"
+                    "Send /cancel to abort.",
+                    parse_mode="HTML",
+                )
+
+            else:
+                # Apply preset context window value
+                try:
+                    new_ctx = int(ctx_action)
+                except ValueError:
+                    await query.answer("Invalid value", show_alert=True)
+                    return
+
+                models = await get_config("provider.models", [])
+                active_key = await get_config("provider.active_model", "gemini-pro")
+                updated = False
+                for m in models:
+                    if m.get("key") == active_key:
+                        m["context_window"] = new_ctx
+                        updated = True
+                        break
+
+                if updated:
+                    await set_config("provider.models", models)
+                    if self.agent:
+                        await self.agent.reload_provider()
+
+                    ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
+                    model_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
+                    await query.answer(f"Context window set to {ctx_display}")
+
+                    # Re-render preset menu with updated checkmark
+                    presets = [
+                        (128000, "128K"),
+                        (200000, "200K"),
+                        (500000, "500K"),
+                        (1000000, "1M"),
+                        (1048576, "1M (exact)"),
+                    ]
+                    buttons = []
+                    for value, display in presets:
+                        check = " ✓" if value == new_ctx else ""
+                        buttons.append(InlineKeyboardButton(
+                            f"{display}{check}", callback_data=f"models:ctx:{value}"
+                        ))
+                    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+                    keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="models:ctx:custom")])
+                    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="models:ctx:back")])
+
+                    await query.edit_message_text(
+                        f"📐 <b>Context Window — {model_label}</b>\n\n"
+                        f"Current: <b>{ctx_display}</b> ({new_ctx:,} tokens)\n\n"
+                        f"Select a preset or enter custom value:",
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                    )
+                else:
+                    await query.answer("Model not found", show_alert=True)
+
+        elif data.startswith("models:edit_label:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            self._auth_state[user.id] = {
+                "type": "models_edit_label",
+                "model_key": model_key,
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                f"✏️ <b>Edit Label — {entry.get('label', model_key)}</b>\n\n"
+                f"Send the new display label.\n"
+                f"Send /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif data.startswith("models:delete_confirm:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            active_key = await get_config("provider.active_model", "gemini-pro")
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            warn = ""
+            if model_key == active_key:
+                warn = "\n\n⚠️ This is the current default model. Deleting will switch to the next available."
+            if len(models) <= 1:
+                await query.answer("Cannot delete the only model", show_alert=True)
+                return
+            await query.edit_message_text(
+                f"🗑 <b>Delete {entry.get('label', model_key)}?</b>{warn}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"models:delete:{model_key}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"models:detail:{model_key}"),
+                    ],
+                ]),
+            )
+
+        elif data.startswith("models:delete:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            active_key = await get_config("provider.active_model", "gemini-pro")
+            models = [m for m in models if m.get("key") != model_key]
+            await set_config("provider.models", models)
+            # If deleted was active → switch to first remaining
+            if model_key == active_key and models:
+                new_default = models[0]
+                await set_config("provider.active_model", new_default["key"])
+                await set_config("provider.chat_model", new_default["model_id"])
+                if self.agent:
+                    await self.agent.reload_provider()
+            await query.answer("Model deleted")
+            await self._models_menu_main(query)
+
+        elif data == "models:add_menu":
+            # Show available drivers for adding a new model
+            drivers = [
+                ("google_cca", "Google (OAuth)"),
+                ("codex", "OpenAI / Codex (OAuth)"),
+                ("openai_compat", "OpenAI-compatible (API Key)"),
+                ("groq", "Groq (API Key)"),
+            ]
+            buttons = [
+                InlineKeyboardButton(label, callback_data=f"models:add:{key}")
+                for key, label in drivers
+            ]
+            buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="models:main"))
+            keyboard = [[btn] for btn in buttons]
+            await query.edit_message_text(
+                "🤖 <b>Add Model</b>\n\n"
+                "Choose a driver:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("models:reauth:"):
+            # Re-authenticate an OAuth model
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            driver = entry.get("driver", "")
+            # Map driver to auth provider key
+            _driver_to_auth = {
+                "google_cca": "google",
+                "codex": "codex",
+                "anthropic": "claude",
+            }
+            auth_key = _driver_to_auth.get(driver)
+            if not auth_key:
+                await query.answer("This model doesn't use OAuth", show_alert=True)
+                return
+            providers = await self._get_auth_providers()
+            auth_entry = next((p for p in providers if p.get("oauth_driver") == auth_key or p.get("key") == auth_key), None)
+            if not auth_entry:
+                await query.answer("Auth provider not found", show_alert=True)
+                return
+            chat_id = query.message.chat_id
+            await query.edit_message_text(
+                f"🔄 Starting {entry.get('label', model_key)} re-authentication...",
+            )
+            await self._start_oauth_flow(auth_entry, chat_id, user.id, None)
+
+        elif data.startswith("models:apikey:"):
+            # Update API key for a model
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            driver = entry.get("driver", "")
+            # Find credential key for this driver
+            providers = await self._get_auth_providers()
+            auth_entry = next((p for p in providers if p.get("key") == driver or p.get("auth_type") == "api_key" and driver in p.get("key", "")), None)
+            cred_key = auth_entry.get("credential_key", "") if auth_entry else ""
+            label = entry.get("label", model_key)
+            if not cred_key:
+                # Try common patterns
+                _driver_creds = {
+                    "openai_compat": "credential.openai_api_key",
+                    "groq": "credential.groq_api_key",
+                    "together": "credential.together_api_key",
+                }
+                cred_key = _driver_creds.get(driver, "")
+            if not cred_key:
+                await query.answer("No credential key for this driver", show_alert=True)
+                return
+            self._auth_state[user.id] = {
+                "type": "apikey",
+                "provider": driver,
+                "credential_key": cred_key,
+                "label": label,
+            }
+            await query.edit_message_text(
+                f"🔐 <b>{label} API Key</b>\n\n"
+                f"Paste your API key below.\n"
+                f"It will be saved to the database and <b>NOT</b> stored in chat history.\n\n"
+                f"Send /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif data.startswith("models:add:"):
+            # User selected a driver — ask for model details
+            driver = data.split(":", 2)[2]
+            logger.info(f"Add model: driver={driver}, user={user.id}")
+            _driver_meta = {
+                "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
+                "codex": ("OpenAI / Codex (OAuth)", "gpt-5.2, o3-pro"),
+                "openai_compat": ("OpenAI-compatible (API Key)", "meta-llama/llama-4-maverick"),
+                "groq": ("Groq (API Key)", "llama-3.3-70b-versatile, qwen/qwen3-32b"),
+            }
+            driver_label, examples = _driver_meta.get(driver, (driver, "model-name"))
+            self._auth_state[user.id] = {
+                "type": "models_add",
+                "driver": driver,
+                "step": "model_id",
+            }
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            example_first = examples.split(", ")[0]
+            from telegram import helpers as tg_helpers
+            await (query._bot or self.app.bot).send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"🤖 <b>Add Model — {driver_label}</b>\n\n"
+                    f"Send the model ID (e.g. <code>{example_first}</code>).\n\n"
+                    f"Available: {examples}\n\n"
+                    f"Send /cancel to abort."
+                ),
+                parse_mode="HTML",
+            )
 
     async def _cmd_embedding(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /embedding command — switch embedding model with inline buttons.
-        
-        Uses driver-based embedding registry from DB (provider.embedding_models).
-        Tests the embedding before switching; rolls back on failure.
-        """
+        """Handle /embedding command — CRUD embedding management menu."""
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
         if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can switch embedding models.")
+            await update.message.reply_text("⚠️ Only the owner can manage embedding models.")
             return
+        await self._embed_menu_main(update)
 
-        # Get embedding registry from DB
+    async def _embed_menu_main(self, update_or_query):
+        """Render CRUD embedding list."""
         models = await get_config("provider.embedding_models", [])
-        if not models:
-            await update.message.reply_text("⚠️ No embedding models configured. Check provider.embedding_models in config.")
-            return
-        
-        # Get current active embedding
         active_key = await get_config("provider.active_embedding", "together-bge")
 
-        # Build buttons from DB entries
         buttons = []
-        for model in models:
-            key = model.get("key", "")
-            label = model.get("label", key)
-            cost = model.get("cost", "")
-            is_active = (key == active_key)
-            btn_label = f"✅ {label}" if is_active else label
-            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"embedding:{key}"))
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            prefix = "✅ " if key == active_key else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"embed:detail:{key}"
+            )])
+        buttons.append([InlineKeyboardButton("➕ Add Embedding", callback_data="embed:add_menu")])
 
-        # Arrange buttons — one per row (labels are long)
-        keyboard = [[btn] for btn in buttons]
-        
-        # Get current model label
-        current_model = next((m for m in models if m.get("key") == active_key), None)
-        current_label = current_model.get("label", active_key) if current_model else active_key
-        current_cost = current_model.get("cost", "") if current_model else ""
-        
-        await update.message.reply_text(
-            f"🧠 **Current embedding:** {current_label}\n💰 Cost: {current_cost}",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        count = len(models)
+        text = f"🧬 <b>Embedding</b> — {count} registered"
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _embed_menu_detail(self, query, embed_key: str):
+        """Show embedding detail submenu."""
+        models = await get_config("provider.embedding_models", [])
+        active_key = await get_config("provider.active_embedding", "together-bge")
+        entry = next((m for m in models if m.get("key") == embed_key), None)
+        if not entry:
+            await query.edit_message_text("❌ Embedding not found.")
+            return
+
+        label = entry.get("label", embed_key)
+        driver = entry.get("driver", "?")
+        model_id = entry.get("model_id", "?")
+        dims = entry.get("dimensions", "?")
+        cost = entry.get("cost", "?")
+        is_active = embed_key == active_key
+
+        text = (
+            f"🧬 <b>{label}</b>\n\n"
+            f"Driver: <code>{driver}</code> | Model: <code>{model_id}</code>\n"
+            f"Dimensions: {dims} | Cost: {cost}"
         )
+        if is_active:
+            text += "\n✅ <b>Active</b>"
+
+        buttons = []
+        if not is_active:
+            buttons.append([InlineKeyboardButton("✅ Set Active", callback_data=f"embed:set_active:{embed_key}")])
+        buttons.append([InlineKeyboardButton("✏️ Edit Label", callback_data=f"embed:edit_label:{embed_key}")])
+        buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"embed:delete_confirm:{embed_key}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="embed:main")])
+
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _handle_embed_callback(self, query, data: str):
+        """Handle all embed:* callback routing."""
+        user = query.from_user
+
+        if data == "embed:main":
+            await self._embed_menu_main(query)
+
+        elif data.startswith("embed:detail:"):
+            embed_key = data.split(":", 2)[2]
+            await self._embed_menu_detail(query, embed_key)
+
+        elif data.startswith("embed:set_active:"):
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
+            # Apply embedding (test + dimension change handling)
+            chat_id = query.message.chat_id
+            from telegram.ext import ContextTypes
+            success, result = await self._apply_embedding(embed_key, chat_id, None)
+            if success:
+                await query.answer(f"Active → {entry.get('label', embed_key)}")
+            else:
+                await query.answer(f"Failed: {result[:50]}", show_alert=True)
+            await self._embed_menu_main(query)
+
+        elif data.startswith("embed:edit_label:"):
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
+            self._auth_state[user.id] = {
+                "type": "embed_edit_label",
+                "embed_key": embed_key,
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                f"✏️ <b>Edit Label — {entry.get('label', embed_key)}</b>\n\n"
+                f"Send the new display label.\n"
+                f"Send /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif data.startswith("embed:delete_confirm:"):
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            active_key = await get_config("provider.active_embedding", "together-bge")
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
+            if len(models) <= 1:
+                await query.answer("Cannot delete the only embedding", show_alert=True)
+                return
+            warn = ""
+            if embed_key == active_key:
+                warn = "\n\n⚠️ This is the active embedding. Deleting will switch to the next available."
+            await query.edit_message_text(
+                f"🗑 <b>Delete {entry.get('label', embed_key)}?</b>{warn}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"embed:delete:{embed_key}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"embed:detail:{embed_key}"),
+                    ],
+                ]),
+            )
+
+        elif data.startswith("embed:delete:"):
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            active_key = await get_config("provider.active_embedding", "together-bge")
+            models = [m for m in models if m.get("key") != embed_key]
+            await set_config("provider.embedding_models", models)
+            if embed_key == active_key and models:
+                new_active = models[0]
+                await set_config("provider.active_embedding", new_active["key"])
+                if self.agent:
+                    await self.agent.reload_provider()
+            await query.answer("Embedding deleted")
+            await self._embed_menu_main(query)
+
+        elif data == "embed:add_menu":
+            drivers = [
+                ("ollama", "Ollama (local, FREE)"),
+                ("together", "Together AI (API Key)"),
+                ("openai_compat", "OpenAI-compatible (API Key)"),
+            ]
+            buttons = [
+                InlineKeyboardButton(label, callback_data=f"embed:add:{key}")
+                for key, label in drivers
+            ]
+            buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="embed:main"))
+            keyboard = [[btn] for btn in buttons]
+            await query.edit_message_text(
+                "🧬 <b>Add Embedding</b>\n\n"
+                "Choose a driver:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        elif data.startswith("embed:add:"):
+            driver = data.split(":", 2)[2]
+            logger.info(f"Add embedding: driver={driver}, user={user.id}")
+            driver_labels = {
+                "ollama": "Ollama (local, FREE)",
+                "together": "Together AI (API Key)",
+                "openai_compat": "OpenAI-compatible (API Key)",
+            }
+            driver_label = driver_labels.get(driver, driver)
+            self._auth_state[user.id] = {
+                "type": "embed_add",
+                "driver": driver,
+                "step": "model_id",
+            }
+            try:
+                await query.answer()
+            except Exception:
+                pass
+            await (query._bot or self.app.bot).send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    f"🧬 <b>Add Embedding — {driver_label}</b>\n\n"
+                    "Send the model ID (e.g. <code>qwen3-embedding:0.6b</code>, <code>BAAI/bge-base-en-v1.5</code>).\n\n"
+                    "Send /cancel to abort."
+                ),
+                parse_mode="HTML",
+            )
 
     async def _apply_embedding(self, embed_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
         """Apply an embedding model from registry — test before switching.
@@ -2205,48 +2992,6 @@ Or just send me a message!"""
             return self._DEFAULT_AUTH_PROVIDERS
         return providers
 
-    async def _cmd_auth(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /auth command — unified credential management.
-        
-        Owner only. Provider list from DB (auth.providers).
-        - New OAuth Setup: providers with auth_type=oauth
-        - New API Key: providers with auth_type=api_key
-        - Re-authenticate: Refresh existing OAuth credentials
-        """
-        user = update.effective_user
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can manage credentials.")
-            return
-
-        # Clear any stale auth state
-        self._auth_state.pop(user.id, None)
-
-        buttons = [
-            [
-                InlineKeyboardButton("🔑 New OAuth Setup", callback_data="auth:oauth_menu"),
-                InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
-            ],
-            [
-                InlineKeyboardButton("🤖 Add Model", callback_data="auth:addmodel_menu"),
-                InlineKeyboardButton("🧠 Add Embedding", callback_data="auth:addembed_menu"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
-            ],
-            [
-                InlineKeyboardButton("📋 Credential Status", callback_data="auth:status"),
-            ],
-        ]
-
-        await update.message.reply_text(
-            "🔐 **Credential & Provider Management**\n\n"
-            "Choose an action:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(buttons),
-        )
-
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /cancel command — abort active operation, auth flow, or running sub-agents."""
         user = update.effective_user
@@ -2283,14 +3028,14 @@ Or just send me a message!"""
         else:
             await update.message.reply_text("Nothing to cancel.")
 
-    async def _cmd_group(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /group command — manage group members, aliases, access levels.
+    async def _cmd_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /groups command — manage group members, aliases, access levels.
 
         Usage (owner DM only):
-            /group list                          — list all registered groups
-            /group members <group_id_or_name>    — list members in a group
-            /group set <group> <member_id> <level>  — set access (owner/family/public)
-            /group alias <group> <member_id> <name>  — set per-group alias
+            /groups list                          — list all registered groups
+            /groups members <group_id_or_name>    — list members in a group
+            /groups set <group> <member_id> <level>  — set access (owner/family/public)
+            /groups alias <group> <member_id> <name>  — set per-group alias
         """
         user = update.effective_user
         chat = update.effective_chat
@@ -2302,7 +3047,7 @@ Or just send me a message!"""
             await update.message.reply_text("⚠️ Only the owner can manage groups.")
             return
         if chat.type != "private":
-            await update.message.reply_text("⚠️ Use /group in DM only.")
+            await update.message.reply_text("⚠️ Use /groups in DM only.")
             return
 
         args = context.args or []
@@ -2330,7 +3075,7 @@ Or just send me a message!"""
             elif len(args) >= 2:
                 await self._group_get_model(update, args[1])
             else:
-                await update.message.reply_text("❌ Usage: /group model <group> [model_key]")
+                await update.message.reply_text("❌ Usage: /groups model <group> [model_key]")
         elif subcommand == "settings" and len(args) >= 2:
             if len(args) == 2:
                 # View settings
@@ -2341,14 +3086,14 @@ Or just send me a message!"""
                 value = " ".join(args[3:])
                 await self._group_set_setting(update, args[1], key, value)
             else:
-                await update.message.reply_text("❌ Usage: /group settings <group> [key] [value|--delete]")
+                await update.message.reply_text("❌ Usage: /groups settings <group> [key] [value|--delete]")
         else:
-            await update.message.reply_text("❌ Invalid syntax. Use /group for help.")
+            await update.message.reply_text("❌ Invalid syntax. Use /groups for help.")
 
     async def _handle_group_callback(self, query, data: str):
         """Handle interactive group menu callbacks."""
         parts = data.split(":")
-        # grp:action:param1:param2...
+        # groups:action:param1:param2...
         action = parts[1] if len(parts) > 1 else ""
         
         # Owner check
@@ -2439,8 +3184,8 @@ Or just send me a message!"""
             
             buttons = [
                 [
-                    InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"grp:delete:{group_id}"),
-                    InlineKeyboardButton("❌ Cancel", callback_data=f"grp:view:{group_id}"),
+                    InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"groups:delete:{group_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"groups:view:{group_id}"),
                 ]
             ]
             await query.edit_message_text(
@@ -2531,21 +3276,21 @@ Or just send me a message!"""
                 f"\u270f\ufe0f <b>Set Alias for {m_name}</b>\n\n"
                 f"Current alias: {current}\n\n"
                 f"Send the new alias as a message:\n"
-                f"<code>/group alias {group_id} {member_id} NewAlias</code>"
+                f"<code>/groups alias {group_id} {member_id} NewAlias</code>"
             )
-            buttons = [[InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=f"grp:member:{group_id}:{member_id}")]]
+            buttons = [[InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=f"groups:member:{group_id}:{member_id}")]]
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         
         elif action == "add_prompt":
             await query.edit_message_text(
                 "➕ <b>Add Group</b>\n\n"
                 "Send the group ID to register:\n"
-                "<code>/group add &lt;group_id&gt;</code>\n\n"
+                "<code>/groups add &lt;group_id&gt;</code>\n\n"
                 "To find group ID: add the bot to the group, "
                 "or forward a message from the group to @userinfobot.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back", callback_data="grp:main")]
+                    [InlineKeyboardButton("⬅️ Back", callback_data="groups:main")]
                 ]),
             )
         
@@ -2566,10 +3311,10 @@ Or just send me a message!"""
             name = row["name"] or gid
             emoji = "✅" if row["enabled"] else "⛔"
             buttons.append([InlineKeyboardButton(
-                f"{emoji} {name}", callback_data=f"grp:view:{gid}"
+                f"{emoji} {name}", callback_data=f"groups:view:{gid}"
             )])
         
-        buttons.append([InlineKeyboardButton("➕ Add Group", callback_data="grp:add_prompt")])
+        buttons.append([InlineKeyboardButton("➕ Add Group", callback_data="groups:add_prompt")])
         
         text = "📋 <b>Group Management</b>\n\nSelect a group to manage:"
         if not rows:
@@ -2591,16 +3336,24 @@ Or just send me a message!"""
         
         name = group.get("name", group_id)
         settings = group.get("settings") or {}
-        model = settings.get("model", "default")
+        model_key = settings.get("model")
         enabled = "✅ Enabled" if group.get("enabled") else "⛔ Disabled"
         mention = "Yes" if group.get("require_mention") else "No"
-        
+
+        if model_key:
+            model_display = f"<code>{model_key}</code>"
+        else:
+            _models = await get_config("provider.models", [])
+            _active = await get_config("provider.active_model", "gemini-pro")
+            _def_lbl = next((m.get("label", _active) for m in _models if m.get("key") == _active), _active)
+            model_display = f"Default ({_def_lbl})"
+
         text = (
             f"📋 <b>{name}</b>\n\n"
             f"ID: <code>{group_id}</code>\n"
             f"Status: {enabled}\n"
             f"Require mention: {mention}\n"
-            f"Model: <code>{model}</code>\n"
+            f"Model: {model_display}\n"
         )
         
         # Add custom settings
@@ -2611,16 +3364,16 @@ Or just send me a message!"""
                 text += f"  • {k}: {settings[k]}\n"
         
         buttons = [
-            [InlineKeyboardButton("🤖 Change Model", callback_data=f"grp:model_list:{group_id}")],
-            [InlineKeyboardButton("👥 Members", callback_data=f"grp:members:{group_id}")],
+            [InlineKeyboardButton("🤖 Change Model", callback_data=f"groups:model_list:{group_id}")],
+            [InlineKeyboardButton("👥 Members", callback_data=f"groups:members:{group_id}")],
             [
                 InlineKeyboardButton(
                     "⛔ Disable" if group.get("enabled") else "✅ Enable",
-                    callback_data=f"grp:toggle:{group_id}"
+                    callback_data=f"groups:toggle:{group_id}"
                 ),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"grp:delete_confirm:{group_id}"),
+                InlineKeyboardButton("🗑 Delete", callback_data=f"groups:delete_confirm:{group_id}"),
             ],
-            [InlineKeyboardButton("⬅️ Back", callback_data="grp:main")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="groups:main")],
         ]
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
@@ -2628,26 +3381,29 @@ Or just send me a message!"""
     async def _group_menu_model_list(self, query, group_id: str):
         """Show model selection for a group."""
         from ..db.models import get_config, get_group
-        
+
         group = await get_group("telegram", group_id)
         current_model = ((group or {}).get("settings") or {}).get("model")
-        
+
         models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
+
         buttons = []
         for m in models:
             key = m.get("key", "")
             label = m.get("label", key)
             check = " ✓" if key == current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"{label}{check}", callback_data=f"grp:model_set:{group_id}:{key}"
+                f"{label}{check}", callback_data=f"groups:model_set:{group_id}:{key}"
             )])
-        
-        # Add "default" option
+
+        # Add "default" option with resolved label
         check = " ✓" if not current_model else ""
         buttons.append([InlineKeyboardButton(
-            f"🔄 Default{check}", callback_data=f"grp:model_set:{group_id}:__default__"
+            f"🔄 Default ({default_label}){check}", callback_data=f"groups:model_set:{group_id}:__default__"
         )])
-        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")])
         
         name = (group or {}).get("name", group_id)
         await query.edit_message_text(
@@ -2669,7 +3425,7 @@ Or just send me a message!"""
         
         if not members:
             text = f"👥 <b>{name} — Members</b>\n\nNo members collected yet."
-            buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
+            buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")]]
         else:
             text = f"👥 <b>{name} — Members</b>\n\nTap a member to edit:"
             buttons = []
@@ -2679,9 +3435,9 @@ Or just send me a message!"""
                 emoji = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤"}.get(access, "👤")
                 buttons.append([InlineKeyboardButton(
                     f"{emoji} {m_name} — {access}",
-                    callback_data=f"grp:member:{group_id}:{mid}",
+                    callback_data=f"groups:member:{group_id}:{mid}",
                 )])
-            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")])
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")])
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -2715,13 +3471,13 @@ Or just send me a message!"""
         for lvl in levels:
             check = " ✓" if lvl == access else ""
             access_buttons.append(InlineKeyboardButton(
-                f"{lvl}{check}", callback_data=f"grp:member_access:{group_id}:{member_id}:{lvl}"
+                f"{lvl}{check}", callback_data=f"groups:member_access:{group_id}:{member_id}:{lvl}"
             ))
         
         buttons = [
             access_buttons,
-            [InlineKeyboardButton("✏️ Set Alias", callback_data=f"grp:member_alias_prompt:{group_id}:{member_id}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"grp:members:{group_id}")],
+            [InlineKeyboardButton("✏️ Set Alias", callback_data=f"groups:member_alias_prompt:{group_id}:{member_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"groups:members:{group_id}")],
         ]
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
@@ -2745,9 +3501,9 @@ Or just send me a message!"""
         else:
             text = f"⚙️ <b>{name} — Settings</b>\n\nNo custom settings."
         
-        text += "\n\nTo set: <code>/group settings " + name + " key value</code>"
+        text += "\n\nTo set: <code>/groups settings " + name + " key value</code>"
         
-        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"grp:view:{group_id}")]]
+        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")]]
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _group_get_model(self, update: Update, group_ref: str):
@@ -2989,20 +3745,20 @@ Or just send me a message!"""
             await update.message.reply_text("❌ Failed to update alias.")
 
     async def _group_view_settings(self, update: Update, group_ref: str):
-        """View group settings (excluding members — those are in /group members)."""
+        """View group settings (excluding members — those are in /groups members)."""
         group = await self._resolve_group(group_ref)
         if not group:
             await update.message.reply_text(f"❌ Group not found: {group_ref}")
             return
 
         settings = group.get("settings", {}) or {}
-        # Filter out 'members' — that's managed via /group members
+        # Filter out 'members' — that's managed via /groups members
         display = {k: v for k, v in settings.items() if k != "members"}
 
         if not display:
             await update.message.reply_text(
                 f"⚙️ <b>{group['name']}</b> — no custom settings.\n\n"
-                f"Set with: <code>/group settings {group_ref} key value</code>",
+                f"Set with: <code>/groups settings {group_ref} key value</code>",
                 parse_mode="HTML",
             )
             return
@@ -3010,8 +3766,8 @@ Or just send me a message!"""
         lines = [f"⚙️ <b>{group['name']}</b> settings:\n"]
         for k, v in sorted(display.items()):
             lines.append(f"  <b>{k}</b>: {v}")
-        lines.append(f"\nEdit: <code>/group settings {group_ref} key value</code>")
-        lines.append(f"Delete: <code>/group settings {group_ref} key --delete</code>")
+        lines.append(f"\nEdit: <code>/groups settings {group_ref} key value</code>")
+        lines.append(f"Delete: <code>/groups settings {group_ref} key --delete</code>")
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
     async def _group_set_setting(self, update: Update, group_ref: str, key: str, value: str):
@@ -3021,9 +3777,9 @@ Or just send me a message!"""
             await update.message.reply_text(f"❌ Group not found: {group_ref}")
             return
 
-        # Protect 'members' key — managed via /group set and /group alias
+        # Protect 'members' key — managed via /groups set and /groups alias
         if key == "members":
-            await update.message.reply_text("❌ Use /group set and /group alias to manage members.")
+            await update.message.reply_text("❌ Use /groups set and /groups alias to manage members.")
             return
 
         from ..db.connection import get_connection
@@ -3170,7 +3926,14 @@ Or just send me a message!"""
         is_first_owner = first_owner and first_owner.get("platform_id") == platform_id
         
         user_model = ((user.get("preferences") or {}).get("model"))
-        model_label = f"<code>{user_model}</code>" if user_model else "<i>default</i>"
+        if user_model:
+            model_label = f"<code>{user_model}</code>"
+        else:
+            from ..db.models import get_config as _gc
+            _models = await _gc("provider.models", [])
+            _active = await _gc("provider.active_model", "gemini-pro")
+            _def_lbl = next((m.get("label", _active) for m in _models if m.get("key") == _active), _active)
+            model_label = f"<i>Default ({_def_lbl})</i>"
         text = f"👤 <b>{name}</b>\n\nID: <code>{platform_id}</code>\nAccess: <b>{access}</b>\nModel: {model_label}"
         if is_first_owner:
             text += "\n🔒 <i>First owner (immutable)</i>"
@@ -3206,6 +3969,9 @@ Or just send me a message!"""
         current_model = ((user or {}).get("preferences") or {}).get("model")
 
         models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
+
         buttons = []
         for m in models:
             key = m.get("key", "")
@@ -3215,10 +3981,10 @@ Or just send me a message!"""
                 f"{label}{check}", callback_data=f"mbr:model_set:{platform_id}:{key}"
             )])
 
-        # Add "default" option
+        # Add "default" option with resolved label
         check = " ✓" if not current_model else ""
         buttons.append([InlineKeyboardButton(
-            f"🔄 Default{check}", callback_data=f"mbr:model_set:{platform_id}:__default__"
+            f"🔄 Default ({default_label}){check}", callback_data=f"mbr:model_set:{platform_id}:__default__"
         )])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mbr:view:{platform_id}")])
 
@@ -3471,12 +4237,18 @@ Or just send me a message!"""
             return await self._process_oauth_input(user_id, chat_id, text, state, context)
         elif auth_type == "apikey":
             return await self._process_apikey_input(user_id, chat_id, text, state, context)
-        elif auth_type == "addmodel":
+        elif auth_type in ("addmodel", "models_add"):
             return await self._process_addmodel_input(user_id, chat_id, text, state, context)
-        elif auth_type == "addembed":
+        elif auth_type in ("addembed", "embed_add"):
             return await self._process_addembed_input(user_id, chat_id, text, state, context)
         elif auth_type == "ctx_window":
             return await self._process_ctx_window_input(user_id, chat_id, text, state, context)
+        elif auth_type == "models_edit_label":
+            return await self._process_models_edit_label(user_id, chat_id, text, state, context)
+        elif auth_type == "embed_edit_label":
+            return await self._process_embed_edit_label(user_id, chat_id, text, state, context)
+        elif auth_type == "eval_add":
+            return await self._process_addeval_input(user_id, chat_id, text, state, context)
 
         return False
 
@@ -3531,7 +4303,7 @@ Or just send me a message!"""
             logger.error(f"OAuth exchange failed for {provider}: {e}", exc_info=True)
             await bot.send_message(
                 chat_id=chat_id,
-                text=f"❌ OAuth exchange failed: {str(e)[:200]}\n\nTry again with /auth.",
+                text=f"❌ OAuth exchange failed: {str(e)[:200]}\n\nTry again via /models → Re-authenticate.",
             )
         finally:
             # Always clear auth state
@@ -3676,7 +4448,7 @@ Or just send me a message!"""
                     f"• Driver: {driver}\n"
                     f"• Auth: {auth_type}\n"
                     f"• Context: {ctx_display}\n\n"
-                    f"Use /model to switch to it."
+                    f"Use /models to switch to it."
                 ),
                 parse_mode="HTML",
             )
@@ -3730,6 +4502,60 @@ Or just send me a message!"""
             )
         else:
             await bot.send_message(chat_id=chat_id, text="Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_models_edit_label(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle text input for editing a model label."""
+        bot = context.bot if context else self.app.bot
+        text = text.strip()
+        model_key = state.get("model_key", "")
+
+        models = await get_config("provider.models", [])
+        updated = False
+        for m in models:
+            if m.get("key") == model_key:
+                m["label"] = text
+                updated = True
+                break
+
+        if updated:
+            await set_config("provider.models", models)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Label updated to <b>{text}</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text="❌ Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_embed_edit_label(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle text input for editing an embedding label."""
+        bot = context.bot if context else self.app.bot
+        text = text.strip()
+        embed_key = state.get("embed_key", "")
+
+        models = await get_config("provider.embedding_models", [])
+        updated = False
+        for m in models:
+            if m.get("key") == embed_key:
+                m["label"] = text
+                updated = True
+                break
+
+        if updated:
+            await set_config("provider.embedding_models", models)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Embedding label updated to <b>{text}</b>",
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text="❌ Embedding not found in registry.")
 
         self._auth_state.pop(user_id, None)
         return True
@@ -3829,7 +4655,7 @@ Or just send me a message!"""
                     f"• Driver: {driver}\n"
                     f"• Dimensions: {entry['dimensions']}\n"
                     f"• Cost: {cost}\n\n"
-                    f"Use /embedding to switch to it."
+                    f"Use /embedding to activate it."
                 ),
                 parse_mode="HTML",
             )
@@ -4363,230 +5189,14 @@ Or just send me a message!"""
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
 
-        elif data == "model:ctx":
-            # Show context window presets for active model
-            models = await get_config("provider.models", [])
-            active_key = await get_config("provider.active_model", "gemini-pro")
-            current = next((m for m in models if m.get("key") == active_key), None)
-            current_ctx = int(current.get("context_window", 0)) if current else 0
-            label = current.get("label", active_key) if current else active_key
+        elif data.startswith("models:"):
+            await self._handle_models_callback(query, data)
 
-            presets = [
-                (128000, "128K"),
-                (200000, "200K"),
-                (500000, "500K"),
-                (1000000, "1M"),
-                (1048576, "1M (exact)"),
-            ]
-            buttons = []
-            for value, display in presets:
-                check = " ✓" if value == current_ctx else ""
-                buttons.append(InlineKeyboardButton(
-                    f"{display}{check}", callback_data=f"model:ctx:{value}"
-                ))
-            keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-            keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="model:ctx:custom")])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="model:ctx:back")])
+        elif data.startswith("embed:"):
+            await self._handle_embed_callback(query, data)
 
-            ctx_display = f"{current_ctx/1000000:.1f}M" if current_ctx >= 1000000 else f"{current_ctx//1000}K"
-            await query.edit_message_text(
-                f"📐 <b>Context Window — {label}</b>\n\n"
-                f"Current: <b>{ctx_display}</b> ({current_ctx:,} tokens)\n\n"
-                f"Select a preset or enter custom value:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-
-        elif data.startswith("model:ctx:"):
-            ctx_action = data.split(":", 2)[2]
-
-            if ctx_action == "back":
-                # Re-render /model menu
-                models = await get_config("provider.models", [])
-                active_key = await get_config("provider.active_model", "gemini-pro")
-                buttons = []
-                for m in models:
-                    key = m.get("key", "")
-                    mlabel = m.get("label", key)
-                    is_active = (key == active_key)
-                    btn_label = f"✅ {mlabel}" if is_active else mlabel
-                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
-                keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-                current = next((m for m in models if m.get("key") == active_key), None)
-                current_label = current.get("label", active_key) if current else active_key
-                ctx_window = int(current.get("context_window", 0)) if current else 0
-                ctx_info = ""
-                ctx_disp = ""
-                if ctx_window:
-                    if ctx_window >= 1000000:
-                        ctx_disp = f"{ctx_window / 1000000:.1f}M"
-                    else:
-                        ctx_disp = f"{ctx_window // 1000}K"
-                    ctx_info = f"\n📐 Context window: {ctx_disp} tokens"
-                if ctx_disp:
-                    keyboard.append([InlineKeyboardButton(
-                        f"📐 Context: {ctx_disp}", callback_data="model:ctx"
-                    )])
-                await query.edit_message_text(
-                    f"🤖 **Current model:** {current_label}{ctx_info}",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif ctx_action == "custom":
-                # Enter text input mode for custom context window
-                user = query.from_user
-                self._auth_state[user.id] = {
-                    "type": "ctx_window",
-                    "step": "input",
-                    "chat_id": query.message.chat_id,
-                    "message_id": query.message.message_id,
-                }
-                await query.edit_message_text(
-                    "📐 <b>Custom Context Window</b>\n\n"
-                    "Send the context window size in tokens (number only).\n"
-                    "Examples: <code>1000000</code>, <code>200000</code>, <code>2000000</code>\n\n"
-                    "Send /cancel to abort.",
-                    parse_mode="HTML",
-                )
-
-            else:
-                # Apply preset context window value
-                try:
-                    new_ctx = int(ctx_action)
-                except ValueError:
-                    await query.answer("Invalid value", show_alert=True)
-                    return
-
-                models = await get_config("provider.models", [])
-                active_key = await get_config("provider.active_model", "gemini-pro")
-                updated = False
-                for m in models:
-                    if m.get("key") == active_key:
-                        m["context_window"] = new_ctx
-                        updated = True
-                        break
-
-                if updated:
-                    await set_config("provider.models", models)
-                    # Reload provider to apply new context window
-                    if self.agent:
-                        await self.agent.reload_provider()
-
-                    ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
-                    model_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
-                    await query.answer(f"Context window set to {ctx_display}")
-
-                    # Re-render preset menu with updated checkmark
-                    presets = [
-                        (128000, "128K"),
-                        (200000, "200K"),
-                        (500000, "500K"),
-                        (1000000, "1M"),
-                        (1048576, "1M (exact)"),
-                    ]
-                    buttons = []
-                    for value, display in presets:
-                        check = " ✓" if value == new_ctx else ""
-                        buttons.append(InlineKeyboardButton(
-                            f"{display}{check}", callback_data=f"model:ctx:{value}"
-                        ))
-                    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-                    keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="model:ctx:custom")])
-                    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="model:ctx:back")])
-
-                    await query.edit_message_text(
-                        f"📐 <b>Context Window — {model_label}</b>\n\n"
-                        f"Current: <b>{ctx_display}</b> ({new_ctx:,} tokens)\n\n"
-                        f"Select a preset or enter custom value:",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                else:
-                    await query.answer("Model not found", show_alert=True)
-
-        elif data.startswith("model:"):
-            model_key = data.split(":", 1)[1]
-
-            # Get model registry
-            models = await get_config("provider.models", [])
-            model_entry = next((m for m in models if m.get("key") == model_key), None)
-
-            if model_entry:
-                # Test and apply model
-                chat_id = query.message.chat_id
-                success, result = await self._apply_model(model_key, chat_id, context)
-
-                # Get updated active model
-                active_model_key = model_key if success else await get_config("provider.active_model", "gemini-pro")
-
-                # Rebuild buttons
-                buttons = []
-                for m in models:
-                    key = m.get("key", "")
-                    label = m.get("label", key)
-                    is_active = (key == active_model_key)
-                    btn_label = f"✅ {label}" if is_active else label
-                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"model:{key}"))
-                keyboard = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-
-                if success:
-                    await query.edit_message_text(
-                        f"✅ **Switched to:** {result}\n\n⚠️ Use /restart to fully apply.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                else:
-                    # Rollback and show error
-                    previous = await get_config("provider.previous_model", "gemini-pro")
-                    previous_entry = next((m for m in models if m.get("key") == previous), None)
-                    previous_label = previous_entry.get("label", previous) if previous_entry else previous
-                    await query.edit_message_text(
-                        f"❌ {result}\n\nRolled back to {previous_label}.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-
-        elif data.startswith("embedding:"):
-            embed_key = data.split(":", 1)[1]
-            
-            # Get embedding registry
-            models = await get_config("provider.embedding_models", [])
-            embed_entry = next((m for m in models if m.get("key") == embed_key), None)
-            
-            if embed_entry:
-                chat_id = query.message.chat_id
-                success, result = await self._apply_embedding(embed_key, chat_id, context)
-                
-                # Get updated active embedding
-                active_key = embed_key if success else await get_config("provider.active_embedding", "together-bge")
-                
-                # Rebuild buttons
-                buttons = []
-                for m in models:
-                    key = m.get("key", "")
-                    label = m.get("label", key)
-                    is_active = (key == active_key)
-                    btn_label = f"✅ {label}" if is_active else label
-                    buttons.append(InlineKeyboardButton(btn_label, callback_data=f"embedding:{key}"))
-                keyboard = [[btn] for btn in buttons]
-                
-                if success:
-                    current_cost = embed_entry.get("cost", "")
-                    await query.edit_message_text(
-                        f"✅ **Switched embedding to:** {result}\n💰 Cost: {current_cost}\n\n⚠️ Use /restart to fully apply.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                else:
-                    previous = await get_config("provider.previous_embedding", "together-bge")
-                    previous_entry = next((m for m in models if m.get("key") == previous), None)
-                    previous_label = previous_entry.get("label", previous) if previous_entry else previous
-                    await query.edit_message_text(
-                        f"❌ {result}\n\nRolled back to {previous_label}.",
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
+        elif data.startswith("eval:"):
+            await self._handle_eval_callback(query, data)
 
         elif data.startswith("autocapture:"):
             toggle = data.split(":", 1)[1]
@@ -4600,7 +5210,7 @@ Or just send me a message!"""
                     if not available:
                         await query.edit_message_text(
                             f"❌ Evaluator model `{eval_model}` not available.\n"
-                            f"Run `ollama pull {eval_model}` first.",
+                            f"Run `ollama pull {eval_model}` first, or use /evaluator to configure.",
                             parse_mode="Markdown",
                         )
                         return
@@ -4687,7 +5297,7 @@ Or just send me a message!"""
             # Interactive global members menu
             await self._handle_members_callback(query, data)
 
-        elif data.startswith("grp:"):
+        elif data.startswith("groups:"):
             # Interactive group management menu
             await self._handle_group_callback(query, data)
 
@@ -4753,280 +5363,6 @@ Or just send me a message!"""
                 pending_key = f"pending_group:{group_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
-
-        elif data.startswith("auth:"):
-            # Auth credential management callbacks
-            auth_action = data.split(":", 1)[1] if ":" in data else ""
-            chat_id = query.message.chat_id
-            logger.info(f"Auth callback: action={auth_action}, data={data}, user={user.id}")
-
-            if auth_action == "oauth_menu":
-                # Show OAuth provider selection from DB
-                providers = await self._get_auth_providers()
-                buttons = []
-                for p in providers:
-                    if p.get("auth_type") == "oauth":
-                        buttons.append(InlineKeyboardButton(
-                            p["label"], callback_data=f"auth:oauth:{p['key']}"
-                        ))
-                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
-                keyboard = [[btn] for btn in buttons]
-                await query.edit_message_text(
-                    "🔑 **New OAuth Setup**\n\nChoose a provider:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif auth_action == "apikey_menu":
-                # Show API key provider selection from DB
-                providers = await self._get_auth_providers()
-                buttons = []
-                for p in providers:
-                    if p.get("auth_type") == "api_key":
-                        buttons.append(InlineKeyboardButton(
-                            p["label"], callback_data=f"auth:apikey:{p['key']}"
-                        ))
-                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
-                keyboard = [[btn] for btn in buttons]
-                await query.edit_message_text(
-                    "🔐 **New API Key**\n\nChoose a provider:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif auth_action == "reauth_menu":
-                # Show only configured OAuth credentials for re-auth
-                import time
-                from ..db.credentials import (
-                    get_google_oauth_credentials,
-                    get_claude_oauth_credentials,
-                    get_credential,
-                )
-                providers = await self._get_auth_providers()
-                buttons = []
-
-                for p in providers:
-                    if p.get("auth_type") != "oauth":
-                        continue
-                    driver = p.get("oauth_driver", p.get("key", ""))
-                    label = p.get("label", driver)
-
-                    if driver == "google":
-                        creds = await get_google_oauth_credentials()
-                        if creds and creds.get("refresh_token"):
-                            exp = creds.get("expires_at", 0)
-                            expired = time.time() >= exp
-                            email = creds.get("email", "?")
-                            btn_label = f"{label} ({email})" + (" ⚠️" if expired else " ✅")
-                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
-                    elif driver == "claude":
-                        creds = await get_claude_oauth_credentials()
-                        if creds and creds.get("refresh_token"):
-                            exp = creds.get("expires_at", 0)
-                            expired = time.time() >= exp
-                            email = creds.get("email", "?")
-                            btn_label = f"{label} ({email})" + (" ⚠️" if expired else " ✅")
-                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
-                    elif driver == "codex":
-                        token = await get_credential("credential.codex_access_token")
-                        if token:
-                            exp = await get_credential("credential.codex_expires_at", 0)
-                            expired = time.time() >= float(exp or 0)
-                            btn_label = label + (" ⚠️" if expired else " ✅")
-                            buttons.append(InlineKeyboardButton(btn_label, callback_data=f"auth:oauth:{p['key']}"))
-
-                if not buttons:
-                    await query.edit_message_text(
-                        "🔄 **Re-authenticate**\n\n"
-                        "No OAuth credentials configured yet.\n"
-                        "Use **New OAuth Setup** first.",
-                        parse_mode="Markdown",
-                    )
-                    return
-
-                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
-                keyboard = [[btn] for btn in buttons]
-                await query.edit_message_text(
-                    "🔄 **Re-authenticate**\n\nSelect credential to refresh:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif auth_action == "status":
-                status_text = await self._get_credential_status()
-                buttons = [[InlineKeyboardButton("⬅️ Back", callback_data="auth:back")]]
-                await query.edit_message_text(
-                    status_text,
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                )
-
-            elif auth_action == "back":
-                # Back to main auth menu
-                buttons = [
-                    [
-                        InlineKeyboardButton("🔑 New OAuth Setup", callback_data="auth:oauth_menu"),
-                        InlineKeyboardButton("🔐 New API Key", callback_data="auth:apikey_menu"),
-                    ],
-                    [
-                        InlineKeyboardButton("🤖 Add Model", callback_data="auth:addmodel_menu"),
-                        InlineKeyboardButton("🧠 Add Embedding", callback_data="auth:addembed_menu"),
-                    ],
-                    [
-                        InlineKeyboardButton("🔄 Re-authenticate", callback_data="auth:reauth_menu"),
-                    ],
-                    [
-                        InlineKeyboardButton("📋 Credential Status", callback_data="auth:status"),
-                    ],
-                ]
-                await query.edit_message_text(
-                    "🔐 **Credential & Provider Management**\n\n"
-                    "Choose an action:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                )
-
-            elif auth_action.startswith("oauth:"):
-                # Start OAuth flow for specific provider key
-                provider_key = auth_action.split(":", 1)[1]
-                providers = await self._get_auth_providers()
-                entry = next((p for p in providers if p["key"] == provider_key and p.get("auth_type") == "oauth"), None)
-                if entry:
-                    await query.edit_message_text(
-                        f"🔄 Starting {entry['label']} OAuth...",
-                    )
-                    await self._start_oauth_flow(entry, chat_id, user.id, context)
-                else:
-                    await query.edit_message_text(f"❌ Unknown OAuth provider: {provider_key}")
-
-            elif auth_action.startswith("apikey:"):
-                # Start API key input flow
-                provider_key = auth_action.split(":", 1)[1]
-                providers = await self._get_auth_providers()
-                entry = next((p for p in providers if p["key"] == provider_key and p.get("auth_type") == "api_key"), None)
-                if entry:
-                    self._auth_state[user.id] = {
-                        "type": "apikey",
-                        "provider": provider_key,
-                        "credential_key": entry.get("credential_key", ""),
-                        "label": entry.get("label", provider_key),
-                    }
-                    await query.edit_message_text(
-                        f"🔐 **{entry['label']} API Key**\n\n"
-                        f"Paste your API key below.\n"
-                        f"It will be saved to the database and **NOT** stored in chat history.\n\n"
-                        f"Send /cancel to abort.",
-                    )
-                else:
-                    await query.edit_message_text(f"❌ Unknown API key provider: {provider_key}")
-
-            elif auth_action == "addmodel_menu":
-                # Show available drivers for adding a new model
-                # Known drivers that have implementations in syne/llm/drivers.py
-                drivers = [
-                    ("google_cca", "Google (OAuth)"),
-                    ("codex", "OpenAI / Codex (OAuth)"),
-                    ("openai_compat", "OpenAI-compatible (API Key)"),
-                    ("groq", "Groq (API Key)"),
-                ]
-                buttons = [
-                    InlineKeyboardButton(label, callback_data=f"auth:addmodel:{key}")
-                    for key, label in drivers
-                ]
-                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
-                keyboard = [[btn] for btn in buttons]
-                await query.edit_message_text(
-                    "🤖 **Add Model**\n\n"
-                    "Choose a driver:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif auth_action.startswith("addmodel:"):
-                # User selected a driver — ask for model details
-                driver = auth_action.split(":", 1)[1]
-                logger.info(f"Add model: driver={driver}, user={user.id}")
-                # Find friendly label for this driver
-                # Driver metadata: label + example model IDs
-                _driver_meta = {
-                    "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
-                    "codex": ("OpenAI / Codex (OAuth)", "gpt-5.2, o3-pro"),
-                    "openai_compat": ("OpenAI-compatible (API Key)", "meta-llama/llama-4-maverick"),
-                    "groq": ("Groq (API Key)", "llama-3.3-70b-versatile, qwen/qwen3-32b"),
-                }
-                driver_label, examples = _driver_meta.get(driver, (driver, "model-name"))
-                self._auth_state[user.id] = {
-                    "type": "addmodel",
-                    "driver": driver,
-                    "step": "model_id",
-                }
-                # Answer callback, then send NEW message (edit_message_text
-                # fails with "can't find end of entity" when the previous
-                # message used Markdown and this one uses HTML).
-                try:
-                    await query.answer()
-                except Exception:
-                    pass
-                example_first = examples.split(", ")[0]
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=(
-                        f"🤖 <b>Add Model — {driver_label}</b>\n\n"
-                        f"Send the model ID (e.g. <code>{example_first}</code>).\n\n"
-                        f"Available: {examples}\n\n"
-                        f"Send /cancel to abort."
-                    ),
-                    parse_mode="HTML",
-                )
-
-            elif auth_action == "addembed_menu":
-                # Show available embedding drivers
-                drivers = [
-                    ("ollama", "Ollama (local, FREE)"),
-                    ("together", "Together AI (API Key)"),
-                    ("openai_compat", "OpenAI-compatible (API Key)"),
-                ]
-                buttons = [
-                    InlineKeyboardButton(label, callback_data=f"auth:addembed:{key}")
-                    for key, label in drivers
-                ]
-                buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="auth:back"))
-                keyboard = [[btn] for btn in buttons]
-                await query.edit_message_text(
-                    "🧠 **Add Embedding**\n\n"
-                    "Choose a driver:",
-                    parse_mode="Markdown",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                )
-
-            elif auth_action.startswith("addembed:"):
-                # User selected embedding driver — ask for model details
-                driver = auth_action.split(":", 1)[1]
-                logger.info(f"Add embedding: driver={driver}, user={user.id}")
-                driver_labels = {
-                    "ollama": "Ollama (local, FREE)",
-                    "together": "Together AI (API Key)",
-                    "openai_compat": "OpenAI-compatible (API Key)",
-                }
-                driver_label = driver_labels.get(driver, driver)
-                self._auth_state[user.id] = {
-                    "type": "addembed",
-                    "driver": driver,
-                    "step": "model_id",
-                }
-                try:
-                    await query.answer()
-                except Exception:
-                    pass
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=(
-                        f"🧠 <b>Add Embedding — {driver_label}</b>\n\n"
-                        "Send the model ID (e.g. <code>qwen3-embedding:0.6b</code>, <code>BAAI/bge-base-en-v1.5</code>).\n\n"
-                        "Send /cancel to abort."
-                    ),
-                    parse_mode="HTML",
-                )
 
         elif data.startswith("brw:"):
             # Browse directory picker callbacks
