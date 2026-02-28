@@ -17,26 +17,27 @@ logger = logging.getLogger("syne.abilities.loader")
 # Bundled ability classes — explicitly imported to avoid dynamic module loading issues
 def get_bundled_ability_classes() -> list[Type[Ability]]:
     """Return list of bundled ability classes.
-    
-    We import explicitly rather than using introspection for:
-    1. Clear, predictable loading order
-    2. Better error messages on import failures
-    3. No surprises from dynamic discovery
-    
+
+    Each import is individually guarded so a missing or broken file
+    doesn't take down ALL abilities.
+
     NOTE: web_search was migrated to core tool (syne/tools/web_search.py)
     NOTE: screenshot is created by Syne itself (dynamic ability, not bundled)
     """
-    from .image_gen import ImageGenAbility
-    from .image_analysis import ImageAnalysisAbility
-    from .maps import MapsAbility
-    from .whatsapp import WhatsAppAbility
-
-    return [
-        ImageGenAbility,
-        ImageAnalysisAbility,
-        MapsAbility,
-        WhatsAppAbility,
+    classes = []
+    _imports = [
+        ("syne.abilities.image_gen", "ImageGenAbility"),
+        ("syne.abilities.image_analysis", "ImageAnalysisAbility"),
+        ("syne.abilities.maps", "MapsAbility"),
+        ("syne.abilities.whatsapp", "WhatsAppAbility"),
     ]
+    for module_path, class_name in _imports:
+        try:
+            mod = __import__(module_path, fromlist=[class_name])
+            classes.append(getattr(mod, class_name))
+        except Exception as e:
+            logger.error(f"Failed to import bundled ability {class_name}: {e}")
+    return classes
 
 
 def load_bundled_abilities(registry: AbilityRegistry) -> int:
@@ -212,6 +213,17 @@ def load_dynamic_ability(module_path: str) -> Optional[Ability]:
     Returns:
         An instantiated Ability, or None on failure.
     """
+    ability, _ = load_dynamic_ability_safe(module_path)
+    return ability
+
+
+def load_dynamic_ability_safe(module_path: str) -> tuple[Optional[Ability], Optional[str]]:
+    """Load a dynamic ability, returning (instance, error_message).
+
+    Same as load_dynamic_ability but returns the error string on failure
+    instead of swallowing it. Used by ability_guide to surface errors in
+    the system prompt so the bot can self-heal.
+    """
     try:
         # Normalise file path → dotted module path
         if module_path.endswith(".py") or "/" in module_path:
@@ -238,14 +250,16 @@ def load_dynamic_ability(module_path: str) -> Optional[Ability]:
                 break
 
         if ability_cls is None:
-            logger.error(f"No Ability subclass found in {module_path}")
-            return None
+            err = f"No Ability subclass found in {module_path}"
+            logger.error(err)
+            return None, err
 
-        return ability_cls()
+        return ability_cls(), None
 
     except Exception as e:
-        logger.error(f"Failed to load dynamic ability from {module_path}: {e}")
-        return None
+        err = str(e)
+        logger.error(f"Failed to load dynamic ability from {module_path}: {err}")
+        return None, err
 
 
 async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:

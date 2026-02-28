@@ -107,7 +107,7 @@ async def build() -> str:
     """
     try:
         from ..db.connection import get_connection
-        from .loader import get_bundled_ability_classes, load_dynamic_ability
+        from .loader import get_bundled_ability_classes, load_dynamic_ability_safe
 
         async with get_connection() as conn:
             rows = await conn.fetch(
@@ -120,29 +120,47 @@ async def build() -> str:
         # ── Bundled abilities ──
         bundled_names = set()
         for cls in get_bundled_ability_classes():
-            instance = cls()
-            bundled_names.add(instance.name)
-            row = db_info.get(instance.name)
-            enabled = row["enabled"] if row else False
-            config = json.loads(row["config"]) if row and row["config"] else {}
-            parts.append(f"## {instance.name}")
-            parts.append(instance.get_guide(enabled, config))
-            parts.append("")
+            try:
+                instance = cls()
+                bundled_names.add(instance.name)
+                row = db_info.get(instance.name)
+                enabled = row["enabled"] if row else False
+                config = json.loads(row["config"]) if row and row["config"] else {}
+                parts.append(f"## {instance.name}")
+                parts.append(instance.get_guide(enabled, config))
+                parts.append("")
+            except Exception as e:
+                logger.error(f"Failed to load bundled ability {cls.__name__}: {e}")
 
         # ── Dynamic abilities (user-created / installed) ──
+        broken = []
         for row in rows:
             if row["name"] in bundled_names:
                 continue
             try:
-                instance = load_dynamic_ability(row["module_path"])
+                instance, load_err = load_dynamic_ability_safe(row["module_path"])
                 if instance and hasattr(instance, "get_guide"):
                     enabled = row["enabled"]
                     config = json.loads(row["config"]) if row["config"] else {}
                     parts.append(f"## {instance.name}")
                     parts.append(instance.get_guide(enabled, config))
                     parts.append("")
+                elif instance is None:
+                    broken.append((row["name"], row["module_path"],
+                                   load_err or "Unknown error"))
             except Exception as e:
+                broken.append((row["name"], row["module_path"], str(e)))
                 logger.debug(f"Skipping guide for '{row['name']}': {e}")
+
+        # ── Broken abilities — surface to bot for self-healing ──
+        if broken:
+            parts.append("## Broken Abilities (need repair)")
+            parts.append("The following user-created abilities failed to load.")
+            parts.append("**Fix them proactively** using the Self-Healing steps.")
+            parts.append("")
+            for name, mod_path, err in broken:
+                parts.append(f"- **{name}** (`{mod_path}`): {err}")
+            parts.append("")
 
         # ── Creation guide ──
         parts.append(_CREATION_GUIDE)

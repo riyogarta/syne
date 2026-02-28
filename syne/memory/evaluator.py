@@ -226,7 +226,7 @@ async def evaluate_message_ollama(
         return None
 
     except Exception as e:
-        logger.error(f"Ollama memory evaluation failed: {e}")
+        logger.error(f"Ollama memory evaluation failed: {type(e).__name__}: {e}")
         return None
 
 
