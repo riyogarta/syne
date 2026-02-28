@@ -59,7 +59,7 @@ _BASE_DELAY_MS = 1_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
-_STREAM_OVERALL_TIMEOUT = 300  # 5 min hard cap on entire SSE stream
+_STREAM_OVERALL_TIMEOUT = 30  # 30s hard cap on entire SSE stream
 
 # Default CCA rate limit (requests per minute).
 # Google Account (OAuth free): documented as 60 RPM, but internal CCA

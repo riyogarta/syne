@@ -211,9 +211,9 @@ class Conversation:
         """
         # Wait for lock with timeout — prevents permanent queue if previous request hangs
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=300)
+            await asyncio.wait_for(self._lock.acquire(), timeout=30)
         except asyncio.TimeoutError:
-            logger.error(f"Session {self.session_id}: lock acquisition timed out after 300s — previous request likely hung")
+            logger.error(f"Session {self.session_id}: lock acquisition timed out after 30s — previous request likely hung")
             return "⚠️ Previous request is still processing. Please wait a moment and try again."
         try:
             # Reset per-turn state
