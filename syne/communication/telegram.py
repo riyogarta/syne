@@ -505,6 +505,7 @@ class TelegramChannel:
         inbound = await self._build_inbound(update, is_group)
 
         # Prepend user context prefix to message (untrusted, per-message)
+        original_text = text  # Keep original for memory evaluator
         user_prefix = build_user_context_prefix(inbound)
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
@@ -519,6 +520,7 @@ class TelegramChannel:
                     "message_id": message_id,
                     "chat_id": str(chat.id),
                     "inbound": inbound,  # Single source of truth for all context
+                    "original_text": original_text,  # Without context prefix, for evaluator
                 }
 
                 # Browse mode: route to CLI-compatible session with cwd

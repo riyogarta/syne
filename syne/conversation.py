@@ -361,6 +361,8 @@ class Conversation:
         if auto_capture and can_write_memory:
             eval_driver = await get_config("memory.evaluator_driver", "ollama")
             eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+            # Use original text (without context prefix) for memory evaluation
+            eval_text = (message_metadata or {}).get("original_text", user_message)
             async def _deferred_evaluate():
                 try:
                     if eval_driver != "ollama":
@@ -368,7 +370,7 @@ class Conversation:
                     result = await evaluate_and_store(
                         provider=self.provider,
                         memory_engine=self.memory,
-                        user_message=user_message,
+                        user_message=eval_text,
                         user_id=self.user.get("id"),
                         evaluator_driver=eval_driver,
                         evaluator_model=eval_model,

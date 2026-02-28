@@ -352,7 +352,8 @@ class AnthropicProvider(LLMProvider):
         
         if top_p is not None:
             body["top_p"] = top_p
-        if top_k is not None:
+        # Anthropic: top_k is not allowed when thinking is enabled
+        if top_k is not None and effective_budget <= 0:
             body["top_k"] = top_k
 
         if tools:

@@ -183,7 +183,7 @@ async def evaluate_message_ollama(
 
     try:
         logger.debug(f"Evaluating message via Ollama ({model}): {user_message[:80]}")
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
                 f"{base_url.rstrip('/')}/api/chat",
                 json={
