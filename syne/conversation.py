@@ -194,6 +194,7 @@ class Conversation:
                 kwargs[key] = p[key]
         if p.get("max_tokens") is not None:
             kwargs["max_tokens"] = p["max_tokens"]
+        logger.debug(f"chat_kwargs from model_params: {kwargs}")
         return kwargs
 
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
@@ -321,7 +322,9 @@ class Conversation:
             return f"⚠️ {auth_failure}"
 
         # Handle tool calls
+        logger.info(f"LLM response: content={len(response.content or '')} chars, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, model={response.model}")
         if response.tool_calls:
+            logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
 
         # Save assistant response

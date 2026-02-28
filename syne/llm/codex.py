@@ -284,7 +284,14 @@ class CodexProvider(LLMProvider):
         url = f"{self.base_url}/codex/responses"
         headers = self._get_headers()
         
-        logger.debug(f"Codex request: model={model}, input={len(input_msgs)} msgs, tools={len(tools) if tools else 0}")
+        # Log request body (exclude input/instructions for brevity)
+        body_log = {k: v for k, v in body.items() if k not in ("input", "instructions")}
+        body_log["input_count"] = len(input_msgs)
+        body_log["instructions_len"] = len(instructions) if instructions else 0
+        logger.info(f"Codex request body: {body_log}")
+        if tools:
+            tool_names = [t.get("function", t).get("name", "?") if isinstance(t.get("function"), dict) else t.get("name", "?") for t in tools]
+            logger.info(f"Codex tools available ({len(tools)}): {tool_names}")
 
         # Stream and collect response
         content_text = ""
@@ -293,6 +300,7 @@ class CodexProvider(LLMProvider):
         usage = {"input_tokens": 0, "output_tokens": 0}
         thinking_text = ""
         actual_model = model
+        event_counts: dict[str, int] = {}  # track all event types
 
         async with httpx.AsyncClient(timeout=180) as client:
           for attempt in range(2):
@@ -354,6 +362,7 @@ class CodexProvider(LLMProvider):
                             continue
 
                         event_type = event.get("type", "")
+                        event_counts[event_type] = event_counts.get(event_type, 0) + 1
 
                         # Text content
                         if event_type == "response.output_text.delta":
@@ -362,12 +371,15 @@ class CodexProvider(LLMProvider):
                         # Function call start
                         elif event_type == "response.output_item.added":
                             item = event.get("item", {})
-                            if item.get("type") == "function_call":
+                            item_type = item.get("type", "")
+                            logger.info(f"Codex output_item.added: type={item_type}, id={item.get('id', '')}, call_id={item.get('call_id', '')}, name={item.get('name', '')}")
+                            if item_type == "function_call":
                                 current_tool_call = {
                                     "id": item.get("call_id", item.get("id", "")),
                                     "name": item.get("name", ""),
                                     "arguments": "",
                                 }
+                                logger.info(f"Codex tool call START: {current_tool_call['name']} (id={current_tool_call['id']})")
 
                         # Function call arguments
                         elif event_type == "response.function_call_arguments.delta":
@@ -378,21 +390,32 @@ class CodexProvider(LLMProvider):
                             if current_tool_call is not None:
                                 current_tool_call["arguments"] = event.get("arguments", current_tool_call["arguments"])
                                 tool_calls.append(current_tool_call)
+                                logger.info(f"Codex tool call DONE: {current_tool_call['name']} args={current_tool_call['arguments'][:200]}")
                                 current_tool_call = None
+                            else:
+                                logger.warning(f"Codex function_call_arguments.done but no current_tool_call! args={event.get('arguments', '')[:200]}")
 
                         # Reasoning/thinking
                         elif event_type == "response.output_item.done":
                             item = event.get("item", {})
-                            if item.get("type") == "reasoning":
+                            item_type = item.get("type", "")
+                            if item_type == "reasoning":
                                 summaries = item.get("summary", [])
                                 if summaries:
                                     thinking_text = "\n\n".join(s.get("text", "") for s in summaries)
+                            elif item_type == "function_call":
+                                # Log completed function call item for verification
+                                logger.info(f"Codex output_item.done: function_call name={item.get('name', '')}, call_id={item.get('call_id', '')}, status={item.get('status', '')}")
 
                         # Completion with usage
                         elif event_type == "response.completed":
                             resp_data = event.get("response", {})
                             actual_model = resp_data.get("model", model)
                             resp_status = resp_data.get("status", "")
+                            # Log ALL output items for debugging
+                            output_items = resp_data.get("output", [])
+                            output_summary = [f"{o.get('type', '?')}({o.get('name', '')})" for o in output_items] if output_items else []
+                            logger.info(f"Codex response.completed: status={resp_status}, output_items={output_summary}")
                             if resp_status == "incomplete":
                                 reason = resp_data.get("incomplete_details", {})
                                 logger.warning(f"Codex response INCOMPLETE: {reason}")
@@ -402,6 +425,19 @@ class CodexProvider(LLMProvider):
                             u = resp_data.get("usage", {})
                             usage["input_tokens"] = u.get("input_tokens", 0)
                             usage["output_tokens"] = u.get("output_tokens", 0)
+
+            # Log stream summary
+            logger.info(
+                f"Codex stream summary: text={len(content_text)} chars, "
+                f"tool_calls={len(tool_calls)}, thinking={len(thinking_text)} chars, "
+                f"events={dict(event_counts)}, "
+                f"usage=in:{usage['input_tokens']}/out:{usage['output_tokens']}"
+            )
+            if current_tool_call is not None:
+                logger.warning(f"Codex ORPHANED tool call (never completed): {current_tool_call}")
+            if content_text and not tool_calls:
+                # Log first 300 chars of text when no tool calls — helps diagnose "narrate without acting"
+                logger.info(f"Codex text-only response (no tools): {content_text[:300]}")
 
             break  # success — exit retry loop
           else:
