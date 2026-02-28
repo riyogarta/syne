@@ -781,19 +781,30 @@ class GoogleProvider(LLMProvider):
                     server_delay = _extract_retry_delay(error_text, e.response.headers)
                     if not server_delay:
                         logger.debug(f"CCA no server delay parsed. Headers: {dict(e.response.headers)}. Body snippet: {error_text[:300]}")
-                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
 
-                    # Cap at max delay
-                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                        delay_s = server_delay // 1000
-                        raise LLMRateLimitError(
-                            f"Rate limited (429). Server requested {delay_s}s wait (max {_MAX_RETRY_DELAY_MS // 1000}s)."
-                        ) from e
+                    # On 429: try next endpoint immediately (delay is per-endpoint).
+                    # Only wait the full delay if all endpoints are exhausted.
+                    next_endpoint = _ENDPOINT_FALLBACKS[min(attempt + 1, len(_ENDPOINT_FALLBACKS) - 1)]
+                    if status == 429 and next_endpoint != endpoint:
+                        delay_ms = 500  # Brief pause, then try other endpoint
+                        logger.warning(
+                            f"CCA 429 on {endpoint.split('//')[1].split('/')[0]}, "
+                            f"switching to {next_endpoint.split('//')[1].split('/')[0]} "
+                            f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
+                        )
+                    else:
+                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                        # Cap at max delay
+                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                            delay_s = server_delay // 1000
+                            raise LLMRateLimitError(
+                                f"Rate limited (429). Server requested {delay_s}s wait (max {_MAX_RETRY_DELAY_MS // 1000}s)."
+                            ) from e
+                        logger.warning(
+                            f"CCA {status}, retrying in {delay_ms}ms "
+                            f"(attempt {attempt + 1}/{_MAX_RETRIES + 1}, endpoint: {endpoint})"
+                        )
 
-                    logger.warning(
-                        f"CCA {status}, retrying in {delay_ms}ms "
-                        f"(attempt {attempt + 1}/{_MAX_RETRIES + 1}, endpoint: {endpoint})"
-                    )
                     await asyncio.sleep(delay_ms / 1000)
                     _reset_output()
                     continue
