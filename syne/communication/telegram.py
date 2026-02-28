@@ -565,6 +565,7 @@ class TelegramChannel:
                         message=text,
                         display_name=self._get_display_name(user),
                         message_metadata=metadata,
+                        is_dm=not is_group,
                     )
 
                 if response:
@@ -637,8 +638,9 @@ class TelegramChannel:
                 logger.debug(f"Ignoring message from unregistered user {user.id} in group {group_id}")
                 return None
         
-        # Auto-discover/create user from group interaction
-        await self._ensure_user(user)
+        # Note: group users are NOT registered in global users table.
+        # Only DM users appear in /members. Group members are tracked
+        # separately via update_group_member below.
         
         # Auto-collect group member — store from.id + name + username
         # Never overwrites alias or access (those are manual-only)
@@ -920,8 +922,12 @@ class TelegramChannel:
             elif not self._is_reply_to_bot(update):
                 return  # Ignore photos in groups without mention/reply
 
-        db_user = await self._ensure_user(user, is_dm=not is_group)
-        
+        # Only register DM users; group users stay in group_members only
+        if not is_group:
+            db_user = await self._ensure_user(user, is_dm=True)
+        else:
+            db_user = {"access_level": "public"}
+
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":
             await self._handle_pending_user(update, db_user)
@@ -972,6 +978,7 @@ class TelegramChannel:
                     message=user_text,
                     display_name=self._get_display_name(user),
                     message_metadata=metadata,
+                    is_dm=not is_group,
                 )
 
                 if response:
@@ -1001,8 +1008,12 @@ class TelegramChannel:
             if not self._is_reply_to_bot(update):
                 return  # Ignore voice in groups unless replying to bot
 
-        db_user = await self._ensure_user(user, is_dm=not is_group)
-        
+        # Only register DM users; group users stay in group_members only
+        if not is_group:
+            db_user = await self._ensure_user(user, is_dm=True)
+        else:
+            db_user = {"access_level": "public"}
+
         # Block pending users
         if not is_group and db_user.get("access_level") == "pending":
             await self._handle_pending_user(update, db_user)
@@ -1072,6 +1083,7 @@ class TelegramChannel:
                     message=user_message,
                     display_name=self._get_display_name(user),
                     message_metadata=metadata,
+                    is_dm=not is_group,
                 )
 
                 if response:
@@ -1204,6 +1216,7 @@ class TelegramChannel:
                     message=user_text,
                     display_name=self._get_display_name(user),
                     message_metadata=metadata,
+                    is_dm=not is_group,
                 )
 
                 if response:
@@ -1303,6 +1316,7 @@ class TelegramChannel:
                     message=user_text,
                     display_name=self._get_display_name(user),
                     message_metadata=metadata,
+                    is_dm=not is_group,
                 )
 
                 if response:
@@ -1427,6 +1441,7 @@ class TelegramChannel:
                     message=event_text,
                     display_name=user_name,
                     message_metadata=metadata,
+                    is_dm=not is_group,
                 )
                 if response and response.strip().upper() != "NO_REPLY":
                     response, reply_to = parse_reply_tag(response, message_id)
@@ -3974,7 +3989,7 @@ Or just send me a message!"""
 
     async def _members_menu_main(self, update=None, query=None):
         """Show global members list as interactive menu (blocked users excluded)."""
-        from ..db.models import list_users
+        from ..db.models import list_users, get_config as _gc
         users = await list_users(platform="telegram")
 
         active_users = [u for u in users if u.get("access_level") != "blocked"]
@@ -3983,14 +3998,26 @@ Or just send me a message!"""
         level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4}
         active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
 
+        # Resolve model labels for display
+        models = await _gc("provider.models", [])
+        active_key = await _gc("provider.active_model", "gemini-pro")
+        default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
+        model_lookup = {m.get("key"): m.get("label", m.get("key")) for m in models}
+
         buttons = []
         for u in active_users:
             access = u.get("access_level", "public")
             icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤", "approved": "✅", "pending": "⏳"}.get(access, "❓")
             name = u.get("display_name") or u.get("name", "?")
             pid = u.get("platform_id", "?")
+            # Resolve per-user model or default
+            user_model_key = ((u.get("preferences") or {}).get("model"))
+            if user_model_key:
+                model_short = model_lookup.get(user_model_key, user_model_key)
+            else:
+                model_short = default_label
             buttons.append([InlineKeyboardButton(
-                f"{icon} {name} — {access}",
+                f"{icon} {name} — {access} | {model_short}",
                 callback_data=f"mbr:view:{pid}",
             )])
 

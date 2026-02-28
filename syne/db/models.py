@@ -176,9 +176,19 @@ async def get_or_create_user(
                     if dm_policy == "approval":
                         access_level = "pending"
     else:
-        # Group interaction — never auto-promote, just create as public
-        pass
-    
+        # Group interaction — return ephemeral user dict, don't persist.
+        # Group-only users belong in group_members, not global /members.
+        return {
+            "id": None,
+            "name": name,
+            "display_name": display_name or name,
+            "platform": platform,
+            "platform_id": platform_id,
+            "access_level": "public",
+            "preferences": {},
+            "active": True,
+        }
+
     return await create_user(name, platform, platform_id, display_name, access_level)
 
 

@@ -1907,6 +1907,7 @@ class SyneAgent:
         message: str,
         display_name: Optional[str] = None,
         message_metadata: Optional[dict] = None,
+        is_dm: bool = True,
     ) -> str:
         """Handle an incoming message from any channel.
 
@@ -1922,16 +1923,18 @@ class SyneAgent:
             message: Message content
             display_name: Optional display name
             message_metadata: Metadata dict. Must contain "inbound" (InboundContext).
+            is_dm: True if direct message. Group users are not persisted to DB.
 
         Returns:
             Agent response string
         """
-        # Get or create user
+        # Get or create user — group-only users get ephemeral dict (not saved)
         user = await get_or_create_user(
             name=user_name,
             platform=platform,
             platform_id=user_platform_id,
             display_name=display_name,
+            is_dm=is_dm,
         )
 
         # Route to conversation manager
