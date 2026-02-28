@@ -1,5 +1,6 @@
 """OpenAI Codex Responses API provider (ChatGPT OAuth, free)."""
 
+import asyncio
 import json
 import logging
 import os
@@ -276,6 +277,7 @@ class CodexProvider(LLMProvider):
         actual_model = model
 
         async with httpx.AsyncClient(timeout=180) as client:
+          for attempt in range(3):
             async with client.stream(
                 "POST", url, json=body, headers=headers,
             ) as resp:
@@ -289,7 +291,16 @@ class CodexProvider(LLMProvider):
                         request=resp.request,
                         response=resp,
                     )
-                
+
+                if 500 <= resp.status_code < 600 and attempt < 2:
+                    error_text = ""
+                    async for chunk in resp.aiter_text():
+                        error_text += chunk
+                    wait = 2 ** attempt
+                    logger.warning(f"Codex {resp.status_code}, retrying in {wait}s (attempt {attempt + 1}/3): {error_text[:200]}")
+                    await asyncio.sleep(wait)
+                    continue
+
                 if resp.status_code != 200:
                     error_text = ""
                     async for chunk in resp.aiter_text():
@@ -364,6 +375,10 @@ class CodexProvider(LLMProvider):
                             u = resp_data.get("usage", {})
                             usage["input_tokens"] = u.get("input_tokens", 0)
                             usage["output_tokens"] = u.get("output_tokens", 0)
+
+            break  # success — exit retry loop
+          else:
+            raise RuntimeError("Codex API failed after 3 retries")
 
         # Convert tool calls to Syne format
         parsed_tool_calls = None

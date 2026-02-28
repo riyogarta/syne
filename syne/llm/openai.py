@@ -1,5 +1,6 @@
 """OpenAI-compatible provider (OpenAI, Groq, Together, etc.)."""
 
+import asyncio
 import json
 import logging
 import httpx
@@ -149,25 +150,34 @@ class OpenAIProvider(LLMProvider):
         logger.debug(f"Request: model={model}, messages={len(messages)}, tools={len(tools) if tools else 0}")
 
         async with httpx.AsyncClient(timeout=120) as client:
+          for attempt in range(3):
             resp = await client.post(
                 f"{self.base_url}/chat/completions",
                 json=body,
                 headers=self._get_headers(),
             )
-            
+
             if resp.status_code == 429:
                 error_body = resp.text
                 logger.error(f"Rate limited (429): {error_body[:200]}")
-                # Try to extract retry-after
                 retry_after = resp.headers.get("retry-after", "a moment")
                 raise httpx.HTTPStatusError(
                     f"Rate limited. Retry after {retry_after}.",
                     request=resp.request,
                     response=resp,
                 )
-            
+
+            if 500 <= resp.status_code < 600 and attempt < 2:
+                wait = 2 ** attempt
+                logger.warning(f"OpenAI {resp.status_code}, retrying in {wait}s (attempt {attempt + 1}/3): {resp.text[:200]}")
+                await asyncio.sleep(wait)
+                continue
+
             resp.raise_for_status()
             data = resp.json()
+            break
+          else:
+            raise RuntimeError("OpenAI API failed after 3 retries")
 
         choice = data["choices"][0]
         message = choice["message"]
