@@ -1683,6 +1683,13 @@ Or just send me a message!"""
             f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
         ]
 
+        # Evaluator model
+        eval_models = await get_config("memory.evaluator_models", [])
+        active_eval_key = await get_config("memory.active_evaluator", None)
+        active_eval_entry = next((m for m in eval_models if m.get("key") == active_eval_key), None) if eval_models and active_eval_key else None
+        eval_label = active_eval_entry.get("label", active_eval_key or "?") if active_eval_entry else (active_eval_key or "none")
+        status_lines.append(f"🔬 Evaluator: {eval_label}")
+
         # Credential summary
         try:
             cred_parts = []
