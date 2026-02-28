@@ -185,6 +185,8 @@ async def run():
 
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        logger.critical(f"Fatal error: {type(e).__name__}: {e}", exc_info=True)
     finally:
         # Stop scheduler
         if scheduler:

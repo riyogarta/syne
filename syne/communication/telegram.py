@@ -211,7 +211,7 @@ class TelegramChannel:
         self.app = (
             Application.builder()
             .token(self.bot_token)
-            .concurrent_updates(True)
+            .concurrent_updates(256)
             .build()
         )
 
@@ -289,10 +289,6 @@ class TelegramChannel:
                 "message", "edited_message", "callback_query",
                 "my_chat_member", "message_reaction",
             ],
-            read_timeout=30,
-            write_timeout=10,
-            connect_timeout=10,
-            pool_timeout=10,
         )
 
         # Register bot commands menu (the "/" button in Telegram)
