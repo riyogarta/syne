@@ -3515,18 +3515,28 @@ Or just send me a message!"""
     async def _group_menu_main(self, update: Update, query=None):
         """Show main group menu — list of groups + add button."""
         from ..db.connection import get_connection
+        from ..db.models import get_config
         async with get_connection() as conn:
             rows = await conn.fetch(
                 "SELECT platform_group_id, name, enabled, settings FROM groups WHERE platform = 'telegram' ORDER BY name"
             )
-        
+
+        # Build model label lookup
+        models = await get_config("provider.models", [])
+        active = await get_config("provider.active_model", "")
+        model_map = {m["key"]: m.get("label", m["key"]) for m in models if "key" in m}
+        default_label = model_map.get(active, active)
+
         buttons = []
         for row in rows:
             gid = row["platform_group_id"]
             name = row["name"] or gid
             emoji = "✅" if row["enabled"] else "⛔"
+            settings = row["settings"] if isinstance(row["settings"], dict) else {}
+            mk = settings.get("model")
+            mlabel = model_map.get(mk, mk) if mk else f"Default"
             buttons.append([InlineKeyboardButton(
-                f"{emoji} {name}", callback_data=f"groups:view:{gid}"
+                f"{emoji} {name}  [{mlabel}]", callback_data=f"groups:view:{gid}"
             )])
         
         buttons.append([InlineKeyboardButton("➕ Add Group", callback_data="groups:add_prompt")])
@@ -3848,11 +3858,17 @@ Or just send me a message!"""
 
     async def _group_list(self, update: Update):
         """List all registered groups."""
-        from ..db.models import list_groups
+        from ..db.models import list_groups, get_config
         groups = await list_groups(platform="telegram", enabled_only=False)
         if not groups:
             await update.message.reply_text("No groups registered.")
             return
+
+        # Build model label lookup
+        models = await get_config("provider.models", [])
+        active = await get_config("provider.active_model", "")
+        model_map = {m["key"]: m.get("label", m["key"]) for m in models if "key" in m}
+        default_label = model_map.get(active, active)
 
         lines = ["📋 <b>Registered Groups</b>\n"]
         for g in groups:
@@ -3860,8 +3876,10 @@ Or just send me a message!"""
             mention = "📢" if not g.get("require_mention") else "🔇"
             settings = g.get("settings", {}) or {}
             member_count = len(settings.get("members", {}))
-            # Custom settings (excluding members)
-            custom = {k: v for k, v in settings.items() if k != "members"}
+            mk = settings.get("model")
+            mlabel = model_map.get(mk, mk) if mk else f"Default ({default_label})"
+            # Custom settings (excluding members and model)
+            custom = {k: v for k, v in settings.items() if k not in ("members", "model")}
             settings_str = ""
             if custom:
                 settings_str = "\n   ⚙️ " + ", ".join(f"{k}={v}" for k, v in sorted(custom.items()))
@@ -3869,6 +3887,7 @@ Or just send me a message!"""
             lines.append(
                 f"{status} <b>{g['name']}</b>\n"
                 f"   ID: <code>{g['platform_group_id']}</code>\n"
+                f"   🤖 {mlabel}\n"
                 f"   {mention} mention={'required' if g.get('require_mention') else 'optional'}"
                 f" | {member_count} members{settings_str}"
             )
