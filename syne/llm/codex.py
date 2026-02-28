@@ -256,8 +256,14 @@ class CodexProvider(LLMProvider):
             "store": False,
         }
 
-        # Note: Codex backend does NOT support temperature or max_output_tokens
-        # max_tokens is silently ignored for Codex
+        if temperature is not None:
+            body["temperature"] = temperature
+        if max_tokens is not None:
+            body["max_output_tokens"] = max_tokens
+        if thinking_budget is not None:
+            effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
+            body["reasoning"] = {"effort": effort}
+
         if tools:
             body["tools"] = self._format_tools(tools)
             body["tool_choice"] = "auto"
