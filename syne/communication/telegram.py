@@ -206,23 +206,16 @@ class TelegramChannel:
         await load_group_settings(ctx)
         return ctx
 
-    async def start(self):
-        """Start the Telegram bot."""
-        self.app = (
-            Application.builder()
-            .token(self.bot_token)
-            .concurrent_updates(256)
-            .build()
-        )
-
+    def _register_handlers(self):
+        """Register all Telegram handlers on self.app."""
         # Command handlers
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("version", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
-        self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
+        self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
@@ -233,52 +226,35 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
-        # Update commands removed — use `syne update` / `syne updatedev` from CLI
-
-        # Message handler — catch all text messages
-        self.app.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            self._handle_message,
-        ))
-
-        # Photo handler
-        self.app.add_handler(MessageHandler(
-            filters.PHOTO & ~filters.LOCATION,
-            self._handle_photo,
-        ))
-
-        # Voice message handler
-        self.app.add_handler(MessageHandler(
-            filters.VOICE | filters.AUDIO,
-            self._handle_voice,
-        ))
-
-        # Document/file handler
-        self.app.add_handler(MessageHandler(
-            filters.Document.ALL,
-            self._handle_document,
-        ))
-
-        # Location handler
-        self.app.add_handler(MessageHandler(
-            filters.LOCATION | filters.Regex(r'^/location'),
-            self._handle_location,
-        ))
-
-        # Reaction update handler
+        # Message handlers
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
+        self.app.add_handler(MessageHandler(filters.PHOTO & ~filters.LOCATION, self._handle_photo))
+        self.app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self._handle_voice))
+        self.app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
+        self.app.add_handler(MessageHandler(filters.LOCATION | filters.Regex(r'^/location'), self._handle_location))
+        # Reaction handler
         self.app.add_handler(MessageReactionHandler(self._handle_reaction_update))
-
-        # Chat member handler — detect when bot is added to/removed from groups
-        self.app.add_handler(ChatMemberHandler(
-            self._handle_my_chat_member,
-            ChatMemberHandler.MY_CHAT_MEMBER,
-        ))
-
-        # Callback query handler (inline button clicks)
+        # Chat member handler
+        self.app.add_handler(ChatMemberHandler(self._handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+        # Callback query handler
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
-
         # Error handler
         self.app.add_error_handler(self._handle_error)
+
+    async def start(self):
+        """Start the Telegram bot."""
+        self.app = (
+            Application.builder()
+            .token(self.bot_token)
+            .concurrent_updates(256)
+            .connect_timeout(30.0)
+            .read_timeout(30.0)
+            .write_timeout(30.0)
+            .pool_timeout(10.0)
+            .build()
+        )
+
+        self._register_handlers()
 
         logger.info("Starting Telegram bot...")
         # Retry initialization (getMe) — transient network timeouts shouldn't kill the bot
@@ -288,9 +264,21 @@ class TelegramChannel:
                 break
             except Exception as e:
                 if attempt < 4:
-                    delay = [2, 5, 10, 15][attempt]
-                    logger.warning(f"Telegram init failed (attempt {attempt + 1}/5): {e}. Retrying in {delay}s...")
+                    delay = [3, 10, 20, 30][attempt]
+                    logger.warning(f"Telegram init failed (attempt {attempt + 1}/5): {type(e).__name__}: {e}. Retrying in {delay}s...")
                     await asyncio.sleep(delay)
+                    # Rebuild app — failed initialize() may leave dirty state
+                    self.app = (
+                        Application.builder()
+                        .token(self.bot_token)
+                        .concurrent_updates(256)
+                        .connect_timeout(30.0)
+                        .read_timeout(30.0)
+                        .write_timeout(30.0)
+                        .pool_timeout(10.0)
+                        .build()
+                    )
+                    self._register_handlers()
                 else:
                     raise
         await self.app.start()
