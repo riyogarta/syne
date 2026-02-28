@@ -10,9 +10,16 @@ from .agent import SyneAgent
 from .communication.telegram import TelegramChannel
 from .scheduler import Scheduler
 
+_log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_log_file = os.path.expanduser("~/syne.log")
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    format=_log_format,
+    handlers=[
+        logging.StreamHandler(),                          # stderr (console)
+        logging.FileHandler(_log_file, encoding="utf-8"), # ~/syne.log
+    ],
 )
 logger = logging.getLogger("syne")
 
