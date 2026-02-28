@@ -262,17 +262,22 @@ class CodexProvider(LLMProvider):
 
         if temperature is not None:
             body["temperature"] = temperature
-        if max_tokens is not None:
-            body["max_output_tokens"] = max_tokens
         if top_p is not None:
             body["top_p"] = top_p
         if frequency_penalty is not None:
             body["frequency_penalty"] = frequency_penalty
         if presence_penalty is not None:
             body["presence_penalty"] = presence_penalty
-        if thinking_budget is not None:
+        if thinking_budget is not None and thinking_budget > 0:
             effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
             body["reasoning"] = {"effort": effort}
+            # max_output_tokens includes reasoning tokens — add thinking budget
+            if max_tokens is not None:
+                body["max_output_tokens"] = max_tokens + thinking_budget
+            else:
+                body["max_output_tokens"] = 8192 + thinking_budget
+        elif max_tokens is not None:
+            body["max_output_tokens"] = max_tokens
 
         if tools:
             body["tools"] = self._format_tools(tools)
