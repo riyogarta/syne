@@ -182,6 +182,7 @@ async def evaluate_message_ollama(
         return None
 
     try:
+        logger.debug(f"Evaluating message via Ollama ({model}): {user_message[:80]}")
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 f"{base_url.rstrip('/')}/api/chat",
@@ -198,13 +199,19 @@ async def evaluate_message_ollama(
             resp.raise_for_status()
             data = resp.json()
 
-        result = data.get("message", {}).get("content", "").strip()
+        raw_result = data.get("message", {}).get("content", "").strip()
+        result = raw_result
         # qwen3 with /think — strip thinking tags if present
         if "<think>" in result:
             import re
             result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
 
+        if not result:
+            logger.warning(f"Ollama evaluator returned empty after think-strip (raw={raw_result[:200]})")
+            return None
+
         if result.startswith("SKIP"):
+            logger.debug(f"Evaluator SKIP for: {user_message[:60]}")
             return None
 
         if result.startswith("STORE|"):
@@ -216,6 +223,7 @@ async def evaluate_message_ollama(
                     importance = max(0.1, min(1.0, importance))
                 except ValueError:
                     importance = 0.5
+                logger.info(f"Evaluator STORE: [{category.strip()}] {content.strip()[:80]}")
                 return {
                     "category": category.strip(),
                     "importance": importance,

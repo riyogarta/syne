@@ -365,7 +365,7 @@ class Conversation:
                 try:
                     if eval_driver != "ollama":
                         await asyncio.sleep(40)  # CCA rate limit window (~36s)
-                    await evaluate_and_store(
+                    result = await evaluate_and_store(
                         provider=self.provider,
                         memory_engine=self.memory,
                         user_message=user_message,
@@ -373,8 +373,9 @@ class Conversation:
                         evaluator_driver=eval_driver,
                         evaluator_model=eval_model,
                     )
+                    logger.debug(f"Evaluator done: {'stored #' + str(result) if result else 'skipped'}")
                 except Exception as e:
-                    logger.warning(f"Deferred memory evaluation failed: {e}")
+                    logger.warning(f"Deferred memory evaluation failed: {type(e).__name__}: {e}")
             asyncio.create_task(_deferred_evaluate())
 
         return final_response
