@@ -211,6 +211,7 @@ class TelegramChannel:
         self.app = (
             Application.builder()
             .token(self.bot_token)
+            .concurrent_updates(True)
             .build()
         )
 
@@ -288,6 +289,10 @@ class TelegramChannel:
                 "message", "edited_message", "callback_query",
                 "my_chat_member", "message_reaction",
             ],
+            read_timeout=30,
+            write_timeout=10,
+            connect_timeout=10,
+            pool_timeout=10,
         )
 
         # Register bot commands menu (the "/" button in Telegram)
@@ -6044,5 +6049,15 @@ Or just send me a message!"""
         logger.debug(f"No active chat found for session {session_id}")
 
     async def _handle_error(self, update: object, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors."""
-        logger.error(f"Telegram error: {context.error}", exc_info=context.error)
+        """Handle errors in update processing."""
+        error = context.error
+        # Log with full context for debugging
+        if update:
+            logger.error(f"Telegram error processing update {type(update).__name__}: {type(error).__name__}: {error}", exc_info=error)
+        else:
+            logger.error(f"Telegram error (no update): {type(error).__name__}: {error}", exc_info=error)
+        # Check if polling is still alive after error
+        if self.app and self.app.updater and self.app.updater.running:
+            logger.debug("Polling still running after error")
+        else:
+            logger.critical("POLLING STOPPED after error — bot will not receive new messages!")

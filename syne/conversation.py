@@ -209,6 +209,13 @@ class Conversation:
         self._cached_input_data: dict = {}  # For ability-first retry via tool call
         self._message_metadata = message_metadata
         self._processing = True
+        try:
+            return await self._chat_inner(user_message, message_metadata)
+        finally:
+            self._processing = False
+
+    async def _chat_inner(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
+        """Inner chat logic. Wrapped by chat() with try/finally for _processing flag."""
 
         # ═══════════════════════════════════════════════════════════════
         # ABILITY-FIRST PRE-PROCESSING
@@ -370,7 +377,6 @@ class Conversation:
                     logger.warning(f"Deferred memory evaluation failed: {e}")
             asyncio.create_task(_deferred_evaluate())
 
-        self._processing = False
         return final_response
 
     async def _handle_tool_calls(
