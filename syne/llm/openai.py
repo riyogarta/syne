@@ -143,8 +143,12 @@ class OpenAIProvider(LLMProvider):
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)
             body["reasoning_effort"] = effort
-            # Don't set max_tokens for reasoning models — the limit includes
-            # reasoning tokens, so capping it risks truncating actual output.
+            # API counts reasoning tokens inside max_tokens, so add
+            # thinking_budget on top to preserve intended output length.
+            if max_tokens and thinking_budget:
+                body["max_tokens"] = max_tokens + thinking_budget
+            elif max_tokens:
+                body["max_tokens"] = max_tokens
         else:
             body["temperature"] = temperature
             if max_tokens:

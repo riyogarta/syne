@@ -271,9 +271,11 @@ class CodexProvider(LLMProvider):
         if thinking_budget is not None and thinking_budget > 0:
             effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
             body["reasoning"] = {"effort": effort}
-            # Don't set max_output_tokens when reasoning is active —
-            # let the API use its own maximum. The limit includes reasoning
-            # tokens, so capping it risks truncating actual output.
+            # API counts reasoning tokens inside max_output_tokens,
+            # so add thinking_budget on top of max_tokens to preserve
+            # the user's intended output length.
+            output = max_tokens or 8192
+            body["max_output_tokens"] = output + thinking_budget
         elif max_tokens is not None:
             body["max_output_tokens"] = max_tokens
 
