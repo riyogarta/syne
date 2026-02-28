@@ -55,8 +55,16 @@ def _do_update(syne_dir: str):
     # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
     _run_schema_migration(syne_dir)
 
-    # Ensure Ollama + evaluator model if auto_capture is enabled (non-fatal)
-    _ensure_evaluator_if_enabled(syne_dir)
+    # Ensure Ollama + evaluator model if auto_capture is enabled (non-fatal).
+    # Run as subprocess so we use the NEWLY installed code, not the old
+    # module still loaded in this process's memory.
+    venv_python = os.path.join(venv_dir, "bin", "python")
+    subprocess.run(
+        [venv_python, "-c",
+         f"from syne.cli.helpers import _ensure_evaluator_if_enabled; "
+         f"_ensure_evaluator_if_enabled({syne_dir!r})"],
+        cwd=syne_dir,
+    )
 
     # Restart systemd service if active
     _restart_service()
