@@ -2464,6 +2464,7 @@ Or just send me a message!"""
             await query.edit_message_text(
                 f"⚙️ <b>Parameters — {entry.get('label', model_key)}</b>\n\n"
                 f"<pre>{params_json}</pre>\n\n"
+                f"Be careful, changing parameters can make the AI model work unstable.\n\n"
                 f"Send new JSON to update, or /cancel to abort.",
                 parse_mode="HTML",
             )
