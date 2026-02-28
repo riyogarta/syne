@@ -242,8 +242,8 @@ class AnthropicProvider(LLMProvider):
 
     # Claude-specific defaults — tuned for quality over creativity
     DEFAULT_TEMPERATURE = 0.3
-    DEFAULT_MAX_TOKENS = 16384
-    DEFAULT_THINKING_BUDGET = 10240  # ~high; None=use this, 0=off, >0=use that
+    DEFAULT_MAX_TOKENS = 64000
+    DEFAULT_THINKING_BUDGET = 32000  # generous default; None=use this, 0=off, >0=use that
 
     async def chat(
         self,

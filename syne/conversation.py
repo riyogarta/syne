@@ -864,8 +864,8 @@ class ConversationManager:
             _driver = model_entry.get("driver", "")
             _defaults = {
                 "google_cca":   {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
-                "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 4096,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
-                "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
+                "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+                "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
                 "openai_compat":{"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
                 "together":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
                 "ollama":       {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},

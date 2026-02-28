@@ -364,7 +364,7 @@ INSERT INTO config (key, value, description) VALUES
     ('web_search.api_key', '""', 'Brave Search API key (get from https://brave.com/search/api/)'),
     ('web_fetch.timeout', '30', 'Web fetch timeout in seconds'),
     -- Model registry (driver-based model system)
-    ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": 4096, "top_p": 1.0, "top_k": null, "frequency_penalty": 0, "presence_penalty": 0}, "reasoning_visible": false}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}]', 'Available LLM models with driver configuration'),
+    ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": 10000, "top_p": 1.0, "top_k": null, "frequency_penalty": 0, "presence_penalty": 0}, "reasoning_visible": false}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}]', 'Available LLM models with driver configuration'),
     ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models'),
     -- Embedding model registry (same pattern as chat model registry)
     ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
@@ -471,8 +471,8 @@ BEGIN
             driver := model->>'driver';
             defaults := CASE driver
                 WHEN 'google_cca'    THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
-                WHEN 'codex'         THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": 4096,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
-                WHEN 'anthropic'     THEN '{"temperature": 0.3, "max_tokens": null, "thinking_budget": 10240, "top_p": 0.99, "top_k": 50,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
+                WHEN 'codex'         THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": 10000, "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
+                WHEN 'anthropic'     THEN '{"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
                 WHEN 'openai_compat' THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": null,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
                 WHEN 'together'      THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": null,  "top_p": 1.0,  "top_k": null, "frequency_penalty": 0,    "presence_penalty": 0}'::jsonb
                 WHEN 'ollama'        THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": null,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": null, "presence_penalty": null}'::jsonb
@@ -517,7 +517,7 @@ BEGIN
     END IF;
 END $$;
 
--- v0.13.5: all models max_tokens → null (unlimited by default)
+-- v0.13.6: max_tokens → null, thinking_budget → max per driver
 DO $$
 DECLARE
     models jsonb;
@@ -525,6 +525,9 @@ DECLARE
     model jsonb;
     changed boolean := false;
     p jsonb;
+    driver text;
+    tb jsonb;
+    new_tb jsonb;
 BEGIN
     SELECT value::jsonb INTO models FROM config WHERE key = 'provider.models';
     IF models IS NULL THEN RETURN; END IF;
@@ -533,14 +536,24 @@ BEGIN
     LOOP
         p := model->'params';
         IF p IS NOT NULL AND p != 'null'::jsonb THEN
+            driver := model->>'driver';
+
             -- max_tokens → null for all models
             IF p ? 'max_tokens' AND (p->'max_tokens') != 'null'::jsonb THEN
                 model := jsonb_set(model, '{params,max_tokens}', 'null'::jsonb);
                 changed := true;
             END IF;
-            -- codex: thinking_budget 8192 → 4096
-            IF model->>'driver' = 'codex' AND (p->'thinking_budget') = '8192'::jsonb THEN
-                model := jsonb_set(model, '{params,thinking_budget}', '4096'::jsonb);
+
+            -- thinking_budget → max per driver
+            tb := p->'thinking_budget';
+            new_tb := NULL;
+            IF driver = 'codex' AND tb IS NOT NULL AND tb != 'null'::jsonb AND (tb)::int < 10000 THEN
+                new_tb := '10000'::jsonb;
+            ELSIF driver = 'anthropic' AND tb IS NOT NULL AND tb != 'null'::jsonb AND (tb)::int < 32000 THEN
+                new_tb := '32000'::jsonb;
+            END IF;
+            IF new_tb IS NOT NULL THEN
+                model := jsonb_set(model, '{params,thinking_budget}', new_tb);
                 changed := true;
             END IF;
         END IF;
