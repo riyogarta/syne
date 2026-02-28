@@ -3534,7 +3534,7 @@ Or just send me a message!"""
             emoji = "✅" if row["enabled"] else "⛔"
             settings = row["settings"] if isinstance(row["settings"], dict) else {}
             mk = settings.get("model")
-            mlabel = model_map.get(mk, mk) if mk else f"Default"
+            mlabel = model_map.get(mk, mk) if mk else f"Default ({default_label})"
             buttons.append([InlineKeyboardButton(
                 f"{emoji} {name}  [{mlabel}]", callback_data=f"groups:view:{gid}"
             )])
