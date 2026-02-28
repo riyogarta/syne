@@ -281,7 +281,18 @@ class TelegramChannel:
         self.app.add_error_handler(self._handle_error)
 
         logger.info("Starting Telegram bot...")
-        await self.app.initialize()
+        # Retry initialization (getMe) — transient network timeouts shouldn't kill the bot
+        for attempt in range(5):
+            try:
+                await self.app.initialize()
+                break
+            except Exception as e:
+                if attempt < 4:
+                    delay = [2, 5, 10, 15][attempt]
+                    logger.warning(f"Telegram init failed (attempt {attempt + 1}/5): {e}. Retrying in {delay}s...")
+                    await asyncio.sleep(delay)
+                else:
+                    raise
         await self.app.start()
         await self.app.updater.start_polling(
             drop_pending_updates=True,
