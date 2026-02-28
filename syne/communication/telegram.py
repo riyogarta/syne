@@ -3479,21 +3479,28 @@ Or just send me a message!"""
         elif action == "member_alias_prompt" and len(parts) >= 4:
             group_id = parts[2]
             member_id = parts[3]
-            
+
             from ..db.models import get_group
             group = await get_group("telegram", group_id)
             members = ((group or {}).get("settings") or {}).get("members") or {}
             info = members.get(member_id, {})
             current = info.get("alias", "none")
             m_name = info.get("name", member_id)
-            
+
+            # Set interactive input state
+            self._auth_state[query.from_user.id] = {
+                "type": "group_alias",
+                "group_id": group_id,
+                "member_id": member_id,
+                "chat_id": query.message.chat_id,
+            }
+
             text = (
-                f"\u270f\ufe0f <b>Set Alias for {m_name}</b>\n\n"
+                f"✏️ <b>Set Alias for {m_name}</b>\n\n"
                 f"Current alias: {current}\n\n"
-                f"Send the new alias as a message:\n"
-                f"<code>/groups alias {group_id} {member_id} NewAlias</code>"
+                f"Send the new alias, or /cancel to abort."
             )
-            buttons = [[InlineKeyboardButton("\u2b05\ufe0f Back", callback_data=f"groups:member:{group_id}:{member_id}")]]
+            buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"groups:member:{group_id}:{member_id}")]]
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         
         elif action == "add_prompt":
@@ -4497,6 +4504,8 @@ Or just send me a message!"""
             return await self._process_embed_edit_label(user_id, chat_id, text, state, context)
         elif auth_type == "eval_add":
             return await self._process_addeval_input(user_id, chat_id, text, state, context)
+        elif auth_type == "group_alias":
+            return await self._process_group_alias_input(user_id, chat_id, text, state, context)
 
         return False
 
@@ -4922,6 +4931,33 @@ Or just send me a message!"""
             )
         else:
             await bot.send_message(chat_id=chat_id, text="❌ Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_group_alias_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle text input for setting a group member alias."""
+        bot = context.bot if context else self.app.bot
+        text = text.strip()
+        group_id = state.get("group_id", "")
+        member_id = state.get("member_id", "")
+
+        from ..db.models import update_group_member
+        result = await update_group_member(
+            platform="telegram",
+            platform_group_id=group_id,
+            member_id=member_id,
+            alias=text,
+        )
+        if result:
+            name = result.get("name", member_id)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f'✅ <b>{name}</b> ({member_id}) alias set to "<b>{text}</b>"',
+                parse_mode="HTML",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text="❌ Failed to update alias.")
 
         self._auth_state.pop(user_id, None)
         return True

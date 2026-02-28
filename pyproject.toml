@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "syne-agent"
-version = "0.12.6"
+version = "0.12.7"
 description = "AI Agent Framework with Unlimited Memory"
 readme = "README.md"
 license = "Apache-2.0"
