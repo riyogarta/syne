@@ -118,7 +118,7 @@ def _ensure_ollama():
         result = subprocess.run(
             ["ollama", "list"], capture_output=True, text=True, timeout=10,
         )
-        if model_name.split(":")[0] in result.stdout:
+        if any(line.startswith(model_name) for line in result.stdout.splitlines()):
             console.print(f"[green]✓ Ollama model {model_name} already available[/green]")
             return
     except Exception:
@@ -156,7 +156,7 @@ def _ensure_evaluator_model():
         result = subprocess.run(
             ["ollama", "list"], capture_output=True, text=True, timeout=10,
         )
-        if model_name.split(":")[0] in result.stdout:
+        if any(line.startswith(model_name) for line in result.stdout.splitlines()):
             console.print(f"[green]✓ Evaluator model {model_name} already available[/green]")
             return
     except Exception:
