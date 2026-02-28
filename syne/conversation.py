@@ -209,7 +209,13 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
-        async with self._lock:  # Serialize per-session to prevent race conditions
+        # Wait for lock with timeout — prevents permanent queue if previous request hangs
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=300)
+        except asyncio.TimeoutError:
+            logger.error(f"Session {self.session_id}: lock acquisition timed out after 300s — previous request likely hung")
+            return "⚠️ Previous request is still processing. Please wait a moment and try again."
+        try:
             # Reset per-turn state
             self._pending_media: list[str] = []
             self._cached_input_data: dict = {}  # For ability-first retry via tool call
@@ -219,6 +225,8 @@ class Conversation:
                 return await self._chat_inner(user_message, message_metadata)
             finally:
                 self._processing = False
+        finally:
+            self._lock.release()
 
     async def _chat_inner(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Inner chat logic. Wrapped by chat() with try/finally for _processing flag."""

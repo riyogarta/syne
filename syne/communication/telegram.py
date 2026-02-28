@@ -553,6 +553,10 @@ class TelegramChannel:
                         is_dm=not is_group,
                     )
 
+                if not response:
+                    response = "⚠️ LLM returned an empty response. Please try again."
+                    logger.warning(f"Empty response for chat {chat.id} — sending fallback")
+
                 if response:
                     # Check if per-model reasoning visibility is ON — prepend thinking if available
                     if browse_cwd:

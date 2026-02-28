@@ -59,6 +59,7 @@ _BASE_DELAY_MS = 1_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
+_STREAM_OVERALL_TIMEOUT = 300  # 5 min hard cap on entire SSE stream
 
 # Default CCA rate limit (requests per minute).
 # Google Account (OAuth free): documented as 60 RPM, but internal CCA
@@ -689,6 +690,11 @@ class GoogleProvider(LLMProvider):
             nonlocal input_tokens, output_tokens
             has_content = False
 
+            # Overall stream timeout — prevents keep-alive lines from holding
+            # the connection open forever (httpx read timeout only checks for
+            # ANY data, including empty keep-alive lines).
+            stream_deadline = time.monotonic() + _STREAM_OVERALL_TIMEOUT
+
             async with httpx.AsyncClient(timeout=180) as client:
                 async with client.stream("POST", url, content=body_json, headers=headers) as resp:
                     # Check status BEFORE consuming stream.
@@ -697,6 +703,9 @@ class GoogleProvider(LLMProvider):
                         await resp.aread()
                         resp.raise_for_status()
                     async for line in resp.aiter_lines():
+                        if time.monotonic() > stream_deadline:
+                            logger.warning(f"CCA stream exceeded {_STREAM_OVERALL_TIMEOUT}s overall — aborting")
+                            break
                         if not line.startswith("data:"):
                             continue
                         data_str = line[5:].strip()
