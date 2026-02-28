@@ -70,10 +70,15 @@ class WhatsAppAbility(Ability):
         except Exception:
             pass
 
-        # 3. Common locations — resolve dynamically, no hardcoded paths
-        candidates = [os.path.join(_WACLI_INSTALL_DIR, "wacli")]  # ~/.local/bin
+        # 3. Dynamically resolve Go binary path
+        gopaths = set()
 
-        # Ask Go where its binaries go (works for any user/setup)
+        # $GOPATH env var
+        env_gopath = os.environ.get("GOPATH", "").strip()
+        if env_gopath:
+            gopaths.add(env_gopath)
+
+        # Ask `go env GOPATH` (if go is in PATH)
         if shutil.which("go"):
             try:
                 proc = await asyncio.create_subprocess_exec(
@@ -81,14 +86,18 @@ class WhatsAppAbility(Ability):
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 )
                 out, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-                gopath = out.decode().strip()
-                if gopath:
-                    candidates.append(os.path.join(gopath, "bin", "wacli"))
+                val = out.decode().strip()
+                if val:
+                    gopaths.add(val)
             except Exception:
                 pass
 
-        # Fallback: ~/go/bin (Go default when GOPATH not set)
-        candidates.append(os.path.expanduser("~/go/bin/wacli"))
+        # Go default: ~/go (used when GOPATH is not set at all)
+        gopaths.add(os.path.expanduser("~/go"))
+
+        candidates = [os.path.join(_WACLI_INSTALL_DIR, "wacli")]
+        for gp in gopaths:
+            candidates.append(os.path.join(gp, "bin", "wacli"))
 
         for candidate in candidates:
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
