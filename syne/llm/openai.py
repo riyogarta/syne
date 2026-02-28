@@ -143,7 +143,7 @@ class OpenAIProvider(LLMProvider):
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)
             body["reasoning_effort"] = effort
-            body["max_tokens"] = self.context_window
+            # Don't cap output — omit max_tokens so API uses model maximum
         else:
             body["temperature"] = temperature
             if max_tokens:

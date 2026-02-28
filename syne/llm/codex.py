@@ -271,7 +271,8 @@ class CodexProvider(LLMProvider):
         if thinking_budget is not None and thinking_budget > 0:
             effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
             body["reasoning"] = {"effort": effort}
-            body["max_output_tokens"] = self.context_window
+            # Don't cap output — omit max_output_tokens entirely
+            # so API uses its own model-specific maximum
         elif max_tokens is not None:
             body["max_output_tokens"] = max_tokens
 
@@ -391,6 +392,13 @@ class CodexProvider(LLMProvider):
                         elif event_type == "response.completed":
                             resp_data = event.get("response", {})
                             actual_model = resp_data.get("model", model)
+                            resp_status = resp_data.get("status", "")
+                            if resp_status == "incomplete":
+                                reason = resp_data.get("incomplete_details", {})
+                                logger.warning(f"Codex response INCOMPLETE: {reason}")
+                            elif resp_status == "failed":
+                                err = resp_data.get("error", {})
+                                logger.error(f"Codex response FAILED: {err}")
                             u = resp_data.get("usage", {})
                             usage["input_tokens"] = u.get("input_tokens", 0)
                             usage["output_tokens"] = u.get("output_tokens", 0)
