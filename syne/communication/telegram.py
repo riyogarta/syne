@@ -4543,8 +4543,8 @@ Or just send me a message!"""
 
     # Default LLM parameters per driver
     _DRIVER_DEFAULT_PARAMS = {
-        "google_cca": {"temperature": 0.7, "thinking_budget": None},
-        "codex": {},
+        "google_cca": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+        "codex": {"temperature": None, "max_tokens": None, "thinking_budget": None},
         "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
         "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
     }

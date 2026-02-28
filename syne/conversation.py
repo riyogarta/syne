@@ -877,8 +877,8 @@ class ConversationManager:
         if not conv.model_params:
             _driver = model_entry.get("driver", "")
             _defaults = {
-                "google_cca": {"temperature": 0.7, "thinking_budget": None},
-                "codex": {},
+                "google_cca": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+                "codex": {"temperature": None, "max_tokens": None, "thinking_budget": None},
                 "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
                 "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
             }
