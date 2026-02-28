@@ -210,11 +210,15 @@ class Conversation:
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
         # Wait for lock with timeout — prevents permanent queue if previous request hangs
+        locked = self._lock.locked()
+        if locked:
+            logger.warning(f"Session {self.session_id}: lock is held, waiting (up to 30s)...")
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=30)
         except asyncio.TimeoutError:
             logger.error(f"Session {self.session_id}: lock acquisition timed out after 30s — previous request likely hung")
             return "⚠️ Previous request is still processing. Please wait a moment and try again."
+        logger.debug(f"Session {self.session_id}: lock acquired")
         try:
             # Reset per-turn state
             self._pending_media: list[str] = []

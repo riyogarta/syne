@@ -422,6 +422,7 @@ class TelegramChannel:
         chat = update.effective_chat
         text = update.message.text
         is_group = chat.type in ("group", "supergroup")
+        logger.debug(f"_handle_message entered: user={user.id}, chat={chat.id}, text={text[:50]}")
 
         # ═══════════════════════════════════════════════════════════════
         # AUTH FLOW INTERCEPT: If user is in auth flow, handle credential
