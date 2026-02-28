@@ -247,10 +247,6 @@ class TelegramChannel:
             Application.builder()
             .token(self.bot_token)
             .concurrent_updates(256)
-            .connect_timeout(30.0)
-            .read_timeout(30.0)
-            .write_timeout(30.0)
-            .pool_timeout(10.0)
             .build()
         )
 
@@ -264,21 +260,9 @@ class TelegramChannel:
                 break
             except Exception as e:
                 if attempt < 4:
-                    delay = [3, 10, 20, 30][attempt]
+                    delay = [2, 5, 10, 15][attempt]
                     logger.warning(f"Telegram init failed (attempt {attempt + 1}/5): {type(e).__name__}: {e}. Retrying in {delay}s...")
                     await asyncio.sleep(delay)
-                    # Rebuild app — failed initialize() may leave dirty state
-                    self.app = (
-                        Application.builder()
-                        .token(self.bot_token)
-                        .concurrent_updates(256)
-                        .connect_timeout(30.0)
-                        .read_timeout(30.0)
-                        .write_timeout(30.0)
-                        .pool_timeout(10.0)
-                        .build()
-                    )
-                    self._register_handlers()
                 else:
                     raise
         await self.app.start()
