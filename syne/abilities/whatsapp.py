@@ -64,10 +64,16 @@ class WhatsAppAbility(Ability):
         if shutil.which("wacli"):
             return True, ""
 
-        local_bin = os.path.join(_WACLI_INSTALL_DIR, "wacli")
-        if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
-            self._wacli_path = local_bin
-            return True, ""
+        # Check common binary locations that may not be in service PATH
+        for candidate in (
+            os.path.join(_WACLI_INSTALL_DIR, "wacli"),       # ~/.local/bin/wacli
+            os.path.expanduser("~/go/bin/wacli"),             # go install default
+            os.path.join(os.environ.get("GOPATH", ""), "bin", "wacli"),  # $GOPATH/bin
+        ):
+            if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                self._wacli_path = candidate
+                logger.info(f"Found wacli at {candidate}")
+                return True, ""
 
         logger.info("wacli not found, attempting to install...")
 
@@ -255,12 +261,27 @@ class WhatsAppAbility(Ability):
         self._agent = agent
         self._wacli_path = wacli_path
 
-        if not shutil.which(self._wacli_path):
-            logger.error(
-                f"wacli binary not found at '{self._wacli_path}'. "
-                "Install from https://github.com/steipete/wacli"
-            )
-            return False
+        # Resolve wacli path — shutil.which may fail if ~/go/bin not in service PATH
+        resolved = shutil.which(self._wacli_path)
+        if resolved:
+            self._wacli_path = resolved
+        elif not os.path.isfile(self._wacli_path):
+            # Try common locations
+            for candidate in (
+                os.path.expanduser("~/go/bin/wacli"),
+                os.path.join(os.environ.get("GOPATH", ""), "bin", "wacli"),
+                os.path.join(_WACLI_INSTALL_DIR, "wacli"),
+            ):
+                if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    self._wacli_path = candidate
+                    logger.info(f"Resolved wacli path: {candidate}")
+                    break
+            else:
+                logger.error(
+                    f"wacli binary not found at '{self._wacli_path}' or common locations. "
+                    "Install from https://github.com/steipete/wacli"
+                )
+                return False
 
         try:
             self._process = await asyncio.create_subprocess_exec(
