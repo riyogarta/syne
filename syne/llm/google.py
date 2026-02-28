@@ -456,9 +456,10 @@ class GoogleProvider(LLMProvider):
                         parts.append({"text": _sanitize_surrogates(msg.content)})
                     for tc in tool_calls:
                         func = tc.get("function", tc)
-                        args_str = func.get("arguments", "{}")
+                        # Handle both original ("arguments" as string) and normalized ("args" as dict)
+                        raw_args = func.get("arguments") or func.get("args") or "{}"
                         try:
-                            args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                         except json.JSONDecodeError:
                             args = {}
 

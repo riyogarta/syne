@@ -103,7 +103,24 @@ class OpenAIProvider(LLMProvider):
                 # Check if this assistant message had tool calls
                 if msg.metadata and msg.metadata.get("tool_calls"):
                     entry["content"] = msg.content or None
-                    entry["tool_calls"] = msg.metadata["tool_calls"]
+                    # Convert normalized tool_calls back to OpenAI API format
+                    api_tcs = []
+                    for tc in msg.metadata["tool_calls"]:
+                        if "function" in tc:
+                            # Already in API format
+                            api_tcs.append(tc)
+                        else:
+                            # Normalized format → convert back
+                            args = tc.get("args", {})
+                            api_tcs.append({
+                                "id": tc.get("id") or f"call_{tc.get('name', 'unknown')}",
+                                "type": "function",
+                                "function": {
+                                    "name": tc.get("name", ""),
+                                    "arguments": json.dumps(args) if isinstance(args, dict) else str(args or "{}"),
+                                },
+                            })
+                    entry["tool_calls"] = api_tcs
                 else:
                     entry["content"] = msg.content
                 formatted.append(entry)

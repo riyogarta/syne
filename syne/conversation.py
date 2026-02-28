@@ -193,12 +193,19 @@ class Conversation:
         """Extract all LLM parameters from self.model_params for provider.chat()."""
         kwargs = {}
         p = self.model_params
-        for key in ("thinking_budget", "temperature", "top_p", "top_k",
-                     "frequency_penalty", "presence_penalty"):
-            if p.get(key) is not None:
-                kwargs[key] = p[key]
-        if p.get("max_tokens") is not None:
-            kwargs["max_tokens"] = p["max_tokens"]
+        # Int params
+        for key in ("thinking_budget", "top_k"):
+            v = p.get(key)
+            if v is not None:
+                kwargs[key] = int(v)
+        # Float params
+        for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
+            v = p.get(key)
+            if v is not None:
+                kwargs[key] = float(v)
+        v = p.get("max_tokens")
+        if v is not None:
+            kwargs["max_tokens"] = int(v)
         logger.debug(f"chat_kwargs from model_params: {kwargs}")
         return kwargs
 

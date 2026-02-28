@@ -297,6 +297,17 @@ class AnthropicProvider(LLMProvider):
                                 "name": func.get("name", ""),
                                 "input": input_data,
                             })
+                        else:
+                            # Normalized format: {"name", "args"(dict), "id"}
+                            input_data = tc.get("args", {})
+                            if isinstance(input_data, str):
+                                input_data = json.loads(input_data)
+                            content_blocks.append({
+                                "type": "tool_use",
+                                "id": tc.get("id", "unknown"),
+                                "name": tc.get("name", ""),
+                                "input": input_data,
+                            })
                     conversation.append({"role": "assistant", "content": content_blocks})
                 else:
                     conversation.append({"role": "assistant", "content": m.content or ""})
