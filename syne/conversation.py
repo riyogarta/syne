@@ -872,7 +872,17 @@ class ConversationManager:
             if _um:
                 effective_key = _um
         model_entry = next((m for m in active_models if m.get("key") == effective_key), {})
-        conv.model_params = model_entry.get("params", {})
+        conv.model_params = model_entry.get("params") or {}
+        # If no params stored, fall back to driver defaults
+        if not conv.model_params:
+            _driver = model_entry.get("driver", "")
+            _defaults = {
+                "google_cca": {"temperature": 0.7, "thinking_budget": None},
+                "codex": {},
+                "anthropic": {"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240},
+                "openai_compat": {"temperature": 0.7, "max_tokens": None, "thinking_budget": None},
+            }
+            conv.model_params = _defaults.get(_driver, {})
 
         self._active[key] = conv
         return conv

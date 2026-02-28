@@ -2453,7 +2453,7 @@ Or just send me a message!"""
                 await query.answer("Model not found", show_alert=True)
                 return
             driver = entry.get("driver", "")
-            params = entry.get("params", self._DRIVER_DEFAULT_PARAMS.get(driver, {}))
+            params = entry.get("params") or self._DRIVER_DEFAULT_PARAMS.get(driver, {})
             import json as _json
             params_json = _json.dumps(params, indent=2)
             self._auth_state[user.id] = {

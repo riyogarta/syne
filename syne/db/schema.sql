@@ -406,3 +406,38 @@ UPDATE config SET value = '25' WHERE key = 'session.max_tool_rounds' AND value =
 
 -- v0.10.0: token optimization — lower recall_limit from 10 to 5
 UPDATE config SET value = '5' WHERE key = 'memory.recall_limit' AND value = '10';
+
+-- v0.11.0: auto-populate params for existing models without them
+DO $$
+DECLARE
+    models JSONB;
+    model JSONB;
+    driver TEXT;
+    defaults JSONB;
+    updated JSONB := '[]'::jsonb;
+    changed BOOLEAN := false;
+BEGIN
+    SELECT value INTO models FROM config WHERE key = 'provider.models';
+    IF models IS NULL THEN RETURN; END IF;
+
+    FOR model IN SELECT jsonb_array_elements(models)
+    LOOP
+        IF model->'params' IS NULL OR model->'params' = '{}'::jsonb THEN
+            driver := model->>'driver';
+            defaults := CASE driver
+                WHEN 'google_cca' THEN '{"temperature": 0.7, "thinking_budget": null}'::jsonb
+                WHEN 'anthropic' THEN '{"temperature": 0.3, "max_tokens": 16384, "thinking_budget": 10240}'::jsonb
+                WHEN 'openai_compat' THEN '{"temperature": 0.7, "max_tokens": null, "thinking_budget": null}'::jsonb
+                WHEN 'codex' THEN '{}'::jsonb
+                ELSE '{}'::jsonb
+            END;
+            model := jsonb_set(model, '{params}', defaults);
+            changed := true;
+        END IF;
+        updated := updated || jsonb_build_array(model);
+    END LOOP;
+
+    IF changed THEN
+        UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
+    END IF;
+END $$;
