@@ -104,10 +104,17 @@ async def evaluate_message(
     if stripped in skip_patterns:
         return None
 
-    # Starts with question words only (no info)
-    question_only = stripped.startswith(("apa ", "what ", "how ", "gimana ", "kapan ", "when ",
-                                          "where ", "dimana ", "siapa ", "who ", "kenapa ", "why "))
-    if question_only and len(stripped) < 30:
+    # Starts with question/conversational words — no personal info to store
+    question_starts = ("apa ", "what ", "how ", "gimana ", "kapan ", "when ",
+                       "where ", "dimana ", "siapa ", "who ", "kenapa ", "why ",
+                       "terus ", "lalu ", "trus ", "jadi ", "so ", "then ",
+                       "bagaimana ", "bisakah ", "bisa ", "can ", "could ",
+                       "tolong ", "coba ", "please ", "help ")
+    if stripped.startswith(question_starts) and len(stripped) < 80:
+        return None
+
+    # Contains question mark and no personal statement keywords
+    if "?" in stripped and len(stripped) < 80:
         return None
 
     # Use LLM for nuanced evaluation
@@ -176,9 +183,15 @@ async def evaluate_message_ollama(
     if stripped in skip_patterns:
         return None
 
-    question_only = stripped.startswith(("apa ", "what ", "how ", "gimana ", "kapan ", "when ",
-                                          "where ", "dimana ", "siapa ", "who ", "kenapa ", "why "))
-    if question_only and len(stripped) < 30:
+    question_starts = ("apa ", "what ", "how ", "gimana ", "kapan ", "when ",
+                       "where ", "dimana ", "siapa ", "who ", "kenapa ", "why ",
+                       "terus ", "lalu ", "trus ", "jadi ", "so ", "then ",
+                       "bagaimana ", "bisakah ", "bisa ", "can ", "could ",
+                       "tolong ", "coba ", "please ", "help ")
+    if stripped.startswith(question_starts) and len(stripped) < 80:
+        return None
+
+    if "?" in stripped and len(stripped) < 80:
         return None
 
     try:

@@ -54,6 +54,7 @@ class Conversation:
         self.reasoning_visible: bool = False  # Per-model reasoning visibility
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
+        self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
 
     async def load_history(self) -> list[ChatMessage]:
@@ -105,8 +106,13 @@ class Conversation:
 
         self._message_cache.append(ChatMessage(role=role, content=content, metadata=metadata))
 
-    async def build_context(self, user_message: str) -> list[ChatMessage]:
-        """Build full context: system prompt + memories + history + current message."""
+    async def build_context(self, user_message: str, recall_query: Optional[str] = None) -> list[ChatMessage]:
+        """Build full context: system prompt + memories + history + current message.
+
+        Args:
+            user_message: Full message (may include context prefix) for history.
+            recall_query: Clean text (without prefix) for memory recall. Falls back to user_message.
+        """
         messages = []
         access_level = self.user.get("access_level", "public")
 
@@ -132,7 +138,7 @@ class Conversation:
         if isinstance(recall_limit, str):
             recall_limit = int(recall_limit)
         memories = await self.memory.recall(
-            query=user_message,
+            query=recall_query or user_message,
             limit=recall_limit,
             user_id=self.user.get("id"),
             requester_access_level=access_level,  # Pass access level for Rule 760
@@ -199,20 +205,21 @@ class Conversation:
 
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Process a user message and return agent response.
-        
+
         Args:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
-        # Reset per-turn state
-        self._pending_media: list[str] = []
-        self._cached_input_data: dict = {}  # For ability-first retry via tool call
-        self._message_metadata = message_metadata
-        self._processing = True
-        try:
-            return await self._chat_inner(user_message, message_metadata)
-        finally:
-            self._processing = False
+        async with self._lock:  # Serialize per-session to prevent race conditions
+            # Reset per-turn state
+            self._pending_media: list[str] = []
+            self._cached_input_data: dict = {}  # For ability-first retry via tool call
+            self._message_metadata = message_metadata
+            self._processing = True
+            try:
+                return await self._chat_inner(user_message, message_metadata)
+            finally:
+                self._processing = False
 
     async def _chat_inner(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Inner chat logic. Wrapped by chat() with try/finally for _processing flag."""
@@ -283,8 +290,9 @@ class Conversation:
                     except Exception as e:
                         logger.debug(f"Status callback failed: {e}")
 
-        # Build context
-        context = await self.build_context(user_message)
+        # Build context — use original text (without context prefix) for memory recall
+        recall_query = (message_metadata or {}).get("original_text", user_message)
+        context = await self.build_context(user_message, recall_query=recall_query)
 
         # Log context usage
         usage = self.context_mgr.get_usage(context)
