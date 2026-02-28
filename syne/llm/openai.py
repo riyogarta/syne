@@ -146,11 +146,9 @@ class OpenAIProvider(LLMProvider):
         else:
             body["temperature"] = temperature
 
-        # Always set max_tokens — API defaults may be too small for reasoning + tool calls
+        # max_tokens — value comes from model params JSON
         if max_tokens and max_tokens > 0:
             body["max_tokens"] = max_tokens
-        elif is_reasoning:
-            body["max_tokens"] = 32768
         if top_p is not None:
             body["top_p"] = top_p
         if frequency_penalty is not None:
