@@ -88,6 +88,18 @@ class AnthropicProvider(LLMProvider):
         except Exception as e:
             logger.debug(f"DB credential load failed: {e}")
         
+        # Try DB API key
+        try:
+            from ..db.models import get_config
+            db_api_key = await get_config("credential.anthropic_api_key", None)
+            if db_api_key:
+                self._access_token = db_api_key
+                self._is_oauth = False
+                self._last_load = now
+                return db_api_key
+        except Exception as e:
+            logger.debug(f"DB API key load failed: {e}")
+
         # Try environment
         env_token = os.environ.get("ANTHROPIC_API_KEY")
         if env_token:

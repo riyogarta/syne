@@ -2483,25 +2483,144 @@ Or just send me a message!"""
             await self._models_menu_main(query)
 
         elif data == "models:add_menu":
-            # Show available drivers for adding a new model
-            drivers = [
-                ("google_cca", "Google (OAuth)"),
-                ("codex", "OpenAI / Codex (OAuth)"),
-                ("openai_compat", "OpenAI-compatible (API Key)"),
-                ("groq", "Groq (API Key)"),
+            # Show 3 top-level auth categories
+            keyboard = [
+                [InlineKeyboardButton("Google (OAuth)", callback_data="models:add:google_cca")],
+                [InlineKeyboardButton("OpenAI (OAuth)", callback_data="models:add:codex")],
+                [InlineKeyboardButton("🔑 AI API Key", callback_data="models:add_apikey")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="models:main")],
             ]
-            buttons = [
-                InlineKeyboardButton(label, callback_data=f"models:add:{key}")
-                for key, label in drivers
-            ]
-            buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="models:main"))
-            keyboard = [[btn] for btn in buttons]
             await query.edit_message_text(
                 "🤖 <b>Add Model</b>\n\n"
-                "Choose a driver:",
+                "Choose authentication method:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
+
+        elif data == "models:add_apikey":
+            # Sub-menu: pick an API key provider
+            providers = [
+                ("openai", "OpenAI"),
+                ("anthropic", "Anthropic (Claude)"),
+                ("groq", "Groq"),
+                ("together", "Together AI"),
+                ("openrouter", "OpenRouter"),
+                ("custom", "Custom (enter URL)"),
+            ]
+            buttons = [
+                [InlineKeyboardButton(label, callback_data=f"models:add_ak:{key}")]
+                for key, label in providers
+            ]
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="models:add_menu")])
+            await query.edit_message_text(
+                "🔑 <b>Add Model — API Key</b>\n\n"
+                "Select provider:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif data.startswith("models:add_ak:"):
+            # API key provider selected — start multi-step add
+            provider_key = data.split(":", 2)[2]
+            _ak_providers = {
+                "openai": {
+                    "label": "OpenAI",
+                    "driver": "openai_compat",
+                    "base_url": "https://api.openai.com/v1",
+                    "credential_key": "credential.openai_api_key",
+                    "examples": "gpt-4.1, gpt-4.1-mini, o3, o4-mini",
+                },
+                "anthropic": {
+                    "label": "Anthropic",
+                    "driver": "anthropic",
+                    "credential_key": "credential.anthropic_api_key",
+                    "examples": "claude-sonnet-4-20250514, claude-opus-4-0-20250514",
+                },
+                "groq": {
+                    "label": "Groq",
+                    "driver": "openai_compat",
+                    "base_url": "https://api.groq.com/openai/v1",
+                    "credential_key": "credential.groq_api_key",
+                    "examples": "llama-3.3-70b-versatile, qwen/qwen3-32b",
+                },
+                "together": {
+                    "label": "Together AI",
+                    "driver": "openai_compat",
+                    "base_url": "https://api.together.xyz/v1",
+                    "credential_key": "credential.together_api_key",
+                    "examples": "meta-llama/Llama-4-Maverick-17B-128E",
+                },
+                "openrouter": {
+                    "label": "OpenRouter",
+                    "driver": "openai_compat",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "credential_key": "credential.openrouter_api_key",
+                    "examples": "google/gemini-2.5-pro, anthropic/claude-sonnet-4",
+                },
+            }
+            meta = _ak_providers.get(provider_key)
+
+            if provider_key == "custom":
+                # Custom URL — ask for base_url first
+                self._auth_state[user.id] = {
+                    "type": "models_add",
+                    "driver": "openai_compat",
+                    "step": "base_url",
+                }
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await (query._bot or self.app.bot).send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        "🔑 <b>Add Model — Custom API</b>\n\n"
+                        "Send the base URL (OpenAI-compatible endpoint).\n"
+                        "Example: <code>https://api.example.com/v1</code>\n\n"
+                        "Send /cancel to abort."
+                    ),
+                    parse_mode="HTML",
+                )
+            elif meta:
+                # Known provider — check if API key exists
+                from syne.db.models import get_config as _gc
+                existing_key = await _gc(meta["credential_key"], None)
+                self._auth_state[user.id] = {
+                    "type": "models_add",
+                    "driver": meta["driver"],
+                    "base_url": meta["base_url"],
+                    "credential_key": meta["credential_key"],
+                    "step": "apikey" if not existing_key else "model_id",
+                }
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                chat_id = query.message.chat_id
+                if existing_key:
+                    masked = str(existing_key)[:8] + "..."
+                    await (query._bot or self.app.bot).send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔑 <b>Add Model — {meta['label']}</b>\n\n"
+                            f"API Key: <code>{masked}</code> (already stored)\n\n"
+                            f"Send the <b>model ID</b> (e.g. <code>{meta['examples'].split(', ')[0]}</code>).\n"
+                            f"Available: {meta['examples']}\n\n"
+                            f"Send /cancel to abort."
+                        ),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await (query._bot or self.app.bot).send_message(
+                        chat_id=chat_id,
+                        text=(
+                            f"🔑 <b>Add Model — {meta['label']}</b>\n\n"
+                            f"Paste your <b>{meta['label']} API key</b> below.\n"
+                            f"It will be saved to the database and <b>NOT</b> stored in chat history.\n\n"
+                            f"Send /cancel to abort."
+                        ),
+                        parse_mode="HTML",
+                    )
 
         elif data.startswith("models:reauth:"):
             # Re-authenticate an OAuth model
@@ -2541,26 +2660,22 @@ Or just send me a message!"""
             if not entry:
                 await query.answer("Model not found", show_alert=True)
                 return
-            driver = entry.get("driver", "")
-            # Find credential key for this driver
-            providers = await self._get_auth_providers()
-            auth_entry = next((p for p in providers if p.get("key") == driver or p.get("auth_type") == "api_key" and driver in p.get("key", "")), None)
-            cred_key = auth_entry.get("credential_key", "") if auth_entry else ""
             label = entry.get("label", model_key)
+            # Use credential_key from model entry first, then fallback
+            cred_key = entry.get("credential_key", "")
             if not cred_key:
-                # Try common patterns
                 _driver_creds = {
                     "openai_compat": "credential.openai_api_key",
                     "groq": "credential.groq_api_key",
                     "together": "credential.together_api_key",
                 }
-                cred_key = _driver_creds.get(driver, "")
+                cred_key = _driver_creds.get(entry.get("driver", ""), "")
             if not cred_key:
                 await query.answer("No credential key for this driver", show_alert=True)
                 return
             self._auth_state[user.id] = {
                 "type": "apikey",
-                "provider": driver,
+                "provider": entry.get("driver", ""),
                 "credential_key": cred_key,
                 "label": label,
             }
@@ -2573,16 +2688,14 @@ Or just send me a message!"""
             )
 
         elif data.startswith("models:add:"):
-            # User selected a driver — ask for model details
+            # OAuth driver selected — ask for model ID
             driver = data.split(":", 2)[2]
-            logger.info(f"Add model: driver={driver}, user={user.id}")
-            _driver_meta = {
+            logger.info(f"Add model (OAuth): driver={driver}, user={user.id}")
+            _oauth_meta = {
                 "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
-                "codex": ("OpenAI / Codex (OAuth)", "gpt-5.2, o3-pro"),
-                "openai_compat": ("OpenAI-compatible (API Key)", "meta-llama/llama-4-maverick"),
-                "groq": ("Groq (API Key)", "llama-3.3-70b-versatile, qwen/qwen3-32b"),
+                "codex": ("OpenAI (OAuth)", "gpt-5.2, o3-pro"),
             }
-            driver_label, examples = _driver_meta.get(driver, (driver, "model-name"))
+            driver_label, examples = _oauth_meta.get(driver, (driver, "model-name"))
             self._auth_state[user.id] = {
                 "type": "models_add",
                 "driver": driver,
@@ -2593,7 +2706,6 @@ Or just send me a message!"""
             except Exception:
                 pass
             example_first = examples.split(", ")[0]
-            from telegram import helpers as tg_helpers
             await (query._bot or self.app.bot).send_message(
                 chat_id=query.message.chat_id,
                 text=(
@@ -4353,6 +4465,7 @@ Or just send me a message!"""
     _DEFAULT_CONTEXT_WINDOWS = {
         "google_cca": 1048576,  # 1M
         "codex": 1048576,       # 1M
+        "anthropic": 200000,    # 200K
         "openai_compat": 128000,
         "groq": 131072,         # 128K
     }
@@ -4361,6 +4474,7 @@ Or just send me a message!"""
     _DRIVER_AUTH_TYPES = {
         "google_cca": "oauth",
         "codex": "oauth",
+        "anthropic": "api_key",
         "openai_compat": "api_key",
         "groq": "api_key",
         "ollama": "none",
@@ -4373,7 +4487,44 @@ Or just send me a message!"""
         step = state.get("step", "")
         text = text.strip()
 
-        if step == "model_id":
+        if step == "base_url":
+            # Custom API key provider — user enters base URL
+            if not text.startswith("http"):
+                await bot.send_message(chat_id=chat_id, text="⚠️ URL must start with http:// or https://", parse_mode="HTML")
+                return True
+            state["base_url"] = text.rstrip("/")
+            state["credential_key"] = "credential.custom_api_key"
+            state["step"] = "apikey"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"Base URL: <code>{text}</code>\n\n"
+                    f"Now paste your <b>API key</b>.\n"
+                    f"It will be saved to the database and <b>NOT</b> stored in chat history.\n\n"
+                    f"Send /cancel to abort."
+                ),
+                parse_mode="HTML",
+            )
+            return True
+
+        elif step == "apikey":
+            # Save API key, then ask for model ID
+            cred_key = state.get("credential_key", "credential.custom_api_key")
+            await set_config(cred_key, text)
+            state["step"] = "model_id"
+            masked = text[:8] + "..."
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"🔑 API key saved (<code>{masked}</code>)\n\n"
+                    f"Now send the <b>model ID</b>.\n\n"
+                    f"Send /cancel to abort."
+                ),
+                parse_mode="HTML",
+            )
+            return True
+
+        elif step == "model_id":
             state["model_id"] = text
             state["step"] = "label"
             await bot.send_message(
@@ -4421,6 +4572,11 @@ Or just send me a message!"""
                 "auth": auth_type,
                 "context_window": ctx_window,
             }
+            # Include base_url and credential_key for API key models
+            if state.get("base_url"):
+                entry["base_url"] = state["base_url"]
+            if state.get("credential_key"):
+                entry["credential_key"] = state["credential_key"]
 
             # Append to provider.models in DB
             models = await get_config("provider.models", [])
