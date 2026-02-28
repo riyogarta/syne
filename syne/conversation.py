@@ -271,10 +271,20 @@ class Conversation:
                     )
                 except Exception as e:
                     logger.debug(f"Status callback failed: {e}")
-            result = await auto_compact_check(
-                session_id=self.session_id,
-                provider=self.provider,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    auto_compact_check(
+                        session_id=self.session_id,
+                        provider=self.provider,
+                    ),
+                    timeout=120,  # Max 2 minutes for compaction
+                )
+            except asyncio.TimeoutError:
+                logger.error(f"Compaction TIMED OUT for session {self.session_id} after 120s — skipping")
+                result = None
+            except Exception as e:
+                logger.error(f"Compaction FAILED for session {self.session_id}: {type(e).__name__}: {e}")
+                result = None
             if result:
                 logger.info(
                     f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
