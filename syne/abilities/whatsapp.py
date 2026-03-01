@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import sqlite3
 import stat
@@ -58,6 +59,10 @@ class WhatsAppAbility(Ability):
         self._allowlist_model_by_jid = {}  # jid -> model key override (None = default)
         self._session_db: Optional[str] = None
         self._lid_to_pn_cache = {}  # lid digits -> phone digits
+        self._owner_platform_ids = set()  # cached WhatsApp owner platform_id(s)
+        self._owner_only = True  # if true, only owner may trigger responses (Rule 700 at channel edge)
+        self._require_trigger = True  # if true, only respond if message contains trigger word
+        self._trigger_name = 'Molt'
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -437,6 +442,27 @@ class WhatsAppAbility(Ability):
         except Exception as e:
             logger.warning(f'Failed to load WhatsApp allowlist: {e}')
 
+        # Trigger gating (like Telegram mention): only respond if message contains trigger word
+        try:
+            from ..db.models import get_config
+            self._owner_only = bool(await get_config('whatsapp.owner_only', True))
+            self._require_trigger = bool(await get_config('whatsapp.require_trigger', True))
+            trig = await get_config('whatsapp.trigger_name', 'Molt')
+            self._trigger_name = (str(trig).strip() if trig is not None else 'Molt') or 'Molt'
+        except Exception as e:
+            logger.warning(f'Failed to load WhatsApp trigger config: {e}')
+
+        # Cache WhatsApp owner ids (Rule 700)
+        try:
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT platform_id FROM users WHERE platform='whatsapp' AND access_level='owner' AND active=true"
+                )
+            self._owner_platform_ids = {r['platform_id'] for r in rows if r and r.get('platform_id')}
+        except Exception as e:
+            logger.warning(f'Failed to load WhatsApp owner ids: {e}')
+
         # Resolve wacli DB path for the inbound poller
         self._wacli_db = self._resolve_wacli_db()
         if not self._wacli_db:
@@ -569,6 +595,81 @@ class WhatsAppAbility(Ability):
                 logger.error(f"Error in WhatsApp poll loop: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
+    def _lookup_pn_from_lid(self, lid: str) -> str:
+        """Map a LID (digits) to a phone number (digits) via session.db.
+
+        Returns '' if unknown/unavailable. Uses an in-memory cache.
+        """
+        if not lid or (not lid.isdigit()) or (not self._session_db):
+            return ''
+        cached = self._lid_to_pn_cache.get(lid)
+        if cached is not None:
+            return cached or ''
+        pn = ''
+        try:
+            con = sqlite3.connect(f'file:{self._session_db}?mode=ro', uri=True, timeout=1)
+            cur = con.execute('SELECT pn FROM whatsmeow_lid_map WHERE lid=? LIMIT 1', (lid,))
+            row = cur.fetchone()
+            con.close()
+            pn = row[0] if row and row[0] else ''
+        except Exception:
+            pn = ''
+        self._lid_to_pn_cache[lid] = pn
+        return pn
+
+    def _has_trigger_word(self, text: str, trigger: str) -> bool:
+        if not trigger:
+            return True
+        try:
+            return re.search(rf'\b{re.escape(trigger)}\b', text or '', re.IGNORECASE) is not None
+        except Exception:
+            return False
+
+    def _strip_trigger_word(self, text: str, trigger: str) -> str:
+        """Strip trigger word if it appears at the start (e.g. 'Molt:', 'molt,')."""
+        if not trigger:
+            return (text or '').strip()
+        try:
+            return re.sub(rf'^\s*{re.escape(trigger)}[,:]?\s*', '', text or '', flags=re.IGNORECASE).strip()
+        except Exception:
+            return (text or '').strip()
+
+    def _sender_is_owner(self, sender_platform_id: str, chat_jid: str, pn_for_chat: str | None) -> bool:
+        """Best-effort owner check based on sender identifiers + LID->phone mapping."""
+        if not self._owner_platform_ids:
+            return False
+
+        candidates: set[str] = set()
+        for x in (sender_platform_id, chat_jid):
+            if not x:
+                continue
+            candidates.add(str(x))
+            base = str(x).split(':', 1)[0]
+            candidates.add(base)
+            if '@' in base:
+                candidates.add(base.split('@', 1)[0])
+
+        if pn_for_chat:
+            candidates.add(str(pn_for_chat))
+            candidates.add(f"{pn_for_chat}@s.whatsapp.net")
+
+        for oid in self._owner_platform_ids:
+            if not oid:
+                continue
+            oid = str(oid)
+            base = oid.split(':', 1)[0]
+            local = base.split('@', 1)[0] if '@' in base else base
+            if oid in candidates or base in candidates or local in candidates:
+                return True
+
+            # If owner id is LID, map to phone and compare
+            if base.endswith('@lid') and local.isdigit():
+                pn = self._lookup_pn_from_lid(local)
+                if pn and (pn in candidates or f"{pn}@s.whatsapp.net" in candidates):
+                    return True
+
+        return False
+
     async def _handle_inbound(self, msg: dict):
         """Process a single inbound wacli JSON message."""
         from_me = bool(msg.get("FromMe", False))
@@ -616,18 +717,7 @@ class WhatsAppAbility(Ability):
             # so allowlisting by phone number still works.
             if (not allowed) and chat_base.endswith('@lid') and chat_local.isdigit() and self._session_db:
                 lid = chat_local
-                pn = self._lid_to_pn_cache.get(lid)
-                if pn is None:
-                    pn = ''
-                    try:
-                        con = sqlite3.connect(f'file:{self._session_db}?mode=ro', uri=True, timeout=1)
-                        cur = con.execute('SELECT pn FROM whatsmeow_lid_map WHERE lid=? LIMIT 1', (lid,))
-                        row = cur.fetchone()
-                        con.close()
-                        pn = row[0] if row and row[0] else ''
-                    except Exception:
-                        pn = ''
-                    self._lid_to_pn_cache[lid] = pn
+                pn = self._lookup_pn_from_lid(lid)
 
                 if pn:
                     pn_for_chat = pn
@@ -648,6 +738,23 @@ class WhatsAppAbility(Ability):
         )
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
+
+        # Rule 700 (WhatsApp policy): owner-only based on sender identity
+        if getattr(self, '_owner_only', True):
+            if not self._sender_is_owner(sender_platform_id, chat_jid, pn_for_chat):
+                logger.info(f'Ignoring WhatsApp inbound from non-owner sender: {sender_platform_id}')
+                return
+
+        # Require trigger word (like Telegram mention)
+        if getattr(self, '_require_trigger', True):
+            trigger = (getattr(self, '_trigger_name', 'Molt') or 'Molt').strip()
+            if trigger and not self._has_trigger_word(text, trigger):
+                logger.info(f'Ignoring WhatsApp inbound without trigger word ({trigger}): {text[:80]}')
+                return
+            text = self._strip_trigger_word(text, trigger)
+            if not text:
+                return
+
         chat_name = msg.get("ChatName", "")
         sender_name = name_override or msg.get("PushName", chat_name or sender_jid.split("@")[0])
 
