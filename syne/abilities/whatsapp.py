@@ -56,6 +56,8 @@ class WhatsAppAbility(Ability):
         self._allowed_chat_jids = set()  # if non-empty, only reply to these chat JIDs
         self._allowlist_name_by_jid = {}  # jid -> friendly name (for greetings/logs)
         self._allowlist_model_by_jid = {}  # jid -> model key override (None = default)
+        self._session_db: Optional[str] = None
+        self._lid_to_pn_cache = {}  # lid digits -> phone digits
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -386,6 +388,10 @@ class WhatsAppAbility(Ability):
 
         self._running = True
 
+        # Resolve session DB path (whatsmeow store; contains lid<->phone mapping)
+        session_db = os.path.expanduser("~/.wacli/session.db")
+        self._session_db = session_db if os.path.isfile(session_db) else None
+
         # Load allowlist (optional): if set, Syne will only reply to these chat JIDs.
         # Config value supports:
         #   1) list[str]                 (legacy)
@@ -595,18 +601,50 @@ class WhatsAppAbility(Ability):
 
         # Allowlist: if configured, only reply to specific chat JIDs.
         # This prevents accidental replies to other contacts on the same WhatsApp account.
+        pn_for_chat = None
+        chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
+        chat_local = chat_base.split('@', 1)[0] if '@' in chat_base else chat_base
+
         if self._allowed_chat_jids:
-            chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
-            if chat_jid not in self._allowed_chat_jids and chat_base not in self._allowed_chat_jids:
+            allowed = (
+                chat_jid in self._allowed_chat_jids
+                or chat_base in self._allowed_chat_jids
+                or chat_local in self._allowed_chat_jids
+            )
+
+            # If wacli represents this chat as a LID (....@lid), map LID->phone via session.db
+            # so allowlisting by phone number still works.
+            if (not allowed) and chat_base.endswith('@lid') and chat_local.isdigit() and self._session_db:
+                lid = chat_local
+                pn = self._lid_to_pn_cache.get(lid)
+                if pn is None:
+                    pn = ''
+                    try:
+                        con = sqlite3.connect(f'file:{self._session_db}?mode=ro', uri=True, timeout=1)
+                        cur = con.execute('SELECT pn FROM whatsmeow_lid_map WHERE lid=? LIMIT 1', (lid,))
+                        row = cur.fetchone()
+                        con.close()
+                        pn = row[0] if row and row[0] else ''
+                    except Exception:
+                        pn = ''
+                    self._lid_to_pn_cache[lid] = pn
+
+                if pn:
+                    pn_for_chat = pn
+                    allowed = (pn in self._allowed_chat_jids) or (f"{pn}@s.whatsapp.net" in self._allowed_chat_jids)
+
+            if not allowed:
                 logger.info(f'Ignoring WhatsApp inbound from non-allowlisted chat: {chat_jid}')
                 return
 
         sender_jid = sender_jid_raw or chat_jid
         # Friendly name override from allowlist (stable naming)
-        chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
         name_override = (
             self._allowlist_name_by_jid.get(chat_jid)
             or (self._allowlist_name_by_jid.get(chat_base) if chat_base else None)
+            or (self._allowlist_name_by_jid.get(chat_local) if chat_local else None)
+            or (self._allowlist_name_by_jid.get(pn_for_chat) if pn_for_chat else None)
+            or (self._allowlist_name_by_jid.get(f"{pn_for_chat}@s.whatsapp.net") if pn_for_chat else None)
         )
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
@@ -635,7 +673,10 @@ class WhatsAppAbility(Ability):
         # Resolve per-member model override from allowlist
         model_override = (
             self._allowlist_model_by_jid.get(chat_jid)
-            or self._allowlist_model_by_jid.get(chat_base)
+            or (self._allowlist_model_by_jid.get(chat_base) if chat_base else None)
+            or (self._allowlist_model_by_jid.get(chat_local) if chat_local else None)
+            or (self._allowlist_model_by_jid.get(pn_for_chat) if pn_for_chat else None)
+            or (self._allowlist_model_by_jid.get(f"{pn_for_chat}@s.whatsapp.net") if pn_for_chat else None)
         )
 
         metadata = {
