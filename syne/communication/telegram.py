@@ -3530,7 +3530,16 @@ Or just send me a message!"""
             gid = row["platform_group_id"]
             name = row["name"] or gid
             emoji = "✅" if row["enabled"] else "⛔"
-            settings = row["settings"] if isinstance(row["settings"], dict) else {}
+            raw_settings = row["settings"]
+            if isinstance(raw_settings, dict):
+                settings = raw_settings
+            elif isinstance(raw_settings, str) and raw_settings:
+                try:
+                    settings = json.loads(raw_settings)
+                except (ValueError, TypeError):
+                    settings = {}
+            else:
+                settings = {}
             mk = settings.get("model")
             mlabel = model_map.get(mk, mk) if mk else f"Default ({default_label})"
             buttons.append([InlineKeyboardButton(
