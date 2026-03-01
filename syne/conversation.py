@@ -435,7 +435,7 @@ class Conversation:
         user_platform_id = self.user.get("platform_id")
         set_current_user(int(user_platform_id) if user_platform_id else None)
 
-        max_rounds = int(await get_config("session.max_tool_rounds", 25))
+        max_rounds = int(await get_config("session.max_tool_rounds", 100))
 
         current = response
         limit_reached = False
