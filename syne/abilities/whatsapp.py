@@ -173,7 +173,7 @@ class WhatsAppAbility(Ability):
                 stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, "GOBIN": _WACLI_INSTALL_DIR},
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1200)
             if proc.returncode == 0:
                 wacli_path = os.path.join(_WACLI_INSTALL_DIR, "wacli")
                 if os.path.isfile(wacli_path):
