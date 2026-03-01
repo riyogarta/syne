@@ -19,7 +19,7 @@ _CREATION_GUIDE = """\
 When the owner asks for a capability you don't have, create an ability.
 
 ### Steps
-1. Write the file to `syne/abilities/<name>.py` using `file_write`
+1. Write the file to `syne/abilities/custom/<name>.py` using `file_write`
 2. Register: `update_ability(action='create', name='<name>', description='...')`
 3. The ability is immediately available — no restart needed
 
@@ -86,7 +86,7 @@ async def ensure_dependencies(self) -> tuple[bool, str]:
 - Do NOT assume deps are pre-installed — always check and auto-install if possible
 
 ### Rules
-- File goes in `syne/abilities/` — the ONLY writable path under `syne/`
+- File goes in `syne/abilities/custom/` — the ONLY writable path under `syne/`
 - Class MUST extend `Ability` and implement: `execute`, `get_schema`, `get_guide`
 - Validator checks syntax, structure, and schema before registration
 - Config (API keys etc.) stored in DB via `update_ability(action='config')`

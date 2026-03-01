@@ -4,10 +4,10 @@ Rule 700: Only the owner can use these tools.
 
 Security restrictions for file_write:
 - CAN write to CWD (working directory) or descendants
-- CAN write to syne/abilities/ (for dynamic ability creation)
-- CANNOT write to syne/ anything else (whitelist approach — only abilities/ is writable)
+- CAN write to syne/abilities/custom/ (for dynamic ability creation)
+- CANNOT write to syne/ anything else (whitelist approach — only abilities/custom/ is writable)
 
-This follows the self-edit pattern: abilities are editable, core is not.
+This follows the self-edit pattern: custom abilities are editable, core is not.
 """
 
 import contextvars
@@ -25,26 +25,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Allowed to write inside syne/ — WHITELIST approach.
 # Everything else under syne/ is BLOCKED.
+# Directory-based protection: only syne/abilities/custom/ is writable.
+# Bundled abilities + infrastructure live in syne/abilities/ root — blocked.
 _SYNE_WRITABLE_PATHS = frozenset({
-    "syne/abilities",
-})
-
-# Protected files WITHIN writable paths — infrastructure and bundled abilities.
-# These exist inside syne/abilities/ but are NOT user-created.
-# The bot can create NEW ability files but cannot overwrite these.
-_SYNE_PROTECTED_FILES = frozenset({
-    # Infrastructure
-    "__init__.py",
-    "base.py",
-    "registry.py",
-    "validator.py",
-    "loader.py",
-    "ability_guide.py",
-    # Bundled abilities
-    "image_gen.py",
-    "image_analysis.py",
-    "maps.py",
-    "whatsapp.py",
+    "syne/abilities/custom",
 })
 
 # Workspace directory — set by agent at startup for non-CLI channels.
@@ -105,7 +89,7 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
     prompt injection impossible in this context.
 
     Normal mode (non-owner or group): WHITELIST approach for syne/ —
-    ONLY syne/abilities/ is writable. Everything else under syne/ is blocked.
+    ONLY syne/abilities/custom/ is writable. Everything else under syne/ is blocked.
     Outside syne/, can write anywhere except .env and schema.sql.
 
     Args:
@@ -131,25 +115,18 @@ def _check_write_allowed(path: Path, cwd: Path) -> tuple[bool, str]:
         return False, "Cannot write to schema.sql (database schema is protected)."
 
     # Check syne/ paths — WHITELIST approach
-    # Only syne/abilities/ is writable. Everything else under syne/ is BLOCKED.
+    # Only syne/abilities/custom/ is writable. Everything else under syne/ is BLOCKED.
     syne_dir = _PROJECT_ROOT / "syne"
     if _is_path_under(resolved, syne_dir):
         # Check if path is under any whitelisted path
         for writable in _SYNE_WRITABLE_PATHS:
             writable_path = _PROJECT_ROOT / writable
             if _is_path_under(resolved, writable_path):
-                # Path is in a writable directory — but check protected files.
-                # Infrastructure and bundled abilities cannot be overwritten.
-                if fname in _SYNE_PROTECTED_FILES:
-                    return False, (
-                        f"Cannot overwrite '{fname}' — this is a core/bundled file. "
-                        "Only user-created ability files can be written."
-                    )
                 return True, ""
 
         # Not in whitelist — BLOCKED
         return False, (
-            "Cannot write to syne/ core. Only syne/abilities/ is writable. "
+            "Cannot write to syne/ core. Only syne/abilities/custom/ is writable. "
             "All other syne/ paths are protected."
         )
 
@@ -328,10 +305,10 @@ async def file_write_handler(
     # Resolve path
     file_path = Path(path)
     if not file_path.is_absolute():
-        # Special case: syne/abilities/ paths always resolve to project root
+        # Special case: syne/abilities/custom/ paths always resolve to project root
         # (self-edit capability), not to workspace
         path_str = str(file_path)
-        if path_str.startswith("syne/abilities/") or path_str.startswith("syne/abilities\\"):
+        if path_str.startswith("syne/abilities/custom/") or path_str.startswith("syne/abilities/custom\\"):
             file_path = _PROJECT_ROOT / file_path
         else:
             file_path = cwd / file_path
@@ -405,8 +382,8 @@ FILE_WRITE_TOOL = {
     "description": (
         "Write content to a file (create or overwrite). "
         "Auto-creates parent directories. "
-        "SECURITY: Only allows writing to CWD or syne/abilities/. "
-        "Cannot write to syne/ core directories (engine, tools, channels, db, llm, security)."
+        "SECURITY: Only allows writing to CWD or syne/abilities/custom/. "
+        "Cannot write to syne/ core directories (engine, tools, channels, db, llm, security, abilities root)."
     ),
     "parameters": {
         "type": "object",

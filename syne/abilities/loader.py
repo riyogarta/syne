@@ -293,8 +293,25 @@ async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:
 
         module_path = row["module_path"]
 
-        # Pre-validate source file before importing
+        # Backward compat: try new custom/ path first, fall back to old path
         file_path = _resolve_module_to_filepath(module_path)
+        if file_path is None and not module_path.startswith("syne.abilities.custom."):
+            # Try old location (syne.abilities.<name>) for pre-migration abilities
+            old_path = module_path
+            new_path = module_path.replace("syne.abilities.", "syne.abilities.custom.", 1)
+            file_path = _resolve_module_to_filepath(new_path)
+            if file_path:
+                module_path = new_path
+                logger.info(f"Ability '{name}' resolved to new path: {new_path}")
+            else:
+                # Try old location — still loads but warn
+                file_path = _resolve_module_to_filepath(old_path)
+                if file_path:
+                    logger.warning(
+                        f"Ability '{name}' found at old location ({old_path}). "
+                        f"Move to syne/abilities/custom/{name}.py for future compatibility."
+                    )
+
         if file_path:
             ok, err = validate_ability_file(file_path)
             if not ok:
@@ -357,7 +374,11 @@ async def register_dynamic_ability(
     """
     from .validator import validate_ability_file, validate_ability_instance
 
-    # 0. Pre-validate source file (syntax + structure) before importing
+    # 0. Force module_path into syne.abilities.custom namespace
+    if not module_path.startswith("syne.abilities.custom."):
+        module_path = f"syne.abilities.custom.{name}"
+
+    # 0b. Pre-validate source file (syntax + structure) before importing
     file_path = _resolve_module_to_filepath(module_path)
     if file_path:
         ok, err = validate_ability_file(file_path)
