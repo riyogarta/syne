@@ -145,7 +145,7 @@ class Scheduler:
             except Exception as e:
                 logger.error(f"Scheduler error: {e}", exc_info=True)
 
-            # Periodic cleanup: delete disabled once-tasks older than 30 days.
+            # Periodic cleanup: delete disabled tasks older than 30 days.
             # Runs roughly once per day (every ~2880 checks at 30s interval).
             cleanup_counter += 1
             if cleanup_counter >= 2880:
@@ -158,20 +158,20 @@ class Scheduler:
             await asyncio.sleep(_CHECK_INTERVAL)
 
     async def _cleanup_expired(self):
-        """Delete disabled one-time tasks older than 30 days."""
+        """Delete disabled tasks older than 30 days."""
         from .db.connection import get_connection
 
         async with get_connection() as conn:
             result = await conn.execute("""
                 DELETE FROM scheduled_tasks
                 WHERE enabled = false
-                  AND schedule_type = 'once'
+                  AND last_run IS NOT NULL
                   AND last_run < NOW() - INTERVAL '30 days'
             """)
         # result = "DELETE N"
         count = result.split()[-1] if result else "0"
         if count != "0":
-            logger.info(f"Cleanup: deleted {count} expired one-time tasks (>30 days old)")
+            logger.info(f"Cleanup: deleted {count} expired disabled tasks (>30 days old)")
     
     async def _check_and_execute(self):
         """Check for due tasks and execute them."""
