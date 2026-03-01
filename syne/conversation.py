@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Optional
 from .db.connection import get_connection
-from .llm.provider import LLMProvider, ChatMessage, ChatResponse
+from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens
@@ -416,11 +416,13 @@ class Conversation:
         tool_schemas: Optional[list[dict]] = None,
     ) -> ChatResponse:
         """Execute tool calls and get final response. Loops for multi-step tool use.
-        
+
         max_rounds loaded from DB config `session.max_tool_rounds` (default: 25).
-        If limit is reached, appends a notice to the response.
+        If limit is reached or a tool loop is detected, stops early with a notice.
+        Token usage is accumulated across all rounds.
         """
         from .db.models import get_config
+        from .tools.loop_detection import ToolLoopDetector
 
         # Set owner-DM context for file_ops security bypass.
         # Owner identity is platform-verified (Telegram ID), not message content.
@@ -437,6 +439,12 @@ class Conversation:
 
         current = response
         limit_reached = False
+        loop_stuck = False
+
+        # Loop detection + usage accumulation
+        detector = ToolLoopDetector()
+        usage = UsageAccumulator()
+        usage.add(response)  # Initial response that triggered tool calls
 
         for round_num in range(max_rounds):
             if not current.tool_calls:
@@ -448,7 +456,8 @@ class Conversation:
                 metadata={"tool_calls": current.tool_calls},
             ))
 
-            for tool_call in current.tool_calls:
+            tool_calls_list = current.tool_calls
+            for tc_idx, tool_call in enumerate(tool_calls_list):
                 # Handle both normalized format (name/args) and OpenAI raw (function.name/arguments)
                 if "function" in tool_call:
                     func = tool_call["function"]
@@ -464,6 +473,32 @@ class Conversation:
                 tool_call_id = tool_call.get("id")
 
                 logger.info(f"Tool call (round {round_num + 1}): {name}({args})")
+
+                # ── Loop detection: record + check BEFORE execution ──
+                loop_record = detector.record_call(name, args, round_num)
+                loop_check = detector.detect()
+
+                if loop_check.stuck:
+                    logger.warning(f"Tool loop detected (stuck): {loop_check.message}")
+                    # Append synthetic results for remaining tool calls in this batch
+                    for skip_tc in tool_calls_list[tc_idx:]:
+                        skip_id = skip_tc.get("id")
+                        skip_name = skip_tc.get("name", skip_tc.get("function", {}).get("name", ""))
+                        skip_meta = {"tool_name": skip_name}
+                        if skip_id:
+                            skip_meta["tool_call_id"] = skip_id
+                        skip_msg = "Skipped: tool loop detected"
+                        await self.save_message("tool", skip_msg, metadata=skip_meta)
+                        context.append(ChatMessage(role="tool", content=skip_msg, metadata=skip_meta))
+                    loop_stuck = True
+                    break
+
+                if loop_check.level == "warning":
+                    logger.warning(f"Tool loop warning: {loop_check.message}")
+                    context.append(ChatMessage(
+                        role="system",
+                        content=f"WARNING: {loop_check.message}. Try a different approach or stop using this tool.",
+                    ))
 
                 # Notify channel about tool activity
                 if self._mgr and self._mgr._tool_callback:
@@ -499,7 +534,7 @@ class Conversation:
                                             args.setdefault("mime_type", idata.get("mime_type", "application/pdf"))
                                     logger.debug(f"Injected cached {itype} data into ability '{name}' tool call")
                                     break
-                    
+
                     # Execute ability with context
                     ability_context = {
                         "user_id": self.user.get("id"),
@@ -523,6 +558,9 @@ class Conversation:
                         result = f"Error: {ability_result.get('error', 'Unknown error')}"
                 else:
                     result = f"Error: Unknown tool or ability '{name}'"
+
+                # Record result for loop detection
+                detector.record_result(loop_record, str(result))
 
                 # ═══════════════════════════════════════════════════════
                 # GLOBAL TOOL RESULT SCRUBBER
@@ -568,16 +606,34 @@ class Conversation:
                 await self.save_message("tool", result, metadata=tool_meta)
                 context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
+            # If loop was detected mid-batch, break out of the round loop
+            if loop_stuck:
+                break
+
             # Get next response — may contain more tool calls
             current = await self.provider.chat(
                 messages=context,
                 tools=tool_schemas if tool_schemas else None,
                 **self._build_chat_kwargs(),
             )
+            usage.add(current)
         else:
             # Loop exhausted without breaking — limit reached
             if current.tool_calls:
                 limit_reached = True
+
+        if loop_stuck:
+            # Force a final text response with no tools
+            context.append(ChatMessage(
+                role="system",
+                content="STOP. A tool call loop was detected — you keep calling the same tool(s) with identical arguments. Summarize what you've done so far and try a completely different approach if the task is incomplete.",
+            ))
+            current = await self.provider.chat(
+                messages=context,
+                tools=None,
+                **self._build_chat_kwargs(),
+            )
+            usage.add(current)
 
         if limit_reached:
             notice = (
@@ -602,6 +658,7 @@ class Conversation:
                     tools=None,  # No tools — force text response
                     **self._build_chat_kwargs(),
                 )
+                usage.add(current)
                 current = ChatResponse(
                     content=(current.content or "") + notice,
                     model=current.model,
@@ -613,7 +670,8 @@ class Conversation:
         set_owner_dm(False)
         set_current_user(None)
 
-        return current
+        logger.info(f"Tool loop done: {usage.rounds} rounds, in={usage.last_input}, out={usage.total_output}")
+        return usage.apply_to(current)
 
 
     async def _ability_first_preprocess(

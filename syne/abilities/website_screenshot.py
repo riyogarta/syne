@@ -11,18 +11,73 @@ Security:
 - Uses Syne URL safety check (SSRF protection) before navigation.
 """
 
+import asyncio
+import logging
 import os
+import sys
 import time
 from typing import Optional
 
 from .base import Ability
 from ..security import is_url_safe
 
+logger = logging.getLogger("syne.ability.website_screenshot")
+
 
 class WebsiteScreenshotAbility(Ability):
     name = "website_screenshot"
     description = "Take a screenshot of a website URL (viewport or full page)"
     version = "1.1"
+
+    async def ensure_dependencies(self) -> tuple[bool, str]:
+        """Install playwright + Chromium browser in the current venv."""
+        # 1. Check if playwright is already importable
+        try:
+            import playwright.async_api  # noqa: F401
+            has_pkg = True
+        except ImportError:
+            has_pkg = False
+
+        installed = []
+
+        # 2. pip install playwright if missing
+        if not has_pkg:
+            logger.info("Installing playwright via pip...")
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", "playwright",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+            if proc.returncode != 0:
+                err = stderr.decode().strip()
+                return False, f"Failed to install playwright: {err}"
+            installed.append("playwright")
+
+        # 3. Install Chromium browser if missing
+        # playwright install chromium — downloads ~130MB browser binary
+        playwright_bin = os.path.join(os.path.dirname(sys.executable), "playwright")
+        if not os.path.isfile(playwright_bin):
+            # Fallback: run via python -m playwright
+            cmd = [sys.executable, "-m", "playwright", "install", "chromium"]
+        else:
+            cmd = [playwright_bin, "install", "chromium"]
+
+        logger.info("Installing Chromium browser via playwright...")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            return False, f"Failed to install Chromium: {err}"
+        installed.append("chromium")
+
+        if installed:
+            return True, f"Installed: {', '.join(installed)}"
+        return True, ""
 
     async def execute(self, params: dict, context: dict) -> dict:
         url = (params.get("url") or "").strip()

@@ -49,6 +49,37 @@ class ChatResponse:
 
 
 @dataclass
+class UsageAccumulator:
+    """Accumulate token usage across multi-round tool call loops.
+
+    Tracks total output tokens (genuinely new per round) and snapshots
+    the last call's input tokens (avoids inflated sums from growing context).
+    """
+    total_input: int = 0
+    total_output: int = 0
+    last_input: int = 0
+    rounds: int = 0
+
+    def add(self, response: ChatResponse):
+        """Add a response's token counts to the accumulator."""
+        self.total_input += response.input_tokens
+        self.total_output += response.output_tokens
+        self.last_input = response.input_tokens
+        self.rounds += 1
+
+    def apply_to(self, response: ChatResponse) -> ChatResponse:
+        """Return a new ChatResponse with accumulated token counts."""
+        return ChatResponse(
+            content=response.content,
+            model=response.model,
+            input_tokens=self.last_input,
+            output_tokens=self.total_output,
+            tool_calls=response.tool_calls,
+            thinking=response.thinking,
+        )
+
+
+@dataclass
 class EmbeddingResponse:
     vector: list[float]
     model: str

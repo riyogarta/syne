@@ -15,8 +15,11 @@ Notes:
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import re
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +27,8 @@ from typing import Any
 import httpx
 
 from syne.abilities.base import Ability
+
+logger = logging.getLogger("syne.ability.pdf")
 
 
 # -----------------------------
@@ -340,6 +345,39 @@ class PdfAbility(Ability):
 
     # tool-call style, not pre-processing
     priority = False
+
+    # pip package name → import name mapping
+    _DEPS = {
+        "reportlab": "reportlab",
+        "readability-lxml": "readability",
+        "beautifulsoup4": "bs4",
+        "PyMuPDF": "fitz",
+    }
+
+    async def ensure_dependencies(self) -> tuple[bool, str]:
+        """Install PDF dependencies (reportlab, readability-lxml, beautifulsoup4, PyMuPDF)."""
+        missing_pkgs = []
+        for pip_name, import_name in self._DEPS.items():
+            try:
+                __import__(import_name)
+            except ImportError:
+                missing_pkgs.append(pip_name)
+
+        if not missing_pkgs:
+            return True, ""
+
+        logger.info(f"Installing PDF deps: {', '.join(missing_pkgs)}")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "pip", "install", *missing_pkgs,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            return False, f"Failed to install PDF deps: {err}"
+
+        return True, f"Installed: {', '.join(missing_pkgs)}"
 
     def get_schema(self) -> dict:
         return {

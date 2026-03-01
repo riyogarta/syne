@@ -1,6 +1,7 @@
 """Database management commands."""
 
 import asyncio
+import json
 import os
 import click
 
@@ -79,3 +80,51 @@ def db_reset():
         await close_db()
 
     asyncio.run(_reset())
+
+
+@db.command("query")
+@click.argument("sql")
+def db_query(sql):
+    """Run a read-only SQL query. Usage: syne db query 'SELECT ...'"""
+    async def _query():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+
+        async with pool.acquire() as conn:
+            # Use a read-only transaction to prevent accidental writes
+            async with conn.transaction(readonly=True):
+                rows = await conn.fetch(sql)
+
+        if not rows:
+            console.print("[yellow]No rows returned.[/yellow]")
+            await close_db()
+            return
+
+        # Column headers
+        columns = list(rows[0].keys())
+        from rich.table import Table
+        table = Table(show_lines=True)
+        for col in columns:
+            table.add_column(col)
+
+        for row in rows:
+            cells = []
+            for col in columns:
+                val = row[col]
+                # Pretty-print JSON/dict values
+                if isinstance(val, (dict, list)):
+                    cells.append(json.dumps(val, indent=2, ensure_ascii=False))
+                elif val is None:
+                    cells.append("[dim]NULL[/dim]")
+                else:
+                    cells.append(str(val))
+            table.add_row(*cells)
+
+        console.print(table)
+        console.print(f"[green]{len(rows)} row(s)[/green]")
+        await close_db()
+
+    asyncio.run(_query())

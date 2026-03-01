@@ -216,11 +216,103 @@ _GEMINI_UNSUPPORTED_KEYWORDS = {
 }
 
 
+def _is_null_schema(variant: dict) -> bool:
+    """Check if a schema variant represents null type."""
+    if not isinstance(variant, dict):
+        return False
+    if variant.get("const") is None and "const" in variant:
+        return True
+    enum_val = variant.get("enum")
+    if isinstance(enum_val, list) and len(enum_val) == 1 and enum_val[0] is None:
+        return True
+    t = variant.get("type")
+    if t == "null":
+        return True
+    if isinstance(t, list) and len(t) == 1 and t[0] == "null":
+        return True
+    return False
+
+
+def _try_flatten_union(variants: list, parent: dict) -> Optional[dict]:
+    """Try to flatten anyOf/oneOf into a single schema.
+
+    Matches OpenClaw's simplifyUnionVariants + flattenUnionFallback:
+    1. Strip null variants
+    2. If all variants are literals (const/single-enum), merge to {type, enum}
+    3. If one variant left after stripping null, use it directly
+    4. If all variants share same type, use that type
+    5. Otherwise use first variant's type
+    """
+    # Strip null variants
+    non_null = [v for v in variants if isinstance(v, dict) and not _is_null_schema(v)]
+    if not non_null:
+        return None
+
+    # Try literal flattening: {const: "a"} + {const: "b"} → {type: "string", enum: ["a", "b"]}
+    all_values = []
+    common_type = None
+    all_literal = True
+    for v in non_null:
+        if "const" in v:
+            literal = v["const"]
+        elif isinstance(v.get("enum"), list) and len(v["enum"]) == 1:
+            literal = v["enum"][0]
+        else:
+            all_literal = False
+            break
+        vtype = v.get("type")
+        if not isinstance(vtype, str):
+            all_literal = False
+            break
+        if common_type is None:
+            common_type = vtype
+        elif common_type != vtype:
+            all_literal = False
+            break
+        all_values.append(literal)
+
+    if all_literal and common_type and all_values:
+        result = {"type": common_type, "enum": all_values}
+        for mk in ("description", "title", "default"):
+            if mk in parent:
+                result[mk] = parent[mk]
+        return result
+
+    # Single variant after null stripping
+    if len(non_null) == 1:
+        result = dict(non_null[0])
+        for mk in ("description", "title", "default"):
+            if mk in parent:
+                result[mk] = parent[mk]
+        return result
+
+    # All same type — use that type
+    types = {v.get("type") for v in non_null if isinstance(v.get("type"), str)}
+    if len(types) == 1:
+        result = {"type": types.pop()}
+        for mk in ("description", "title", "default"):
+            if mk in parent:
+                result[mk] = parent[mk]
+        return result
+
+    # Fallback: first variant's type
+    first_type = non_null[0].get("type") if non_null else None
+    if first_type:
+        result = {"type": first_type}
+        for mk in ("description", "title", "default"):
+            if mk in parent:
+                result[mk] = parent[mk]
+        return result
+
+    return None
+
+
 def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
     """Remove unsupported JSON Schema keywords for Gemini.
 
     Recursively cleans nested schemas (properties, items, anyOf, oneOf).
-    Resolves $ref locally. Converts const→enum.
+    Resolves $ref locally. Converts const→enum. Flattens unions.
+    Matches OpenClaw's cleanSchemaForGemini + simplifyUnionVariants.
     """
     if not isinstance(schema, dict):
         return schema
@@ -234,6 +326,16 @@ def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
         if ref_name in defs:
             return _clean_schema_for_gemini(defs[ref_name], defs)
 
+    # Handle type: ["string", "null"] → type: "string" (strip null from type arrays)
+    raw_type = schema.get("type")
+    if isinstance(raw_type, list) and all(isinstance(t, str) for t in raw_type):
+        non_null_types = [t for t in raw_type if t != "null"]
+        schema = dict(schema)  # shallow copy to avoid mutating original
+        if len(non_null_types) == 1:
+            schema["type"] = non_null_types[0]
+        elif non_null_types:
+            schema["type"] = non_null_types
+
     cleaned = {}
     for key, value in schema.items():
         if key in _GEMINI_UNSUPPORTED_KEYWORDS:
@@ -245,7 +347,16 @@ def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
             cleaned[key] = {k: _clean_schema_for_gemini(v, defs) for k, v in value.items()}
         elif key == "items" and isinstance(value, dict):
             cleaned[key] = _clean_schema_for_gemini(value, defs)
-        elif key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+        elif key in ("anyOf", "oneOf") and isinstance(value, list):
+            # Clean each variant first, then try to flatten
+            cleaned_variants = [_clean_schema_for_gemini(v, defs) for v in value]
+            flattened = _try_flatten_union(cleaned_variants, schema)
+            if flattened:
+                # Flattened successfully — merge into cleaned, skip the union key
+                cleaned.update(_clean_schema_for_gemini(flattened, defs))
+            else:
+                cleaned[key] = cleaned_variants
+        elif key == "allOf" and isinstance(value, list):
             cleaned[key] = [_clean_schema_for_gemini(v, defs) for v in value]
         else:
             cleaned[key] = value
@@ -903,7 +1014,8 @@ class GoogleProvider(LLMProvider):
                 elif status in (401, 403):
                     raise LLMAuthError(f"Authentication failed ({status}): {error_text[:200]}") from e
                 elif status == 400:
-                    raise LLMBadRequestError(f"Bad request (400): {error_text[:200]}") from e
+                    logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
+                    raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
                 else:
                     raise
 
