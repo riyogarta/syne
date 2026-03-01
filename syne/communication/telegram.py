@@ -554,6 +554,10 @@ class TelegramChannel:
                         is_dm=not is_group,
                     )
 
+                if response is None:
+                    # Silent drop (e.g. lock timeout while previous request is processing)
+                    return
+
                 if not response:
                     response = "⚠️ LLM returned an empty response. Please try again."
                     logger.warning(f"Empty response for chat {chat.id} — sending fallback")

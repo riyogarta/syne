@@ -223,8 +223,8 @@ class Conversation:
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=30)
         except asyncio.TimeoutError:
-            logger.error(f"Session {self.session_id}: lock acquisition timed out after 30s — previous request likely hung")
-            return "⚠️ Previous request is still processing. Please wait a moment and try again."
+            logger.warning(f"Session {self.session_id}: lock timeout — previous request still processing, dropping this message silently")
+            return None  # None = silently dropped; typing indicator from first request stays visible
         logger.debug(f"Session {self.session_id}: lock acquired")
         try:
             # Reset per-turn state
@@ -1050,7 +1050,10 @@ class ConversationManager:
             inbound=inbound,
         )
         response = await conv.chat(message, message_metadata=message_metadata)
-        
+
+        if response is None:
+            return None  # Silent drop (lock timeout)
+
         # Run memory decay (conversation-based, fire-and-forget)
         if self.memory:
             try:
