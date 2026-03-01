@@ -28,6 +28,7 @@ _DRIVER_MAP: dict[str, Type[LLMProvider]] = {
     "codex": CodexProvider,
     "openai_compat": OpenAIProvider,
     "anthropic": AnthropicProvider,
+    "others": OpenAIProvider,
 }
 
 
@@ -116,7 +117,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     elif driver_name == "openai_compat":
         base_url = model_entry.get("base_url", "https://api.openai.com/v1")
         credential_key = model_entry.get("credential_key")
-        
+
         # Load API key from config or environment
         api_key = await _load_api_key(credential_key)
         if not api_key:
@@ -124,7 +125,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
                 f"No API key found for {model_entry.get('label', model_id)}. "
                 f"Set {credential_key} in config or corresponding env var."
             )
-        
+
         # Determine provider name from base_url
         provider_name = "openai"
         if "groq.com" in base_url:
@@ -133,14 +134,42 @@ async def create_provider(model_entry: dict) -> LLMProvider:
             provider_name = "together"
         elif "openrouter" in base_url:
             provider_name = "openrouter"
-        
+
         return OpenAIProvider(
             api_key=api_key,
             chat_model=model_id,
             base_url=base_url,
             provider_name=provider_name,
         )
-    
+
+    # ═══════════════════════════════════════════════════════════════
+    # Others — generic OpenAI-compatible for unsupported providers
+    # (Mistral, Cohere, DeepSeek, xAI, etc.)
+    # ═══════════════════════════════════════════════════════════════
+    elif driver_name == "others":
+        base_url = model_entry.get("base_url")
+        if not base_url:
+            raise RuntimeError(
+                f"'others' driver requires base_url for {model_entry.get('label', model_id)}."
+            )
+        credential_key = model_entry.get("credential_key")
+
+        api_key = await _load_api_key(credential_key)
+        if not api_key:
+            raise RuntimeError(
+                f"No API key found for {model_entry.get('label', model_id)}. "
+                f"Set {credential_key} in config or corresponding env var."
+            )
+
+        provider_name = model_entry.get("provider_name", "others")
+
+        return OpenAIProvider(
+            api_key=api_key,
+            chat_model=model_id,
+            base_url=base_url,
+            provider_name=provider_name,
+        )
+
     raise RuntimeError(f"Unhandled driver: {driver_name}")
 
 

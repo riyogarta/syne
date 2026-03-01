@@ -10,6 +10,23 @@ from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
 logger = logging.getLogger("syne.llm.openai")
 
 
+def _merge_consecutive(messages: list[dict]) -> list[dict]:
+    """Merge consecutive same-role messages (can happen after orphan removal)."""
+    if not messages:
+        return messages
+    result = [messages[0]]
+    for msg in messages[1:]:
+        prev = result[-1]
+        if msg["role"] == prev["role"] and msg["role"] in ("user", "system"):
+            # Merge content
+            prev_content = prev.get("content", "") or ""
+            msg_content = msg.get("content", "") or ""
+            prev["content"] = (prev_content + "\n" + msg_content).strip()
+        else:
+            result.append(msg)
+    return result
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible API provider.
     
@@ -91,14 +108,21 @@ class OpenAIProvider(LLMProvider):
         messages: list[ChatMessage],
         tools: Optional[list[dict]] = None,
     ) -> list[dict]:
-        """Convert ChatMessages to OpenAI format, handling tool calls/results."""
+        """Convert ChatMessages to OpenAI format, handling tool calls/results.
+
+        Tracks active tool_call IDs to skip orphan tool results (e.g. after compaction).
+        """
         formatted = []
+        active_tool_ids: set[str] = set()
+
         for msg in messages:
             if msg.role == "system":
                 formatted.append({"role": "system", "content": msg.content})
             elif msg.role == "user":
+                active_tool_ids = set()
                 formatted.append({"role": "user", "content": msg.content})
             elif msg.role == "assistant":
+                active_tool_ids = set()
                 entry: dict = {"role": "assistant"}
                 # Check if this assistant message had tool calls
                 if msg.metadata and msg.metadata.get("tool_calls"):
@@ -108,18 +132,22 @@ class OpenAIProvider(LLMProvider):
                     for tc in msg.metadata["tool_calls"]:
                         if "function" in tc:
                             # Already in API format
+                            tc_id = tc.get("id", "")
                             api_tcs.append(tc)
                         else:
                             # Normalized format → convert back
                             args = tc.get("args", {})
+                            tc_id = tc.get("id") or f"call_{tc.get('name', 'unknown')}"
                             api_tcs.append({
-                                "id": tc.get("id") or f"call_{tc.get('name', 'unknown')}",
+                                "id": tc_id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.get("name", ""),
                                     "arguments": json.dumps(args) if isinstance(args, dict) else str(args or "{}"),
                                 },
                             })
+                        if tc_id:
+                            active_tool_ids.add(tc_id)
                     entry["tool_calls"] = api_tcs
                 else:
                     entry["content"] = msg.content
@@ -127,12 +155,17 @@ class OpenAIProvider(LLMProvider):
             elif msg.role == "tool":
                 tool_name = msg.metadata.get("tool_name", "unknown") if msg.metadata else "unknown"
                 tool_call_id = msg.metadata.get("tool_call_id", f"call_{tool_name}") if msg.metadata else f"call_{tool_name}"
+                # Skip orphan tool results — no matching tool call in preceding assistant message
+                if active_tool_ids and tool_call_id not in active_tool_ids:
+                    logger.debug(f"Skipping orphan tool result: {tool_call_id}")
+                    continue
                 formatted.append({
                     "role": "tool",
                     "content": msg.content,
                     "tool_call_id": tool_call_id,
                 })
-        return formatted
+
+        return _merge_consecutive(formatted)
 
     async def chat(
         self,
@@ -177,71 +210,127 @@ class OpenAIProvider(LLMProvider):
 
         logger.debug(f"Request: model={model}, messages={len(messages)}, tools={len(tools) if tools else 0}")
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        stream_body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+
+        async with httpx.AsyncClient(timeout=180) as client:
           for attempt in range(2):
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                json=body,
-                headers=self._get_headers(),
-                timeout=30 if attempt > 0 else 120,
-            )
+            # Accumulated state
+            content_parts: list[str] = []
+            # tool_calls keyed by index: {index: {"id": ..., "name": ..., "arguments": ...}}
+            tc_accum: dict[int, dict] = {}
+            thinking_text: str | None = None
+            resp_model = model
+            usage: dict = {}
 
-            if resp.status_code == 429:
-                error_body = resp.text
-                logger.error(f"Rate limited (429): {error_body[:200]}")
-                retry_after = resp.headers.get("retry-after", "a moment")
-                raise httpx.HTTPStatusError(
-                    f"Rate limited. Retry after {retry_after}.",
-                    request=resp.request,
-                    response=resp,
-                )
+            try:
+                async with client.stream(
+                    "POST",
+                    f"{self.base_url}/chat/completions",
+                    json=stream_body,
+                    headers=self._get_headers(),
+                    timeout=httpx.Timeout(30.0 if attempt > 0 else 120.0, connect=10.0),
+                ) as resp:
+                    if resp.status_code == 429:
+                        await resp.aread()
+                        logger.error(f"Rate limited (429): {resp.text[:200]}")
+                        retry_after = resp.headers.get("retry-after", "a moment")
+                        raise httpx.HTTPStatusError(
+                            f"Rate limited. Retry after {retry_after}.",
+                            request=resp.request,
+                            response=resp,
+                        )
 
-            if 500 <= resp.status_code < 600 and attempt < 1:
-                logger.warning(f"OpenAI {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {resp.text[:200]}")
-                await asyncio.sleep(1)
-                continue
+                    if 500 <= resp.status_code < 600 and attempt < 1:
+                        await resp.aread()
+                        logger.warning(f"OpenAI {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {resp.text[:200]}")
+                        await asyncio.sleep(1)
+                        continue
 
-            resp.raise_for_status()
-            data = resp.json()
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        resp.raise_for_status()
+
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        resp_model = chunk.get("model", resp_model)
+
+                        # Usage comes in the final chunk with stream_options
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+
+                        choices = chunk.get("choices")
+                        if not choices:
+                            continue
+                        delta = choices[0].get("delta", {})
+
+                        # Content
+                        if delta.get("content"):
+                            content_parts.append(delta["content"])
+
+                        # Reasoning / thinking
+                        if delta.get("reasoning_summary"):
+                            thinking_text = (thinking_text or "") + delta["reasoning_summary"]
+                        elif delta.get("reasoning"):
+                            thinking_text = (thinking_text or "") + delta["reasoning"]
+
+                        # Tool calls — accumulate by index
+                        if delta.get("tool_calls"):
+                            for tc_delta in delta["tool_calls"]:
+                                idx = tc_delta.get("index", 0)
+                                if idx not in tc_accum:
+                                    tc_accum[idx] = {"id": "", "name": "", "arguments": ""}
+                                if tc_delta.get("id"):
+                                    tc_accum[idx]["id"] = tc_delta["id"]
+                                fn = tc_delta.get("function", {})
+                                if fn.get("name"):
+                                    tc_accum[idx]["name"] = fn["name"]
+                                if fn.get("arguments"):
+                                    tc_accum[idx]["arguments"] += fn["arguments"]
+
+            except httpx.ReadTimeout:
+                if attempt < 1:
+                    logger.warning("OpenAI stream read timeout, retrying (attempt 1/2)")
+                    await asyncio.sleep(1)
+                    continue
+                raise RuntimeError("OpenAI stream timed out after 2 attempts")
+
+            # If we got here without continue, we have a valid response
             break
           else:
             raise RuntimeError("OpenAI API failed after 2 attempts")
 
-        choice = data["choices"][0]
-        message = choice["message"]
-        usage = data.get("usage", {})
-
-        # Parse tool calls into Syne's format
+        # Parse accumulated tool calls
         tool_calls = None
-        raw_tool_calls = message.get("tool_calls")
-        if raw_tool_calls:
+        if tc_accum:
             tool_calls = []
-            for tc in raw_tool_calls:
-                fn = tc.get("function", {})
+            for idx in sorted(tc_accum):
+                tc = tc_accum[idx]
                 try:
-                    args = json.loads(fn.get("arguments", "{}"))
+                    args = json.loads(tc["arguments"] or "{}")
                 except json.JSONDecodeError:
                     args = {}
                 tool_calls.append({
-                    "name": fn.get("name"),
+                    "name": tc["name"],
                     "args": args,
-                    "id": tc.get("id"),
+                    "id": tc["id"],
                 })
 
-        # Extract reasoning summary from GPT-5.x (if present)
-        thinking = None
-        reasoning = usage.get("completion_tokens_details", {})
-        if reasoning.get("reasoning_tokens"):
-            # GPT-5.x returns reasoning summary in message
-            thinking = message.get("reasoning_summary") or message.get("reasoning")
-
         return ChatResponse(
-            content=message.get("content") or "",
-            model=data.get("model", model),
+            content="".join(content_parts),
+            model=resp_model,
             input_tokens=usage.get("prompt_tokens", 0),
             output_tokens=usage.get("completion_tokens", 0),
             tool_calls=tool_calls,
-            thinking=thinking,
+            thinking=thinking_text,
         )
 
     async def embed(

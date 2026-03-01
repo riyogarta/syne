@@ -205,6 +205,55 @@ def _is_valid_thought_signature(sig: Optional[str]) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Tool schema sanitization — strip unsupported JSON Schema keywords for Gemini
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_GEMINI_UNSUPPORTED_KEYWORDS = {
+    "patternProperties", "additionalProperties", "$schema", "$id", "$ref",
+    "$defs", "definitions", "examples", "minLength", "maxLength",
+    "minimum", "maximum", "multipleOf", "pattern", "format",
+    "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties",
+}
+
+
+def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
+    """Remove unsupported JSON Schema keywords for Gemini.
+
+    Recursively cleans nested schemas (properties, items, anyOf, oneOf).
+    Resolves $ref locally. Converts const→enum.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    if defs is None:
+        defs = schema.get("$defs") or schema.get("definitions") or {}
+
+    # Handle $ref before anything else
+    if "$ref" in schema and isinstance(schema["$ref"], str):
+        ref_name = schema["$ref"].rsplit("/", 1)[-1]
+        if ref_name in defs:
+            return _clean_schema_for_gemini(defs[ref_name], defs)
+
+    cleaned = {}
+    for key, value in schema.items():
+        if key in _GEMINI_UNSUPPORTED_KEYWORDS:
+            continue
+        if key == "const":
+            cleaned["enum"] = [value]
+            continue
+        if key == "properties" and isinstance(value, dict):
+            cleaned[key] = {k: _clean_schema_for_gemini(v, defs) for k, v in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            cleaned[key] = _clean_schema_for_gemini(value, defs)
+        elif key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+            cleaned[key] = [_clean_schema_for_gemini(v, defs) for v in value]
+        else:
+            cleaned[key] = value
+
+    return cleaned
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # #1 — Tool schema conversion (parametersJsonSchema, not parameters)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -227,11 +276,13 @@ def _convert_tools_to_gemini(tools: list[dict], use_parameters: bool = False) ->
                 "description": func.get("description", ""),
             }
             if "parameters" in func:
+                params = func["parameters"]
                 if use_parameters:
-                    decl["parameters"] = func["parameters"]
+                    decl["parameters"] = params
                 else:
                     # #1: Use parametersJsonSchema for Gemini models
-                    decl["parametersJsonSchema"] = func["parameters"]
+                    # Clean unsupported keywords for non-legacy mode
+                    decl["parametersJsonSchema"] = _clean_schema_for_gemini(params)
             declarations.append(decl)
 
     if not declarations:
@@ -317,6 +368,32 @@ def _transform_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
                 existing_result_ids = set()
             result.append(msg)
 
+        else:
+            result.append(msg)
+
+    return result
+
+
+def _sanitize_turn_ordering(contents: list[dict]) -> list[dict]:
+    """Ensure Gemini user/model alternation.
+
+    Two fixes:
+    1. If first content is 'model', prepend bootstrap user message
+    2. Merge consecutive same-role messages (parts concatenation)
+    """
+    if not contents:
+        return contents
+
+    result = []
+
+    # Fix 1: Bootstrap — if first message is model, prepend user
+    if contents[0].get("role") == "model":
+        result.append({"role": "user", "parts": [{"text": "(session bootstrap)"}]})
+
+    # Fix 2: Merge consecutive same-role
+    for msg in contents:
+        if result and result[-1].get("role") == msg.get("role"):
+            result[-1]["parts"].extend(msg.get("parts", []))
         else:
             result.append(msg)
 
@@ -525,6 +602,7 @@ class GoogleProvider(LLMProvider):
                         "parts": [fr_part],
                     })
 
+        contents = _sanitize_turn_ordering(contents)
         return system_text, contents
 
     async def _throttle_cca(self):

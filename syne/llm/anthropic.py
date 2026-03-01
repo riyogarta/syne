@@ -19,6 +19,20 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 _BETA_HEADER = "oauth-2025-04-20"
 
 
+def _parse_retry_delay(resp: httpx.Response, default: float = 1.0) -> float:
+    """Extract retry delay from response headers.
+
+    Checks retry-after (seconds or date), falls back to default.
+    """
+    retry_after = resp.headers.get("retry-after", "")
+    if retry_after:
+        try:
+            return min(float(retry_after), 30.0)
+        except ValueError:
+            pass
+    return default
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using OAuth tokens from DB or API key.
     
@@ -370,87 +384,172 @@ class AnthropicProvider(LLMProvider):
         if tools:
             body["tools"] = self._convert_tools(tools)
 
+        stream_body = {**body, "stream": True}
+
         token = await self._load_token()
         headers = self._build_headers(token)
-        
-        async with httpx.AsyncClient(timeout=120) as client:
-            for attempt in range(2):
-                resp = await client.post(
+
+        async with httpx.AsyncClient(timeout=180) as client:
+          for attempt in range(3):
+            # Accumulated state — reset each attempt
+            content_text = ""
+            thinking_text = ""
+            tool_calls: list[dict] = []
+            # Active content block accumulator: {index: {"type", "id", "name", "text"/"json"}}
+            active_blocks: dict[int, dict] = {}
+            usage: dict = {}
+            resp_model = model
+
+            try:
+                async with client.stream(
+                    "POST",
                     ANTHROPIC_API_URL,
-                    json=body,
+                    json=stream_body,
                     headers=headers,
-                    timeout=30 if attempt > 0 else 120,
-                )
-
-                if resp.status_code == 429:
-                    if attempt < 1:
-                        logger.warning(f"Rate limited (429), retrying in 1s (attempt {attempt + 1}/2)")
-                        await asyncio.sleep(1)
-                        continue
-                    raise RuntimeError("Rate limited (429) after 2 attempts")
-
-                if resp.status_code == 401:
-                    # Try refreshing token once
-                    if self._claude_creds and attempt == 0:
-                        logger.info("Got 401 — attempting token refresh...")
-                        try:
-                            token = await self._claude_creds.get_token()
-                            self._access_token = token
-                            headers = self._build_headers(token)
+                    timeout=httpx.Timeout(30.0 if attempt > 0 else 120.0, connect=10.0),
+                ) as resp:
+                    # ── Error handling before consuming stream ──
+                    if resp.status_code in (429, 529):
+                        await resp.aread()
+                        retry_after = _parse_retry_delay(resp)
+                        status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
+                        if attempt < 2:
+                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {retry_after}s (attempt {attempt + 1}/3)")
+                            await asyncio.sleep(retry_after)
                             continue
-                        except Exception as e:
-                            logger.error(f"Token refresh failed: {e}")
-                    raise RuntimeError(
-                        "Claude OAuth token expired or invalid. "
-                        "Run 'syne init' to re-authenticate."
-                    )
+                        raise RuntimeError(f"{status_label} ({resp.status_code}) after 3 attempts")
 
-                if resp.status_code == 400:
-                    error_text = resp.text[:500]
-                    logger.error(f"Anthropic 400 Bad Request: {error_text}")
-                    raise RuntimeError(f"Anthropic API error 400: {error_text}")
+                    if resp.status_code == 401:
+                        await resp.aread()
+                        if self._claude_creds and attempt == 0:
+                            logger.info("Got 401 — attempting token refresh...")
+                            try:
+                                token = await self._claude_creds.get_token()
+                                self._access_token = token
+                                headers = self._build_headers(token)
+                                continue
+                            except Exception as e:
+                                logger.error(f"Token refresh failed: {e}")
+                        raise RuntimeError(
+                            "Claude OAuth token expired or invalid. "
+                            "Run 'syne init' to re-authenticate."
+                        )
 
-                if 500 <= resp.status_code < 600:
-                    error_text = resp.text[:500]
-                    logger.error(f"Anthropic {resp.status_code} Server Error: {error_text}")
-                    logger.debug(f"Request body model={body.get('model')}, messages_count={len(body.get('messages', []))}, has_tools={bool(body.get('tools'))}")
-                    if attempt < 1:
-                        logger.warning(f"Server error ({resp.status_code}), retrying in 1s (attempt {attempt + 1}/2)")
-                        await asyncio.sleep(1)
-                        continue
-                    resp.raise_for_status()
+                    if resp.status_code == 400:
+                        await resp.aread()
+                        error_text = resp.text[:500]
+                        logger.error(f"Anthropic 400 Bad Request: {error_text}")
+                        raise RuntimeError(f"Anthropic API error 400: {error_text}")
 
-                resp.raise_for_status()
-                break
-            else:
-                raise RuntimeError("Rate limited (429) after 2 attempts")
-        
-        data = resp.json()
-        
-        content_text = ""
-        thinking_text = ""
-        tool_calls = []
-        
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                content_text += block.get("text", "")
-            elif block.get("type") == "thinking":
-                thinking_text += block.get("thinking", "")
-            elif block.get("type") == "tool_use":
-                tool_calls.append({
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": block.get("name", ""),
-                        "arguments": json.dumps(block.get("input", {})),
-                    }
-                })
-        
-        usage = data.get("usage", {})
-        
+                    if 500 <= resp.status_code < 600:
+                        await resp.aread()
+                        error_text = resp.text[:500]
+                        logger.error(f"Anthropic {resp.status_code}: {error_text}")
+                        if attempt < 2:
+                            logger.warning(f"Server error ({resp.status_code}), retrying in 1s (attempt {attempt + 1}/3)")
+                            await asyncio.sleep(1)
+                            continue
+                        resp.raise_for_status()
+
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        resp.raise_for_status()
+
+                    # ── Parse SSE stream ──
+                    event_type = ""
+                    async for line in resp.aiter_lines():
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str:
+                            continue
+                        try:
+                            data = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        # ── message_start: model + input usage ──
+                        if event_type == "message_start":
+                            msg_data = data.get("message", {})
+                            resp_model = msg_data.get("model", model)
+                            u = msg_data.get("usage", {})
+                            usage["input_tokens"] = u.get("input_tokens", 0)
+
+                        # ── content_block_start: begin a new block ──
+                        elif event_type == "content_block_start":
+                            idx = data.get("index", 0)
+                            block = data.get("content_block", {})
+                            btype = block.get("type", "")
+                            active_blocks[idx] = {
+                                "type": btype,
+                                "id": block.get("id", ""),
+                                "name": block.get("name", ""),
+                                "text": "",
+                                "json": "",
+                            }
+
+                        # ── content_block_delta: accumulate content ──
+                        elif event_type == "content_block_delta":
+                            idx = data.get("index", 0)
+                            delta = data.get("delta", {})
+                            dtype = delta.get("type", "")
+                            ab = active_blocks.get(idx)
+                            if not ab:
+                                continue
+
+                            if dtype == "text_delta":
+                                ab["text"] += delta.get("text", "")
+                            elif dtype == "thinking_delta":
+                                ab["text"] += delta.get("thinking", "")
+                            elif dtype == "input_json_delta":
+                                ab["json"] += delta.get("partial_json", "")
+
+                        # ── content_block_stop: finalize block ──
+                        elif event_type == "content_block_stop":
+                            idx = data.get("index", 0)
+                            ab = active_blocks.pop(idx, None)
+                            if not ab:
+                                continue
+
+                            if ab["type"] == "text":
+                                content_text += ab["text"]
+                            elif ab["type"] == "thinking":
+                                thinking_text += ab["text"]
+                            elif ab["type"] == "tool_use":
+                                try:
+                                    args = json.loads(ab["json"] or "{}")
+                                except json.JSONDecodeError:
+                                    args = {}
+                                tool_calls.append({
+                                    "name": ab["name"],
+                                    "args": args,
+                                    "id": ab["id"],
+                                })
+
+                        # ── message_delta: output usage + stop reason ──
+                        elif event_type == "message_delta":
+                            delta = data.get("delta", {})
+                            u = data.get("usage", {})
+                            usage["output_tokens"] = u.get("output_tokens", 0)
+
+            except httpx.ReadTimeout:
+                if attempt < 2:
+                    logger.warning(f"Anthropic stream read timeout, retrying (attempt {attempt + 1}/3)")
+                    await asyncio.sleep(1)
+                    continue
+                raise RuntimeError("Anthropic stream timed out after 3 attempts")
+
+            # Success — exit retry loop
+            break
+          else:
+            raise RuntimeError("Anthropic API failed after 3 attempts")
+
         return ChatResponse(
             content=content_text,
-            model=data.get("model", model),
+            model=resp_model,
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
             tool_calls=tool_calls if tool_calls else None,
