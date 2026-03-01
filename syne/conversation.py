@@ -1073,6 +1073,21 @@ class ConversationManager:
             extra_context=extra_context,
             inbound=inbound,
         )
+
+        # Per-message WA model override (applies even on cached sessions)
+        wa_override = (message_metadata or {}).get("wa_model_override")
+        if wa_override and hasattr(self, '_agent') and self._agent:
+            override_provider = await self._agent.create_provider_for_model(wa_override)
+            if override_provider:
+                conv.provider = override_provider
+                # Load matching model_params + reasoning_visible
+                from .db.models import get_config as _gc_wa
+                _wa_models = await _gc_wa("provider.models", [])
+                _wa_entry = next((m for m in _wa_models if m.get("key") == wa_override), {})
+                conv.model_params = _wa_entry.get("params") or conv.model_params
+                conv.reasoning_visible = bool(_wa_entry.get("reasoning_visible", False))
+                logger.info(f"WA model override for {chat_id}: {wa_override}")
+
         response = await conv.chat(message, message_metadata=message_metadata)
 
         if response is None:

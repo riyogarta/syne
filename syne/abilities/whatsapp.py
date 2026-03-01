@@ -55,6 +55,7 @@ class WhatsAppAbility(Ability):
         self._send_lock = asyncio.Lock()
         self._allowed_chat_jids = set()  # if non-empty, only reply to these chat JIDs
         self._allowlist_name_by_jid = {}  # jid -> friendly name (for greetings/logs)
+        self._allowlist_model_by_jid = {}  # jid -> model key override (None = default)
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -396,6 +397,7 @@ class WhatsAppAbility(Ability):
 
             self._allowed_chat_jids = set()
             self._allowlist_name_by_jid = {}
+            self._allowlist_model_by_jid = {}
 
             # Normalize legacy string formats
             if isinstance(allowed, str):
@@ -409,10 +411,13 @@ class WhatsAppAbility(Ability):
                     if isinstance(item, dict):
                         jid = str(item.get('jid') or '').strip()
                         name = str(item.get('name') or '').strip()
+                        model = item.get('model') or None
                         if jid:
                             self._allowed_chat_jids.add(jid)
                             if name:
                                 self._allowlist_name_by_jid[jid] = name
+                            if model:
+                                self._allowlist_model_by_jid[jid] = model
                     else:
                         jid = str(item).strip()
                         if jid:
@@ -627,10 +632,17 @@ class WhatsAppAbility(Ability):
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
 
+        # Resolve per-member model override from allowlist
+        model_override = (
+            self._allowlist_model_by_jid.get(chat_jid)
+            or self._allowlist_model_by_jid.get(chat_base)
+        )
+
         metadata = {
             "chat_id": chat_jid,
             "inbound": inbound,
             "original_text": original_text,
+            "wa_model_override": model_override,  # None = use default
         }
 
         try:
