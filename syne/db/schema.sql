@@ -347,7 +347,7 @@ INSERT INTO config (key, value, description) VALUES
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
-    ('session.max_tool_rounds', '25', 'Max tool call rounds per turn (safety limit). Agent notifies user if reached.'),
+    -- session.max_tool_rounds removed in v0.18.5 (no hard limit, loop detection handles runaway)
     -- Telegram channel config
     ('telegram.dm_policy', '"approval"', 'DM policy: approval (owner approves new users) or open (accept all)'),
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
@@ -401,8 +401,8 @@ END $$;
 -- v0.9.0: decay_amount changed from 2 to 1 (recall +2, decay -1)
 UPDATE config SET value = '1' WHERE key = 'memory.decay_amount' AND value = '2';
 
--- v0.10.0: token optimization — lower max_tool_rounds from 100 to 25
-UPDATE config SET value = '25' WHERE key = 'session.max_tool_rounds' AND value = '100';
+-- v0.18.5: max_tool_rounds removed — no hard limit, loop detection is sufficient
+DELETE FROM config WHERE key = 'session.max_tool_rounds';
 
 -- v0.10.0: token optimization — lower recall_limit from 10 to 5
 UPDATE config SET value = '5' WHERE key = 'memory.recall_limit' AND value = '10';

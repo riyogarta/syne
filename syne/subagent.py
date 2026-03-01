@@ -222,10 +222,6 @@ class SubAgentManager:
         # Build tool schemas (filtered for sub-agent safety)
         tool_schemas = self._get_tool_schemas(access_level)
 
-        # Get max tool rounds from config
-        max_rounds = int(await get_config("session.max_tool_rounds", 100))
-        # Sub-agents get same limit as main session
-        
         total_input_tokens = 0
         total_output_tokens = 0
 
@@ -238,11 +234,9 @@ class SubAgentManager:
         total_input_tokens += getattr(response, "input_tokens", 0) or 0
         total_output_tokens += getattr(response, "output_tokens", 0) or 0
 
-        # Tool-calling loop — same pattern as conversation._handle_tool_calls
-        for round_num in range(max_rounds):
-            if not response.tool_calls:
-                break
-
+        # Tool-calling loop — no hard round limit, runs until LLM stops
+        round_num = 0
+        while response.tool_calls:
             # Add assistant message with tool calls
             messages.append(ChatMessage(
                 role="assistant",
@@ -283,21 +277,7 @@ class SubAgentManager:
             )
             total_input_tokens += getattr(response, "input_tokens", 0) or 0
             total_output_tokens += getattr(response, "output_tokens", 0) or 0
-        else:
-            # Loop exhausted — force a final text response
-            if response.tool_calls:
-                logger.warning(f"Sub-agent {run_id[:8]} hit tool round limit ({max_rounds})")
-                messages.append(ChatMessage(
-                    role="system",
-                    content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done and what remains.",
-                ))
-                response = await llm.chat(
-                    messages=messages,
-                    tools=None,
-                    temperature=0.3,
-                )
-                total_input_tokens += getattr(response, "input_tokens", 0) or 0
-                total_output_tokens += getattr(response, "output_tokens", 0) or 0
+            round_num += 1
 
         # Track total tokens
         async with get_connection() as conn:

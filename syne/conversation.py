@@ -419,11 +419,9 @@ class Conversation:
     ) -> ChatResponse:
         """Execute tool calls and get final response. Loops for multi-step tool use.
 
-        max_rounds loaded from DB config `session.max_tool_rounds` (default: 25).
-        If limit is reached or a tool loop is detected, stops early with a notice.
-        Token usage is accumulated across all rounds.
+        No hard round limit — loop runs until LLM stops calling tools or
+        loop detection kicks in. Token usage is accumulated across all rounds.
         """
-        from .db.models import get_config
         from .tools.loop_detection import ToolLoopDetector
 
         # Set owner-DM context for file_ops security bypass.
@@ -440,20 +438,16 @@ class Conversation:
         except (TypeError, ValueError):
             set_current_user(None)
 
-        max_rounds = int(await get_config("session.max_tool_rounds", 100))
-
         current = response
-        limit_reached = False
         loop_stuck = False
+        round_num = 0
 
         # Loop detection + usage accumulation
         detector = ToolLoopDetector()
         usage = UsageAccumulator()
         usage.add(response)  # Initial response that triggered tool calls
 
-        for round_num in range(max_rounds):
-            if not current.tool_calls:
-                break
+        while current.tool_calls:
 
             context.append(ChatMessage(
                 role="assistant",
@@ -616,7 +610,7 @@ class Conversation:
                 await self.save_message("tool", result, metadata=tool_meta)
                 context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
-            # If loop was detected mid-batch, break out of the round loop
+            # If loop was detected mid-batch, break out
             if loop_stuck:
                 break
 
@@ -627,10 +621,7 @@ class Conversation:
                 **self._build_chat_kwargs(),
             )
             usage.add(current)
-        else:
-            # Loop exhausted without breaking — limit reached
-            if current.tool_calls:
-                limit_reached = True
+            round_num += 1
 
         if loop_stuck:
             # Force a final text response with no tools
@@ -644,37 +635,6 @@ class Conversation:
                 **self._build_chat_kwargs(),
             )
             usage.add(current)
-
-        if limit_reached:
-            notice = (
-                f"\n\n⚠️ Tool call limit reached ({max_rounds} rounds). "
-                f"Some steps may be incomplete. Use /compact or continue the conversation to proceed."
-            )
-            if current.content:
-                current = ChatResponse(
-                    content=current.content + notice,
-                    model=current.model,
-                    tool_calls=None,
-                    thinking=current.thinking,
-                )
-            else:
-                # LLM didn't produce text — generate a final response without tools
-                context.append(ChatMessage(
-                    role="system",
-                    content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done so far and what remains.",
-                ))
-                current = await self.provider.chat(
-                    messages=context,
-                    tools=None,  # No tools — force text response
-                    **self._build_chat_kwargs(),
-                )
-                usage.add(current)
-                current = ChatResponse(
-                    content=(current.content or "") + notice,
-                    model=current.model,
-                    tool_calls=None,
-                    thinking=current.thinking,
-                )
 
         # Reset context after tool execution
         set_owner_dm(False)
