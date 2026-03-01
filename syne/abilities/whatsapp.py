@@ -15,6 +15,7 @@ import logging
 import os
 import platform
 import shutil
+import sqlite3
 import stat
 import tempfile
 from pathlib import Path
@@ -45,8 +46,11 @@ class WhatsAppAbility(Ability):
     def __init__(self):
         self._agent = None
         self._wacli_path = "wacli"
+        self._wacli_db: Optional[str] = None
         self._process: Optional[asyncio.subprocess.Process] = None
-        self._reader_task: Optional[asyncio.Task] = None
+        self._monitor_task: Optional[asyncio.Task] = None
+        self._poll_task: Optional[asyncio.Task] = None
+        self._last_rowid: int = 0
         self._running = False
         self._send_lock = asyncio.Lock()
 
@@ -312,14 +316,19 @@ class WhatsAppAbility(Ability):
         return []
 
     async def _start_sync(self) -> bool:
-        """Start the long-running `wacli sync --follow --json` process."""
+        """Start the long-running `wacli sync --follow` process.
+
+        This keeps the wacli WebSocket connection alive and syncs new
+        messages into the local SQLite DB.  Inbound messages are picked
+        up by the separate _poll_loop (DB poller).
+        """
         # Make sure old process is not running
         await self._stop_sync()
 
         try:
             self._process = await asyncio.create_subprocess_exec(
-                self._wacli_path, 'sync', '--follow', '--json',
-                stdout=asyncio.subprocess.PIPE,
+                self._wacli_path, 'sync', '--follow',
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except Exception as e:
@@ -327,19 +336,19 @@ class WhatsAppAbility(Ability):
             self._process = None
             return False
 
-        self._reader_task = asyncio.create_task(self._reader_loop())
+        self._monitor_task = asyncio.create_task(self._monitor_loop())
         return True
 
     async def _stop_sync(self):
         """Stop the sync process (if any)."""
-        # Stop reader task first so it won't auto-restart on EOF.
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
+        # Stop monitor task first so it won't auto-restart on exit.
+        if self._monitor_task and not self._monitor_task.done():
+            self._monitor_task.cancel()
             try:
-                await self._reader_task
+                await self._monitor_task
             except asyncio.CancelledError:
                 pass
-        self._reader_task = None
+        self._monitor_task = None
 
         if self._process:
             try:
@@ -374,6 +383,11 @@ class WhatsAppAbility(Ability):
 
         self._running = True
 
+        # Resolve wacli DB path for the inbound poller
+        self._wacli_db = self._resolve_wacli_db()
+        if not self._wacli_db:
+            logger.error("wacli database not found — inbound messages will not work")
+
         # Wire callbacks so sub-agent results and status messages reach WhatsApp
         if self._agent.conversations:
             self._agent.conversations.add_delivery_callback(self._deliver_subagent_result)
@@ -383,6 +397,11 @@ class WhatsAppAbility(Ability):
         if not ok:
             self._running = False
             return False
+
+        # Start DB poller for inbound messages (independent of sync process)
+        if self._wacli_db:
+            self._poll_task = asyncio.create_task(self._poll_loop())
+
         _bridge_instance = self
         logger.info("WhatsApp bridge started.")
         return True
@@ -397,40 +416,103 @@ class WhatsAppAbility(Ability):
             self._agent.conversations.remove_delivery_callback(self._deliver_subagent_result)
             self._agent.conversations.remove_status_callback(self._send_status_message)
 
+        # Stop poller
+        if self._poll_task and not self._poll_task.done():
+            self._poll_task.cancel()
+            try:
+                await self._poll_task
+            except asyncio.CancelledError:
+                pass
+        self._poll_task = None
+
         await self._stop_sync()
         _bridge_instance = None
         logger.info("WhatsApp bridge stopped.")
 
-    # ── Message loop ───────────────────────────────────────────
+    # ── Process monitor ──────────────────────────────────────
 
-    async def _reader_loop(self):
-        """Read JSON lines from wacli stdout and process messages."""
-        while self._running and self._process and self._process.stdout:
+    async def _monitor_loop(self):
+        """Watch wacli sync process — restart if it dies unexpectedly."""
+        try:
+            if self._process:
+                await self._process.wait()
+            if self._running:
+                logger.warning("wacli process ended unexpectedly, restarting...")
+                await self._restart_wacli()
+        except asyncio.CancelledError:
+            pass
+
+    # ── Inbound DB poller ─────────────────────────────────────
+
+    def _resolve_wacli_db(self) -> Optional[str]:
+        """Find the wacli SQLite database file.
+
+        wacli stores its DB at ~/.wacli/wacli.db relative to the user
+        running the process.
+        """
+        default = os.path.expanduser("~/.wacli/wacli.db")
+        if os.path.isfile(default):
+            return default
+        return None
+
+    async def _poll_loop(self):
+        """Poll wacli SQLite DB for new inbound messages.
+
+        Runs independently of the sync process.  SQLite read is safe
+        even while wacli sync writes (WAL mode / shared cache).
+        """
+        db_path = self._wacli_db
+        if not db_path:
+            return
+
+        # Seed last_rowid to current max so we only process NEW messages
+        try:
+            conn = sqlite3.connect(db_path, timeout=5)
+            cur = conn.execute("SELECT MAX(rowid) FROM messages")
+            self._last_rowid = cur.fetchone()[0] or 0
+            conn.close()
+            logger.info(f"WhatsApp poller started (last_rowid={self._last_rowid}, db={db_path})")
+        except Exception as e:
+            logger.error(f"Failed to read wacli DB: {e}")
+            return
+
+        while self._running:
             try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    if self._running:
-                        logger.warning("wacli process ended unexpectedly, restarting...")
-                        await self._restart_wacli()
+                await asyncio.sleep(2)
+                if not self._running:
                     break
 
-                line = line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
+                # Read new inbound messages (from_me=0, text not empty, DM only)
+                conn = sqlite3.connect(db_path, timeout=5)
+                conn.row_factory = sqlite3.Row
+                cur = conn.execute("""
+                    SELECT rowid, chat_jid, sender_jid, sender_name, chat_name, text
+                    FROM messages
+                    WHERE rowid > ? AND from_me = 0
+                      AND text IS NOT NULL AND text != ''
+                      AND chat_jid NOT LIKE '%@g.us'
+                    ORDER BY rowid ASC
+                """, (self._last_rowid,))
+                rows = cur.fetchall()
+                conn.close()
 
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.debug(f"Non-JSON line from wacli: {line[:200]}")
-                    continue
-
-                await self._handle_inbound(msg)
+                for row in rows:
+                    self._last_rowid = row["rowid"]
+                    msg = {
+                        "ChatJID": row["chat_jid"],
+                        "SenderJID": row["sender_jid"] or row["chat_jid"],
+                        "PushName": row["sender_name"] or "",
+                        "ChatName": row["chat_name"] or "",
+                        "Text": row["text"],
+                        "FromMe": False,
+                    }
+                    await self._handle_inbound(msg)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in reader loop: {e}", exc_info=True)
-                await asyncio.sleep(1)
+                logger.error(f"Error in WhatsApp poll loop: {e}", exc_info=True)
+                await asyncio.sleep(5)
 
     async def _handle_inbound(self, msg: dict):
         """Process a single inbound wacli JSON message."""
