@@ -104,7 +104,7 @@ class ToolRegistry:
             for tool in tools
         ]
 
-    async def execute(self, name: str, arguments: dict, access_level: str = "public", scheduled: bool = False) -> str:
+    async def execute(self, name: str, arguments: dict, access_level: str = "public", scheduled: bool = False, provider=None) -> str:
         """Execute a tool by name."""
         tool = self.get(name)
         if not tool:
@@ -151,6 +151,8 @@ class ToolRegistry:
             call_args = {**arguments}
             if scheduled and name in ("send_message",):
                 call_args["_scheduled"] = True
+            if provider and name in ("spawn_subagent",):
+                call_args["_provider"] = provider
             result = await tool.handler(**call_args)
             return str(result)
         except Exception as e:

@@ -73,6 +73,7 @@ class SubAgentManager:
         parent_session_id: int,
         context: Optional[str] = None,
         model: Optional[str] = None,
+        provider: Optional[LLMProvider] = None,
     ) -> dict:
         """Spawn a new sub-agent.
         
@@ -109,9 +110,11 @@ class SubAgentManager:
             """, run_id, parent_session_id, task, model)
 
         # Start the sub-agent task
+        # Use parent conversation's provider if given, else fall back to default
+        effective_provider = provider or self.provider
         timeout = await self.timeout_seconds()
         async_task = asyncio.create_task(
-            self._run_subagent(run_id, task, context, model, timeout)
+            self._run_subagent(run_id, task, context, model, timeout, effective_provider)
         )
         self._active_runs[run_id] = async_task
 
@@ -130,11 +133,12 @@ class SubAgentManager:
         context: Optional[str],
         model: Optional[str],
         timeout: int,
+        provider: Optional[LLMProvider] = None,
     ):
         """Execute a sub-agent task in the background."""
         try:
             result = await asyncio.wait_for(
-                self._execute_task(run_id, task, context, model),
+                self._execute_task(run_id, task, context, model, provider),
                 timeout=timeout,
             )
             await self._complete_run(run_id, "completed", result=result)
@@ -155,13 +159,18 @@ class SubAgentManager:
         task: str,
         context: Optional[str],
         model: Optional[str],
+        provider: Optional[LLMProvider] = None,
     ) -> str:
         """Execute a sub-agent task with full tool-calling loop.
-        
+
         Sub-agents can use tools (exec, memory, web, abilities) just like
         the main agent, enabling them to do real work autonomously.
         Config/management tools are filtered out for safety.
         """
+        # Use parent conversation's provider (inherits group/user model override)
+        llm = provider or self.provider
+        logger.info(f"Sub-agent {run_id[:8]} using provider: {llm.name}")
+
         messages = []
 
         # ═══════════════════════════════════════════════════════════════
@@ -221,7 +230,7 @@ class SubAgentManager:
         total_output_tokens = 0
 
         # Initial LLM call
-        response = await self.provider.chat(
+        response = await llm.chat(
             messages=messages,
             tools=tool_schemas if tool_schemas else None,
             temperature=0.3,
@@ -267,7 +276,7 @@ class SubAgentManager:
                 messages.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
 
             # Get next response — may contain more tool calls
-            response = await self.provider.chat(
+            response = await llm.chat(
                 messages=messages,
                 tools=tool_schemas if tool_schemas else None,
                 temperature=0.3,
@@ -282,7 +291,7 @@ class SubAgentManager:
                     role="system",
                     content=f"STOP. You have used {max_rounds} tool rounds. Summarize what you've done and what remains.",
                 ))
-                response = await self.provider.chat(
+                response = await llm.chat(
                     messages=messages,
                     tools=None,
                     temperature=0.3,

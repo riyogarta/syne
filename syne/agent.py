@@ -1053,24 +1053,25 @@ class SyneAgent:
         
         return "\n".join(lines)
 
-    async def _tool_spawn_subagent(self, task: str, context: str = "") -> str:
+    async def _tool_spawn_subagent(self, task: str, context: str = "", _provider=None) -> str:
         """Tool handler: spawn a sub-agent."""
         if not self.subagents:
             return "Sub-agent system not initialized."
-        
+
         # Get parent session ID from the currently active conversation
         parent_session_id = 0
         conv = self._get_active_conversation()
         if conv and hasattr(conv, 'session_id'):
             parent_session_id = conv.session_id
-        
+
         if parent_session_id == 0:
             return "Cannot spawn sub-agent: no active session found."
-        
+
         result = await self.subagents.spawn(
             task=task,
             parent_session_id=parent_session_id,
             context=context or None,
+            provider=_provider,
         )
         
         if result["success"]:
