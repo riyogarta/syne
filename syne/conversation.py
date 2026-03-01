@@ -854,7 +854,25 @@ class ConversationManager:
             if inbound:
                 existing.inbound = inbound
                 existing.is_group = inbound.is_group
-            return existing
+
+            # Session rows can be deleted externally (e.g. manual reset). If that happens,
+            # a cached Conversation would keep a stale session_id and message inserts will
+            # fail with messages_session_id_fkey. Detect and drop stale cache.
+            try:
+                async with get_connection() as conn:
+                    ok = await conn.fetchval(
+                        "SELECT 1 FROM sessions WHERE id = $1 AND status = 'active'",
+                        existing.session_id,
+                    )
+                if ok:
+                    return existing
+                logger.warning(
+                    f"Dropping stale cached conversation for {key}: session_id={existing.session_id} not found/active"
+                )
+            except Exception as e:
+                logger.warning(f"Failed to validate cached session for {key}: {e}")
+
+            self._active.pop(key, None)
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
