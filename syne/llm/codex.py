@@ -264,16 +264,7 @@ class CodexProvider(LLMProvider):
         if is_reasoning:
             effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
             body["reasoning"] = {"effort": effort}
-            # Reasoning models reject temperature/top_p/penalties
-        else:
-            if temperature is not None:
-                body["temperature"] = temperature
-            if top_p is not None:
-                body["top_p"] = top_p
-            if frequency_penalty is not None:
-                body["frequency_penalty"] = frequency_penalty
-            if presence_penalty is not None:
-                body["presence_penalty"] = presence_penalty
+        # Codex API does not support temperature/top_p/penalties at all
 
         if max_tokens is not None and max_tokens > 0:
             body["max_output_tokens"] = max_tokens
