@@ -295,7 +295,7 @@ class TelegramChannel:
             await self.app.shutdown()
             logger.info("Telegram bot stopped.")
 
-    async def process_scheduled_message(self, chat_id: int, payload: str):
+    async def process_scheduled_message(self, chat_id: int, payload: str, task_id: int | None = None):
         """Process a scheduled task payload as if the user sent it.
         
         This is called by the scheduler when a task executes.
@@ -316,6 +316,10 @@ class TelegramChannel:
         
         user_name = user.get("display_name") or user.get("name") or str(chat_id)
         access_level = user.get("access_level", "public")
+
+        # Use a dedicated internal chat_id for scheduled tasks to avoid DM session locks
+        # while keeping the user identity (user_platform_id) as the real Telegram user id.
+        session_chat_id = str(chat_id) if task_id is None else f"scheduled:{chat_id}:{task_id}"
         
         logger.info(f"[scheduled] {user_name} ({chat_id}): {payload[:100]}")
         
@@ -333,17 +337,17 @@ class TelegramChannel:
                 platform="telegram",
                 chat_type="direct",
                 conversation_label=user_name,
-                chat_id=str(chat_id),
+                chat_id=session_chat_id,
             )
             # Process the message via agent (DM context, not group)
             response = await self.agent.handle_message(
                 platform="telegram",
-                chat_id=str(chat_id),
+                chat_id=session_chat_id,
                 user_name=user_name,
                 user_platform_id=str(chat_id),
                 message=payload,
                 display_name=user_name,
-                message_metadata={"scheduled": True, "inbound": sched_inbound},
+                message_metadata={"scheduled": True, "task_id": task_id, "inbound": sched_inbound},
             )
             
             if response:

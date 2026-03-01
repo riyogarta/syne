@@ -117,7 +117,7 @@ async def _scheduler_callback(task_id: int, payload: str, created_by: int):
     
     # Process the payload as if the user sent it
     try:
-        await _telegram_channel.process_scheduled_message(chat_id, payload)
+        await _telegram_channel.process_scheduled_message(chat_id, payload, task_id=task_id)
     except Exception as e:
         logger.error(f"Scheduler: Error executing task {task_id}: {e}", exc_info=True)
 
