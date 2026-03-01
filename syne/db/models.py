@@ -87,13 +87,21 @@ async def create_user(
     access_level: str = "public",
 ) -> dict:
     """Create a new user."""
+    import json
     async with get_connection() as conn:
         row = await conn.fetchrow("""
             INSERT INTO users (name, display_name, platform, platform_id, access_level)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING id, name, display_name, platform, platform_id, access_level, preferences
         """, name, display_name, platform, platform_id, access_level)
-        return dict(row)
+        result = dict(row)
+        # Parse JSONB fields that may come as strings (asyncpg may return json/jsonb as str)
+        if "preferences" in result and isinstance(result["preferences"], str):
+            try:
+                result["preferences"] = json.loads(result["preferences"])
+            except (json.JSONDecodeError, TypeError):
+                result["preferences"] = {}
+        return result
 
 
 async def get_or_create_user(

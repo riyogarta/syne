@@ -435,7 +435,10 @@ class Conversation:
         # Set current user context for scheduler (auto-fill created_by).
         from .tools.scheduler import set_current_user
         user_platform_id = self.user.get("platform_id")
-        set_current_user(int(user_platform_id) if user_platform_id else None)
+        try:
+            set_current_user(int(user_platform_id))
+        except (TypeError, ValueError):
+            set_current_user(None)
 
         max_rounds = int(await get_config("session.max_tool_rounds", 100))
 
