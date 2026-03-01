@@ -153,25 +153,26 @@ async def run():
                 "Set via DB (credential.telegram_bot_token) or .env (SYNE_TELEGRAM_BOT_TOKEN)."
             )
 
-        # Start WhatsApp bridge if enabled (registered as ability)
-        from .db.models import get_config
-        wa_enabled = await get_config("whatsapp.enabled", False)
-        if wa_enabled:
-            wa_reg = agent.abilities.get("whatsapp")
-            if wa_reg:
-                # Ensure wacli is installed before starting bridge
-                dep_ok, dep_msg = await wa_reg.instance.ensure_dependencies()
-                if not dep_ok:
-                    logger.warning(f"WhatsApp enabled but dependency check failed: {dep_msg}")
-                else:
-                    wa_path = await get_config("whatsapp.wacli_path", "wacli")
-                    if await wa_reg.instance.start_bridge(agent, wacli_path=wa_path):
-                        channels.append(wa_reg.instance)
-                        logger.info("WhatsApp bridge active.")
-                    else:
-                        logger.warning("WhatsApp enabled but failed to start.")
+        # Start WhatsApp bridge if the ability is enabled in DB
+        # NOTE: We use abilities.enabled as the source of truth (not config.whatsapp.enabled)
+        wa_reg = agent.abilities.get("whatsapp")
+        if wa_reg and wa_reg.enabled:
+            from .db.models import get_config
+            # Ensure wacli is installed before starting bridge
+            dep_ok, dep_msg = await wa_reg.instance.ensure_dependencies()
+            if not dep_ok:
+                logger.warning(f"WhatsApp ability enabled but dependency check failed: {dep_msg}")
             else:
-                logger.warning("WhatsApp enabled but ability not registered.")
+                wa_path = await get_config("whatsapp.wacli_path", "wacli")
+                if await wa_reg.instance.start_bridge(agent, wacli_path=wa_path):
+                    channels.append(wa_reg.instance)
+                    logger.info("WhatsApp bridge active.")
+                else:
+                    logger.warning("WhatsApp ability enabled but failed to start.")
+        elif wa_reg and not wa_reg.enabled:
+            logger.info("WhatsApp ability registered but disabled.")
+        else:
+            logger.debug("WhatsApp ability not registered.")
 
         # Start scheduler
         scheduler = Scheduler(on_task_execute=_scheduler_callback)
