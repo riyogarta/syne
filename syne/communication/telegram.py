@@ -166,6 +166,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
+        self.app.add_handler(CommandHandler("wamember", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
