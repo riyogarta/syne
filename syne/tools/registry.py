@@ -104,7 +104,7 @@ class ToolRegistry:
             for tool in tools
         ]
 
-    async def execute(self, name: str, arguments: dict, access_level: str = "public") -> str:
+    async def execute(self, name: str, arguments: dict, access_level: str = "public", scheduled: bool = False) -> str:
         """Execute a tool by name."""
         tool = self.get(name)
         if not tool:
@@ -148,7 +148,10 @@ class ToolRegistry:
                 logger.error(f"Approval callback error: {e}")
 
         try:
-            result = await tool.handler(**arguments)
+            call_args = {**arguments}
+            if scheduled and name in ("send_message",):
+                call_args["_scheduled"] = True
+            result = await tool.handler(**call_args)
             return str(result)
         except Exception as e:
             logger.error(f"Error executing tool '{name}': {e}")

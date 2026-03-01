@@ -509,7 +509,8 @@ class Conversation:
 
                 # Check if this is a built-in tool or an ability
                 if self.tools.get(name):
-                    result = await self.tools.execute(name, args, access_level)
+                    is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
+                    result = await self.tools.execute(name, args, access_level, scheduled=is_scheduled)
                 elif self.abilities and self.abilities.get(name):
                     # Inject cached input data if ability needs it
                     # (e.g. image_analysis retry after pre-process failed)

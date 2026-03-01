@@ -26,6 +26,7 @@ async def send_message_handler(
     chat_id: str,
     message: str,
     reply_to_message_id: int = 0,
+    _scheduled: bool = False,
 ) -> str:
     """Send a message to a Telegram chat.
 
@@ -33,6 +34,7 @@ async def send_message_handler(
         chat_id: Telegram chat ID (user ID for DMs, group ID for groups).
         message: Message text to send. Supports Markdown formatting.
         reply_to_message_id: Optional message ID to reply/quote to.
+        _scheduled: Injected by tool registry when called from scheduled context.
 
     Returns:
         Success or error message.
@@ -47,6 +49,13 @@ async def send_message_handler(
 
     if not message or not message.strip():
         return "Error: message cannot be empty"
+
+    # Guard: sending to groups requires scheduled context
+    if str(chat_id).startswith("-") and not _scheduled:
+        return (
+            "Error: Cannot send to groups from a regular conversation. "
+            "Use manage_schedule to create a scheduled task instead."
+        )
 
     try:
         reply_to = reply_to_message_id if reply_to_message_id else None

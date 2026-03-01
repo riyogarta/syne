@@ -183,7 +183,7 @@ class Scheduler:
             # Get all due tasks
             due_tasks = await conn.fetch(
                 """
-                SELECT id, name, schedule_type, schedule_value, payload, created_by, end_date
+                SELECT id, name, schedule_type, schedule_value, payload, created_by, end_date, next_run
                 FROM scheduled_tasks
                 WHERE enabled = true
                   AND next_run <= $1
@@ -192,6 +192,10 @@ class Scheduler:
                 now,
             )
             
+            # Load misfire grace window (default 5 minutes)
+            from .db.models import get_config
+            grace = await get_config("scheduler.misfire_grace_seconds", 300)
+
             for task in due_tasks:
                 task_id = task["id"]
                 task_name = task["name"]
@@ -200,9 +204,37 @@ class Scheduler:
                 payload = task["payload"]
                 created_by = task["created_by"]
                 end_date = task["end_date"]
-                
+                task_next_run = task["next_run"]
+
+                # Misfire check: skip recurring tasks that are too far overdue
+                if schedule_type != "once" and task_next_run:
+                    overdue = (now - task_next_run).total_seconds()
+                    if overdue > grace:
+                        logger.warning(
+                            f"Skipping overdue task {task_id} ({task_name}): "
+                            f"{overdue:.0f}s late (grace={grace}s)"
+                        )
+                        # Advance next_run without executing
+                        next_run = _calculate_next_run(schedule_type, schedule_value, now)
+                        if next_run:
+                            await conn.execute(
+                                """
+                                UPDATE scheduled_tasks
+                                SET next_run = $1
+                                WHERE id = $2
+                                """,
+                                next_run, task_id,
+                            )
+                        else:
+                            logger.error(f"Failed to calculate next run for skipped task {task_id}, disabling")
+                            await conn.execute(
+                                "UPDATE scheduled_tasks SET enabled = false WHERE id = $1",
+                                task_id,
+                            )
+                        continue
+
                 logger.info(f"Executing scheduled task: {task_name} (id={task_id})")
-                
+
                 try:
                     # Execute the callback
                     await self._on_execute(task_id, payload, created_by)
