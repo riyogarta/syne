@@ -89,6 +89,19 @@ async def evaluate_message(
     """
     # Quick filters — skip obviously non-memorable messages
     stripped = user_message.strip().lower()
+    # Technical/task/debug chatter — almost always not long-term memory
+    # (Allow explicit remember requests to pass through; those are handled later)
+    technical_skip_keywords = (
+        "git ", "pull", "push", "commit", "merge", "branch", "deploy", "rollback", "restart",
+        "docker", "systemctl", "journalctl", "psql", "sql ", "select ", "insert ", "delete ",
+        "traceback", "stack trace", "error ", "exception", "foreignkey", "fk violation",
+        "scheduler", "cron", "task id", "next run", "last run",
+        "syne/", "/home/", ".py", "pip install", "apt install",
+        "ability", "abilities", "log", "syne.log",
+    )
+    if any(k in stripped for k in technical_skip_keywords) and not _is_explicit_remember(user_message):
+        return None
+
     
     # Too short
     if len(stripped) < 5:
@@ -171,6 +184,19 @@ async def evaluate_message_ollama(
     """
     # Quick filters — same as evaluate_message()
     stripped = user_message.strip().lower()
+    # Technical/task/debug chatter — almost always not long-term memory
+    # (Allow explicit remember requests to pass through; those are handled later)
+    technical_skip_keywords = (
+        "git ", "pull", "push", "commit", "merge", "branch", "deploy", "rollback", "restart",
+        "docker", "systemctl", "journalctl", "psql", "sql ", "select ", "insert ", "delete ",
+        "traceback", "stack trace", "error ", "exception", "foreignkey", "fk violation",
+        "scheduler", "cron", "task id", "next run", "last run",
+        "syne/", "/home/", ".py", "pip install", "apt install",
+        "ability", "abilities", "log", "syne.log",
+    )
+    if any(k in stripped for k in technical_skip_keywords) and not _is_explicit_remember(user_message):
+        return None
+
     if len(stripped) < 5:
         return None
 
