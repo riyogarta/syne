@@ -486,11 +486,12 @@ class WhatsAppAbility(Ability):
                 conn = sqlite3.connect(db_path, timeout=5)
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("""
-                    SELECT rowid, chat_jid, sender_jid, sender_name, chat_name, text
+                    SELECT rowid, chat_jid, sender_jid, sender_name, chat_name, text, from_me
                     FROM messages
-                    WHERE rowid > ? AND from_me = 0
+                    WHERE rowid > ?
                       AND text IS NOT NULL AND text != ''
                       AND chat_jid NOT LIKE '%@g.us'
+                      AND chat_jid != 'status@broadcast'
                     ORDER BY rowid ASC
                 """, (self._last_rowid,))
                 rows = cur.fetchall()
@@ -504,7 +505,7 @@ class WhatsAppAbility(Ability):
                         "PushName": row["sender_name"] or "",
                         "ChatName": row["chat_name"] or "",
                         "Text": row["text"],
-                        "FromMe": False,
+                        "FromMe": bool(row["from_me"]),
                     }
                     await self._handle_inbound(msg)
 
@@ -516,8 +517,7 @@ class WhatsAppAbility(Ability):
 
     async def _handle_inbound(self, msg: dict):
         """Process a single inbound wacli JSON message."""
-        if msg.get("FromMe"):
-            return
+        from_me = bool(msg.get("FromMe", False))
 
         text = msg.get("Text", "").strip()
         if not text:
@@ -525,11 +525,29 @@ class WhatsAppAbility(Ability):
 
         chat_jid = msg.get("ChatJID", "")
 
+        # Special-case: when wacli is logged into the same WhatsApp account as the user,
+        # messages typed on the phone show up in the DB as from_me=1 (because they are
+        # sent by the logged-in account). We still want to treat *self-chat* messages
+        # as inbound so Syne can reply.
+        #
+        # Accept from_me=1 only when it's the self-chat (sender base JID == chat_jid).
+        sender_jid_raw = msg.get("SenderJID") or ""
+        if from_me:
+            if not sender_jid_raw:
+                # Likely sent by wacli itself (sender_jid NULL)
+                return
+            sender_base = sender_jid_raw.split(":", 1)[0]
+            if sender_base != chat_jid:
+                # User sending messages to other contacts — do not auto-reply
+                return
+
         # DM only — skip groups
         if chat_jid.endswith("@g.us"):
             return
 
-        sender_jid = msg.get("SenderJID", chat_jid)
+        sender_jid = sender_jid_raw or chat_jid
+        # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
+        sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
         chat_name = msg.get("ChatName", "")
         sender_name = msg.get("PushName", chat_name or sender_jid.split("@")[0])
 
@@ -542,7 +560,7 @@ class WhatsAppAbility(Ability):
             conversation_label=sender_name,
             chat_id=chat_jid,
             sender_name=sender_name,
-            sender_id=sender_jid,
+            sender_id=sender_platform_id,
         )
 
         # User context prefix (core utility — adds sender info for LLM)
@@ -563,7 +581,7 @@ class WhatsAppAbility(Ability):
                 platform="whatsapp",
                 chat_id=chat_jid,
                 user_name=sender_name,
-                user_platform_id=sender_jid,
+                user_platform_id=sender_platform_id,
                 message=text,
                 display_name=sender_name,
                 message_metadata=metadata,
