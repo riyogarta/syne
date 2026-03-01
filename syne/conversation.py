@@ -115,6 +115,11 @@ class Conversation:
         """
         messages = []
         access_level = self.user.get("access_level", "public")
+        # In group chats, the effective access level for memory is the SENDER (who asked),
+        # resolved from the group member registry in InboundContext.sender_access.
+        # If not available, fall back to the user record.
+        if self.is_group and self.inbound and self.inbound.sender_access:
+            access_level = self.inbound.sender_access
 
         # 1. System prompt
         prompt = self.system_prompt

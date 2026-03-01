@@ -1681,6 +1681,8 @@ class SyneAgent:
         # Pass requester access level for Rule 760 filtering
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+            access = conv.inbound.sender_access
         results = await self.memory.recall(query, limit=limit, requester_access_level=access)
         if not results:
             return "No relevant memories found."

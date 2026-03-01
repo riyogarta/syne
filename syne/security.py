@@ -61,41 +61,27 @@ def check_rule_700(tool_name: str, access_level: str) -> tuple[bool, str]:
 # ============================================================
 # RULE 760: Family Privacy Protection
 # ============================================================
-# Personal/family information can only be accessed by owner or
-# family-level users. This protects sensitive memories from
-# being retrieved by public or friend-level users.
-
-PRIVATE_MEMORY_CATEGORIES = frozenset({
-    "personal_info",
-    "family",
-    "health",
-    "medical",
-    "private",
-    "financial",
-})
+# Yahyo policy: ALL memories are private (Rule 760).
+# Only owner/family can access memory (recall/search), regardless of category.
 
 
 def check_rule_760(memory_category: str, requester_access: str) -> tuple[bool, str]:
     """Check Rule 760: family privacy.
-    
-    Filters access to private memory categories based on requester's
-    access level. Only owner and family can access private memories.
-    
+
+    Yahyo policy: ALL memories are treated as family-private.
+    Only owner and family can access memory, regardless of category.
+
     Args:
-        memory_category: Category of the memory being accessed
+        memory_category: Category of the memory being accessed (kept for compatibility)
         requester_access: Access level of the user requesting the memory
-        
+
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
-    if memory_category in PRIVATE_MEMORY_CATEGORIES:
-        if requester_access not in ("owner", "family"):
-            reason = (
-                f"[Rule 760] Personal/family information is restricted. "
-                f"Category '{memory_category}' requires family-level access or higher."
-            )
-            logger.warning(f"Rule 760 violation: {memory_category} attempted by {requester_access}")
-            return False, reason
+    if requester_access not in ("owner", "family"):
+        reason = "[Rule 760] Memory access is restricted to owner/family only."
+        logger.warning(f"Rule 760 violation: memory access attempted by {requester_access}")
+        return False, reason
     return True, ""
 
 

@@ -69,6 +69,16 @@ class MemoryEngine:
         Returns:
             List of matching memories (filtered by Rule 760 for privacy)
         """
+        # ═══════════════════════════════════════════════════════
+        # RULE 760 CHECK — FAMILY PRIVACY PROTECTION (Yahyo policy)
+        # All memory recall is restricted to owner/family.
+        # Do this BEFORE embedding/DB query for safety and efficiency.
+        # ═══════════════════════════════════════════════════════
+        allowed, reason = check_rule_760("", requester_access_level)
+        if not allowed:
+            logger.info(f"Memory recall blocked: {reason}")
+            return []
+
         # Generate query embedding
         embedding_resp = await self.provider.embed(query)
         vector = embedding_resp.vector
