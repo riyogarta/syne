@@ -171,7 +171,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
 
         # Set up callbacks
         if agent.conversations:
-            agent.conversations.set_status_callback(_cli_status_callback)
+            agent.conversations.add_status_callback(_cli_status_callback)
             # Tool activity indicator — will be wired to status spinner in REPL
             agent.conversations._tool_status = None  # Rich Status object, set during processing
 

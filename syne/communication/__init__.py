@@ -11,6 +11,7 @@ This package is the single source of truth for all communication logic:
 from .inbound import InboundContext, build_system_metadata, build_user_context_prefix, load_group_settings
 from .outbound import strip_server_paths, strip_narration, extract_media, split_message, process_outbound
 from .tags import parse_reply_tag, parse_react_tags
+from .errors import classify_error
 
 __all__ = [
     # Inbound
@@ -27,4 +28,6 @@ __all__ = [
     # Tags
     "parse_reply_tag",
     "parse_react_tags",
+    # Errors
+    "classify_error",
 ]

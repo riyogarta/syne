@@ -282,14 +282,15 @@ class Conversation:
 
         if context_full or count_exceeded or chars_exceeded:
             logger.info(f"Compaction triggered for session {self.session_id}: context_full={context_full}, msgs={msg_count}/{_msg_thresh}, chars={char_total}/{_chr_thresh}")
-            if self._mgr and self._mgr._status_callback:
-                try:
-                    await self._mgr._status_callback(
-                        self.session_id,
-                        "🧹 Compacting memory... please wait a moment."
-                    )
-                except Exception as e:
-                    logger.debug(f"Status callback failed: {e}")
+            if self._mgr and self._mgr._status_callbacks:
+                for cb in self._mgr._status_callbacks:
+                    try:
+                        await cb(
+                            self.session_id,
+                            "🧹 Compacting memory... please wait a moment."
+                        )
+                    except Exception as e:
+                        logger.debug(f"Status callback failed: {e}")
             result = await auto_compact_check(
                 session_id=self.session_id,
                 provider=self.provider,
@@ -299,14 +300,15 @@ class Conversation:
                     f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
                 )
                 await self.load_history()
-                if self._mgr and self._mgr._status_callback:
-                    try:
-                        await self._mgr._status_callback(
-                            self.session_id,
-                            f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
-                        )
-                    except Exception as e:
-                        logger.debug(f"Status callback failed: {e}")
+                if self._mgr and self._mgr._status_callbacks:
+                    for cb in self._mgr._status_callbacks:
+                        try:
+                            await cb(
+                                self.session_id,
+                                f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
+                            )
+                        except Exception as e:
+                            logger.debug(f"Status callback failed: {e}")
 
         # Build context — use original text (without context prefix) for memory recall
         recall_query = (message_metadata or {}).get("original_text", user_message)
@@ -791,9 +793,9 @@ class ConversationManager:
         self.subagents = subagents
         self.workspace_outputs: Optional[str] = None  # Set by agent after init
         self._active: dict[str, Conversation] = {}
-        self._delivery_callback = None  # Set by channel for delivering sub-agent results
-        self._status_callback = None  # Set by channel for status notifications (e.g., compaction)
-        self._tool_callback = None  # Set by channel for tool activity notifications
+        self._delivery_callbacks: list = []  # Multi-slot: channels register via add/remove
+        self._status_callbacks: list = []  # Multi-slot: channels register via add/remove
+        self._tool_callback = None  # Single-slot (CLI only, per-cycle)
 
         # Wire up sub-agent completion callback
         if self.subagents:
@@ -806,28 +808,47 @@ class ConversationManager:
         else:
             msg = f"❌ Sub-agent failed (run: {run_id[:8]})\n\n{result}"
 
-        # Deliver via callback if set (e.g., send Telegram message)
-        if self._delivery_callback:
-            try:
-                await self._delivery_callback(msg, parent_session_id)
-            except Exception as e:
-                logger.error(f"Failed to deliver sub-agent result: {e}")
+        # Deliver via callbacks (e.g., Telegram, WhatsApp)
+        if self._delivery_callbacks:
+            for cb in self._delivery_callbacks:
+                try:
+                    await cb(msg, parent_session_id)
+                except Exception as e:
+                    logger.error(f"Failed to deliver sub-agent result via {cb}: {e}")
         else:
             logger.info(f"Sub-agent result (no delivery callback): {msg[:200]}")
 
-    def set_delivery_callback(self, callback):
-        """Set callback for delivering sub-agent results to the user.
+    def add_delivery_callback(self, callback):
+        """Register a callback for delivering sub-agent results.
 
         callback(message: str, parent_session_id: int) -> None
+        Multiple channels can register (Telegram, WhatsApp, etc.).
         """
-        self._delivery_callback = callback
+        if callback not in self._delivery_callbacks:
+            self._delivery_callbacks.append(callback)
 
-    def set_status_callback(self, callback):
-        """Set callback for status notifications (compaction, etc.).
-        
-        callback(session_id: str, message: str) -> None
+    def remove_delivery_callback(self, callback):
+        """Unregister a delivery callback."""
+        try:
+            self._delivery_callbacks.remove(callback)
+        except ValueError:
+            pass
+
+    def add_status_callback(self, callback):
+        """Register a callback for status notifications (compaction, etc.).
+
+        callback(session_id: int, message: str) -> None
+        Multiple channels can register (Telegram, WhatsApp, CLI, etc.).
         """
-        self._status_callback = callback
+        if callback not in self._status_callbacks:
+            self._status_callbacks.append(callback)
+
+    def remove_status_callback(self, callback):
+        """Unregister a status callback."""
+        try:
+            self._status_callbacks.remove(callback)
+        except ValueError:
+            pass
 
     def set_tool_callback(self, callback):
         """Set callback for tool activity notifications.

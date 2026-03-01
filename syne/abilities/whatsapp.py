@@ -373,6 +373,11 @@ class WhatsAppAbility(Ability):
 
         self._running = True
 
+        # Wire callbacks so sub-agent results and status messages reach WhatsApp
+        if self._agent.conversations:
+            self._agent.conversations.add_delivery_callback(self._deliver_subagent_result)
+            self._agent.conversations.add_status_callback(self._send_status_message)
+
         ok = await self._start_sync()
         if not ok:
             self._running = False
@@ -385,6 +390,12 @@ class WhatsAppAbility(Ability):
         """Stop the WhatsApp bridge."""
         global _bridge_instance
         self._running = False
+
+        # Unregister callbacks
+        if self._agent and self._agent.conversations:
+            self._agent.conversations.remove_delivery_callback(self._deliver_subagent_result)
+            self._agent.conversations.remove_status_callback(self._send_status_message)
+
         await self._stop_sync()
         _bridge_instance = None
         logger.info("WhatsApp bridge stopped.")
@@ -451,9 +462,17 @@ class WhatsAppAbility(Ability):
             sender_id=sender_jid,
         )
 
+        # User context prefix (core utility — adds sender info for LLM)
+        from ..communication.inbound import build_user_context_prefix
+        original_text = text
+        user_prefix = build_user_context_prefix(inbound)
+        if user_prefix:
+            text = f"{user_prefix}\n\n{text}"
+
         metadata = {
             "chat_id": chat_jid,
             "inbound": inbound,
+            "original_text": original_text,
         }
 
         try:
@@ -466,11 +485,18 @@ class WhatsAppAbility(Ability):
                 display_name=sender_name,
                 message_metadata=metadata,
             )
-            if response:
-                await self._send_text(chat_jid, response)
+
+            # None = lock timeout (another request in progress) — silently drop
+            if response is None:
+                return
+            if not response:
+                response = "LLM returned an empty response. Please try again."
+
+            await self._send_text(chat_jid, response)
         except Exception as e:
             logger.error(f"Error handling WhatsApp message: {e}", exc_info=True)
-            await self._send_text(chat_jid, "Sorry, an error occurred.")
+            from ..communication.errors import classify_error
+            await self._send_text(chat_jid, classify_error(e))
 
     # ── Outbound ───────────────────────────────────────────────
 
