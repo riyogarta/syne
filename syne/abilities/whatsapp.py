@@ -48,6 +48,7 @@ class WhatsAppAbility(Ability):
         self._process: Optional[asyncio.subprocess.Process] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._running = False
+        self._send_lock = asyncio.Lock()
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -256,7 +257,10 @@ class WhatsAppAbility(Ability):
             to = to.replace("+", "").replace(" ", "").replace("-", "")
             to = f"{to}@s.whatsapp.net"
 
-        await self._send_text(to, message)
+        try:
+            await self._send_text(to, message)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
         return {"success": True, "result": f"Message sent to {to}."}
 
     def get_schema(self) -> dict:
@@ -306,6 +310,47 @@ class WhatsAppAbility(Ability):
     def get_required_config(self) -> list[str]:
         return []
 
+    async def _start_sync(self) -> bool:
+        """Start the long-running `wacli sync --follow --json` process."""
+        # Make sure old process is not running
+        await self._stop_sync()
+
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                self._wacli_path, 'sync', '--follow', '--json',
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.error(f"Failed to start wacli sync: {e}")
+            self._process = None
+            return False
+
+        self._reader_task = asyncio.create_task(self._reader_loop())
+        return True
+
+    async def _stop_sync(self):
+        """Stop the sync process (if any)."""
+        # Stop reader task first so it won't auto-restart on EOF.
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._reader_task = None
+
+        if self._process:
+            try:
+                self._process.terminate()
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
+            self._process = None
+
     # ── Bridge lifecycle ───────────────────────────────────────
 
     async def start_bridge(self, agent, wacli_path: str = "wacli"):
@@ -326,18 +371,12 @@ class WhatsAppAbility(Ability):
             )
             return False
 
-        try:
-            self._process = await asyncio.create_subprocess_exec(
-                self._wacli_path, "sync", "--follow", "--json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except Exception as e:
-            logger.error(f"Failed to start wacli: {e}")
-            return False
-
         self._running = True
-        self._reader_task = asyncio.create_task(self._reader_loop())
+
+        ok = await self._start_sync()
+        if not ok:
+            self._running = False
+            return False
         _bridge_instance = self
         logger.info("WhatsApp bridge started.")
         return True
@@ -346,19 +385,7 @@ class WhatsAppAbility(Ability):
         """Stop the WhatsApp bridge."""
         global _bridge_instance
         self._running = False
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-        if self._process:
-            try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                self._process.kill()
-            self._process = None
+        await self._stop_sync()
         _bridge_instance = None
         logger.info("WhatsApp bridge stopped.")
 
@@ -448,28 +475,41 @@ class WhatsAppAbility(Ability):
     # ── Outbound ───────────────────────────────────────────────
 
     async def _send_text(self, jid: str, text: str):
-        """Send a text message via wacli."""
+        """Send a text message via wacli.
+
+        `wacli sync --follow` holds an exclusive lock on the store. Running
+        `wacli send ...` concurrently fails with "store is locked".
+
+        Workaround: pause sync, send, then resume sync.
+        """
         text = process_outbound(text)
         if not text:
             return
 
-        for chunk in split_message(text, max_length=4096):
+        async with self._send_lock:
+            was_syncing = self._process is not None
+            if was_syncing:
+                await self._stop_sync()
+
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    self._wacli_path, "send", "text",
-                    "--to", jid,
-                    "--message", chunk,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                if proc.returncode != 0:
-                    logger.error(f"wacli send failed: {stderr.decode()[:200]}")
-            except asyncio.TimeoutError:
-                logger.error(f"wacli send timed out for {jid}")
-            except Exception as e:
-                logger.error(f"Failed to send WhatsApp message: {e}")
-            await asyncio.sleep(0.3)
+                for chunk in split_message(text, max_length=4096):
+                    proc = await asyncio.create_subprocess_exec(
+                        self._wacli_path, 'send', 'text',
+                        '--to', jid,
+                        '--message', chunk,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    if proc.returncode != 0:
+                        err = stderr.decode('utf-8', errors='replace') if stderr else ''
+                        raise RuntimeError(f"wacli send failed (rc={proc.returncode}): {err[:200]}")
+                    await asyncio.sleep(0.3)
+            finally:
+                if self._running and was_syncing:
+                    ok = await self._start_sync()
+                    if not ok:
+                        logger.error('Failed to restart wacli sync after sending message')
 
     # ── Sub-agent callbacks ────────────────────────────────────
 
@@ -500,11 +540,8 @@ class WhatsAppAbility(Ability):
             return
         logger.info("Restarting wacli sync...")
         try:
-            self._process = await asyncio.create_subprocess_exec(
-                self._wacli_path, "sync", "--follow", "--json",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            self._reader_task = asyncio.create_task(self._reader_loop())
+            ok = await self._start_sync()
+            if not ok:
+                logger.error('Failed to restart wacli sync')
         except Exception as e:
             logger.error(f"Failed to restart wacli: {e}")
