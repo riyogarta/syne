@@ -173,7 +173,10 @@ class WhatsAppAbility(Ability):
                 stderr=asyncio.subprocess.PIPE,
                 env={**os.environ, "GOBIN": _WACLI_INSTALL_DIR},
             )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+            except asyncio.TimeoutError:
+                return False, "go install timed out after 30 minutes. Try manually:\n  go install github.com/steipete/wacli@latest"
             if proc.returncode == 0:
                 wacli_path = os.path.join(_WACLI_INSTALL_DIR, "wacli")
                 if os.path.isfile(wacli_path):
@@ -183,8 +186,6 @@ class WhatsAppAbility(Ability):
                     return True, f"wacli installed to {wacli_path}"
             logger.warning(f"go install failed: {stderr.decode()[:300]}")
             return False, f"go install failed: {stderr.decode()[:200]}"
-        except asyncio.TimeoutError:
-            return False, "go install timed out (180s)"
         except Exception as e:
             return False, f"go install error: {e}"
 

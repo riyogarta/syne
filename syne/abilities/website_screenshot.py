@@ -43,12 +43,15 @@ class WebsiteScreenshotAbility(Ability):
         # 2. pip install playwright if missing
         if not has_pkg:
             logger.info("Installing playwright via pip...")
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "pip", "install", "playwright",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, "-m", "pip", "install", "playwright",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+            except asyncio.TimeoutError:
+                return False, "Playwright installation timed out after 30 minutes. Try manually:\n  pip install playwright"
             if proc.returncode != 0:
                 err = stderr.decode().strip()
                 return False, f"Failed to install playwright: {err}"
@@ -64,12 +67,15 @@ class WebsiteScreenshotAbility(Ability):
             cmd = [playwright_bin, "install", "chromium"]
 
         logger.info("Installing Chromium browser via playwright...")
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        except asyncio.TimeoutError:
+            return False, "Chromium download timed out after 30 minutes. Try manually:\n  playwright install chromium"
         if proc.returncode != 0:
             err = stderr.decode().strip()
             return False, f"Failed to install Chromium: {err}"

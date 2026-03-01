@@ -367,12 +367,15 @@ class PdfAbility(Ability):
             return True, ""
 
         logger.info(f"Installing PDF deps: {', '.join(missing_pkgs)}")
-        proc = await asyncio.create_subprocess_exec(
-            sys.executable, "-m", "pip", "install", *missing_pkgs,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "pip", "install", *missing_pkgs,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        except asyncio.TimeoutError:
+            return False, f"Installation timed out after 30 minutes. Try installing manually:\n  pip install {' '.join(missing_pkgs)}"
         if proc.returncode != 0:
             err = stderr.decode().strip()
             return False, f"Failed to install PDF deps: {err}"
