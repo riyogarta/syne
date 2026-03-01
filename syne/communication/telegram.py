@@ -166,7 +166,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
-        self.app.add_handler(CommandHandler("wamember", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -217,8 +216,8 @@ class TelegramChannel:
         )
 
         # Register bot commands menu (the "/" button in Telegram)
-        from telegram import BotCommand
-        await self.app.bot.set_my_commands([
+        from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+        commands = [
             BotCommand("start", "Welcome message"),
             BotCommand("help", "Available commands"),
             BotCommand("version", "Version info"),
@@ -238,7 +237,12 @@ class TelegramChannel:
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
-        ])
+        ]
+        for scope in (BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()):
+            try:
+                await self.app.bot.set_my_commands(commands, scope=scope)
+            except Exception as e:
+                logger.warning(f"Failed to set Telegram commands for scope {type(scope).__name__}: {type(e).__name__}: {e}")
 
         # Wire sub-agent delivery: when a sub-agent completes, send result to the last active chat
         if self.agent.conversations:
