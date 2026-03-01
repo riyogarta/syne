@@ -587,6 +587,7 @@ class Conversation:
             if current.content:
                 current = ChatResponse(
                     content=current.content + notice,
+                    model=current.model,
                     tool_calls=None,
                     thinking=current.thinking,
                 )
@@ -603,6 +604,7 @@ class Conversation:
                 )
                 current = ChatResponse(
                     content=(current.content or "") + notice,
+                    model=current.model,
                     tool_calls=None,
                     thinking=current.thinking,
                 )
