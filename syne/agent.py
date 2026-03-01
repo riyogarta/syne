@@ -904,7 +904,7 @@ class SyneAgent:
             description=(
                 "Manage abilities. Actions: "
                 "'list' — show all abilities; "
-                "'create' — register a new self-created ability (provide name, description, module_path for the Python file you wrote to syne/abilities/); "
+                "'create' — register a new self-created ability (provide name, description, module_path for the Python file you wrote to syne/abilities/custom/); "
                 "'enable'/'disable' — toggle an ability; "
                 "'config' — update ability settings (JSON)."
             ),

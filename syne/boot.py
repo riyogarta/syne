@@ -213,7 +213,7 @@ def _get_self_healing_section() -> str:
 When a user-created ability fails:
 1. Read the error and the ability source (`read_source`)
 2. Diagnose: syntax error? wrong API response? missing config?
-3. Fix the file (`file_write` to `syne/abilities/<name>.py`)
+3. Fix the file (`file_write` to `syne/abilities/custom/<name>.py`)
 4. Re-register: `update_ability(action='create', name='<name>')`
 5. Verify: try executing the ability again
 6. Report the fix to the user
@@ -242,9 +242,9 @@ All abilities MUST implement these 3 abstract methods:
 - `get_schema(self) -> dict`
 
 How to fix:
-1. Read the source: `read_source(action="read", path="syne/abilities/<name>.py")`
+1. Read the source: `read_source(action="read", path="syne/abilities/custom/<name>.py")`
 2. Add/fix whatever is missing (see template in "Creating a New Ability")
-3. Rewrite: `file_write(path="syne/abilities/<name>.py", content="...")`
+3. Rewrite: `file_write(path="syne/abilities/custom/<name>.py", content="...")`
 4. Re-register: `update_ability(action='create', name='<name>')`
 5. Tell the user what you fixed
 
@@ -253,7 +253,7 @@ When a user asks "update my abilities" → scan and fix all broken abilities.
 
 ## Source Code Access
 - `read_source(action="tree/read/search")` — read-only access to entire codebase
-- You can READ all source. You can only WRITE to `syne/abilities/`.
+- You can READ all source. You can only WRITE to `syne/abilities/custom/`.
 - For core bugs: draft a bug report with diagnosis and suggested fix.
 
 ## Environment
@@ -472,7 +472,7 @@ Input processing (images, audio, documents) tries abilities FIRST.
 - If raw data passes through (ability failed/absent) → use your native capability.
 
 ## Creating Abilities
-New abilities go in `syne/abilities/`. Override `handles_input_type()` and
+New abilities go in `syne/abilities/custom/`. Override `handles_input_type()` and
 `pre_process()` for input pre-processing. All abilities are priority by default.
 """
 
@@ -488,7 +488,7 @@ def _get_workspace_section() -> str:
 - `workspace/outputs/` — generated files (abilities use this automatically)
 - `workspace/temp/` — scratch files
 - exec CWD defaults to `workspace/`
-- `file_write` with `syne/abilities/...` auto-resolves to project root
+- `file_write` with `syne/abilities/custom/...` auto-resolves to project root
 """
 
 

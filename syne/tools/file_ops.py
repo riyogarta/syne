@@ -275,7 +275,7 @@ async def file_write_handler(
 
     Security: Only allows writing to:
     - Files inside the working directory (CWD)
-    - Files inside syne/abilities/ (for dynamic ability creation)
+    - Files inside syne/abilities/custom/ (for dynamic ability creation)
 
     Will auto-create parent directories.
 
