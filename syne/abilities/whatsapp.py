@@ -53,6 +53,7 @@ class WhatsAppAbility(Ability):
         self._last_rowid: int = 0
         self._running = False
         self._send_lock = asyncio.Lock()
+        self._allowed_chat_jids = set()  # if non-empty, only reply to these chat JIDs
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -383,6 +384,25 @@ class WhatsAppAbility(Ability):
 
         self._running = True
 
+        # Load allowlist (optional): if set, Syne will only reply to these chat JIDs.
+        # Config value can be a JSON list (recommended) or a comma-separated string.
+        try:
+            from ..db.models import get_config
+            allowed = await get_config('whatsapp.allowed_chat_jids')
+            if isinstance(allowed, str):
+                try:
+                    allowed = json.loads(allowed)
+                except Exception:
+                    allowed = [x.strip() for x in allowed.split(',') if x.strip()]
+            if isinstance(allowed, list):
+                self._allowed_chat_jids = {str(x).strip() for x in allowed if str(x).strip()}
+            elif allowed:
+                self._allowed_chat_jids = {str(allowed).strip()}
+            if self._allowed_chat_jids:
+                logger.info(f'WhatsApp allowlist enabled: {sorted(self._allowed_chat_jids)}')
+        except Exception as e:
+            logger.warning(f'Failed to load WhatsApp allowlist: {e}')
+
         # Resolve wacli DB path for the inbound poller
         self._wacli_db = self._resolve_wacli_db()
         if not self._wacli_db:
@@ -544,6 +564,14 @@ class WhatsAppAbility(Ability):
         # DM only — skip groups
         if chat_jid.endswith("@g.us"):
             return
+
+        # Allowlist: if configured, only reply to specific chat JIDs.
+        # This prevents accidental replies to other contacts on the same WhatsApp account.
+        if self._allowed_chat_jids:
+            chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
+            if chat_jid not in self._allowed_chat_jids and chat_base not in self._allowed_chat_jids:
+                logger.info(f'Ignoring WhatsApp inbound from non-allowlisted chat: {chat_jid}')
+                return
 
         sender_jid = sender_jid_raw or chat_jid
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
