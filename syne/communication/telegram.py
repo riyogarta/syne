@@ -165,6 +165,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
+        self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -232,6 +233,7 @@ class TelegramChannel:
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("groups", "Manage groups, members & aliases"),
             BotCommand("members", "Manage global user access levels"),
+            BotCommand("wamembers", "Manage WhatsApp allowlist (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
@@ -4045,6 +4047,151 @@ Or just send me a message!"""
         else:
             await update.message.reply_text("❌ Invalid syntax. Use /members for help.")
 
+
+
+    async def _cmd_wamembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manage WhatsApp allowlist entries (owner only).
+
+        Usage:
+          /wamembers list
+          /wamembers add <jid|number> <name...>
+          /wamembers remove <jid|number>
+          /wamembers clear
+
+        Notes:
+          - <jid|number> can be a full JID (e.g. 628xx@s.whatsapp.net, 176..@lid) or just digits.
+          - Entries are stored in config key: whatsapp.allowed_chat_jids
+        """
+        try:
+            user = update.effective_user
+            chat = update.effective_chat
+            if not user or not chat:
+                return
+
+            # Owner-only
+            from ..db.models import get_user, get_config, set_config
+            db_user = await get_user("telegram", str(user.id))
+            access_level = db_user.get("access_level", "public") if db_user else "public"
+            if access_level != "owner":
+                await update.message.reply_text("⚠️ Only the owner can manage WhatsApp allowlist.")
+                return
+
+            # DM only (avoid accidental group ops)
+            if chat.type != "private":
+                await update.message.reply_text("⚠️ Please use /wamembers in DM (private chat) only.")
+                return
+
+            args = context.args or []
+            if not args or args[0].lower() in {"help", "-h", "--help"}:
+                await update.message.reply_text(
+                    "WhatsApp allowlist manager (owner only)\n\n"
+                    "Commands:\n"
+                    "- /wamembers list\n"
+                    "- /wamembers add <jid|number> <name...>\n"
+                    "- /wamembers remove <jid|number>\n"
+                    "- /wamembers clear\n\n"
+                    "Examples:\n"
+                    "- /wamembers add 628111681624 Pak Riyo\n"
+                    "- /wamembers add 176295656874158@lid Pak Riyo (LID)\n"
+                )
+                return
+
+            action = args[0].lower()
+
+            def _norm_key(s: str) -> str:
+                s = (s or "").strip()
+                if s.startswith('+'):
+                    s = s[1:]
+                s = s.replace(' ', '')
+                return s
+
+            raw = await get_config("whatsapp.allowed_chat_jids", default=[])
+
+            # Normalize loaded config into list[dict]
+            entries = []
+            if isinstance(raw, str):
+                import json
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = [x.strip() for x in raw.split(',') if x.strip()]
+
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        jid = _norm_key(str(item.get('jid') or ''))
+                        name = str(item.get('name') or '').strip()
+                        if jid:
+                            entries.append({'jid': jid, 'name': name})
+                    else:
+                        jid = _norm_key(str(item))
+                        if jid:
+                            entries.append({'jid': jid, 'name': ''})
+            elif raw:
+                jid = _norm_key(str(raw))
+                if jid:
+                    entries.append({'jid': jid, 'name': ''})
+
+            # Dedup by jid (keep last non-empty name)
+            by_jid = {}
+            for e in entries:
+                jid = _norm_key(e.get('jid', ''))
+                if not jid:
+                    continue
+                name = (e.get('name') or '').strip()
+                if jid not in by_jid:
+                    by_jid[jid] = {'jid': jid, 'name': name}
+                else:
+                    if name:
+                        by_jid[jid]['name'] = name
+
+            if action == 'list':
+                if not by_jid:
+                    await update.message.reply_text("WhatsApp allowlist: (empty)\n\nSyne will reply to ANY DM if allowlist is empty.")
+                    return
+                lines = ["WhatsApp allowlist entries:"]
+                for jid, e in sorted(by_jid.items(), key=lambda kv: kv[0]):
+                    name = e.get('name') or '(no name)'
+                    lines.append(f"- {name} — {jid}")
+                await update.message.reply_text("\n".join(lines))
+                return
+
+            if action == 'clear':
+                await set_config("whatsapp.allowed_chat_jids", [])
+                await update.message.reply_text("✅ Cleared WhatsApp allowlist. (Syne may reply to other DMs now.)")
+                return
+
+            if action == 'add':
+                if len(args) < 3:
+                    await update.message.reply_text("❌ Usage: /wamembers add <jid|number> <name...>")
+                    return
+                jid = _norm_key(args[1])
+                name = " ".join(args[2:]).strip()
+                if not jid or not name:
+                    await update.message.reply_text("❌ Both jid/number and name are required.")
+                    return
+                by_jid[jid] = {'jid': jid, 'name': name}
+                await set_config("whatsapp.allowed_chat_jids", list(by_jid.values()))
+                await update.message.reply_text(f"✅ Added/updated WA allowlist: {name} — {jid}\n\nNote: changes take effect immediately after restart (or next WhatsApp bridge reload).")
+                return
+
+            if action in {'remove', 'rm', 'del', 'delete'}:
+                if len(args) < 2:
+                    await update.message.reply_text("❌ Usage: /wamembers remove <jid|number>")
+                    return
+                jid = _norm_key(args[1])
+                if jid in by_jid:
+                    removed = by_jid.pop(jid)
+                    await set_config("whatsapp.allowed_chat_jids", list(by_jid.values()))
+                    await update.message.reply_text(f"✅ Removed WA allowlist: {removed.get('name') or '(no name)'} — {jid}")
+                else:
+                    await update.message.reply_text(f"ℹ️ Not found in allowlist: {jid}")
+                return
+
+            await update.message.reply_text("❌ Invalid syntax. Use /wamembers help")
+        except Exception as e:
+            logger.error(f"Error in /wamembers: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
     async def _members_menu_main(self, update=None, query=None):
         """Show global members list as interactive menu (blocked users excluded)."""
         from ..db.models import list_users, get_config as _gc

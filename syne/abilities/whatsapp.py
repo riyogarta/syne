@@ -54,6 +54,7 @@ class WhatsAppAbility(Ability):
         self._running = False
         self._send_lock = asyncio.Lock()
         self._allowed_chat_jids = set()  # if non-empty, only reply to these chat JIDs
+        self._allowlist_name_by_jid = {}  # jid -> friendly name (for greetings/logs)
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -385,19 +386,41 @@ class WhatsAppAbility(Ability):
         self._running = True
 
         # Load allowlist (optional): if set, Syne will only reply to these chat JIDs.
-        # Config value can be a JSON list (recommended) or a comma-separated string.
+        # Config value supports:
+        #   1) list[str]                 (legacy)
+        #   2) list[{'jid': str, 'name': str}] (recommended)
+        #   3) comma-separated string    (legacy)
         try:
             from ..db.models import get_config
-            allowed = await get_config('whatsapp.allowed_chat_jids')
+            allowed = await get_config('whatsapp.allowed_chat_jids', default=[])
+
+            self._allowed_chat_jids = set()
+            self._allowlist_name_by_jid = {}
+
+            # Normalize legacy string formats
             if isinstance(allowed, str):
                 try:
                     allowed = json.loads(allowed)
                 except Exception:
                     allowed = [x.strip() for x in allowed.split(',') if x.strip()]
+
             if isinstance(allowed, list):
-                self._allowed_chat_jids = {str(x).strip() for x in allowed if str(x).strip()}
+                for item in allowed:
+                    if isinstance(item, dict):
+                        jid = str(item.get('jid') or '').strip()
+                        name = str(item.get('name') or '').strip()
+                        if jid:
+                            self._allowed_chat_jids.add(jid)
+                            if name:
+                                self._allowlist_name_by_jid[jid] = name
+                    else:
+                        jid = str(item).strip()
+                        if jid:
+                            self._allowed_chat_jids.add(jid)
             elif allowed:
+                # Any other scalar type
                 self._allowed_chat_jids = {str(allowed).strip()}
+
             if self._allowed_chat_jids:
                 logger.info(f'WhatsApp allowlist enabled: {sorted(self._allowed_chat_jids)}')
         except Exception as e:
@@ -574,10 +597,16 @@ class WhatsAppAbility(Ability):
                 return
 
         sender_jid = sender_jid_raw or chat_jid
+        # Friendly name override from allowlist (stable naming)
+        chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
+        name_override = (
+            self._allowlist_name_by_jid.get(chat_jid)
+            or (self._allowlist_name_by_jid.get(chat_base) if chat_base else None)
+        )
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
         chat_name = msg.get("ChatName", "")
-        sender_name = msg.get("PushName", chat_name or sender_jid.split("@")[0])
+        sender_name = name_override or msg.get("PushName", chat_name or sender_jid.split("@")[0])
 
         logger.info(f"[whatsapp] {sender_name}: {text[:100]}")
 
