@@ -372,7 +372,7 @@ class PdfAbility(Ability):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
         if proc.returncode != 0:
             err = stderr.decode().strip()
             return False, f"Failed to install PDF deps: {err}"
