@@ -81,7 +81,7 @@ class ImageAnalysisAbility(Ability):
             return await self._call_openai_compatible(
                 image_base64, mime_type, prompt,
                 api_key=api_key,
-                model=model or "Qwen/Qwen2.5-VL-72B-Instruct",
+                model=model or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
                 base_url="https://api.together.xyz/v1",
             )
 
