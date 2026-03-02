@@ -1,7 +1,9 @@
-"""WhatsApp Ability — text-only DM bridge via wacli.
+"""WhatsApp Ability — text + image bridge via wacli.
 
-Alternative communication channel. No slash commands, no groups.
+Alternative communication channel supporting DMs and groups.
 All inbound messages go directly to agent.handle_message().
+Images are downloaded via wacli, base64-encoded, and routed
+to ImageAnalysisAbility for vision processing.
 
 Setup: tell Syne via Telegram to "enable whatsapp" — Syne sets
 whatsapp.enabled=true in DB, restarts, and the bridge auto-starts.
@@ -10,6 +12,7 @@ Requires: wacli binary installed and authenticated (`wacli auth`).
 """
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -504,14 +507,15 @@ class WhatsAppAbility(Ability):
                 if not self._running:
                     break
 
-                # Read new inbound messages (text not empty, DM + groups)
+                # Read new inbound messages (text or media)
                 conn = sqlite3.connect(db_path, timeout=5)
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("""
-                    SELECT rowid, chat_jid, sender_jid, sender_name, chat_name, text, from_me
+                    SELECT rowid, chat_jid, sender_jid, sender_name, chat_name, text,
+                           from_me, media_type, mime_type, media_caption, msg_id
                     FROM messages
                     WHERE rowid > ?
-                      AND text IS NOT NULL AND text != ''
+                      AND ((text IS NOT NULL AND text != '') OR media_type IS NOT NULL)
                       AND chat_jid != 'status@broadcast'
                     ORDER BY rowid ASC
                 """, (self._last_rowid,))
@@ -553,6 +557,10 @@ class WhatsAppAbility(Ability):
                         "ChatName": row["chat_name"] or "",
                         "Text": row["text"],
                         "FromMe": bool(row["from_me"]),
+                        "MediaType": row["media_type"],
+                        "MimeType": row["mime_type"],
+                        "MediaCaption": row["media_caption"],
+                        "MsgID": row["msg_id"],
                     }
                     self._enqueue_debounce(msg)
 
@@ -729,9 +737,13 @@ class WhatsAppAbility(Ability):
 
         text = msg.get("Text", "").strip()
         chat_jid = msg.get("ChatJID", "")
-        logger.info(f'[whatsapp] inbound: from_me={from_me} chat={chat_jid} text={text[:60]}')
+        media_type = msg.get("MediaType")
+        is_image = media_type == "image"
 
-        if not text:
+        logger.info(f'[whatsapp] inbound: from_me={from_me} chat={chat_jid} media={media_type} text={text[:60]}')
+
+        # Allow through if there's text OR an image
+        if not text and not is_image:
             return
 
         # from_me handling:
@@ -755,25 +767,50 @@ class WhatsAppAbility(Ability):
                 return
 
         # Echo detection: skip messages that match something we recently sent
-        h = self._content_hash(chat_jid, text)
-        now = time.time()
-        if h in self._echo_hashes and (now - self._echo_hashes[h]) < _ECHO_TTL:
-            del self._echo_hashes[h]
-            logger.debug(f'[whatsapp] echo suppressed: {text[:60]}')
-            return
+        if text:
+            h = self._content_hash(chat_jid, text)
+            now = time.time()
+            if h in self._echo_hashes and (now - self._echo_hashes[h]) < _ECHO_TTL:
+                del self._echo_hashes[h]
+                logger.debug(f'[whatsapp] echo suppressed: {text[:60]}')
+                return
 
         sender_jid = sender_jid_raw or chat_jid
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
 
-        # Require trigger word (same config as Telegram)
+        # Trigger word check
+        # - Text messages: always require trigger
+        # - Image with caption containing trigger: process (strip trigger from caption)
+        # - Image in DM without trigger: still process (images don't need trigger in DMs)
+        # - Image in group without trigger in caption: skip (groups always need trigger)
         trigger = await self._get_trigger_name()
-        if trigger and not self._has_trigger_word(text, trigger):
-            logger.info(f'[whatsapp] no trigger "{trigger}" in: {text[:80]}')
-            return
-        text = self._strip_trigger_word(text, trigger)
-        if not text:
-            return
+
+        if is_image:
+            caption = (msg.get("MediaCaption") or "").strip()
+            if caption and trigger and self._has_trigger_word(caption, trigger):
+                # Caption has trigger — use stripped caption as text
+                text = self._strip_trigger_word(caption, trigger)
+            elif caption and not is_group:
+                # DM image with caption (no trigger needed)
+                text = caption
+            elif not caption and not is_group:
+                # DM image without caption — use default prompt
+                text = ""
+            elif is_group:
+                # Group: require trigger in caption
+                if not caption or not trigger or not self._has_trigger_word(caption, trigger):
+                    logger.info(f'[whatsapp] image in group without trigger, skipping')
+                    return
+                text = self._strip_trigger_word(caption, trigger)
+        else:
+            # Text-only: require trigger
+            if trigger and not self._has_trigger_word(text, trigger):
+                logger.info(f'[whatsapp] no trigger "{trigger}" in: {text[:80]}')
+                return
+            text = self._strip_trigger_word(text, trigger)
+            if not text:
+                return
 
         # Load members, check blocked, auto-register
         by_jid = await self._wa_load_members()
@@ -821,6 +858,39 @@ class WhatsAppAbility(Ability):
 
         model_override = member.get('model') or None
 
+        # ── Image handling ──
+        image_metadata = None
+        if is_image:
+            msg_id = msg.get("MsgID")
+            mime_type = msg.get("MimeType") or "image/jpeg"
+            if msg_id:
+                local_path = await self._download_media(chat_jid, msg_id)
+                if local_path:
+                    try:
+                        with open(local_path, "rb") as f:
+                            image_bytes = f.read()
+                        if image_bytes:
+                            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+                            image_metadata = {"mime_type": mime_type, "base64": image_b64}
+                            logger.info(f"[whatsapp] image downloaded: {len(image_bytes)} bytes, mime={mime_type}")
+                        else:
+                            logger.warning(f"[whatsapp] downloaded image is empty: {local_path}")
+                    except Exception as e:
+                        logger.error(f"[whatsapp] failed to read image file: {e}")
+                else:
+                    logger.warning(f"[whatsapp] media download returned no path for msg_id={msg_id}")
+            else:
+                logger.warning("[whatsapp] image message without msg_id, cannot download")
+
+            # If download failed, fall back to text-only (caption) or skip
+            if not image_metadata and not text:
+                logger.info("[whatsapp] image download failed and no caption, skipping")
+                return
+
+            # Use caption as prompt, or default
+            if not text:
+                text = "What's in this image?"
+
         logger.info(f"[whatsapp] {sender_name}: {text[:100]}")
 
         inbound = InboundContext(
@@ -855,6 +925,8 @@ class WhatsAppAbility(Ability):
             "original_text": original_text,
             "wa_model_override": model_override,  # None = use default
         }
+        if image_metadata:
+            metadata["image"] = image_metadata
 
         try:
             response = await self._agent.handle_message(
@@ -919,6 +991,64 @@ class WhatsAppAbility(Ability):
                     ok = await self._start_sync()
                     if not ok:
                         logger.error('Failed to restart wacli sync after sending message')
+
+    # ── Media download ────────────────────────────────────────
+
+    async def _download_media(self, chat_jid: str, msg_id: str) -> Optional[str]:
+        """Download media via wacli and return local file path.
+
+        Reuses _send_lock because wacli holds an exclusive lock on the
+        SQLite store — same issue as sending messages.
+        """
+        if not msg_id or not chat_jid:
+            return None
+
+        async with self._send_lock:
+            was_syncing = self._process is not None
+            if was_syncing:
+                await self._stop_sync()
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    self._wacli_path, 'media', 'download',
+                    '--chat', chat_jid,
+                    '--id', msg_id,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                if proc.returncode != 0:
+                    err = stderr.decode('utf-8', errors='replace') if stderr else ''
+                    logger.error(f"wacli media download failed (rc={proc.returncode}): {err[:200]}")
+                    return None
+            except asyncio.TimeoutError:
+                logger.error("wacli media download timed out")
+                return None
+            except Exception as e:
+                logger.error(f"wacli media download error: {e}")
+                return None
+            finally:
+                if self._running and was_syncing:
+                    ok = await self._start_sync()
+                    if not ok:
+                        logger.error('Failed to restart wacli sync after media download')
+
+        # Query DB for the local_path after download
+        try:
+            conn = sqlite3.connect(self._wacli_db, timeout=5)
+            cur = conn.execute(
+                "SELECT local_path FROM messages WHERE msg_id = ? LIMIT 1",
+                (msg_id,),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0] and os.path.isfile(row[0]):
+                return row[0]
+            logger.warning(f"Media downloaded but local_path not found for msg_id={msg_id}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to query local_path: {e}")
+            return None
 
     # ── Sub-agent callbacks ────────────────────────────────────
 
