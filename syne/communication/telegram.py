@@ -114,6 +114,9 @@ class TelegramChannel:
         self._auth_state: dict[int, dict] = {}
         # Active processing tasks per chat_id — for /cancel support
         self._active_tasks: dict[int, asyncio.Task] = {}
+        # Deduplicate inbound Telegram messages (Telegram may retry delivering the same update)
+        # Format: {chat_id: deque([message_id, ...], maxlen=200)}
+        self._seen_inbound: dict[int, deque[int]] = {}
 
     async def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
         """Build InboundContext from a Telegram Update. Used by ALL handlers.
@@ -373,7 +376,13 @@ class TelegramChannel:
         chat = update.effective_chat
         text = update.message.text
         is_group = chat.type in ("group", "supergroup")
-        logger.debug(f"_handle_message entered: user={user.id}, chat={chat.id}, text={text[:50]}")
+        message_id = update.message.message_id
+        logger.debug(f"_handle_message entered: user={user.id}, chat={chat.id}, msg={message_id}, text={text[:50]}")
+
+        # Drop duplicate inbound updates
+        if self._is_duplicate_inbound(chat.id, message_id):
+            logger.debug(f"Dropping duplicate inbound message: chat={chat.id}, msg={message_id}")
+            return
 
         # ═══════════════════════════════════════════════════════════════
         # AUTH FLOW INTERCEPT: If user is in auth flow, handle credential
@@ -429,10 +438,9 @@ class TelegramChannel:
             logger.warning(f"Credential pattern detected in chat from user {user.id} — skipped history")
             return
 
-        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {text[:100]}")
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: {text[:100]}")
 
         # Track incoming message ID for reaction context
-        message_id = update.message.message_id
         self._track_message(chat.id, message_id, text[:100])
 
         # Build InboundContext (OpenClaw-style — core module)
@@ -852,6 +860,10 @@ class TelegramChannel:
         user = update.effective_user
         chat = update.effective_chat
         is_group = chat.type in ("group", "supergroup")
+        message_id = update.message.message_id
+        if self._is_duplicate_inbound(chat.id, message_id):
+            logger.debug(f"Dropping duplicate inbound photo: chat={chat.id}, msg={message_id}")
+            return
 
         # Rate limiting
 
@@ -877,7 +889,7 @@ class TelegramChannel:
             await self._handle_pending_user(update, db_user)
             return
 
-        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [photo] {caption[:100]}")
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [photo] {caption[:100]}")
 
         # Reply context is now handled by InboundContext (build_user_context_prefix)
 
@@ -944,6 +956,10 @@ class TelegramChannel:
         user = update.effective_user
         chat = update.effective_chat
         is_group = chat.type in ("group", "supergroup")
+        message_id = update.message.message_id
+        if self._is_duplicate_inbound(chat.id, message_id):
+            logger.debug(f"Dropping duplicate inbound voice: chat={chat.id}, msg={message_id}")
+            return
 
         # Rate limiting
 
@@ -963,7 +979,7 @@ class TelegramChannel:
             await self._handle_pending_user(update, db_user)
             return
 
-        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [voice message]")
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [voice message]")
 
         # Keep typing indicator while transcribing
         async with _TypingIndicator(context.bot, chat.id):
@@ -1057,6 +1073,10 @@ class TelegramChannel:
         user = update.effective_user
         chat = update.effective_chat
         is_group = chat.type in ("group", "supergroup")
+        message_id = update.message.message_id
+        if self._is_duplicate_inbound(chat.id, message_id):
+            logger.debug(f"Dropping duplicate inbound document: chat={chat.id}, msg={message_id}")
+            return
 
         # Rate limiting
 
@@ -1087,7 +1107,7 @@ class TelegramChannel:
             await update.message.reply_text("⚠️ File too large (max 20 MB for download).")
             return
 
-        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): [document] {filename} ({mime_type}, {file_size} bytes)")
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [document] {filename} ({mime_type}, {file_size} bytes)")
 
         # Extract reply/quote context
         # Reply context handled by InboundContext
@@ -1184,6 +1204,10 @@ class TelegramChannel:
         user = update.message.from_user
         chat = update.message.chat
         is_group = chat.type in ("group", "supergroup")
+        message_id = update.message.message_id
+        if self._is_duplicate_inbound(chat.id, message_id):
+            logger.debug(f"Dropping duplicate inbound location: chat={chat.id}, msg={message_id}")
+            return
 
         # Rate limiting
 
@@ -1237,7 +1261,7 @@ class TelegramChannel:
             user_text += caption + "\n\n"
         user_text += location_text
 
-        logger.info(f"[{chat.type}] {user.first_name} ({user.id}): {location_text}")
+        logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: {location_text}")
 
         metadata = {
             "message_id": update.message.message_id,
@@ -1396,6 +1420,20 @@ class TelegramChannel:
                         self._track_message(chat.id, sent.message_id, response[:100])
             except Exception as e:
                 logger.error(f"Error handling reaction event: {e}", exc_info=True)
+
+    def _is_duplicate_inbound(self, chat_id: int, message_id: int) -> bool:
+        """Return True if this inbound Telegram message_id was already processed for this chat.
+
+        Telegram/webhook/bridge layers can retry delivering the same update.
+        We keep a small sliding window per chat to drop duplicates safely.
+        """
+        if chat_id not in self._seen_inbound:
+            self._seen_inbound[chat_id] = deque(maxlen=200)
+        seen = self._seen_inbound[chat_id]
+        if message_id in seen:
+            return True
+        seen.append(message_id)
+        return False
 
     def _track_message(self, chat_id: int, message_id: int, preview: str):
         """Track a message ID for reaction context."""
