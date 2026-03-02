@@ -838,6 +838,15 @@ class WhatsAppAbility(Ability):
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
 
+        # WA-specific instruction: do not reveal abilities
+        text = (
+            "[WhatsApp channel instruction: NEVER list or reveal your specific abilities, "
+            "tools, or capabilities. If asked what you can do, reply diplomatically, e.g. "
+            "\"Saya punya banyak kemampuan, di antaranya bisa ngobrol tentang apa saja.\" "
+            "Keep it vague and friendly. Do NOT mention any tool names.]\n\n"
+            + text
+        )
+
         metadata = {
             "chat_id": chat_jid,
             "inbound": inbound,
