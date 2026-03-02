@@ -567,6 +567,9 @@ class WhatsAppAbility(Ability):
                 rows = cur.fetchall()
                 conn.close()
 
+                if rows:
+                    logger.info(f'[whatsapp] poll: {len(rows)} new row(s) after rowid {self._last_rowid}')
+
                 now = time.time()
                 if now - self._last_prune > 60:
                     self._prune_caches()
@@ -634,13 +637,16 @@ class WhatsAppAbility(Ability):
         if not msgs:
             return
 
-        if len(msgs) == 1:
-            await self._handle_inbound(msgs[0])
-        else:
-            # Merge: combine texts, use first msg's metadata
-            merged = dict(msgs[0])
-            merged["Text"] = "\n".join((m.get("Text") or "").strip() for m in msgs if (m.get("Text") or "").strip())
-            await self._handle_inbound(merged)
+        try:
+            if len(msgs) == 1:
+                await self._handle_inbound(msgs[0])
+            else:
+                # Merge: combine texts, use first msg's metadata
+                merged = dict(msgs[0])
+                merged["Text"] = "\n".join((m.get("Text") or "").strip() for m in msgs if (m.get("Text") or "").strip())
+                await self._handle_inbound(merged)
+        except Exception as e:
+            logger.error(f'[whatsapp] debounce dispatch error: {e}', exc_info=True)
 
     def _lookup_pn_from_lid(self, lid: str) -> str:
         """Map a LID (digits) to a phone number (digits) via session.db.
