@@ -29,7 +29,7 @@ from typing import Optional
 
 from .base import Ability
 from ..communication.inbound import InboundContext
-from ..communication.outbound import process_outbound, split_message
+from ..communication.outbound import extract_media, process_outbound, split_message
 
 logger = logging.getLogger("syne.whatsapp")
 
@@ -954,7 +954,10 @@ class WhatsAppAbility(Ability):
     # ── Outbound ───────────────────────────────────────────────
 
     async def _send_text(self, jid: str, text: str):
-        """Send a text message via wacli.
+        """Send a text (or text+image) message via wacli.
+
+        If the response contains a MEDIA: path, the image is sent via
+        `wacli send file` and the remaining text as a follow-up.
 
         `wacli sync --follow` holds an exclusive lock on the store. Running
         `wacli send ...` concurrently fails with "store is locked".
@@ -965,32 +968,62 @@ class WhatsAppAbility(Ability):
         if not text:
             return
 
+        # Extract MEDIA: path if present (e.g. from image_gen ability)
+        text, media_path = extract_media(text)
+
         async with self._send_lock:
             was_syncing = self._process is not None
             if was_syncing:
                 await self._stop_sync()
 
             try:
-                for chunk in split_message(text, max_length=4096):
-                    proc = await asyncio.create_subprocess_exec(
-                        self._wacli_path, 'send', 'text',
-                        '--to', jid,
-                        '--message', chunk,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                    if proc.returncode != 0:
-                        err = stderr.decode('utf-8', errors='replace') if stderr else ''
-                        raise RuntimeError(f"wacli send failed (rc={proc.returncode}): {err[:200]}")
-                    # Record echo hash so poller ignores our own sent message
-                    self._echo_hashes[self._content_hash(jid, chunk)] = time.time()
-                    await asyncio.sleep(0.3)
+                # Send image first if present
+                if media_path:
+                    await self._send_file_locked(jid, media_path, caption=text)
+                    text = None  # caption already sent with image
+
+                # Send remaining text (if any)
+                if text:
+                    for chunk in split_message(text, max_length=4096):
+                        await self._wacli_send_text(jid, chunk)
+                        await asyncio.sleep(0.3)
             finally:
                 if self._running and was_syncing:
                     ok = await self._start_sync()
                     if not ok:
                         logger.error('Failed to restart wacli sync after sending message')
+
+    async def _wacli_send_text(self, jid: str, text: str):
+        """Low-level: send a single text chunk. Caller must hold _send_lock."""
+        proc = await asyncio.create_subprocess_exec(
+            self._wacli_path, 'send', 'text',
+            '--to', jid,
+            '--message', text,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        if proc.returncode != 0:
+            err = stderr.decode('utf-8', errors='replace') if stderr else ''
+            raise RuntimeError(f"wacli send text failed (rc={proc.returncode}): {err[:200]}")
+        self._echo_hashes[self._content_hash(jid, text)] = time.time()
+
+    async def _send_file_locked(self, jid: str, file_path: str, caption: str = ""):
+        """Low-level: send a file via wacli. Caller must hold _send_lock."""
+        cmd = [self._wacli_path, 'send', 'file', '--to', jid, '--file', file_path]
+        if caption:
+            cmd.extend(['--caption', caption])
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        if proc.returncode != 0:
+            err = stderr.decode('utf-8', errors='replace') if stderr else ''
+            raise RuntimeError(f"wacli send file failed (rc={proc.returncode}): {err[:200]}")
+        logger.info(f"[whatsapp] sent file to {jid}: {file_path}")
 
     # ── Media download ────────────────────────────────────────
 
