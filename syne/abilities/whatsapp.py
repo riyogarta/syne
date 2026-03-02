@@ -62,9 +62,6 @@ class WhatsAppAbility(Ability):
         self._last_rowid: int = 0
         self._running = False
         self._send_lock = asyncio.Lock()
-        self._allowed_chat_jids = set()  # if non-empty, only reply to these chat JIDs
-        self._allowlist_name_by_jid = {}  # jid -> friendly name (for greetings/logs)
-        self._allowlist_model_by_jid = {}  # jid -> model key override (None = default)
         self._session_db: Optional[str] = None
         self._lid_to_pn_cache = {}  # lid digits -> phone digits
         # Dedup / echo / debounce state
@@ -408,51 +405,6 @@ class WhatsAppAbility(Ability):
         session_db = os.path.expanduser("~/.wacli/session.db")
         self._session_db = session_db if os.path.isfile(session_db) else None
 
-        # Load allowlist (optional): if set, Syne will only reply to these chat JIDs.
-        # Config value supports:
-        #   1) list[str]                 (legacy)
-        #   2) list[{'jid': str, 'name': str}] (recommended)
-        #   3) comma-separated string    (legacy)
-        try:
-            from ..db.models import get_config
-            allowed = await get_config('whatsapp.allowed_chat_jids', default=[])
-
-            self._allowed_chat_jids = set()
-            self._allowlist_name_by_jid = {}
-            self._allowlist_model_by_jid = {}
-
-            # Normalize legacy string formats
-            if isinstance(allowed, str):
-                try:
-                    allowed = json.loads(allowed)
-                except Exception:
-                    allowed = [x.strip() for x in allowed.split(',') if x.strip()]
-
-            if isinstance(allowed, list):
-                for item in allowed:
-                    if isinstance(item, dict):
-                        jid = str(item.get('jid') or '').strip()
-                        name = str(item.get('name') or '').strip()
-                        model = item.get('model') or None
-                        if jid:
-                            self._allowed_chat_jids.add(jid)
-                            if name:
-                                self._allowlist_name_by_jid[jid] = name
-                            if model:
-                                self._allowlist_model_by_jid[jid] = model
-                    else:
-                        jid = str(item).strip()
-                        if jid:
-                            self._allowed_chat_jids.add(jid)
-            elif allowed:
-                # Any other scalar type
-                self._allowed_chat_jids = {str(allowed).strip()}
-
-            if self._allowed_chat_jids:
-                logger.info(f'WhatsApp allowlist enabled: {sorted(self._allowed_chat_jids)}')
-        except Exception as e:
-            logger.warning(f'Failed to load WhatsApp allowlist: {e}')
-
         # Resolve wacli DB path for the inbound poller
         self._wacli_db = self._resolve_wacli_db()
         if not self._wacli_db:
@@ -552,7 +504,7 @@ class WhatsAppAbility(Ability):
                 if not self._running:
                     break
 
-                # Read new inbound messages (from_me=0, text not empty, DM only)
+                # Read new inbound messages (text not empty, DM + groups)
                 conn = sqlite3.connect(db_path, timeout=5)
                 conn.row_factory = sqlite3.Row
                 cur = conn.execute("""
@@ -560,7 +512,6 @@ class WhatsAppAbility(Ability):
                     FROM messages
                     WHERE rowid > ?
                       AND text IS NOT NULL AND text != ''
-                      AND chat_jid NOT LIKE '%@g.us'
                       AND chat_jid != 'status@broadcast'
                     ORDER BY rowid ASC
                 """, (self._last_rowid,))
@@ -670,6 +621,68 @@ class WhatsAppAbility(Ability):
         self._lid_to_pn_cache[lid] = pn
         return pn
 
+    # ── Member helpers (load / save / match) ────────────────────
+
+    async def _wa_load_members(self) -> dict:
+        """Load WA members from config. Returns {normalized_phone: entry}.
+
+        Each entry: {'jid': str, 'name': str, 'model': str|None, 'blocked': bool}
+        Legacy entries without 'blocked' default to False.
+        """
+        from ..db.models import get_config
+        raw = await get_config('whatsapp.allowed_chat_jids', default=[])
+
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = [x.strip() for x in raw.split(',') if x.strip()]
+
+        by_jid: dict[str, dict] = {}
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, dict):
+                    jid = str(item.get('jid') or '').strip()
+                    name = str(item.get('name') or '').strip()
+                    model = item.get('model') or None
+                    blocked = bool(item.get('blocked', False))
+                    if jid:
+                        by_jid[jid] = {'jid': jid, 'name': name, 'model': model, 'blocked': blocked}
+                else:
+                    jid = str(item).strip()
+                    if jid:
+                        by_jid[jid] = {'jid': jid, 'name': '', 'model': None, 'blocked': False}
+        return by_jid
+
+    async def _wa_save_members(self, by_jid: dict):
+        """Save WA members to config."""
+        from ..db.models import set_config
+        await set_config('whatsapp.allowed_chat_jids', list(by_jid.values()))
+
+    def _wa_match_jid(self, by_jid: dict, chat_jid: str) -> tuple:
+        """Find member by chat_jid. Returns (key, entry) or (None, None).
+
+        Tries: full JID, base JID (strip device), local phone number,
+        and LID→phone mapping via session.db.
+        """
+        chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
+        chat_local = chat_base.split('@', 1)[0] if '@' in chat_base else chat_base
+
+        # Direct match: full JID, base JID, or phone number
+        for candidate in (chat_jid, chat_base, chat_local):
+            if candidate and candidate in by_jid:
+                return candidate, by_jid[candidate]
+
+        # LID→phone mapping
+        if chat_base.endswith('@lid') and chat_local.isdigit() and self._session_db:
+            pn = self._lookup_pn_from_lid(chat_local)
+            if pn:
+                for candidate in (pn, f"{pn}@s.whatsapp.net"):
+                    if candidate in by_jid:
+                        return candidate, by_jid[candidate]
+
+        return None, None
+
     def _has_trigger_word(self, text: str, trigger: str) -> bool:
         if not trigger:
             return True
@@ -721,23 +734,23 @@ class WhatsAppAbility(Ability):
         if not text:
             return
 
-        # Special-case: when wacli is logged into the same WhatsApp account as the user,
-        # messages typed on the phone show up in the DB as from_me=1 (because they are
-        # sent by the logged-in account). We still want to treat *self-chat* messages
-        # as inbound so Syne can reply.
-        #
-        # Accept from_me=1 only when it's the self-chat (sender base JID == chat_jid).
+        # from_me handling:
+        # - DM self-chat (sender == chat): allow (owner talking to themselves)
+        # - DM to other contact: drop (outgoing message, not inbound)
+        # - Group: allow (owner typed trigger in group → Syne should reply)
         sender_jid_raw = msg.get("SenderJID") or ""
+        is_group = chat_jid.endswith("@g.us")
         if from_me:
             if not sender_jid_raw:
                 logger.info(f'[whatsapp] drop: from_me with no sender (wacli echo)')
                 return
-            # Compare phone-number part only (strip :device and @domain)
-            sender_local = sender_jid_raw.split(":", 1)[0].split("@", 1)[0]
-            chat_local_fm = chat_jid.split(":", 1)[0].split("@", 1)[0]
-            if sender_local != chat_local_fm:
-                logger.info(f'[whatsapp] drop: from_me to other contact ({sender_local} != {chat_local_fm})')
-                return
+            if not is_group:
+                # DM: only allow self-chat
+                sender_local = sender_jid_raw.split(":", 1)[0].split("@", 1)[0]
+                chat_local_fm = chat_jid.split(":", 1)[0].split("@", 1)[0]
+                if sender_local != chat_local_fm:
+                    logger.info(f'[whatsapp] drop: from_me to other contact ({sender_local} != {chat_local_fm})')
+                    return
 
         # Echo detection: skip messages that match something we recently sent
         h = self._content_hash(chat_jid, text)
@@ -747,46 +760,7 @@ class WhatsAppAbility(Ability):
             logger.debug(f'[whatsapp] echo suppressed: {text[:60]}')
             return
 
-        # DM only — skip groups
-        if chat_jid.endswith("@g.us"):
-            return
-
-        # Allowlist: if configured, only reply to specific chat JIDs.
-        # This prevents accidental replies to other contacts on the same WhatsApp account.
-        pn_for_chat = None
-        chat_base = chat_jid.split(':', 1)[0] if chat_jid else ''
-        chat_local = chat_base.split('@', 1)[0] if '@' in chat_base else chat_base
-
-        if self._allowed_chat_jids:
-            allowed = (
-                chat_jid in self._allowed_chat_jids
-                or chat_base in self._allowed_chat_jids
-                or chat_local in self._allowed_chat_jids
-            )
-
-            # If wacli represents this chat as a LID (....@lid), map LID->phone via session.db
-            # so allowlisting by phone number still works.
-            if (not allowed) and chat_base.endswith('@lid') and chat_local.isdigit() and self._session_db:
-                lid = chat_local
-                pn = self._lookup_pn_from_lid(lid)
-
-                if pn:
-                    pn_for_chat = pn
-                    allowed = (pn in self._allowed_chat_jids) or (f"{pn}@s.whatsapp.net" in self._allowed_chat_jids)
-
-            if not allowed:
-                logger.info(f'Ignoring WhatsApp inbound from non-allowlisted chat: {chat_jid}')
-                return
-
         sender_jid = sender_jid_raw or chat_jid
-        # Friendly name override from allowlist (stable naming)
-        name_override = (
-            self._allowlist_name_by_jid.get(chat_jid)
-            or (self._allowlist_name_by_jid.get(chat_base) if chat_base else None)
-            or (self._allowlist_name_by_jid.get(chat_local) if chat_local else None)
-            or (self._allowlist_name_by_jid.get(pn_for_chat) if pn_for_chat else None)
-            or (self._allowlist_name_by_jid.get(f"{pn_for_chat}@s.whatsapp.net") if pn_for_chat else None)
-        )
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
 
@@ -799,16 +773,59 @@ class WhatsAppAbility(Ability):
         if not text:
             return
 
-        chat_name = msg.get("ChatName", "")
-        sender_name = name_override or msg.get("PushName", chat_name or sender_jid.split("@")[0])
+        # Load members, check blocked, auto-register
+        by_jid = await self._wa_load_members()
+
+        if is_group:
+            # Groups: match/register by chat_jid (the group itself)
+            member_key, member = self._wa_match_jid(by_jid, chat_jid)
+            group_name = msg.get("ChatName", "") or chat_jid.split("@")[0]
+
+            if member and member.get('blocked'):
+                logger.info(f'[whatsapp] blocked group, dropping: {chat_jid}')
+                return
+
+            if not member:
+                reg_key = chat_jid
+                member = {'jid': reg_key, 'name': group_name, 'model': None, 'blocked': False}
+                by_jid[reg_key] = member
+                member_key = reg_key
+                await self._wa_save_members(by_jid)
+                logger.info(f'[whatsapp] auto-registered group: {group_name} ({reg_key})')
+
+            # In groups, sender_name comes from PushName (the person who typed)
+            sender_name = msg.get("PushName", "") or sender_jid.split("@")[0]
+            conversation_label = member.get('name') or group_name
+        else:
+            # DM: match/register by chat_jid (the contact)
+            member_key, member = self._wa_match_jid(by_jid, chat_jid)
+            chat_local = chat_jid.split(':', 1)[0].split('@', 1)[0] if chat_jid else ''
+            push_name = msg.get("PushName", "") or msg.get("ChatName", "") or chat_local
+
+            if member and member.get('blocked'):
+                logger.info(f'[whatsapp] blocked member, dropping: {chat_jid}')
+                return
+
+            if not member:
+                reg_key = chat_local or chat_jid
+                member = {'jid': reg_key, 'name': push_name, 'model': None, 'blocked': False}
+                by_jid[reg_key] = member
+                member_key = reg_key
+                await self._wa_save_members(by_jid)
+                logger.info(f'[whatsapp] auto-registered new member: {push_name} ({reg_key})')
+
+            sender_name = member.get('name') or push_name
+            conversation_label = sender_name
+
+        model_override = member.get('model') or None
 
         logger.info(f"[whatsapp] {sender_name}: {text[:100]}")
 
         inbound = InboundContext(
             channel="whatsapp",
             platform="whatsapp",
-            chat_type="direct",
-            conversation_label=sender_name,
+            chat_type="group" if is_group else "direct",
+            conversation_label=conversation_label,
             chat_id=chat_jid,
             sender_name=sender_name,
             sender_id=sender_platform_id,
@@ -820,15 +837,6 @@ class WhatsAppAbility(Ability):
         user_prefix = build_user_context_prefix(inbound)
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
-
-        # Resolve per-member model override from allowlist
-        model_override = (
-            self._allowlist_model_by_jid.get(chat_jid)
-            or (self._allowlist_model_by_jid.get(chat_base) if chat_base else None)
-            or (self._allowlist_model_by_jid.get(chat_local) if chat_local else None)
-            or (self._allowlist_model_by_jid.get(pn_for_chat) if pn_for_chat else None)
-            or (self._allowlist_model_by_jid.get(f"{pn_for_chat}@s.whatsapp.net") if pn_for_chat else None)
-        )
 
         metadata = {
             "chat_id": chat_jid,

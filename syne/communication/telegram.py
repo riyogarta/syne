@@ -4069,9 +4069,10 @@ Or just send me a message!"""
         return s
 
     async def _wa_load_allowlist(self):
-        """Load & normalize WhatsApp allowlist from config.
+        """Load & normalize WhatsApp members from config.
 
-        Returns dict keyed by jid: {'jid': str, 'name': str, 'model': str|None}
+        Returns dict keyed by jid: {'jid': str, 'name': str, 'model': str|None, 'blocked': bool}
+        Legacy entries without 'blocked' default to False.
         """
         from ..db.models import get_config
         raw = await get_config("whatsapp.allowed_chat_jids", default=[])
@@ -4083,49 +4084,35 @@ Or just send me a message!"""
             except Exception:
                 raw = [x.strip() for x in raw.split(',') if x.strip()]
 
-        entries = []
+        by_jid = {}
         if isinstance(raw, list):
             for item in raw:
                 if isinstance(item, dict):
                     jid = self._wa_norm_key(str(item.get('jid') or ''))
                     name = str(item.get('name') or '').strip()
                     model = item.get('model') or None
+                    blocked = bool(item.get('blocked', False))
                     if jid:
-                        entries.append({'jid': jid, 'name': name, 'model': model})
+                        by_jid[jid] = {'jid': jid, 'name': name, 'model': model, 'blocked': blocked}
                 else:
                     jid = self._wa_norm_key(str(item))
                     if jid:
-                        entries.append({'jid': jid, 'name': '', 'model': None})
+                        by_jid[jid] = {'jid': jid, 'name': '', 'model': None, 'blocked': False}
         elif raw:
             jid = self._wa_norm_key(str(raw))
             if jid:
-                entries.append({'jid': jid, 'name': '', 'model': None})
-
-        by_jid = {}
-        for e in entries:
-            jid = self._wa_norm_key(e.get('jid', ''))
-            if not jid:
-                continue
-            name = (e.get('name') or '').strip()
-            model = e.get('model') or None
-            if jid not in by_jid:
-                by_jid[jid] = {'jid': jid, 'name': name, 'model': model}
-            else:
-                if name:
-                    by_jid[jid]['name'] = name
-                if model:
-                    by_jid[jid]['model'] = model
+                by_jid[jid] = {'jid': jid, 'name': '', 'model': None, 'blocked': False}
         return by_jid
 
     async def _wa_save_allowlist(self, by_jid: dict):
-        """Persist allowlist dict back to config."""
+        """Persist members dict back to config."""
         from ..db.models import set_config
         await set_config("whatsapp.allowed_chat_jids", list(by_jid.values()))
 
     # ─── /wamembers command ──────────────────────────────────────────────
 
     async def _cmd_wamembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Manage WhatsApp allowlist via inline keyboard (owner only, DM only)."""
+        """Manage WhatsApp members via inline keyboard (owner only, DM only)."""
         try:
             user = update.effective_user
             chat = update.effective_chat
@@ -4136,7 +4123,7 @@ Or just send me a message!"""
             db_user = await get_user("telegram", str(user.id))
             access_level = db_user.get("access_level", "public") if db_user else "public"
             if access_level != "owner":
-                await update.message.reply_text("⚠️ Only the owner can manage WhatsApp allowlist.")
+                await update.message.reply_text("⚠️ Only the owner can manage WhatsApp members.")
                 return
 
             if chat.type != "private":
@@ -4154,88 +4141,82 @@ Or just send me a message!"""
             await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
 
     async def _cmd_wamembers_text(self, update, context, args):
-        """Legacy text subcommands (add/remove/list/clear) for compat."""
-        from ..db.models import set_config
+        """Text subcommand: list only."""
         action = args[0].lower()
         by_jid = await self._wa_load_allowlist()
 
         if action == 'list':
+            active = {k: v for k, v in by_jid.items() if not v.get('blocked')}
+            blocked = {k: v for k, v in by_jid.items() if v.get('blocked')}
             if not by_jid:
-                await update.message.reply_text("WhatsApp allowlist: (empty)\n\nSyne will reply to ANY DM if allowlist is empty.")
+                await update.message.reply_text("WhatsApp members: (none)\n\nNew users auto-register when they send a message with the trigger word.")
                 return
-            lines = ["WhatsApp allowlist entries:"]
-            for jid, e in sorted(by_jid.items(), key=lambda kv: kv[0]):
+            lines = [f"WhatsApp members ({len(active)} active, {len(blocked)} blocked):"]
+            for jid, e in sorted(active.items(), key=lambda kv: kv[1].get('name') or kv[0]):
                 name = e.get('name') or '(no name)'
-                lines.append(f"- {name} — {jid}")
+                lines.append(f"  {name} — {jid}")
+            if blocked:
+                lines.append(f"\nBlocked ({len(blocked)}):")
+                for jid, e in sorted(blocked.items(), key=lambda kv: kv[1].get('name') or kv[0]):
+                    name = e.get('name') or '(no name)'
+                    lines.append(f"  {name} — {jid}")
             await update.message.reply_text("\n".join(lines))
             return
 
-        if action == 'clear':
-            await set_config("whatsapp.allowed_chat_jids", [])
-            await update.message.reply_text("✅ Cleared WhatsApp allowlist.")
-            return
-
-        if action == 'add':
-            if len(args) < 3:
-                await update.message.reply_text("❌ Usage: /wamembers add <jid|number> <name...>")
-                return
-            jid = self._wa_norm_key(args[1])
-            name = " ".join(args[2:]).strip()
-            if not jid or not name:
-                await update.message.reply_text("❌ Both jid/number and name are required.")
-                return
-            by_jid[jid] = {'jid': jid, 'name': name, 'model': None}
-            await self._wa_save_allowlist(by_jid)
-            await update.message.reply_text(f"✅ Added/updated: {name} — {jid}")
-            return
-
-        if action in {'remove', 'rm', 'del', 'delete'}:
-            if len(args) < 2:
-                await update.message.reply_text("❌ Usage: /wamembers remove <jid|number>")
-                return
-            jid = self._wa_norm_key(args[1])
-            if jid in by_jid:
-                removed = by_jid.pop(jid)
-                await self._wa_save_allowlist(by_jid)
-                await update.message.reply_text(f"✅ Removed: {removed.get('name') or '(no name)'} — {jid}")
-            else:
-                await update.message.reply_text(f"ℹ️ Not found: {jid}")
-            return
-
-        await update.message.reply_text("❌ Invalid syntax. Use /wamembers for interactive menu.")
+        await update.message.reply_text("❌ Unknown subcommand. Use /wamembers for interactive menu.")
 
     # ─── WA inline keyboard menus ────────────────────────────────────────
 
     async def _wamembers_menu_main(self, update=None, query=None):
-        """Show WA allowlist as interactive menu."""
+        """Show WA members split into DM / Groups sections."""
         from ..db.models import get_config as _gc
         by_jid = await self._wa_load_allowlist()
+
+        active = {k: v for k, v in by_jid.items() if not v.get('blocked')}
+        blocked_count = sum(1 for v in by_jid.values() if v.get('blocked'))
+
+        dm_entries = {k: v for k, v in active.items() if not k.endswith('@g.us')}
+        group_entries = {k: v for k, v in active.items() if k.endswith('@g.us')}
 
         models = await _gc("provider.models", [])
         active_key = await _gc("provider.active_model", "gemini-pro")
         default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
         model_lookup = {m.get("key"): m.get("label", m.get("key")) for m in models}
 
+        def _model_short(entry):
+            m = entry.get('model')
+            return model_lookup.get(m, m) if m else f"Default ({default_label})"
+
         buttons = []
-        for jid, e in sorted(by_jid.items(), key=lambda kv: kv[1].get('name') or kv[0]):
-            name = e.get('name') or '(no name)'
-            member_model = e.get('model')
-            if member_model:
-                model_short = model_lookup.get(member_model, member_model)
-            else:
-                model_short = f"Default ({default_label})"
-            buttons.append([InlineKeyboardButton(
-                f"👤 {name} — {jid} | {model_short}",
-                callback_data=f"wa:view:{jid}",
-            )])
 
-        count = len(by_jid)
-        buttons.append([InlineKeyboardButton(f"➕ Add Member", callback_data="wa:add_prompt")])
+        # DM section
+        if dm_entries:
+            buttons.append([InlineKeyboardButton(f"── 👤 DM ({len(dm_entries)}) ──", callback_data="wa:noop")])
+            for jid, e in sorted(dm_entries.items(), key=lambda kv: kv[1].get('name') or kv[0]):
+                name = e.get('name') or '(no name)'
+                buttons.append([InlineKeyboardButton(
+                    f"{name} — {jid} | {_model_short(e)}",
+                    callback_data=f"wa:view:{jid}",
+                )])
 
+        # Groups section
+        if group_entries:
+            buttons.append([InlineKeyboardButton(f"── 👥 Groups ({len(group_entries)}) ──", callback_data="wa:noop")])
+            for jid, e in sorted(group_entries.items(), key=lambda kv: kv[1].get('name') or kv[0]):
+                name = e.get('name') or '(no name)'
+                buttons.append([InlineKeyboardButton(
+                    f"{name} | {_model_short(e)}",
+                    callback_data=f"wa:view:{jid}",
+                )])
+
+        if blocked_count:
+            buttons.append([InlineKeyboardButton(f"🚫 Blocked ({blocked_count})", callback_data="wa:blocked")])
+
+        total = len(active)
         text = (
-            f"📱 <b>WhatsApp Members</b> ({count})\n\nTap a member to manage:"
-            if count else
-            "📱 <b>WhatsApp Members</b>\n\nNo members. Syne will reply to ANY WhatsApp DM."
+            f"📱 <b>WhatsApp Members</b> ({total})\n\nAuto-register via trigger word.\nTap to manage:"
+            if total else
+            "📱 <b>WhatsApp Members</b>\n\nNo members yet. New users and groups auto-register when someone sends a message with the trigger word."
         )
         markup = InlineKeyboardMarkup(buttons)
 
@@ -4245,7 +4226,7 @@ Or just send me a message!"""
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
     async def _wamembers_menu_detail(self, query, jid: str):
-        """Show detail for one WA allowlist member."""
+        """Show detail for one WA member."""
         from ..db.models import get_config as _gc
         by_jid = await self._wa_load_allowlist()
         entry = by_jid.get(jid)
@@ -4254,6 +4235,7 @@ Or just send me a message!"""
             return
 
         name = entry.get('name') or '(no name)'
+        blocked = entry.get('blocked', False)
         member_model = entry.get('model')
 
         if member_model:
@@ -4266,17 +4248,27 @@ Or just send me a message!"""
             default_lbl = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
             model_label = f"<i>Default ({default_lbl})</i>"
 
-        text = f"👤 <b>{name}</b>\n\nJID: <code>{jid}</code>\nModel: {model_label}"
+        is_group = jid.endswith('@g.us')
+        icon = "👥" if is_group else "👤"
+        type_label = "Group" if is_group else "DM"
+        status_label = "🚫 Blocked" if blocked else "✅ Active"
+        text = f"{icon} <b>{name}</b>\n\nType: {type_label}\nJID: <code>{jid}</code>\nModel: {model_label}\nStatus: {status_label}"
 
         buttons = [
-            [
-                InlineKeyboardButton("✏️ Edit Name", callback_data=f"wa:edit_name:{jid}"),
-                InlineKeyboardButton("✏️ Edit JID", callback_data=f"wa:edit_jid:{jid}"),
-            ],
+            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"wa:edit_name:{jid}")],
             [InlineKeyboardButton("🤖 Set Model", callback_data=f"wa:model_list:{jid}")],
-            [InlineKeyboardButton("🗑 Remove", callback_data=f"wa:remove_confirm:{jid}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="wa:main")],
         ]
+        if blocked:
+            buttons.append([
+                InlineKeyboardButton("✅ Unblock", callback_data=f"wa:unblock:{jid}"),
+                InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
+            ])
+        else:
+            buttons.append([
+                InlineKeyboardButton("🚫 Block", callback_data=f"wa:block:{jid}"),
+                InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
+            ])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="wa:main")])
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _wamembers_menu_model_list(self, query, jid: str):
@@ -4319,16 +4311,44 @@ Or just send me a message!"""
 
     # ─── WA callback handler ─────────────────────────────────────────────
 
+    async def _wamembers_menu_blocked(self, query):
+        """Show blocked WA members list."""
+        by_jid = await self._wa_load_allowlist()
+        blocked = {k: v for k, v in by_jid.items() if v.get('blocked')}
+
+        buttons = []
+        for jid, e in sorted(blocked.items(), key=lambda kv: kv[1].get('name') or kv[0]):
+            name = e.get('name') or '(no name)'
+            icon = "👥" if jid.endswith('@g.us') else "👤"
+            buttons.append([InlineKeyboardButton(
+                f"🚫 {icon} {name}",
+                callback_data=f"wa:view:{jid}",
+            )])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="wa:main")])
+
+        text = (
+            f"🚫 <b>Blocked Members</b> ({len(blocked)})\n\nTap to manage:"
+            if blocked else
+            "🚫 <b>Blocked Members</b>\n\nNo blocked members."
+        )
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
     async def _handle_wamembers_callback(self, query, data: str):
-        """Handle wa: prefix callbacks for WA allowlist menu."""
+        """Handle wa: prefix callbacks for WA members menu."""
         parts = data.split(":")
         action = parts[1] if len(parts) > 1 else ""
 
         if action == "main":
             await self._wamembers_menu_main(query=query)
 
+        elif action == "noop":
+            await query.answer()
+
+        elif action == "blocked":
+            await self._wamembers_menu_blocked(query)
+
         elif action == "view" and len(parts) >= 3:
-            jid = ":".join(parts[2:])  # JID may contain ':'
+            jid = ":".join(parts[2:])
             await self._wamembers_menu_detail(query, jid)
 
         elif action == "model_list" and len(parts) >= 3:
@@ -4336,8 +4356,6 @@ Or just send me a message!"""
             await self._wamembers_menu_model_list(query, jid)
 
         elif action == "model_set" and len(parts) >= 4:
-            # wa:model_set:<jid>:<model_key>
-            # JID does NOT contain ':', model_key is always last
             model_key = parts[-1]
             jid = ":".join(parts[2:-1])
             by_jid = await self._wa_load_allowlist()
@@ -4353,41 +4371,55 @@ Or just send me a message!"""
             await query.answer(f"Model set to {label}")
             await self._wamembers_menu_detail(query, jid)
 
-        elif action == "remove_confirm" and len(parts) >= 3:
+        elif action == "block" and len(parts) >= 3:
+            jid = ":".join(parts[2:])
+            by_jid = await self._wa_load_allowlist()
+            if jid not in by_jid:
+                await query.answer("Member not found", show_alert=True)
+                return
+            by_jid[jid]['blocked'] = True
+            await self._wa_save_allowlist(by_jid)
+            name = by_jid[jid].get('name') or jid
+            await query.answer(f"Blocked {name}")
+            await self._wamembers_menu_detail(query, jid)
+
+        elif action == "unblock" and len(parts) >= 3:
+            jid = ":".join(parts[2:])
+            by_jid = await self._wa_load_allowlist()
+            if jid not in by_jid:
+                await query.answer("Member not found", show_alert=True)
+                return
+            by_jid[jid]['blocked'] = False
+            await self._wa_save_allowlist(by_jid)
+            name = by_jid[jid].get('name') or jid
+            await query.answer(f"Unblocked {name}")
+            await self._wamembers_menu_detail(query, jid)
+
+        elif action == "delete_confirm" and len(parts) >= 3:
             jid = ":".join(parts[2:])
             by_jid = await self._wa_load_allowlist()
             entry = by_jid.get(jid)
             name = (entry.get('name') if entry else jid) or jid
             buttons = [
                 [
-                    InlineKeyboardButton("✅ Yes, remove", callback_data=f"wa:remove_yes:{jid}"),
+                    InlineKeyboardButton("✅ Yes, delete", callback_data=f"wa:delete_yes:{jid}"),
                     InlineKeyboardButton("❌ Cancel", callback_data=f"wa:view:{jid}"),
                 ],
             ]
             await query.edit_message_text(
-                f"🗑 Remove <b>{name}</b> ({jid}) from allowlist?",
+                f"🗑 Delete <b>{name}</b> ({jid})?\n\nThey can re-register by messaging with the trigger word.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
 
-        elif action == "remove_yes" and len(parts) >= 3:
+        elif action == "delete_yes" and len(parts) >= 3:
             jid = ":".join(parts[2:])
             by_jid = await self._wa_load_allowlist()
             removed = by_jid.pop(jid, None)
             await self._wa_save_allowlist(by_jid)
             name = (removed.get('name') if removed else jid) or jid
-            await query.answer(f"Removed {name}")
+            await query.answer(f"Deleted {name}")
             await self._wamembers_menu_main(query=query)
-
-        elif action == "add_prompt":
-            user_id = query.from_user.id
-            self._auth_state[user_id] = {"type": "wa_add"}
-            await query.edit_message_text(
-                "➕ <b>Add WA Member</b>\n\n"
-                "Send: <code>&lt;jid/number&gt; &lt;name&gt;</code>\n\n"
-                "Example: <code>628111681624 Pak Riyo</code>",
-                parse_mode="HTML",
-            )
 
         elif action == "edit_name" and len(parts) >= 3:
             jid = ":".join(parts[2:])
@@ -4401,52 +4433,17 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-        elif action == "edit_jid" and len(parts) >= 3:
-            jid = ":".join(parts[2:])
-            user_id = query.from_user.id
-            self._auth_state[user_id] = {"type": "wa_edit_jid", "jid": jid}
-            await query.edit_message_text(
-                f"✏️ <b>Edit JID</b>\n\nCurrent: <code>{jid}</code>\n\nSend new JID/number:",
-                parse_mode="HTML",
-            )
-
         else:
             await query.answer("Unknown action")
 
     # ─── WA state machine input processor ─────────────────────────────────
 
     async def _process_wamembers_input(self, user_id, chat_id, text, state, context):
-        """Process text input for wa_add / wa_edit_name / wa_edit_jid states."""
+        """Process text input for wa_edit_name state."""
         bot = context.bot if context else self.app.bot
         auth_type = state.get("type")
 
-        if auth_type == "wa_add":
-            parts = text.strip().split(None, 1)
-            if len(parts) < 2:
-                await bot.send_message(chat_id=chat_id, text="❌ Format: <jid/number> <name>\nTry again or /wamembers to cancel.")
-                return True
-            jid = self._wa_norm_key(parts[0])
-            name = parts[1].strip()
-            if not jid or not name:
-                await bot.send_message(chat_id=chat_id, text="❌ Both JID and name are required.")
-                return True
-            by_jid = await self._wa_load_allowlist()
-            by_jid[jid] = {'jid': jid, 'name': name, 'model': None}
-            await self._wa_save_allowlist(by_jid)
-            self._auth_state.pop(user_id, None)
-            await bot.send_message(chat_id=chat_id, text=f"✅ Added: {name} — {jid}")
-            # Show updated main menu
-            msg = await bot.send_message(chat_id=chat_id, text="Loading...")
-            from telegram import Update as _Upd
-            fake_query = type('Q', (), {
-                'from_user': type('U', (), {'id': user_id})(),
-                'edit_message_text': msg.edit_text,
-                'answer': lambda *a, **kw: None,
-            })()
-            await self._wamembers_menu_main(query=fake_query)
-            return True
-
-        elif auth_type == "wa_edit_name":
+        if auth_type == "wa_edit_name":
             new_name = text.strip()
             if not new_name:
                 await bot.send_message(chat_id=chat_id, text="❌ Name cannot be empty.")
@@ -4468,32 +4465,6 @@ Or just send me a message!"""
                 'answer': lambda *a, **kw: None,
             })()
             await self._wamembers_menu_detail(fake_query, jid)
-            return True
-
-        elif auth_type == "wa_edit_jid":
-            new_jid = self._wa_norm_key(text.strip())
-            if not new_jid:
-                await bot.send_message(chat_id=chat_id, text="❌ JID cannot be empty.")
-                return True
-            old_jid = state.get("jid", "")
-            by_jid = await self._wa_load_allowlist()
-            if old_jid not in by_jid:
-                await bot.send_message(chat_id=chat_id, text=f"❌ Member {old_jid} no longer exists.")
-                self._auth_state.pop(user_id, None)
-                return True
-            old_entry = by_jid.pop(old_jid)
-            old_entry['jid'] = new_jid
-            by_jid[new_jid] = old_entry
-            await self._wa_save_allowlist(by_jid)
-            self._auth_state.pop(user_id, None)
-            await bot.send_message(chat_id=chat_id, text=f"✅ JID updated to: {new_jid}")
-            msg = await bot.send_message(chat_id=chat_id, text="Loading...")
-            fake_query = type('Q', (), {
-                'from_user': type('U', (), {'id': user_id})(),
-                'edit_message_text': msg.edit_text,
-                'answer': lambda *a, **kw: None,
-            })()
-            await self._wamembers_menu_detail(fake_query, new_jid)
             return True
 
         return False
@@ -4902,7 +4873,7 @@ Or just send me a message!"""
             return await self._process_addeval_input(user_id, chat_id, text, state, context)
         elif auth_type == "group_alias":
             return await self._process_group_alias_input(user_id, chat_id, text, state, context)
-        elif auth_type in ("wa_add", "wa_edit_name", "wa_edit_jid"):
+        elif auth_type == "wa_edit_name":
             return await self._process_wamembers_input(user_id, chat_id, text, state, context)
 
         return False
