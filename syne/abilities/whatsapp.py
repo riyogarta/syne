@@ -715,10 +715,11 @@ class WhatsAppAbility(Ability):
         from_me = bool(msg.get("FromMe", False))
 
         text = msg.get("Text", "").strip()
+        chat_jid = msg.get("ChatJID", "")
+        logger.info(f'[whatsapp] inbound: from_me={from_me} chat={chat_jid} text={text[:60]}')
+
         if not text:
             return
-
-        chat_jid = msg.get("ChatJID", "")
 
         # Special-case: when wacli is logged into the same WhatsApp account as the user,
         # messages typed on the phone show up in the DB as from_me=1 (because they are
@@ -729,11 +730,11 @@ class WhatsAppAbility(Ability):
         sender_jid_raw = msg.get("SenderJID") or ""
         if from_me:
             if not sender_jid_raw:
-                # Likely sent by wacli itself (sender_jid NULL)
+                logger.info(f'[whatsapp] drop: from_me with no sender (wacli echo)')
                 return
             sender_base = sender_jid_raw.split(":", 1)[0]
             if sender_base != chat_jid:
-                # User sending messages to other contacts — do not auto-reply
+                logger.info(f'[whatsapp] drop: from_me to other contact ({sender_base} != {chat_jid})')
                 return
 
         # Echo detection: skip messages that match something we recently sent
