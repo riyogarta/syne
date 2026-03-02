@@ -757,16 +757,12 @@ class Conversation:
                 user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
                 metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
                 self._message_metadata = metadata if metadata else None
-            elif spec["native_check"]():
-                # Ability failed but provider has native capability — let it through
-                logger.info(
-                    f"{input_type} ability failed, falling back to native LLM"
-                )
             else:
-                # Ability failed AND no native support — nothing we can do
-                logger.warning(
-                    f"{input_type} received but no handler available"
-                )
+                # Ability failed — strip raw input, inject error so user knows
+                logger.warning(f"{spec['label']} failed — no silent fallback")
+                user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
+                metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                self._message_metadata = metadata if metadata else None
         
         return user_message, metadata if metadata else None
 
