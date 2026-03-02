@@ -732,9 +732,11 @@ class WhatsAppAbility(Ability):
             if not sender_jid_raw:
                 logger.info(f'[whatsapp] drop: from_me with no sender (wacli echo)')
                 return
-            sender_base = sender_jid_raw.split(":", 1)[0]
-            if sender_base != chat_jid:
-                logger.info(f'[whatsapp] drop: from_me to other contact ({sender_base} != {chat_jid})')
+            # Compare phone-number part only (strip :device and @domain)
+            sender_local = sender_jid_raw.split(":", 1)[0].split("@", 1)[0]
+            chat_local_fm = chat_jid.split(":", 1)[0].split("@", 1)[0]
+            if sender_local != chat_local_fm:
+                logger.info(f'[whatsapp] drop: from_me to other contact ({sender_local} != {chat_local_fm})')
                 return
 
         # Echo detection: skip messages that match something we recently sent
