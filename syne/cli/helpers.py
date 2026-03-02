@@ -32,7 +32,11 @@ def _ensure_ollama():
         console.print("[bold yellow]Ollama is not installed — installing now...[/bold yellow]")
         console.print("[dim]This downloads ~100MB and requires sudo for installation.[/dim]")
         sys.stdout.flush()
-        ret = subprocess.run("curl -fL https://ollama.com/install.sh | sh", shell=True).returncode
+        # Download first, then run — piping curl|sh blocks sudo's TTY access
+        ret = subprocess.run(
+            "curl -fsSL https://ollama.com/install.sh -o /tmp/install-ollama.sh && sudo sh /tmp/install-ollama.sh && rm -f /tmp/install-ollama.sh",
+            shell=True,
+        ).returncode
         if ret != 0:
             console.print("[red]Ollama installation failed.[/red]")
             console.print("[dim]Install manually: https://ollama.com/download[/dim]")
@@ -274,7 +278,12 @@ def _ensure_docker() -> str:
         console.print("[bold yellow]Docker is not installed — installing now...[/bold yellow]")
         console.print("[dim]This downloads Docker packages — may take a few minutes.[/dim]")
         sys.stdout.flush()
-        ret = subprocess.run("curl -fL https://get.docker.com | sh", shell=True).returncode
+        # Download first, then run — piping curl|sh blocks sudo's TTY access,
+        # causing fallback to GUI askpass (gksudo) which fails on headless servers.
+        ret = subprocess.run(
+            "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && sudo sh /tmp/get-docker.sh && rm -f /tmp/get-docker.sh",
+            shell=True,
+        ).returncode
         if ret != 0:
             console.print("[red]Docker installation failed.[/red]")
             console.print("[dim]Install manually: https://docs.docker.com/get-docker/[/dim]")
