@@ -10,6 +10,7 @@ Requires: wacli binary installed and authenticated (`wacli auth`).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +33,12 @@ logger = logging.getLogger("syne.whatsapp")
 # wacli install config
 _WACLI_REPO = "steipete/wacli"
 _WACLI_INSTALL_DIR = os.path.expanduser("~/.local/bin")
+
+# Reliability: dedup / echo / debounce
+_DEDUP_TTL = 120        # 2 minutes
+_ECHO_TTL = 20          # 20 seconds
+_DEBOUNCE_DELAY = 2.0   # 2 seconds — batch rapid messages
+_DEDUP_MAX = 5000       # max cache entries before prune
 
 # Module-level reference so main.py can access the running bridge
 _bridge_instance: Optional["WhatsAppAbility"] = None
@@ -59,10 +67,13 @@ class WhatsAppAbility(Ability):
         self._allowlist_model_by_jid = {}  # jid -> model key override (None = default)
         self._session_db: Optional[str] = None
         self._lid_to_pn_cache = {}  # lid digits -> phone digits
-        self._owner_platform_ids = set()  # cached WhatsApp owner platform_id(s)
-        self._owner_only = True  # if true, only owner may trigger responses (Rule 700 at channel edge)
-        self._require_trigger = True  # if true, only respond if message contains trigger word
-        self._trigger_name = 'Molt'
+        # Dedup / echo / debounce state
+        self._seen_rowids: set[int] = set()
+        self._seen_hashes: dict[str, float] = {}     # "chat_jid:md5" -> timestamp
+        self._echo_hashes: dict[str, float] = {}     # "chat_jid:md5" -> timestamp
+        self._debounce_buffers: dict[str, list] = {}  # chat_jid -> [msg, ...]
+        self._debounce_tasks: dict[str, asyncio.Task] = {}
+        self._last_prune: float = 0.0
 
     # ── Dependencies ────────────────────────────────────────────
 
@@ -442,27 +453,6 @@ class WhatsAppAbility(Ability):
         except Exception as e:
             logger.warning(f'Failed to load WhatsApp allowlist: {e}')
 
-        # Trigger gating (like Telegram mention): only respond if message contains trigger word
-        try:
-            from ..db.models import get_config
-            self._owner_only = bool(await get_config('whatsapp.owner_only', True))
-            self._require_trigger = bool(await get_config('whatsapp.require_trigger', True))
-            trig = await get_config('whatsapp.trigger_name', 'Molt')
-            self._trigger_name = (str(trig).strip() if trig is not None else 'Molt') or 'Molt'
-        except Exception as e:
-            logger.warning(f'Failed to load WhatsApp trigger config: {e}')
-
-        # Cache WhatsApp owner ids (Rule 700)
-        try:
-            from ..db.connection import get_connection
-            async with get_connection() as conn:
-                rows = await conn.fetch(
-                    "SELECT platform_id FROM users WHERE platform='whatsapp' AND access_level='owner' AND active=true"
-                )
-            self._owner_platform_ids = {r['platform_id'] for r in rows if r and r.get('platform_id')}
-        except Exception as e:
-            logger.warning(f'Failed to load WhatsApp owner ids: {e}')
-
         # Resolve wacli DB path for the inbound poller
         self._wacli_db = self._resolve_wacli_db()
         if not self._wacli_db:
@@ -577,23 +567,80 @@ class WhatsAppAbility(Ability):
                 rows = cur.fetchall()
                 conn.close()
 
+                now = time.time()
+                if now - self._last_prune > 60:
+                    self._prune_caches()
+
                 for row in rows:
-                    self._last_rowid = row["rowid"]
+                    rowid = row["rowid"]
+                    self._last_rowid = rowid
+
+                    # Dedup: skip already-seen rowids
+                    if rowid in self._seen_rowids:
+                        continue
+
+                    text = (row["text"] or "").strip()
+                    chat_jid = row["chat_jid"] or ""
+
+                    # Dedup: skip duplicate content within TTL
+                    if text and chat_jid:
+                        h = self._content_hash(chat_jid, text)
+                        if h in self._seen_hashes and (now - self._seen_hashes[h]) < _DEDUP_TTL:
+                            self._seen_rowids.add(rowid)
+                            continue
+                        self._seen_hashes[h] = now
+
+                    self._seen_rowids.add(rowid)
+
                     msg = {
-                        "ChatJID": row["chat_jid"],
-                        "SenderJID": row["sender_jid"] or row["chat_jid"],
+                        "ChatJID": chat_jid,
+                        "SenderJID": row["sender_jid"] or chat_jid,
                         "PushName": row["sender_name"] or "",
                         "ChatName": row["chat_name"] or "",
                         "Text": row["text"],
                         "FromMe": bool(row["from_me"]),
                     }
-                    await self._handle_inbound(msg)
+                    self._enqueue_debounce(msg)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error(f"Error in WhatsApp poll loop: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    # ── Debounce ──────────────────────────────────────────────
+
+    def _enqueue_debounce(self, msg: dict):
+        """Buffer a message and (re)start a debounce timer for its chat."""
+        chat_jid = msg.get("ChatJID", "")
+        self._debounce_buffers.setdefault(chat_jid, []).append(msg)
+
+        # Cancel existing timer for this chat
+        existing = self._debounce_tasks.get(chat_jid)
+        if existing and not existing.done():
+            existing.cancel()
+
+        self._debounce_tasks[chat_jid] = asyncio.create_task(self._debounce_fire(chat_jid))
+
+    async def _debounce_fire(self, chat_jid: str):
+        """Wait for debounce delay, then merge buffered messages and dispatch."""
+        try:
+            await asyncio.sleep(_DEBOUNCE_DELAY)
+        except asyncio.CancelledError:
+            return
+
+        msgs = self._debounce_buffers.pop(chat_jid, [])
+        self._debounce_tasks.pop(chat_jid, None)
+        if not msgs:
+            return
+
+        if len(msgs) == 1:
+            await self._handle_inbound(msgs[0])
+        else:
+            # Merge: combine texts, use first msg's metadata
+            merged = dict(msgs[0])
+            merged["Text"] = "\n".join((m.get("Text") or "").strip() for m in msgs if (m.get("Text") or "").strip())
+            await self._handle_inbound(merged)
 
     def _lookup_pn_from_lid(self, lid: str) -> str:
         """Map a LID (digits) to a phone number (digits) via session.db.
@@ -634,50 +681,28 @@ class WhatsAppAbility(Ability):
         except Exception:
             return (text or '').strip()
 
-    def _jid_to_phone(self, identifier: str) -> str:
-        """Extract phone number from any identifier format.
+    def _content_hash(self, chat_jid: str, text: str) -> str:
+        """Return a compact content hash for dedup/echo detection."""
+        return f"{chat_jid}:{hashlib.md5(text.encode()).hexdigest()[:12]}"
 
-        Handles: plain number, 628xxx@s.whatsapp.net, 628xxx:51@s.whatsapp.net,
-        176xxx@lid (mapped via session.db).  Returns digits-only or '' if unknown.
-        """
-        if not identifier:
-            return ''
-        s = str(identifier).split(':', 1)[0]  # strip device suffix
-        local = s.split('@', 1)[0] if '@' in s else s
-        if not local:
-            return ''
-        # If it's a LID, map to phone via session.db
-        if s.endswith('@lid') and local.isdigit():
-            return self._lookup_pn_from_lid(local) or ''
-        # Already a phone number (digits only)
-        if local.isdigit():
-            return local
-        return ''
+    def _prune_caches(self):
+        """Remove expired entries from dedup/echo caches."""
+        now = time.time()
+        self._seen_hashes = {k: v for k, v in self._seen_hashes.items() if (now - v) < _DEDUP_TTL}
+        self._echo_hashes = {k: v for k, v in self._echo_hashes.items() if (now - v) < _ECHO_TTL}
+        if len(self._seen_rowids) > _DEDUP_MAX:
+            sorted_ids = sorted(self._seen_rowids)
+            self._seen_rowids = set(sorted_ids[-_DEDUP_MAX:])
+        self._last_prune = now
 
-    def _sender_is_owner(self, sender_platform_id: str, chat_jid: str, pn_for_chat: str | None) -> bool:
-        """Check if sender is owner by comparing phone numbers."""
-        if not self._owner_platform_ids:
-            return False
-
-        # Collect sender phone numbers from all available identifiers
-        sender_phones: set[str] = set()
-        for x in (sender_platform_id, chat_jid):
-            pn = self._jid_to_phone(x)
-            if pn:
-                sender_phones.add(pn)
-        if pn_for_chat:
-            sender_phones.add(str(pn_for_chat))
-
-        if not sender_phones:
-            return False
-
-        # Compare against owner phone numbers
-        for oid in self._owner_platform_ids:
-            owner_pn = self._jid_to_phone(oid)
-            if owner_pn and owner_pn in sender_phones:
-                return True
-
-        return False
+    async def _get_trigger_name(self) -> str:
+        """Get the bot trigger name from config or identity (same as Telegram)."""
+        from ..db.models import get_config, get_identity
+        trigger = await get_config("telegram.bot_trigger_name", None)
+        if trigger:
+            return trigger
+        identity = await get_identity()
+        return identity.get("name", "Syne")
 
     async def _handle_inbound(self, msg: dict):
         """Process a single inbound wacli JSON message."""
@@ -704,6 +729,13 @@ class WhatsAppAbility(Ability):
             if sender_base != chat_jid:
                 # User sending messages to other contacts — do not auto-reply
                 return
+
+        # Echo detection: skip messages that match something we recently sent
+        h = self._content_hash(chat_jid, text)
+        now = time.time()
+        if h in self._echo_hashes and (now - self._echo_hashes[h]) < _ECHO_TTL:
+            del self._echo_hashes[h]
+            return
 
         # DM only — skip groups
         if chat_jid.endswith("@g.us"):
@@ -748,21 +780,13 @@ class WhatsAppAbility(Ability):
         # Normalize device JID (e.g. 628xxx:51@s.whatsapp.net) to base number for user id
         sender_platform_id = sender_jid.split(":", 1)[0] if ":" in sender_jid else sender_jid
 
-        # Rule 700 (WhatsApp policy): owner-only based on sender identity
-        if getattr(self, '_owner_only', True):
-            if not self._sender_is_owner(sender_platform_id, chat_jid, pn_for_chat):
-                logger.info(f'Ignoring WhatsApp inbound from non-owner sender: {sender_platform_id}')
-                return
-
-        # Require trigger word (like Telegram mention)
-        if getattr(self, '_require_trigger', True):
-            trigger = (getattr(self, '_trigger_name', 'Molt') or 'Molt').strip()
-            if trigger and not self._has_trigger_word(text, trigger):
-                logger.info(f'Ignoring WhatsApp inbound without trigger word ({trigger}): {text[:80]}')
-                return
-            text = self._strip_trigger_word(text, trigger)
-            if not text:
-                return
+        # Require trigger word (same config as Telegram)
+        trigger = await self._get_trigger_name()
+        if trigger and not self._has_trigger_word(text, trigger):
+            return
+        text = self._strip_trigger_word(text, trigger)
+        if not text:
+            return
 
         chat_name = msg.get("ChatName", "")
         sender_name = name_override or msg.get("PushName", chat_name or sender_jid.split("@")[0])
@@ -857,6 +881,8 @@ class WhatsAppAbility(Ability):
                     if proc.returncode != 0:
                         err = stderr.decode('utf-8', errors='replace') if stderr else ''
                         raise RuntimeError(f"wacli send failed (rc={proc.returncode}): {err[:200]}")
+                    # Record echo hash so poller ignores our own sent message
+                    self._echo_hashes[self._content_hash(jid, chunk)] = time.time()
                     await asyncio.sleep(0.3)
             finally:
                 if self._running and was_syncing:
