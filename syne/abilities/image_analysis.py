@@ -48,6 +48,7 @@ class ImageAnalysisAbility(Ability):
 
         if result.get("success"):
             return result["result"]
+        logger.warning(f"Image analysis failed: {result.get('error', 'unknown')}")
         return None
 
     async def execute(self, params: dict, context: dict) -> dict:

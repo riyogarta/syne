@@ -720,11 +720,14 @@ class Conversation:
             },
         }
         
+        # Use original_text (without channel instructions) as ability prompt
+        ability_prompt = metadata.get("original_text") or user_message
+
         for input_type, spec in INPUT_TYPES.items():
             input_data = metadata.get(spec["meta_key"])
             if not input_data:
                 continue
-            
+
             # Find a priority ability that handles this input type
             result_text = None
             for registered in self.abilities.list_enabled("owner"):
@@ -733,10 +736,10 @@ class Conversation:
                     continue
                 if not registered.instance.handles_input_type(input_type):
                     continue
-                
+
                 try:
                     result_text = await registered.instance.pre_process(
-                        input_type, input_data, user_message,
+                        input_type, input_data, ability_prompt,
                         config=registered.config,
                     )
                     if result_text:
