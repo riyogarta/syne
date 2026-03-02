@@ -583,11 +583,12 @@ class Conversation:
                     ability_result = await self.abilities.execute(name, args, ability_context)
                     if ability_result.get("success"):
                         result = ability_result.get("result", "")
-                        # Handle media output (images, audio)
+                        # Collect media for the channel to deliver
+                        # Don't embed MEDIA: in tool result — strip_server_paths
+                        # would strip the path, leaving bare "MEDIA:" that the
+                        # LLM echoes without a valid path.
                         if ability_result.get("media"):
                             media_path = ability_result["media"]
-                            result = f"{result}\n\nMEDIA: {media_path}"
-                            # Collect media for the channel to deliver
                             if hasattr(self, '_pending_media'):
                                 self._pending_media.append(media_path)
                     else:
@@ -621,13 +622,16 @@ class Conversation:
                         from .security import redact_secrets_in_text
                         result = redact_secrets_in_text(str(result))
 
-                # Collect MEDIA: from tool results (same as ability results)
+                # Collect MEDIA: from tool results and strip from result
+                # so LLM never sees the MEDIA: protocol (prevents echoing)
                 result_str = str(result)
                 if "\n\nMEDIA: " in result_str or result_str.startswith("MEDIA: "):
                     if "\n\nMEDIA: " in result_str:
                         media_path = result_str.rsplit("\n\nMEDIA: ", 1)[1].strip()
+                        result = result_str.rsplit("\n\nMEDIA: ", 1)[0]
                     else:
                         media_path = result_str[7:].strip()
+                        result = ""
                     if media_path and hasattr(self, '_pending_media'):
                         self._pending_media.append(media_path)
 
