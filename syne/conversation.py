@@ -403,12 +403,12 @@ class Conversation:
         # Attach any media collected during tool calls to the final response
         final_response = response.content
         if self._pending_media:
-            # Append the last media path (most relevant — usually the final image/file)
-            # If LLM response already contains MEDIA:, don't duplicate
-            if "MEDIA: " not in final_response:
-                last_media = self._pending_media[-1]
-                final_response = f"{final_response}\n\nMEDIA: {last_media}"
-                logger.info(f"Attached pending media to response: {last_media}")
+            # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
+            import re
+            final_response = re.sub(r'\n*MEDIA:\s*\S*', '', final_response).rstrip()
+            last_media = self._pending_media[-1]
+            final_response = f"{final_response}\n\nMEDIA: {last_media}"
+            logger.info(f"Attached pending media to response: {last_media}")
 
         # Evaluate memory (only if auto_capture enabled)
         # Rule 760: Only owner and family can write to global memory.
