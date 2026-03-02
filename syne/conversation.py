@@ -372,21 +372,37 @@ class Conversation:
         if self.is_group and should_filter_tools_for_group(self.is_group):
             tool_schemas = filter_tools_for_group(tool_schemas)
 
-        # Call LLM with all params from model registry
-        response = await self.provider.chat(
-            messages=context,
-            tools=tool_schemas if tool_schemas else None,
-            **self._build_chat_kwargs(),
-        )
+        # Call LLM with all params from model registry.
+        # Retry once on *empty* non-tool responses — some providers occasionally
+        # return "" with no tool_calls, which would otherwise surface as a
+        # channel-level fallback message.
+        chat_kwargs = self._build_chat_kwargs()
+        response = None
+        for attempt in range(2):
+            response = await self.provider.chat(
+                messages=context,
+                tools=tool_schemas if tool_schemas else None,
+                **chat_kwargs,
+            )
 
-        # Check for auth failures (expired OAuth tokens etc.)
-        auth_failure = getattr(self.provider, '_auth_failure', None)
-        if auth_failure:
-            logger.warning(f"Provider auth failure: {auth_failure}")
-            # Notify once, then clear
-            self.provider._auth_failure = None
-            await self.save_message("assistant", f"⚠️ {auth_failure}")
-            return f"⚠️ {auth_failure}"
+            # Check for auth failures (expired OAuth tokens etc.)
+            auth_failure = getattr(self.provider, '_auth_failure', None)
+            if auth_failure:
+                logger.warning(f"Provider auth failure: {auth_failure}")
+                # Notify once, then clear
+                self.provider._auth_failure = None
+                await self.save_message("assistant", f"⚠️ {auth_failure}")
+                return f"⚠️ {auth_failure}"
+
+            # Stop retrying if we got tool calls or any non-whitespace content.
+            if (response.tool_calls) or ((response.content or "").strip()):
+                break
+
+            if attempt == 0:
+                logger.warning(
+                    "LLM returned empty content (no tool calls). Retrying once after short backoff..."
+                )
+                await asyncio.sleep(0.8)
 
         # Handle tool calls
         logger.info(f"LLM response: content={len(response.content or '')} chars, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, model={response.model}")
