@@ -735,6 +735,7 @@ class WhatsAppAbility(Ability):
         now = time.time()
         if h in self._echo_hashes and (now - self._echo_hashes[h]) < _ECHO_TTL:
             del self._echo_hashes[h]
+            logger.debug(f'[whatsapp] echo suppressed: {text[:60]}')
             return
 
         # DM only — skip groups
@@ -783,6 +784,7 @@ class WhatsAppAbility(Ability):
         # Require trigger word (same config as Telegram)
         trigger = await self._get_trigger_name()
         if trigger and not self._has_trigger_word(text, trigger):
+            logger.info(f'[whatsapp] no trigger "{trigger}" in: {text[:80]}')
             return
         text = self._strip_trigger_word(text, trigger)
         if not text:
