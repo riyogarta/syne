@@ -102,22 +102,14 @@ class AbilityRegistry:
         return list(self._abilities.values())
 
     def list_enabled(self, access_level: str = "public") -> list[RegisteredAbility]:
-        """List enabled abilities accessible at the given access level.
-        
-        Args:
-            access_level: User's access level
-            
-        Returns:
-            List of enabled abilities the user can access
-        """
-        try:
-            max_level = self.ACCESS_LEVELS.index(access_level)
-        except ValueError:
-            max_level = 0  # Default to public if invalid
+        """List enabled abilities.
 
+        Abilities are user-facing features available to everyone.
+        Access control is handled by tools, not abilities.
+        """
         return [
             ability for ability in self._abilities.values()
-            if ability.enabled and self._check_access(ability.requires_access_level, max_level)
+            if ability.enabled
         ]
 
     def _check_access(self, required_level: str, user_level_index: int) -> bool:
@@ -185,20 +177,6 @@ class AbilityRegistry:
 
         if not ability.enabled:
             return {"success": False, "error": f"Ability '{name}' is disabled."}
-
-        # Check access level
-        access_level = context.get("access_level", "public")
-        try:
-            user_level = self.ACCESS_LEVELS.index(access_level)
-        except ValueError:
-            user_level = 0
-
-        if not self._check_access(ability.requires_access_level, user_level):
-            return {
-                "success": False,
-                "error": f"Insufficient permissions for ability '{name}'. "
-                         f"Requires {ability.requires_access_level} access.",
-            }
 
         # Validate config
         is_valid, error = await ability.instance.validate_config(ability.config)

@@ -180,7 +180,10 @@ async def get_or_create_user(
                 if owner_on_platform == 0 and total_users <= 3:
                     access_level = "owner"
                 else:
-                    dm_policy = await get_config("telegram.dm_policy", "approval")
+                    dm_policy = await get_config(
+                        f"{platform}.dm_policy",
+                        await get_config("dm_policy", "approval"),
+                    )
                     if dm_policy == "approval":
                         access_level = "pending"
     else:
