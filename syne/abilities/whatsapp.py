@@ -634,39 +634,48 @@ class WhatsAppAbility(Ability):
         except Exception:
             return (text or '').strip()
 
+    def _jid_to_phone(self, identifier: str) -> str:
+        """Extract phone number from any identifier format.
+
+        Handles: plain number, 628xxx@s.whatsapp.net, 628xxx:51@s.whatsapp.net,
+        176xxx@lid (mapped via session.db).  Returns digits-only or '' if unknown.
+        """
+        if not identifier:
+            return ''
+        s = str(identifier).split(':', 1)[0]  # strip device suffix
+        local = s.split('@', 1)[0] if '@' in s else s
+        if not local:
+            return ''
+        # If it's a LID, map to phone via session.db
+        if s.endswith('@lid') and local.isdigit():
+            return self._lookup_pn_from_lid(local) or ''
+        # Already a phone number (digits only)
+        if local.isdigit():
+            return local
+        return ''
+
     def _sender_is_owner(self, sender_platform_id: str, chat_jid: str, pn_for_chat: str | None) -> bool:
-        """Best-effort owner check based on sender identifiers + LID->phone mapping."""
+        """Check if sender is owner by comparing phone numbers."""
         if not self._owner_platform_ids:
             return False
 
-        candidates: set[str] = set()
+        # Collect sender phone numbers from all available identifiers
+        sender_phones: set[str] = set()
         for x in (sender_platform_id, chat_jid):
-            if not x:
-                continue
-            candidates.add(str(x))
-            base = str(x).split(':', 1)[0]
-            candidates.add(base)
-            if '@' in base:
-                candidates.add(base.split('@', 1)[0])
-
+            pn = self._jid_to_phone(x)
+            if pn:
+                sender_phones.add(pn)
         if pn_for_chat:
-            candidates.add(str(pn_for_chat))
-            candidates.add(f"{pn_for_chat}@s.whatsapp.net")
+            sender_phones.add(str(pn_for_chat))
 
+        if not sender_phones:
+            return False
+
+        # Compare against owner phone numbers
         for oid in self._owner_platform_ids:
-            if not oid:
-                continue
-            oid = str(oid)
-            base = oid.split(':', 1)[0]
-            local = base.split('@', 1)[0] if '@' in base else base
-            if oid in candidates or base in candidates or local in candidates:
+            owner_pn = self._jid_to_phone(oid)
+            if owner_pn and owner_pn in sender_phones:
                 return True
-
-            # If owner id is LID, map to phone and compare
-            if base.endswith('@lid') and local.isdigit():
-                pn = self._lookup_pn_from_lid(local)
-                if pn and (pn in candidates or f"{pn}@s.whatsapp.net" in candidates):
-                    return True
 
         return False
 

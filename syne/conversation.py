@@ -86,23 +86,52 @@ class Conversation:
         return messages
 
     async def save_message(self, role: str, content: str, metadata: Optional[dict] = None):
-        """Save a message to the database."""
+        """Save a message to the database.
+
+        If the session row was deleted externally (e.g. manual reset),
+        the INSERT will fail with an FK violation.  We recreate the
+        session row and retry once, then mark the conversation for
+        eviction from the manager cache so the next call creates a
+        fresh Conversation.
+        """
         # Strip null bytes — PostgreSQL text columns reject 0x00
         if content and "\x00" in content:
             content = content.replace("\x00", "")
         meta_json = json.dumps(metadata) if metadata else "{}"
 
-        async with get_connection() as conn:
-            await conn.execute("""
-                INSERT INTO messages (session_id, role, content, metadata)
-                VALUES ($1, $2, $3, $4::jsonb)
-            """, self.session_id, role, content, meta_json)
+        for attempt in range(2):
+            try:
+                async with get_connection() as conn:
+                    await conn.execute("""
+                        INSERT INTO messages (session_id, role, content, metadata)
+                        VALUES ($1, $2, $3, $4::jsonb)
+                    """, self.session_id, role, content, meta_json)
 
-            await conn.execute("""
-                UPDATE sessions
-                SET message_count = message_count + 1, updated_at = NOW()
-                WHERE id = $1
-            """, self.session_id)
+                    await conn.execute("""
+                        UPDATE sessions
+                        SET message_count = message_count + 1, updated_at = NOW()
+                        WHERE id = $1
+                    """, self.session_id)
+                break  # success
+            except Exception as e:
+                err = str(e).lower()
+                if attempt == 0 and ("foreign key" in err or "fk" in err or "messages_session_id_fkey" in err):
+                    logger.warning(f"Session {self.session_id} missing from DB, recreating")
+                    try:
+                        async with get_connection() as conn:
+                            await conn.execute("""
+                                INSERT INTO sessions (id, user_id, platform, platform_chat_id)
+                                VALUES ($1, $2, $3, $4)
+                                ON CONFLICT (id) DO NOTHING
+                            """, self.session_id, self.user.get("id"),
+                                self.inbound.platform if self.inbound else "unknown",
+                                self.inbound.chat_id if self.inbound else "unknown",
+                            )
+                    except Exception as re_err:
+                        logger.error(f"Failed to recreate session: {re_err}")
+                        raise e
+                    continue  # retry the INSERT
+                raise
 
         self._message_cache.append(ChatMessage(role=role, content=content, metadata=metadata))
 
@@ -857,25 +886,7 @@ class ConversationManager:
             if inbound:
                 existing.inbound = inbound
                 existing.is_group = inbound.is_group
-
-            # Session rows can be deleted externally (e.g. manual reset). If that happens,
-            # a cached Conversation would keep a stale session_id and message inserts will
-            # fail with messages_session_id_fkey. Detect and drop stale cache.
-            try:
-                async with get_connection() as conn:
-                    ok = await conn.fetchval(
-                        "SELECT 1 FROM sessions WHERE id = $1 AND status = 'active'",
-                        existing.session_id,
-                    )
-                if ok:
-                    return existing
-                logger.warning(
-                    f"Dropping stale cached conversation for {key}: session_id={existing.session_id} not found/active"
-                )
-            except Exception as e:
-                logger.warning(f"Failed to validate cached session for {key}: {e}")
-
-            self._active.pop(key, None)
+            return existing
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
