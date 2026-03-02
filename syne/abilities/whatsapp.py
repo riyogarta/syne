@@ -737,20 +737,22 @@ class WhatsAppAbility(Ability):
         # from_me handling:
         # - DM self-chat (sender == chat): allow (owner talking to themselves)
         # - DM to other contact: drop (outgoing message, not inbound)
-        # - Group: allow (owner typed trigger in group → Syne should reply)
+        # - Group: always drop (prevents echo loop — Syne's own replies come back as from_me)
         sender_jid_raw = msg.get("SenderJID") or ""
         is_group = chat_jid.endswith("@g.us")
         if from_me:
+            if is_group:
+                logger.info(f'[whatsapp] drop: from_me in group ({chat_jid})')
+                return
             if not sender_jid_raw:
                 logger.info(f'[whatsapp] drop: from_me with no sender (wacli echo)')
                 return
-            if not is_group:
-                # DM: only allow self-chat
-                sender_local = sender_jid_raw.split(":", 1)[0].split("@", 1)[0]
-                chat_local_fm = chat_jid.split(":", 1)[0].split("@", 1)[0]
-                if sender_local != chat_local_fm:
-                    logger.info(f'[whatsapp] drop: from_me to other contact ({sender_local} != {chat_local_fm})')
-                    return
+            # DM: only allow self-chat
+            sender_local = sender_jid_raw.split(":", 1)[0].split("@", 1)[0]
+            chat_local_fm = chat_jid.split(":", 1)[0].split("@", 1)[0]
+            if sender_local != chat_local_fm:
+                logger.info(f'[whatsapp] drop: from_me to other contact ({sender_local} != {chat_local_fm})')
+                return
 
         # Echo detection: skip messages that match something we recently sent
         h = self._content_hash(chat_jid, text)
