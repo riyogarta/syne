@@ -964,12 +964,12 @@ class WhatsAppAbility(Ability):
 
         Workaround: pause sync, send, then resume sync.
         """
-        text = process_outbound(text)
-        if not text:
-            return
-
-        # Extract MEDIA: path if present (e.g. from image_gen ability)
+        # Extract MEDIA: path BEFORE process_outbound (which strips server paths)
         text, media_path = extract_media(text)
+
+        text = process_outbound(text)
+        if not text and not media_path:
+            return
 
         async with self._send_lock:
             was_syncing = self._process is not None
