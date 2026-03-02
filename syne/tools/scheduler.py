@@ -1,6 +1,6 @@
-"""manage_schedule — Create and manage scheduled tasks (owner-only).
+"""manage_schedule — Create and manage scheduled tasks (family+).
 
-Rule 700: Only the owner can use this tool.
+Rule 760z: Owner and family can use this tool.
 
 Task types:
 - 'once': Run once at a specific time (ISO timestamp)
@@ -406,5 +406,5 @@ MANAGE_SCHEDULE_TOOL = {
         "required": ["action"],
     },
     "handler": manage_schedule_handler,
-    "requires_access_level": "owner",
+    "requires_access_level": "family",
 }

@@ -326,16 +326,14 @@ class Conversation:
         # Get available tools + abilities
         access_level = self.user.get("access_level", "public")
         
-        # ═══════════════════════════════════════════════════════════════
-        # SECURITY: In group chats, cap effective access to "public" for tools
-        # Owner can still use all tools via DM, but group context = restricted
-        # ═══════════════════════════════════════════════════════════════
+        # In group chats, tool access is based on the SENDER (member registry),
+        # not the cached session user.
+        if self.is_group and self.inbound and self.inbound.sender_access:
+            access_level = self.inbound.sender_access
+
+        # SECURITY (Groups): tools are sender-based, but owner-only (Rule 700) tools stay DM-only.
+        # We enforce DM-only for owner tools by filtering them out from tool schemas below.
         effective_access_level = access_level
-        if self.is_group:
-            # In groups, even owners get restricted tool access
-            # This prevents prompt injection attacks in group context
-            effective_access_level = "public"
-            logger.debug(f"Group context: capping tool access to 'public' (user was: {access_level})")
         
         tool_schemas = self.tools.to_openai_schema(effective_access_level)
         if self.abilities:
