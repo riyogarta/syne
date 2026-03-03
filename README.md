@@ -93,58 +93,6 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, the **embedding model** makes memories searchable, and the **decay engine** ensures only relevant memories survive.
 
-### How It Works
-
-```
-                         ┌──────────────────────────────────┐
-                         │          USER MESSAGE            │
-                         └──────────────┬───────────────────┘
-                                        │
-                    ┌───────────────────┬┴───────────────────┐
-                    │                   │                    │
-                    ▼                   ▼                    ▼
-           ┌───────────────┐  ┌─────────────────┐  ┌───────────────┐
-           │  CHAT (LLM)   │  │  AUTO-CAPTURE   │  │    RECALL     │
-           │               │  │  (Evaluator)    │  │  (Embedding)  │
-           │ Gemini/Claude │  │                 │  │               │
-           │ processes the │  │ Worth storing?  │  │ Find relevant │
-           │ conversation  │  │ What category?  │  │ memories for  │
-           │               │  │ How important?  │  │ this message  │
-           └───────────────┘  └────────┬────────┘  └───────┬───────┘
-                                       │                    │
-                                       ▼                    │
-                              ┌─────────────────┐           │
-                              │    EMBEDDING     │           │
-                              │                  │           │
-                              │ Convert text to  │◄──────────┘
-                              │ vector (1024-dim)│
-                              │ for similarity   │
-                              │ search           │
-                              └────────┬─────────┘
-                                       │
-                                       ▼
-                              ┌─────────────────┐
-                              │   PostgreSQL +   │
-                              │    pgvector      │
-                              │                  │
-                              │ HNSW index for   │
-                              │ fast semantic    │
-                              │ search over      │
-                              │ millions of      │
-                              │ memories         │
-                              └────────┬─────────┘
-                                       │
-                                       ▼
-                              ┌─────────────────┐
-                              │  DECAY ENGINE    │
-                              │                  │
-                              │ Every 50 convos: │
-                              │ recall_count - 1 │
-                              │ Unused = deleted │
-                              │ Recalled = +2    │
-                              └─────────────────┘
-```
-
 ### The Three Engines
 
 #### 1. Evaluator — "Is this worth remembering?"
@@ -309,24 +257,14 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 | Ability | Permission | Description | Requires |
 |---------|-----------|-------------|----------|
-| `image_gen` | 777 | Generate images from text (FLUX.1) | Together AI API key |
-| `image_analysis` | 555 | Analyze and describe images | Google Gemini / Together AI |
+| `image_gen` | 777 | Generate images from text (FLUX.1-schnell via Together AI) | Together AI API key |
+| `image_analysis` | 555 | Analyze and describe images (Gemini 2.0 Flash default) | Google Gemini / Together AI / OpenAI |
 | `maps` | 555 | Places, directions, geocoding | Google Maps API key |
 | `pdf` | 770 | Generate PDF documents from HTML | wkhtmltopdf (auto-installed) |
 | `website_screenshot` | 550 | Capture website screenshots | Playwright + Chromium (auto-installed) |
 | `whatsapp` | 700 | WhatsApp bridge (send/receive via wacli) | wacli binary |
 
 Each ability manages its own dependencies via `ensure_dependencies()` — external binaries and packages are auto-installed when you enable the ability.
-
-### Managing Abilities
-
-```
-You:  Enable image generation
-Syne: Done — image_gen enabled.
-
-You:  What abilities do I have?
-Syne: image_gen (ready), image_analysis (ready), maps (disabled), ...
-```
 
 ---
 
@@ -478,10 +416,6 @@ All configuration lives in the `config` table. Change via conversation or `updat
 syne init                  # Interactive setup (fully automated)
 syne start                 # Start Telegram agent
 syne start --debug         # Start with debug logging
-syne cli                   # Interactive terminal chat (resumes by default)
-syne cli --new             # Start fresh conversation (clear history)
-syne cli --yolo            # Skip file write approvals (auto-yes)
-syne cli --debug           # CLI with debug logging
 syne status                # Show status
 syne repair                # Diagnose and repair
 syne restart               # Restart agent
@@ -510,28 +444,6 @@ syne backup                # Backup database
 syne restore               # Restore from backup
 ```
 
-### Interactive CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `/help` | Show commands |
-| `/status` | Agent status (model, memories, tools) |
-| `/model` | Show/switch model |
-| `/clear` | Clear conversation |
-| `/compact` | Compact conversation |
-| `/think [level]` | Set thinking budget |
-| `/exit` | Exit CLI |
-
-### CLI Features
-
-- **Per-directory sessions** — each directory has its own conversation context, auto-resumed
-- **`--new`** — start fresh conversation (clears history for this directory)
-- **Multiline input** — Shift+Enter for new line, Enter to submit, paste preserved
-- **File write approval** — Syne asks before writing files (`y`es / `n`o / `a`lways). Skip with `--yolo`
-- **Tool activity indicator** — spinner shows what Syne is doing (Thinking → Searching memory → Running command...)
-- **Ctrl+C** — single tap cancels current request, double tap exits
-- **Auto-compaction** — notifies when context is compacted
-
 ---
 
 ## Telegram Commands
@@ -544,13 +456,19 @@ syne restore               # Restore from backup
 | `/status` | Agent status | All |
 | `/memory` | Memory statistics | All |
 | `/identity` | Agent identity | All |
+| `/clear` | Clear conversation history | Owner |
 | `/compact` | Compact conversation | Owner |
 | `/think [level]` | Set thinking (off/low/medium/high/max) | Owner |
 | `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
 | `/autocapture [on/off]` | Toggle auto memory capture | Owner |
-| `/model` | Show/switch model | Owner |
+| `/models` | Show/switch chat model | Owner |
 | `/embedding` | Show/switch embedding model | Owner |
-| `/forget` | Clear conversation | Owner |
+| `/evaluator` | Show/switch evaluator model | Owner |
+| `/browse` | Browse web page via LLM | Owner |
+| `/groups` | List active groups | Owner |
+| `/members` | List group members (Telegram) | Owner |
+| `/wamembers` | List group members (WhatsApp) | Owner |
+| `/cancel` | Cancel current operation | Owner |
 | `/restart` | Restart agent | Owner |
 
 ---
@@ -718,33 +636,8 @@ pytest
 
 ## Roadmap
 
-- [x] Core memory system with pgvector
-- [x] Google OAuth (free Gemini access)
-- [x] Telegram channel
-- [x] Anti-hallucination memory (3-layer)
-- [x] Conflict resolution (3-zone similarity)
-- [x] Ability system (bundled + self-created)
-- [x] Self-modification (abilities only)
-- [x] Multi-model support (7 drivers: Google, OpenAI, Anthropic, Codex, Together AI, Ollama, Hybrid)
-- [x] Interactive CLI mode
-- [x] Source code introspection (read_source)
-- [x] Systemd service auto-setup
-- [x] Sub-agents
-- [x] Multi-user access control
-- [x] File operations (read/write with security enforcement)
-- [x] Cron scheduler (DB-backed, once/interval/cron expressions)
-- [x] Telegram reactions (send/receive)
-- [x] Voice message support (STT via Groq Whisper)
-- [x] Ollama embedding (local, $0 — qwen3-embedding with auto-install)
-- [x] Linux-style permission system (3-digit octal per tool/ability)
-- [x] PDF generation (HTML to PDF via wkhtmltopdf)
-- [x] Website screenshots (Playwright + Chromium)
-- [x] WhatsApp bridge (via wacli)
-- [x] Memory decay system (conversation-based, configurable)
-- [x] Self-healing with bug reporting (diagnose → format GitHub issue)
-- [x] Comprehensive system prompt guides (config, architecture, security)
+- [ ] Interactive CLI
 - [ ] Ability marketplace
-- [ ] Web UI
 
 ---
 
