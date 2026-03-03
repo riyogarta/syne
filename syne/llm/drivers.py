@@ -77,18 +77,32 @@ async def create_provider(model_entry: dict) -> LLMProvider:
         raise RuntimeError(f"Unknown driver: {driver_name}")
     
     # ═══════════════════════════════════════════════════════════════
-    # Google CCA (OAuth)
+    # Google CCA (OAuth or API key)
     # ═══════════════════════════════════════════════════════════════
     if driver_name == "google_cca":
-        from ..auth.google_oauth import get_credentials
-        creds = await get_credentials()
-        if not creds:
-            raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
-        return GoogleProvider(
-            credentials=creds,
-            chat_model=model_id,
-            cca_rpm=model_entry.get("rpm_limit"),
-        )
+        auth = model_entry.get("auth", "oauth")
+        if auth == "api_key":
+            credential_key = model_entry.get("credential_key")
+            api_key = await _load_api_key(credential_key)
+            if not api_key:
+                raise RuntimeError(
+                    f"No API key found for {model_entry.get('label', model_id)}. "
+                    f"Set {credential_key} in config."
+                )
+            return GoogleProvider(
+                api_key=api_key,
+                chat_model=model_id,
+            )
+        else:
+            from ..auth.google_oauth import get_credentials
+            creds = await get_credentials()
+            if not creds:
+                raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
+            return GoogleProvider(
+                credentials=creds,
+                chat_model=model_id,
+                cca_rpm=model_entry.get("rpm_limit"),
+            )
     
     # ═══════════════════════════════════════════════════════════════
     # Codex (ChatGPT OAuth)

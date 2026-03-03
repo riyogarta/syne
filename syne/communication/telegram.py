@@ -2564,6 +2564,7 @@ Or just send me a message!"""
         elif data == "models:add_apikey":
             # Sub-menu: pick an API key provider
             providers = [
+                ("google_ai", "Google AI Studio (Gemini)"),
                 ("openai", "OpenAI"),
                 ("anthropic", "Anthropic (Claude)"),
                 ("groq", "Groq"),
@@ -2587,6 +2588,12 @@ Or just send me a message!"""
             # API key provider selected — start multi-step add
             provider_key = data.split(":", 2)[2]
             _ak_providers = {
+                "google_ai": {
+                    "label": "Google AI Studio",
+                    "driver": "google_cca",
+                    "credential_key": "credential.google_ai_api_key",
+                    "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
+                },
                 "openai": {
                     "label": "OpenAI",
                     "driver": "openai_compat",
@@ -2649,13 +2656,15 @@ Or just send me a message!"""
                 # Known provider — check if API key exists
                 from syne.db.models import get_config as _gc
                 existing_key = await _gc(meta["credential_key"], None)
-                self._auth_state[user.id] = {
+                add_state = {
                     "type": "models_add",
                     "driver": meta["driver"],
-                    "base_url": meta["base_url"],
                     "credential_key": meta["credential_key"],
                     "step": "apikey" if not existing_key else "model_id",
                 }
+                if meta.get("base_url"):
+                    add_state["base_url"] = meta["base_url"]
+                self._auth_state[user.id] = add_state
                 try:
                     await query.answer()
                 except Exception:
