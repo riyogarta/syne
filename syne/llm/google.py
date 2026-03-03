@@ -24,7 +24,6 @@ import logging
 import re
 import time
 import random
-from collections import deque
 import httpx
 from typing import Optional
 from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError, StreamCallbacks
@@ -61,11 +60,8 @@ _EMPTY_STREAM_BASE_DELAY_MS = 500
 _MAX_RETRY_DELAY_MS = 60_000
 _STREAM_OVERALL_TIMEOUT = 300  # 5min hard cap on entire SSE stream
 
-# Default CCA rate limit (requests per minute).
-# Google Account (OAuth free): documented as 60 RPM, but internal CCA
-# endpoint may enforce lower limits. Conservative default; configurable
-# per model via "rpm_limit" field in model registry.
-_DEFAULT_CCA_RPM = 10
+# CCA rate limiting is handled server-side. No client-side throttle —
+# if the server returns 429, the retry loop handles it with backoff.
 
 # Tool call ID counter
 _tool_call_counter = 0
@@ -528,7 +524,7 @@ class GoogleProvider(LLMProvider):
         api_key: Optional[str] = None,
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
-        cca_rpm: Optional[int] = None,
+        cca_rpm: Optional[int] = None,  # kept for interface compat, ignored
     ):
         self.credentials = credentials
         self.api_key = api_key
@@ -541,9 +537,6 @@ class GoogleProvider(LLMProvider):
         self._use_cca = credentials is not None
         # Limit concurrent embed calls to prevent burst 429s
         self._embed_semaphore = asyncio.Semaphore(3)
-        # Sliding window throttle for CCA chat requests
-        self._cca_rpm = cca_rpm or _DEFAULT_CCA_RPM
-        self._request_times: deque = deque()
 
     @property
     def name(self) -> str:
@@ -718,48 +711,6 @@ class GoogleProvider(LLMProvider):
         contents = _sanitize_turn_ordering(contents)
         return system_text, contents
 
-    async def _throttle_cca(self):
-        """Sliding window rate limiter for CCA chat requests.
-
-        Tracks request timestamps in a 60-second window. When approaching
-        the RPM limit, adds proportional delay to spread requests out.
-        When at the limit, waits until the oldest request exits the window.
-        """
-        if not self._use_cca or not self._cca_rpm:
-            return
-
-        now = time.monotonic()
-        window = 60.0
-
-        # Remove timestamps outside the window
-        while self._request_times and self._request_times[0] < now - window:
-            self._request_times.popleft()
-
-        used = len(self._request_times)
-        threshold = max(1, self._cca_rpm - 2)  # Start throttling 2 before limit
-
-        if used >= self._cca_rpm:
-            # Hard limit — wait for oldest request to exit the window
-            wait = self._request_times[0] + window - now
-            if wait > 0:
-                logger.info(f"CCA throttle: {used}/{self._cca_rpm} RPM, waiting {wait:.1f}s")
-                await asyncio.sleep(wait)
-                now = time.monotonic()
-                while self._request_times and self._request_times[0] < now - window:
-                    self._request_times.popleft()
-        elif used >= threshold:
-            # Approaching limit — spread remaining requests across remaining time
-            elapsed = now - self._request_times[0] if self._request_times else 0
-            remaining_time = window - elapsed
-            remaining_slots = self._cca_rpm - used
-            if remaining_slots > 0 and remaining_time > 0:
-                spacing = remaining_time / remaining_slots
-                if spacing > 1.0:
-                    logger.debug(f"CCA pre-throttle: {used}/{self._cca_rpm} RPM, spacing {spacing:.1f}s")
-                    await asyncio.sleep(spacing)
-
-        self._request_times.append(time.monotonic())
-
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -777,7 +728,6 @@ class GoogleProvider(LLMProvider):
         model = model or self.chat_model
 
         if self._use_cca:
-            await self._throttle_cca()
             return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
         else:
             return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
