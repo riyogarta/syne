@@ -8,6 +8,7 @@ import os
 import sys
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from rich.console import Console
@@ -29,6 +30,43 @@ _DIM_ITALIC = "\033[2;3m"
 _RESET = "\033[0m"
 _CYAN = "\033[36m"
 _BOLD = "\033[1m"
+
+
+_SLASH_COMMANDS = [
+    ("/help", "Show available commands"),
+    ("/models", "Switch model"),
+    ("/status", "Show agent status"),
+    ("/memory", "Search memories"),
+    ("/compact", "Compact conversation"),
+    ("/clear", "Clear conversation history"),
+    ("/think", "Set thinking budget"),
+    ("/cost", "Show session token usage"),
+    ("/context", "Show context usage"),
+    ("/exit", "Exit CLI"),
+]
+
+
+class _SlashCompleter(Completer):
+    """Autocomplete slash commands when input starts with /."""
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        # Only complete if the entire input so far is a slash command (no prior text)
+        if "\n" in text:
+            return
+        stripped = text.lstrip()
+        if not stripped.startswith("/"):
+            return
+        # Only complete the first word
+        if " " in stripped:
+            return
+        for cmd, desc in _SLASH_COMMANDS:
+            if cmd.startswith(stripped):
+                yield Completion(
+                    cmd,
+                    start_position=-len(stripped),
+                    display_meta=desc,
+                )
 
 
 async def cli_select(options: list[str], default: int = 0) -> int:
@@ -191,7 +229,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
         sys.stdout.flush()
         event.app.renderer.clear()
 
-    _prompt_session = PromptSession(key_bindings=_kb, multiline=True)
+    _prompt_session = PromptSession(
+        key_bindings=_kb,
+        multiline=True,
+        completer=_SlashCompleter(),
+        complete_while_typing=True,
+    )
 
     try:
         await agent.start()
