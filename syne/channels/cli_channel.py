@@ -697,7 +697,7 @@ async def _handle_cli_command(
             "[bold]CLI Commands[/bold]\n\n"
             "/help          \u2014 Show this help\n"
             "/status        \u2014 Show agent status\n"
-            "/models        \u2014 Show/switch model\n"
+            "/models        \u2014 Switch model\n"
             "/memory        \u2014 Search memories\n"
             "/compact       \u2014 Compact conversation\n"
             "/clear         \u2014 Clear conversation history\n"
@@ -807,11 +807,57 @@ async def _handle_cli_command(
         return False
 
     elif cmd == "/models":
-        if args:
-            # Forward model switch to agent
-            return False
-        model_name = getattr(agent.provider, 'chat_model', 'unknown')
-        console.print(f"[bold]Current model:[/bold] {model_name} ({agent.provider.name})")
+        from ..db.models import get_config, set_config
+
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "")
+
+        if not models:
+            console.print("[dim]No models registered.[/dim]")
+            return True
+
+        # Build option list — mark current with (active)
+        options = []
+        keys = []
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            model_id = m.get("model_id", "")
+            suffix = " (active)" if key == active_key else ""
+            options.append(f"{label} [{model_id}]{suffix}")
+            keys.append(key)
+
+        # Find current index
+        current_idx = 0
+        for i, k in enumerate(keys):
+            if k == active_key:
+                current_idx = i
+                break
+
+        console.print("[bold]Select model:[/bold]")
+        try:
+            chosen = await cli_select(options, default=current_idx)
+        except (EOFError, KeyboardInterrupt):
+            return True
+
+        new_key = keys[chosen]
+        if new_key == active_key:
+            console.print(f"[dim]Already using {models[chosen].get('label', new_key)}.[/dim]")
+            return True
+
+        # Switch: update DB, create new provider, invalidate cached conversation
+        await set_config("provider.active_model", new_key)
+        new_provider = await agent.create_provider_for_model(new_key)
+        if new_provider:
+            agent.provider = new_provider
+            # Invalidate cached conversation so next message uses new provider
+            conv_key = f"cli:{chat_id}"
+            if conv_key in agent.conversations._active:
+                del agent.conversations._active[conv_key]
+            new_label = models[chosen].get("label", new_key)
+            console.print(f"[green]Switched to {new_label}[/green]")
+        else:
+            console.print(f"[red]Failed to create provider for {new_key}[/red]")
         return True
 
     elif cmd == "/think":
