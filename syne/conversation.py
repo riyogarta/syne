@@ -1,9 +1,18 @@
 """Conversation manager — session handling, message history, context building."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 from typing import Optional
+
+
+try:
+    # Python 3.9+
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
+
 from .db.connection import get_connection
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks
 from .memory.engine import MemoryEngine
@@ -163,6 +172,28 @@ class Conversation:
             prompt = prompt + group_restrictions
         
         messages.append(ChatMessage(role="system", content=prompt))
+
+
+        # 1b. Runtime time context (ground truth)
+        # LLMs often hallucinate the current date/time unless we provide it explicitly.
+        # This is not a privileged system/credential (Rule 700); it's safe to expose in groups.
+        try:
+            if ZoneInfo:
+                wib = ZoneInfo("Asia/Jakarta")
+                now_wib = datetime.now(wib)
+            else:
+                now_wib = datetime.now(timezone(timedelta(hours=7)))
+            now_utc = now_wib.astimezone(timezone.utc)
+            time_lines = [
+                "# Runtime context (authoritative)",
+                "Use this as the ground truth for the current time/date. Do not guess.",
+                f"- Now (WIB / Asia/Jakarta): {now_wib.isoformat(timespec='seconds')}",
+                f"- Now (UTC): {now_utc.isoformat(timespec='seconds')}",
+            ]
+            messages.append(ChatMessage(role="system", content="\n".join(time_lines)))
+        except Exception as e:
+            # If time injection fails, continue without it.
+            logger.debug(f"Time context injection failed: {e}")
 
         # 2. Recall relevant memories (with Rule 760 filtering via access_level)
         #    Memory is GLOBAL — all sessions (DM + group) recall from the same pool.
