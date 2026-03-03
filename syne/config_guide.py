@@ -21,9 +21,12 @@ Always inform the owner of **both positive and negative impacts** before changin
 | Key | Default | Type |
 |-----|---------|------|
 | `memory.auto_capture` | `false` | boolean |
+| `memory.auto_evaluate` | `true` | boolean |
 
-Automatically evaluates every message for memory-worthy content.
-- **Enable when**: Owner wants the bot to learn from conversations without explicit "remember" commands.
+- `auto_capture` — automatically evaluates every message for memory-worthy content.
+- `auto_evaluate` — use LLM to judge what is worth storing (only applies when auto_capture is ON).
+  If false, auto_capture stores everything without evaluation.
+- **Enable auto_capture when**: Owner wants the bot to learn from conversations without explicit "remember" commands.
 - **Disable when**: Privacy is priority, or conversations are mostly transactional.
 - **Positive**: Bot learns preferences, facts, and context over time without manual effort.
 - **Negative**: Uses extra compute per message (evaluator model call). May store unwanted info.
@@ -34,13 +37,18 @@ Automatically evaluates every message for memory-worthy content.
 |-----|---------|------|
 | `memory.evaluator_driver` | `"ollama"` | string |
 | `memory.evaluator_model` | `"qwen3:0.6b"` | string |
+| `memory.evaluator_models` | *(registry)* | JSON array |
+| `memory.active_evaluator` | `"qwen3-0-6b"` | string |
 
 Which model judges whether a message is worth remembering.
-- `"ollama"` — local model, free, fast, no API cost. Recommended.
-- `"provider"` — uses the main chat model. More accurate but costs tokens and adds 40s delay
-  (to avoid rate limits on some providers).
+- `evaluator_driver` / `evaluator_model` — legacy shorthand (still works).
+- `evaluator_models` — registry of available evaluator models (managed via `/evaluator` command).
+- `active_evaluator` — key of the currently active evaluator from the registry.
+- `"ollama"` driver — local model, free, fast, no API cost. Recommended.
+- `"provider"` driver — uses the main chat model. More accurate but costs tokens.
 - **Change when**: Auto-captured memories are low quality (switch to better model) or
   evaluator is too slow (switch to smaller/local model).
+- **Warning**: Evaluator models must be pre-pulled in Ollama. Use `/evaluator` to manage.
 
 ### Memory Decay
 | Key | Default | Type |
@@ -60,13 +68,15 @@ Controls how fast non-permanent memories fade.
   recalled will be deleted after 50 conversations. Frequently recalled memories get +2 boost
   each time, so useful memories survive naturally.
 
-### Recall Limit
+### Recall & Importance
 | Key | Default | Type |
 |-----|---------|------|
 | `memory.recall_limit` | `5` | integer |
+| `memory.max_importance` | `1.0` | float |
 
-Max memories injected into context per message.
-- **Increase when**: Bot lacks context, forgets things mentioned recently.
+- `recall_limit` — max memories injected into context per message.
+- `max_importance` — ceiling for importance scores (0.0–1.0).
+- **Increase recall_limit when**: Bot lacks context, forgets things mentioned recently.
 - **Decrease when**: Context window is tight, or too many irrelevant memories appear.
 - **Warning**: Each recalled memory uses tokens. Setting too high wastes context window.
 
@@ -93,7 +103,8 @@ Controls when conversation history is compacted (summarized) to save context.
 |-----|---------|------|
 | `session.thinking_budget` | `null` | integer or null |
 
-Controls extended thinking/reasoning for supported models.
+Global fallback for extended thinking/reasoning. Per-model `thinking_budget` in `provider.models`
+takes priority — this only applies when the per-model value is null.
 - `null` — use model's default behavior.
 - `0` — disable thinking entirely (fastest, cheapest).
 - `1024`-`24576` — thinking token budget (low to max).
@@ -159,16 +170,19 @@ Controls which groups the bot responds in.
 - **Warning**: "open" means anyone who adds the bot to a group gets access.
   Combined with public tool permissions, this could be a security risk.
 
-### Mention Requirement
+### Mention & Trigger
 | Key | Default | Type |
 |-----|---------|------|
 | `telegram.require_mention` | `true` | boolean |
+| `telegram.bot_trigger_name` | `null` | string or null |
 
-Whether bot requires @mention or reply to respond in groups.
-- `true` — bot only responds when mentioned or replied to. Recommended for busy groups.
-- `false` — bot responds to every message in the group.
-- **Warning**: Disabling this in active groups will cause the bot to respond to every
-  message, which is expensive and potentially annoying.
+- `require_mention` — whether bot requires @mention or reply to respond in groups.
+  `true` recommended for busy groups; `false` makes bot respond to every message.
+- `bot_trigger_name` — custom name that triggers the bot (e.g., "Syne", "hey bot").
+  `null` = auto-reads from `identity.name`. Set this if the bot should respond to a
+  different name than its identity name.
+- **Warning**: Disabling require_mention in active groups will cause the bot to respond
+  to every message, which is expensive and potentially annoying.
 
 ## Execution & Tools
 
@@ -185,14 +199,40 @@ Safety limits for the `exec` tool (shell command execution).
 - **Warning**: Very high timeouts could let a runaway process block the bot for minutes.
   The exec tool is owner-only (permission 700) so this is a self-imposed risk.
 
-### Web Fetch Timeout
+### Web Tools
 | Key | Default | Type |
 |-----|---------|------|
+| `web_search.api_key` | `""` | string |
 | `web_fetch.timeout` | `30` | integer (seconds) |
 
-HTTP request timeout for the `web_fetch` tool.
-- **Increase when**: Fetching from slow servers or large pages.
+- `web_search.api_key` — Brave Search API key. Required for `web_search` tool to work.
+  Get one from https://brave.com/search/api/ (free tier available).
+  Empty string = web search disabled.
+- `web_fetch.timeout` — HTTP request timeout for the `web_fetch` tool.
+- **Increase timeout when**: Fetching from slow servers or large pages.
 - **Warning**: High timeouts delay bot responses while waiting for external servers.
+
+### File Operations
+| Key | Default | Type |
+|-----|---------|------|
+| `file_ops.max_read_size` | `102400` | integer (bytes) |
+
+Maximum file size the bot can read via the `read_file` tool (default 100KB).
+- **Increase when**: Owner needs the bot to read larger files (logs, data files).
+- **Decrease when**: Want to limit memory usage from large file reads.
+- **Warning**: Very large values may cause context window overflow or slow responses.
+
+### Voice / Speech-to-Text
+| Key | Default | Type |
+|-----|---------|------|
+| `voice.stt_provider` | `"groq"` | string |
+| `voice.stt_model` | `"whisper-large-v3"` | string |
+
+Controls how voice messages are transcribed.
+- `"groq"` — fast, free-tier available via Groq Cloud. Requires `credential.groq_api_key`.
+- `stt_model` — Whisper model variant to use.
+- **Change when**: Current provider is down, or want to use a different transcription service.
+- **Warning**: Requires a valid API key for the chosen provider.
 
 ## Sub-Agents
 
@@ -220,8 +260,9 @@ Grace period for scheduled tasks that run late (e.g., bot was offline).
 - **Warning**: A large grace period means old tasks execute when the bot comes back online,
   which might surprise the user if the context has changed.
 
-## Provider & Model (Advanced)
+## Provider & Model
 
+### Active Models
 | Key | Default | Type |
 |-----|---------|------|
 | `provider.active_model` | `"gemini-pro"` | string |
@@ -236,6 +277,47 @@ Active chat and embedding models. These reference keys in `provider.models` and
   and may temporarily affect memory recall quality.
 - **Warning**: Changing models mid-conversation does not affect existing sessions —
   only new sessions use the new model.
+
+### Model Registries
+| Key | Type |
+|-----|------|
+| `provider.models` | JSON array |
+| `provider.embedding_models` | JSON array |
+
+Full model registries. Each entry contains: key, label, driver, model_id, auth, context_window,
+params (temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty),
+and reasoning_visible.
+- Managed via `/model` and `/embedding` commands — avoid editing raw JSON directly.
+- Each model has its own `thinking_budget` and `reasoning_visible` per-model settings.
+- **Warning**: Invalid JSON in these registries will break model selection.
+
+### Legacy Provider Keys
+| Key | Default | Type |
+|-----|---------|------|
+| `provider.primary` | `{"name": "google", "auth": "oauth"}` | JSON object |
+| `provider.chat_model` | `"gemini-2.5-pro"` | string |
+| `provider.embedding_model` | `"text-embedding-004"` | string |
+| `provider.embedding_dimensions` | `768` | integer |
+
+Legacy keys from before the model registry system. Still read as fallback by some components.
+- `provider.primary` — primary LLM provider name and auth method.
+- `provider.chat_model` / `provider.embedding_model` — model identifiers (superseded by registries).
+- `provider.embedding_dimensions` — vector dimensions for embeddings.
+- **Do not change directly** — use `/model` and `/embedding` commands instead.
+
+### Auth Refresh (Advanced)
+| Key | Default | Type |
+|-----|---------|------|
+| `auth.refresh_buffer_seconds` | `600` | integer (10 min) |
+| `auth.refresh_interval_seconds` | `1800` | integer (30 min) |
+
+Controls OAuth token refresh timing.
+- `refresh_buffer_seconds` — how early before expiry to refresh tokens (safety margin).
+- `refresh_interval_seconds` — how often the background refresh loop runs.
+- **Increase buffer when**: Token refresh is failing intermittently (gives more retry time).
+- **Decrease interval when**: Tokens expire quickly and need more frequent refresh.
+- **Warning**: Setting buffer too low risks token expiry mid-conversation.
+  Setting interval too high may miss refresh windows.
 
 ## WhatsApp Bridge
 
@@ -258,12 +340,14 @@ For quick reference when deciding permission level:
 |--------|------|------------|
 | Enable auto_capture | Low — memories decay naturally | Yes — disable anytime |
 | Increase decay_interval | Low — memories last longer | Yes |
-| Decrease decay_interval | Medium — memories deleted faster | Partially — deleted memories cannot be recovered |
+| Decrease decay_interval | Medium — memories deleted faster | Partially — deleted memories gone |
 | Change chat model | Medium — different response quality | Yes — switch back anytime |
-| Change embedding model | High — requires full re-embedding | Yes but slow (re-embedding takes time) |
+| Change embedding model | High — requires full re-embedding | Yes but slow |
+| Change timezone | Low — affects new cron calculations | Yes — switch back anytime |
 | Set DM policy to "open" | High — anyone can message the bot | Yes — switch back to "approval" |
 | Set group policy to "open" | High — bot responds in any group | Yes — switch back to "allowlist" |
 | Disable require_mention | Medium — bot responds to everything in groups | Yes |
 | Increase exec timeout | Low — owner-only tool | Yes |
 | Disable subagents | Low — just disables feature | Yes |
+| Change auth refresh timing | Medium — may cause token expiry | Yes — restore defaults |
 """

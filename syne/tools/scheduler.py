@@ -341,6 +341,8 @@ MANAGE_SCHEDULE_TOOL = {
         "Create and manage scheduled tasks. Tasks execute by injecting payload as user message. "
         "Actions: create, list, get, delete, enable, disable, bulk_create, bulk_delete. "
         "Types: 'once' (ISO timestamp), 'interval' (seconds), 'cron' (cron expression). "
+        "IMPORTANT: Cron expressions are interpreted in the system.timezone config (check with update_config). "
+        "For example, '0 9 * * *' means 9 AM in the configured timezone, NOT UTC (unless timezone is UTC). "
         "Optional end_date for recurring tasks — auto-disables after the date passes. "
         "Use bulk_create with a JSON array to create many tasks in one call. "
         "Use bulk_delete with comma-separated IDs or ranges (e.g., '64-131') to delete many at once."
@@ -371,7 +373,8 @@ MANAGE_SCHEDULE_TOOL = {
                 "description": (
                     "Schedule value. For 'once': ISO timestamp. "
                     "For 'interval': seconds (e.g., '3600'). "
-                    "For 'cron': cron expression (e.g., '0 9 * * *')."
+                    "For 'cron': cron expression interpreted in system.timezone "
+                    "(e.g., '0 9 * * *' = 9 AM local time)."
                 ),
             },
             "payload": {
