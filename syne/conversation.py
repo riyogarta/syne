@@ -446,8 +446,6 @@ class Conversation:
             eval_text = (message_metadata or {}).get("original_text", user_message)
             async def _deferred_evaluate():
                 try:
-                    if eval_driver != "ollama":
-                        await asyncio.sleep(40)  # CCA rate limit window (~36s)
                     result = await evaluate_and_store(
                         provider=self.provider,
                         memory_engine=self.memory,
