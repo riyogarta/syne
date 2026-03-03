@@ -565,3 +565,28 @@ BEGIN
     END IF;
 END $$;
 
+-- v0.23.5: remove rpm_limit from model registry (was arbitrary CCA throttle)
+DO $$
+DECLARE
+    models jsonb;
+    updated jsonb := '[]'::jsonb;
+    model jsonb;
+    changed boolean := false;
+BEGIN
+    SELECT value::jsonb INTO models FROM config WHERE key = 'provider.models';
+    IF models IS NULL THEN RETURN; END IF;
+
+    FOR model IN SELECT * FROM jsonb_array_elements(models)
+    LOOP
+        IF model ? 'rpm_limit' THEN
+            model := model - 'rpm_limit';
+            changed := true;
+        END IF;
+        updated := updated || jsonb_build_array(model);
+    END LOOP;
+
+    IF changed THEN
+        UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
+    END IF;
+END $$;
+
