@@ -37,9 +37,8 @@ _SLASH_COMMANDS = [
     ("/models", "Switch model"),
     ("/status", "Show agent status"),
     ("/memory", "Search memories"),
-    ("/compact", "Compact conversation"),
+    ("/compact", "Compact conversation now"),
     ("/clear", "Clear conversation history"),
-    ("/think", "Set thinking budget"),
     ("/cost", "Show session token usage"),
     ("/context", "Show context usage"),
     ("/exit", "Exit CLI"),
@@ -742,9 +741,8 @@ async def _handle_cli_command(
             "/status        \u2014 Show agent status\n"
             "/models        \u2014 Switch model\n"
             "/memory        \u2014 Search memories\n"
-            "/compact       \u2014 Compact conversation\n"
+            "/compact       \u2014 Compact conversation now\n"
             "/clear         \u2014 Clear conversation history\n"
-            "/think [level] \u2014 Set thinking budget\n"
             "/cost          \u2014 Show session token usage\n"
             "/context       \u2014 Show context usage\n"
             "/exit          \u2014 Exit CLI\n"
@@ -846,8 +844,28 @@ async def _handle_cli_command(
         return True
 
     elif cmd == "/compact":
-        # Forward to agent as regular message
-        return False
+        conv = agent.conversations._active.get(f"cli:{chat_id}")
+        if not conv:
+            console.print("[dim]No active conversation.[/dim]")
+            return True
+        msg_count = len(conv._message_cache)
+        if msg_count < 4:
+            console.print("[dim]Conversation too short to compact.[/dim]")
+            return True
+        console.print("[dim]Compacting conversation...[/dim]")
+        from ..compaction import compact_session
+        result = await compact_session(
+            session_id=conv.session_id,
+            provider=conv.provider,
+        )
+        if result:
+            await conv.load_history()
+            console.print(
+                f"[green]Compacted: {result['messages_before']} -> {result['messages_after']} messages[/green]"
+            )
+        else:
+            console.print("[dim]Nothing to compact.[/dim]")
+        return True
 
     elif cmd == "/models":
         from ..db.models import get_config, set_config
@@ -902,15 +920,6 @@ async def _handle_cli_command(
             console.print(f"[green]Switched to {new_label}[/green]")
         else:
             console.print(f"[red]Failed to create provider for {new_key}[/red]")
-        return True
-
-    elif cmd == "/think":
-        if args:
-            return False  # Let agent handle
-        conv = agent.conversations._active.get(f"cli:{chat_id}", None)
-        if conv:
-            tb = conv.model_params.get("thinking_budget")
-            console.print(f"[bold]Thinking budget:[/bold] {tb if tb is not None else 'default'}")
         return True
 
     # Unknown command — pass to agent
