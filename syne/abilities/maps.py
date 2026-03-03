@@ -14,6 +14,7 @@ class MapsAbility(Ability):
     name = "maps"
     description = "Search for nearby places (restaurants, cafes, etc.), get driving/walking directions between locations, and convert addresses to coordinates or vice versa"
     version = "1.0"
+    permission = 0o555
 
     def _get_api_key(self, context: dict) -> str | None:
         config = context.get("config", {})

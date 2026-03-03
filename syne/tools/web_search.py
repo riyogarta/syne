@@ -94,5 +94,5 @@ WEB_SEARCH_TOOL = {
         "required": ["query"],
     },
     "handler": web_search_handler,
-    "requires_access_level": "public",
+    "permission": 0o555,
 }

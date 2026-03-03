@@ -101,5 +101,5 @@ SEND_FILE_TOOL = {
         "required": ["path"],
     },
     "handler": send_file_handler,
-    "requires_access_level": "owner",
+    "permission": 0o770,
 }

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 
 from .base import Ability
 from ..db.connection import get_connection
+from ..security import check_tool_access
 
 logger = logging.getLogger("syne.abilities.registry")
 
@@ -29,24 +30,21 @@ class RegisteredAbility:
     instance: Ability
     config: dict = field(default_factory=dict)
     enabled: bool = True
-    requires_access_level: str = "family"
+    permission: int = 0o700  # Linux-style 3-digit octal (owner/family/public)
     db_id: Optional[int] = None
     consecutive_failures: int = 0
 
 
 class AbilityRegistry:
     """Manages available abilities for the agent.
-    
+
     Responsibilities:
     - Load abilities from bundled package and DB
     - Register/unregister abilities at runtime
     - Enable/disable abilities
     - Convert to OpenAI function calling schema
-    - Execute abilities with access level checks
+    - Execute abilities with permission checks
     """
-
-    # Access level hierarchy (lower index = lower privilege)
-    ACCESS_LEVELS = ["public", "friend", "family", "admin", "owner"]
 
     def __init__(self):
         self._abilities: dict[str, RegisteredAbility] = {}
@@ -58,18 +56,18 @@ class AbilityRegistry:
         module_path: str = "",
         config: Optional[dict] = None,
         enabled: bool = True,
-        requires_access_level: str = "family",
+        permission: int = 0o700,
         db_id: Optional[int] = None,
     ):
         """Register an ability instance.
-        
+
         Args:
             ability: The Ability instance to register
             source: Where the ability comes from ('bundled', 'installed', 'self_created')
             module_path: Python import path or file path
             config: Ability-specific configuration
             enabled: Whether ability is enabled
-            requires_access_level: Minimum access level to use this ability
+            permission: Linux-style 3-digit octal permission
             db_id: Database ID if loaded from DB
         """
         registered = RegisteredAbility(
@@ -81,11 +79,11 @@ class AbilityRegistry:
             instance=ability,
             config=config or {},
             enabled=enabled,
-            requires_access_level=requires_access_level,
+            permission=permission,
             db_id=db_id,
         )
         self._abilities[ability.name] = registered
-        logger.debug(f"Registered ability: {ability.name} (source={source}, enabled={enabled})")
+        logger.debug(f"Registered ability: {ability.name} (source={source}, enabled={enabled}, perm={oct(permission)})")
 
     def unregister(self, name: str):
         """Remove an ability from the registry."""
@@ -102,33 +100,23 @@ class AbilityRegistry:
         return list(self._abilities.values())
 
     def list_enabled(self, access_level: str = "public") -> list[RegisteredAbility]:
-        """List enabled abilities.
-
-        Abilities are user-facing features available to everyone.
-        Access control is handled by tools, not abilities.
-        """
+        """List enabled abilities accessible to the given access level."""
+        if access_level == "blocked":
+            return []
         return [
             ability for ability in self._abilities.values()
-            if ability.enabled
+            if ability.enabled and check_tool_access(ability.name, access_level, ability.permission)[0]
         ]
-
-    def _check_access(self, required_level: str, user_level_index: int) -> bool:
-        """Check if user has sufficient access."""
-        try:
-            required_index = self.ACCESS_LEVELS.index(required_level)
-        except ValueError:
-            required_index = 2  # Default to family if invalid
-        return user_level_index >= required_index
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
         """Convert enabled abilities to OpenAI function calling format.
-        
+
         Validates every schema before including it. Abilities with malformed
         schemas are logged and skipped — they won't reach the LLM API.
-        
+
         Args:
             access_level: User's access level for filtering
-            
+
         Returns:
             List of validated function schemas for OpenAI API
         """
@@ -162,12 +150,12 @@ class AbilityRegistry:
         context: dict,
     ) -> dict:
         """Execute an ability by name.
-        
+
         Args:
             name: Ability name
             params: Parameters from LLM function call
             context: Execution context (user_id, session_id, access_level, etc.)
-            
+
         Returns:
             Execution result dict with success, result, error, media keys
         """
@@ -177,6 +165,13 @@ class AbilityRegistry:
 
         if not ability.enabled:
             return {"success": False, "error": f"Ability '{name}' is disabled."}
+
+        # Permission check
+        access_level = context.get("access_level", "public")
+        allowed, reason = check_tool_access(name, access_level, ability.permission)
+        if not allowed:
+            logger.warning(f"Permission denied: ability={name}, access_level={access_level}, perm={oct(ability.permission)}")
+            return {"success": False, "error": reason}
 
         # Validate config
         is_valid, error = await ability.instance.validate_config(ability.config)
@@ -249,10 +244,10 @@ class AbilityRegistry:
 
     async def disable(self, name: str) -> bool:
         """Disable an ability.
-        
+
         Args:
             name: Ability name
-            
+
         Returns:
             True if successful, False if ability not found
         """
@@ -303,11 +298,11 @@ class AbilityRegistry:
 
     async def update_config(self, name: str, config: dict) -> bool:
         """Update ability configuration.
-        
+
         Args:
             name: Ability name
             config: New configuration dict
-            
+
         Returns:
             True if successful, False if ability not found
         """
@@ -335,15 +330,15 @@ class AbilityRegistry:
 
     async def load_from_db(self):
         """Load ability metadata from database and update registry.
-        
-        This merges DB state (enabled, config, access_level) with
-        already-registered abilities.
+
+        This merges DB state (enabled, config) with already-registered abilities.
+        Permission is read from the class instance, not the DB.
         """
         try:
             async with get_connection() as conn:
                 rows = await conn.fetch("""
                     SELECT id, name, description, version, source, module_path,
-                           config, enabled, requires_access_level
+                           config, enabled
                     FROM abilities
                 """)
 
@@ -354,7 +349,7 @@ class AbilityRegistry:
                     ability.db_id = row["id"]
                     ability.enabled = row["enabled"]
                     ability.config = json.loads(row["config"]) if row["config"] else {}
-                    ability.requires_access_level = row["requires_access_level"]
+                    # Permission comes from class, not DB
                 else:
                     # Ability in DB but not registered (installed/self_created)
                     # TODO: Dynamic loading for non-bundled abilities

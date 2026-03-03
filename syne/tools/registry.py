@@ -4,7 +4,7 @@ import logging
 from typing import Callable, Optional
 from dataclasses import dataclass, field
 
-from ..security import check_rule_700, OWNER_ONLY_TOOLS
+from ..security import check_tool_access, TOOL_PERMISSIONS
 
 logger = logging.getLogger("syne.tools.registry")
 
@@ -15,7 +15,7 @@ class Tool:
     description: str
     parameters: dict                    # JSON Schema for parameters
     handler: Callable                   # async function to execute
-    requires_access_level: str = "public"
+    permission: int = 0o700             # Linux-style 3-digit octal (owner/family/public)
     enabled: bool = True
     scrub_level: str = "aggressive"     # "aggressive" | "safe" | "none"
     # aggressive: full regex scrub (Cookie, PEM, querystring, etc.)
@@ -33,7 +33,7 @@ class ToolRegistry:
 
     def set_approval_callback(self, callback):
         """Set approval callback for tools that need user confirmation.
-        
+
         callback(tool_name: str, args: dict) -> tuple[bool, str]
         Returns (approved, reason).
         """
@@ -45,12 +45,15 @@ class ToolRegistry:
         description: str,
         parameters: dict,
         handler: Callable,
-        requires_access_level: str = "public",
+        permission: int = 0o700,
         scrub_level: str = "aggressive",
     ):
         """Register a new tool.
-        
+
         Args:
+            permission: Linux-style 3-digit octal (owner/family/public).
+                Each digit encodes rwx: r=4(read), w=2(write), x=1(action).
+                Example: 0o750 = owner(rwx), family(r-x), public(---).
             scrub_level: Credential scrubbing level for tool output.
                 "aggressive" — full regex scrub (default, safest)
                 "safe" — high-confidence patterns only (for code/content output)
@@ -61,7 +64,7 @@ class ToolRegistry:
             description=description,
             parameters=parameters,
             handler=handler,
-            requires_access_level=requires_access_level,
+            permission=permission,
             scrub_level=scrub_level,
         )
 
@@ -74,19 +77,16 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def list_tools(self, access_level: str = "public") -> list[Tool]:
-        """List available tools for a given access level."""
-        # pending/blocked users get NO tools
-        if access_level in ("pending", "blocked"):
+        """List available tools for a given access level.
+
+        A tool is included if its permission digit for the access level is > 0.
+        """
+        if access_level == "blocked":
             return []
-        level_order = ["public", "friend", "family", "admin", "owner"]
-        try:
-            max_level = level_order.index(access_level)
-        except ValueError:
-            max_level = 0
 
         return [
             tool for tool in self._tools.values()
-            if tool.enabled and level_order.index(tool.requires_access_level) <= max_level
+            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission)[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
@@ -113,30 +113,11 @@ class ToolRegistry:
         if not tool.enabled:
             return f"Error: Tool '{name}' is disabled."
 
-        # ═══════════════════════════════════════════════════════════════
-        # RULE 700 CHECK — HARDCODED, FIRST LAYER OF DEFENSE
-        # This runs BEFORE the normal access level check to provide
-        # defense-in-depth. Even if access levels are somehow bypassed,
-        # Rule 700 still blocks non-owners from sensitive tools.
-        # ═══════════════════════════════════════════════════════════════
-        allowed, reason = check_rule_700(name, access_level)
+        # Permission check
+        allowed, reason = check_tool_access(name, access_level, tool.permission)
         if not allowed:
-            logger.warning(f"Rule 700 blocked: tool={name}, access_level={access_level}")
+            logger.warning(f"Permission denied: tool={name}, access_level={access_level}, perm={oct(tool.permission)}")
             return f"Error: {reason}"
-
-        # Check access level (second layer)
-        # pending/blocked = no access
-        if access_level in ("pending", "blocked"):
-            return f"Error: Access denied."
-        level_order = ["public", "friend", "family", "admin", "owner"]
-        try:
-            required = level_order.index(tool.requires_access_level)
-            current = level_order.index(access_level)
-        except ValueError:
-            return f"Error: Invalid access level."
-
-        if current < required:
-            return f"Error: Insufficient permissions for tool '{name}'."
 
         # Interactive approval (e.g., CLI file write confirmation)
         if self._approval_callback:

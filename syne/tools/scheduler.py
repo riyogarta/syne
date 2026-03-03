@@ -406,5 +406,5 @@ MANAGE_SCHEDULE_TOOL = {
         "required": ["action"],
     },
     "handler": manage_schedule_handler,
-    "requires_access_level": "family",
+    "permission": 0o770,
 }

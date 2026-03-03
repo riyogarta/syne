@@ -180,5 +180,5 @@ SEND_VOICE_TOOL = {
         "required": ["text"],
     },
     "handler": send_voice_handler,
-    "requires_access_level": "owner",  # Rule 700 — voice represents the bot
+    "permission": 0o770,
 }

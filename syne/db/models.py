@@ -179,13 +179,6 @@ async def get_or_create_user(
                 total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
                 if owner_on_platform == 0 and total_users <= 3:
                     access_level = "owner"
-                else:
-                    dm_policy = await get_config(
-                        f"{platform}.dm_policy",
-                        await get_config("dm_policy", "approval"),
-                    )
-                    if dm_policy == "approval":
-                        access_level = "pending"
     else:
         # Group interaction — return ephemeral user dict, don't persist.
         # Group-only users belong in group_members, not global /members.
@@ -605,3 +598,53 @@ async def set_config(key: str, value, description: Optional[str] = None):
                 INSERT INTO config (key, value) VALUES ($1, $2::jsonb)
                 ON CONFLICT (key) DO UPDATE SET value = $2::jsonb, updated_at = NOW()
             """, key, json_value)
+
+
+async def migrate_access_levels():
+    """One-time migration: collapse 5-tier access levels to 3-tier.
+
+    admin → owner, friend → public, pending → public.
+    Safe to run multiple times (idempotent).
+    """
+    import logging
+    log = logging.getLogger("syne.db")
+    async with get_connection() as conn:
+        result = await conn.execute(
+            "UPDATE users SET access_level = 'owner' WHERE access_level = 'admin'"
+        )
+        if "UPDATE 0" not in str(result):
+            log.info(f"Migrated admin → owner: {result}")
+
+        result = await conn.execute(
+            "UPDATE users SET access_level = 'public' WHERE access_level IN ('friend', 'pending')"
+        )
+        if "UPDATE 0" not in str(result):
+            log.info(f"Migrated friend/pending → public: {result}")
+
+        # Also migrate group member access levels in settings JSONB
+        rows = await conn.fetch(
+            "SELECT id, settings FROM groups WHERE settings::text LIKE '%\"access\"%'"
+        )
+        for row in rows:
+            import json
+            settings = row["settings"]
+            if isinstance(settings, str):
+                settings = json.loads(settings) if settings else {}
+            settings = settings or {}
+            members = settings.get("members", {})
+            changed = False
+            for mid, mdata in members.items():
+                old = mdata.get("access", "")
+                if old == "admin":
+                    mdata["access"] = "owner"
+                    changed = True
+                elif old in ("friend", "pending"):
+                    mdata["access"] = "public"
+                    changed = True
+            if changed:
+                settings["members"] = members
+                await conn.execute(
+                    "UPDATE groups SET settings = $1::jsonb WHERE id = $2",
+                    json.dumps(settings, ensure_ascii=False), row["id"],
+                )
+                log.info(f"Migrated group {row['id']} member access levels")

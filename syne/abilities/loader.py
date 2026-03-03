@@ -62,7 +62,7 @@ def load_bundled_abilities(registry: AbilityRegistry) -> int:
                 source="bundled",
                 module_path=f"syne.abilities.{ability.name}",
                 enabled=True,
-                requires_access_level="family",  # Default for bundled
+                permission=getattr(ability, 'permission', 0o700),
             )
             count += 1
             logger.debug(f"Loaded bundled ability: {ability.name}")
@@ -95,29 +95,29 @@ async def sync_abilities_to_db(registry: AbilityRegistry) -> int:
             
             # Check if ability exists in DB
             existing = await conn.fetchrow(
-                "SELECT id, enabled, config, requires_access_level FROM abilities WHERE name = $1",
+                "SELECT id, enabled, config FROM abilities WHERE name = $1",
                 ability.name,
             )
-            
+
             if existing:
                 # Update in-memory state from DB (DB is source of truth for user config)
                 ability.db_id = existing["id"]
                 ability.enabled = existing["enabled"]
                 ability.config = json.loads(existing["config"]) if existing["config"] else {}
-                ability.requires_access_level = existing["requires_access_level"]
-                
+                # Permission comes from class, not DB
+
                 # Update description/version if changed
                 await conn.execute("""
-                    UPDATE abilities 
+                    UPDATE abilities
                     SET description = $1, version = $2, updated_at = NOW()
                     WHERE id = $3
                 """, ability.description, ability.version, existing["id"])
-                
+
             else:
                 # Insert new ability
                 row = await conn.fetchrow("""
-                    INSERT INTO abilities (name, description, version, source, module_path, config, enabled, requires_access_level)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
+                    INSERT INTO abilities (name, description, version, source, module_path, config, enabled)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     RETURNING id
                 """,
                     ability.name,
@@ -127,7 +127,6 @@ async def sync_abilities_to_db(registry: AbilityRegistry) -> int:
                     ability.module_path,
                     json.dumps(ability.config),
                     ability.enabled,
-                    ability.requires_access_level,
                 )
                 ability.db_id = row["id"]
                 logger.info(f"Added ability to DB: {ability.name}")
@@ -279,7 +278,7 @@ async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:
     async with get_connection() as conn:
         rows = await conn.fetch("""
             SELECT id, name, description, version, source, module_path,
-                   config, enabled, requires_access_level
+                   config, enabled
             FROM abilities
             WHERE source != 'bundled'
         """)
@@ -335,7 +334,7 @@ async def load_dynamic_abilities_from_db(registry: AbilityRegistry) -> int:
             module_path=module_path,
             config=json.loads(row["config"]) if row["config"] else {},
             enabled=row["enabled"],
-            requires_access_level=row["requires_access_level"],
+            permission=getattr(ability, 'permission', 0o700),
             db_id=row["id"],
         )
         count += 1
@@ -437,7 +436,7 @@ async def register_dynamic_ability(
         module_path=module_path,
         config=config or {},
         enabled=True,
-        requires_access_level="family",
+        permission=getattr(ability, 'permission', 0o700),
         db_id=db_id,
     )
 

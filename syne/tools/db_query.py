@@ -157,5 +157,5 @@ DB_QUERY_TOOL = {
         "required": ["sql"],
     },
     "handler": db_query_handler,
-    "requires_access_level": "owner",
+    "permission": 0o700,
 }

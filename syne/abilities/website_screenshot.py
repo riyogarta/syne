@@ -28,6 +28,7 @@ class WebsiteScreenshotAbility(Ability):
     name = "website_screenshot"
     description = "Take a screenshot of a website URL (viewport or full page)"
     version = "1.1"
+    permission = 0o550
 
     async def ensure_dependencies(self) -> tuple[bool, str]:
         """Install playwright + Chromium browser in the current venv."""

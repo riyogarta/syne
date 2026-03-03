@@ -50,7 +50,8 @@ class Ability(ABC):
     name: str
     description: str
     version: str = "1.0"
-    
+    permission: int = 0o700  # Linux-style 3-digit octal (owner/family/public), default owner-only
+
     # Set to False to opt-out of ability-first pre-processing.
     # Default True = this ability is always tried first before LLM native.
     # Override in subclass or set via chat to disable priority for specific abilities.

@@ -8,7 +8,7 @@ from typing import Optional
 
 from .config import SyneSettings
 from .db.connection import init_db, close_db
-from .db.models import get_config, set_config, get_or_create_user
+from .db.models import get_config, set_config, get_or_create_user, migrate_access_levels
 from .llm.provider import LLMProvider
 from .llm.google import GoogleProvider
 from .llm.openai import OpenAIProvider
@@ -69,6 +69,9 @@ class SyneAgent:
         # 1. Database
         await init_db(self.settings.database_url)
         logger.info("Database connected.")
+
+        # 1.5. Migrate old access levels (admin→owner, friend/pending→public)
+        await migrate_access_levels()
 
         # 2. LLM Provider
         self.provider = await self._init_provider()
@@ -559,7 +562,7 @@ class SyneAgent:
             description=WEB_SEARCH_TOOL["description"],
             parameters=WEB_SEARCH_TOOL["parameters"],
             handler=WEB_SEARCH_TOOL["handler"],
-            requires_access_level=WEB_SEARCH_TOOL["requires_access_level"],
+            permission=WEB_SEARCH_TOOL["permission"],
             scrub_level="safe",  # search snippets may contain code
         )
 
@@ -570,7 +573,7 @@ class SyneAgent:
             description=WEB_FETCH_TOOL["description"],
             parameters=WEB_FETCH_TOOL["parameters"],
             handler=WEB_FETCH_TOOL["handler"],
-            requires_access_level=WEB_FETCH_TOOL["requires_access_level"],
+            permission=WEB_FETCH_TOOL["permission"],
             scrub_level="safe",  # web content may contain code/docs
         )
 
@@ -581,7 +584,7 @@ class SyneAgent:
             description=READ_SOURCE_TOOL["description"],
             parameters=READ_SOURCE_TOOL["parameters"],
             handler=READ_SOURCE_TOOL["handler"],
-            requires_access_level=READ_SOURCE_TOOL["requires_access_level"],
+            permission=READ_SOURCE_TOOL["permission"],
             scrub_level="safe",  # source code — must not corrupt regex/patterns
         )
 
@@ -592,7 +595,7 @@ class SyneAgent:
             description=DB_QUERY_TOOL["description"],
             parameters=DB_QUERY_TOOL["parameters"],
             handler=DB_QUERY_TOOL["handler"],
-            requires_access_level=DB_QUERY_TOOL["requires_access_level"],
+            permission=DB_QUERY_TOOL["permission"],
             scrub_level="safe",  # query results may contain config values
         )
 
@@ -603,7 +606,7 @@ class SyneAgent:
             description=FILE_READ_TOOL["description"],
             parameters=FILE_READ_TOOL["parameters"],
             handler=FILE_READ_TOOL["handler"],
-            requires_access_level=FILE_READ_TOOL["requires_access_level"],
+            permission=FILE_READ_TOOL["permission"],
             scrub_level="safe",  # files may contain code/configs
         )
         self.tools.register(
@@ -611,7 +614,7 @@ class SyneAgent:
             description=FILE_WRITE_TOOL["description"],
             parameters=FILE_WRITE_TOOL["parameters"],
             handler=FILE_WRITE_TOOL["handler"],
-            requires_access_level=FILE_WRITE_TOOL["requires_access_level"],
+            permission=FILE_WRITE_TOOL["permission"],
         )
 
         # ── Send File (Core) ──
@@ -621,7 +624,7 @@ class SyneAgent:
             description=SEND_FILE_TOOL["description"],
             parameters=SEND_FILE_TOOL["parameters"],
             handler=SEND_FILE_TOOL["handler"],
-            requires_access_level=SEND_FILE_TOOL["requires_access_level"],
+            permission=SEND_FILE_TOOL["permission"],
         )
 
         # ── Scheduler (Core) ──
@@ -631,7 +634,7 @@ class SyneAgent:
             description=MANAGE_SCHEDULE_TOOL["description"],
             parameters=MANAGE_SCHEDULE_TOOL["parameters"],
             handler=MANAGE_SCHEDULE_TOOL["handler"],
-            requires_access_level=MANAGE_SCHEDULE_TOOL["requires_access_level"],
+            permission=MANAGE_SCHEDULE_TOOL["permission"],
         )
 
         # ── Send Message (Core) ──
@@ -641,7 +644,7 @@ class SyneAgent:
             description=SEND_MESSAGE_TOOL["description"],
             parameters=SEND_MESSAGE_TOOL["parameters"],
             handler=SEND_MESSAGE_TOOL["handler"],
-            requires_access_level=SEND_MESSAGE_TOOL["requires_access_level"],
+            permission=SEND_MESSAGE_TOOL["permission"],
         )
 
         # ── Send Reaction (Core) ──
@@ -651,7 +654,7 @@ class SyneAgent:
             description=SEND_REACTION_TOOL["description"],
             parameters=SEND_REACTION_TOOL["parameters"],
             handler=SEND_REACTION_TOOL["handler"],
-            requires_access_level=SEND_REACTION_TOOL["requires_access_level"],
+            permission=SEND_REACTION_TOOL["permission"],
         )
 
         # ── Send Voice (Core) ──
@@ -661,7 +664,7 @@ class SyneAgent:
             description=SEND_VOICE_TOOL["description"],
             parameters=SEND_VOICE_TOOL["parameters"],
             handler=SEND_VOICE_TOOL["handler"],
-            requires_access_level=SEND_VOICE_TOOL["requires_access_level"],
+            permission=SEND_VOICE_TOOL["permission"],
         )
 
         # ── Exec (Core) ──
@@ -687,7 +690,7 @@ class SyneAgent:
                 "required": ["command"],
             },
             handler=self._tool_exec,
-            requires_access_level="owner",
+            permission=0o700,
             scrub_level="none",  # exec has dedicated redact_exec_output()
         )
 
@@ -711,6 +714,7 @@ class SyneAgent:
                 "required": ["query"],
             },
             handler=self._tool_memory_search,
+            permission=0o550,
         )
 
         # Memory store tool
@@ -733,7 +737,7 @@ class SyneAgent:
                 "required": ["content", "category"],
             },
             handler=self._tool_memory_store,
-            requires_access_level="family",
+            permission=0o770,
         )
         # Memory delete tool
         self.tools.register(
@@ -750,7 +754,7 @@ class SyneAgent:
                 "required": ["memory_ids"],
             },
             handler=self._tool_memory_delete,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
 
@@ -773,7 +777,7 @@ class SyneAgent:
                 "required": ["task"],
             },
             handler=self._tool_spawn_subagent,
-            requires_access_level="family",
+            permission=0o750,
         )
 
         # Sub-agent status tool
@@ -791,6 +795,7 @@ class SyneAgent:
                 "required": [],
             },
             handler=self._tool_subagent_status,
+            permission=0o550,
         )
 
         # ── Group Management (owner only) ──
@@ -830,7 +835,7 @@ class SyneAgent:
                 "required": ["action"],
             },
             handler=self._tool_manage_group,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
         # ── User Management ──
@@ -859,14 +864,14 @@ class SyneAgent:
                     },
                     "access_level": {
                         "type": "string",
-                        "enum": ["owner", "admin", "family", "friend", "public"],
+                        "enum": ["owner", "family", "public", "blocked"],
                         "description": "User access level",
                     },
                 },
                 "required": ["action"],
             },
             handler=self._tool_manage_user,
-            requires_access_level="owner",  # Note: get action checks differently in handler
+            permission=0o700,
         )
 
         # ── Self-Configuration Tools (owner only) ──
@@ -895,7 +900,7 @@ class SyneAgent:
                 "required": ["action"],
             },
             handler=self._tool_update_config,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
         # Update ability config
@@ -936,7 +941,7 @@ class SyneAgent:
                 "required": ["action"],
             },
             handler=self._tool_update_ability,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
         # Update identity/soul/rules
@@ -973,7 +978,7 @@ class SyneAgent:
                 "required": ["target", "action"],
             },
             handler=self._tool_update_soul,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
         # ── Auth Status Check ──
@@ -985,7 +990,7 @@ class SyneAgent:
                 "properties": {},
             },
             handler=self._tool_check_auth,
-            requires_access_level="owner",
+            permission=0o700,
         )
 
     async def _tool_check_auth(self) -> str:
@@ -1848,7 +1853,7 @@ class SyneAgent:
             for u in users:
                 display = u.get("display_name") or u["name"]
                 level = u.get("access_level", "public")
-                level_icon = {"owner": "👑", "admin": "⭐", "family": "💚", "friend": "💙"}.get(level, "👤")
+                level_icon = {"owner": "👑", "family": "💚"}.get(level, "👤")
                 user_aliases = u.get("aliases") or {}
                 alias_info = ""
                 if user_aliases.get("default"):

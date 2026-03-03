@@ -1,6 +1,6 @@
 """File Operations — Read and write files (owner-only).
 
-Rule 700: Only the owner can use these tools.
+Permission: file_read=500 (owner read-only), file_write=700 (owner-only).
 
 Security restrictions for file_write:
 - CAN write to CWD (working directory) or descendants
@@ -374,7 +374,7 @@ FILE_READ_TOOL = {
         "required": ["path"],
     },
     "handler": file_read_handler,
-    "requires_access_level": "owner",
+    "permission": 0o500,
 }
 
 FILE_WRITE_TOOL = {
@@ -404,5 +404,5 @@ FILE_WRITE_TOOL = {
         "required": ["path", "content"],
     },
     "handler": file_write_handler,
-    "requires_access_level": "owner",
+    "permission": 0o700,
 }

@@ -31,9 +31,9 @@ class MyAbility(Ability):
     name = "my_ability"
     description = "What this ability does"
     version = "1.0"
+    permission = 0o700  # see Permission section below
 
     def get_guide(self, enabled: bool, config: dict) -> str:
-        # Return status + usage for system prompt
         if enabled:
             return "- Status: **ready**\\n- Use: `my_ability(param='...')`"
         return "- Status: **not ready**\\n- Setup: configure via update_ability"
@@ -62,6 +62,59 @@ class MyAbility(Ability):
         return []  # or ["api_key"] if needed
 ```
 
+### Permission System
+
+Every ability declares a `permission` class attribute — a 3-digit octal number
+that controls who can use it. Format: `0oOFP` (Owner / Family / Public).
+
+**If omitted, defaults to `0o700` (owner-only) — always safe.**
+
+#### The 3 digits
+| Position | Who | Example |
+|----------|-----|---------|
+| 1st digit | **owner** — the system administrator | `7xx` |
+| 2nd digit | **family** — trusted users (household, close friends) | `x7x` |
+| 3rd digit | **public** — anyone else who can message the bot | `xx7` |
+
+#### What each bit means
+| Bit | Value | Meaning |
+|-----|-------|---------|
+| r | 4 | **read** — query, fetch, view data |
+| w | 2 | **write** — store, update, modify data |
+| x | 1 | **execute** — perform action, send, generate |
+
+Combine bits by adding: `r+w+x = 7`, `r+x = 5`, `r = 4`, none = `0`.
+
+#### Common permission patterns
+| Permission | Meaning | Use when |
+|------------|---------|----------|
+| `0o700` | owner-only | Sensitive ops: system config, admin, private data |
+| `0o770` | owner + family | Family features: messaging, scheduling, personal tools |
+| `0o750` | owner full + family read/exec | Family can use but not modify |
+| `0o550` | owner + family read/exec | Read-only tools for trusted users |
+| `0o555` | everyone read/exec | Safe public tools: search, lookup, info |
+| `0o777` | everyone full access | Safe creative tools: image gen, translation |
+
+#### How to choose the right permission
+Ask these questions in order:
+
+1. **Can this cause harm or cost money if misused?** (API costs, send messages, modify data)
+   → Start with `0o700` (owner-only)
+2. **Is this useful for family/household members?**
+   → Consider `0o770` (owner + family)
+3. **Is this safe for anyone to use?** (read-only, no side effects, no cost)
+   → Consider `0o555` or `0o777`
+4. **Does this access private data?** (health, finances, personal notes)
+   → Keep at `0o700` regardless of other factors
+
+#### Security rules
+- **Default to 0o700** when unsure — you can always relax later
+- **Never give public (xx7) write access** to abilities that modify system state
+- Abilities that **send messages** to external services → max `0o770`
+- Abilities that **cost money** per call (paid APIs) → `0o700` unless owner says otherwise
+- Abilities that only **read/display** public info → `0o555` is safe
+- The `blocked` access level is always denied regardless of permission
+
 ### External Dependencies
 If the ability needs an external binary, package, or service to work,
 override `ensure_dependencies()`. It is called **automatically** when the
@@ -72,7 +125,6 @@ async def ensure_dependencies(self) -> tuple[bool, str]:
     import shutil
     if shutil.which("mytool"):
         return True, ""
-    # Try to install...
     ok = await self._install_mytool()
     if ok:
         return True, "mytool installed"
@@ -91,6 +143,7 @@ async def ensure_dependencies(self) -> tuple[bool, str]:
 - Validator checks syntax, structure, and schema before registration
 - Config (API keys etc.) stored in DB via `update_ability(action='config')`
 - Never hardcode secrets — read from `context["config"]`
+- Always set `permission` explicitly — don't rely on the default
 """
 
 

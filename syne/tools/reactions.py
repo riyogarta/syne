@@ -128,5 +128,5 @@ SEND_REACTION_TOOL = {
         "required": ["message_id"],
     },
     "handler": send_reaction_handler,
-    "requires_access_level": "family",  # Family+ can trigger; bot also uses [[react:]] tags proactively
+    "permission": 0o771,  # Family+ can trigger; bot also uses [[react:]] tags proactively
 }

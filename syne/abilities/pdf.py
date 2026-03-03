@@ -342,6 +342,7 @@ class PdfAbility(Ability):
     name = "pdf"
     description = "Create and read PDFs from text or URL."
     version = "1.5"
+    permission = 0o770
 
     # tool-call style, not pre-processing
     priority = False

@@ -307,5 +307,5 @@ READ_SOURCE_TOOL = {
         "required": ["action"],
     },
     "handler": _handle_read_source,
-    "requires_access_level": "owner",
+    "permission": 0o500,
 }

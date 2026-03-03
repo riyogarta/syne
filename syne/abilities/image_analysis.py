@@ -25,6 +25,7 @@ class ImageAnalysisAbility(Ability):
     name = "image_analysis"
     description = "Analyze and describe images using AI vision"
     version = "2.0"
+    permission = 0o555
 
     def handles_input_type(self, input_type: str) -> bool:
         return input_type == "image"

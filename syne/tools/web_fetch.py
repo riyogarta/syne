@@ -138,5 +138,5 @@ WEB_FETCH_TOOL = {
         "required": ["url"],
     },
     "handler": web_fetch_handler,
-    "requires_access_level": "public",
+    "permission": 0o555,
 }

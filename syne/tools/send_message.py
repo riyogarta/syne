@@ -4,8 +4,7 @@ Enables:
 - Proactive messaging: agent initiates conversation (reminders, alerts)
 - Cross-session relay: forward info between chats (group → DM, DM → group)
 
-Rule 700: Only owner can send to arbitrary chats.
-Family can send to their own DM only.
+Permission 770: Owner and family can send messages.
 """
 
 import logging
@@ -110,5 +109,5 @@ SEND_MESSAGE_TOOL = {
         "required": ["chat_id", "message"],
     },
     "handler": send_message_handler,
-    "requires_access_level": "owner",
+    "permission": 0o770,
 }

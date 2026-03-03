@@ -360,7 +360,7 @@ class Conversation:
         if self.is_group and self.inbound and self.inbound.sender_access:
             access_level = self.inbound.sender_access
 
-        # SECURITY (Groups): tools are sender-based, but owner-only (Rule 700) tools stay DM-only.
+        # SECURITY (Groups): tools are sender-based, but owner-only tools stay DM-only.
         # We enforce DM-only for owner tools by filtering them out from tool schemas below.
         effective_access_level = access_level
         

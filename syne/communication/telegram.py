@@ -412,10 +412,6 @@ class TelegramChannel:
             if db_user.get("access_level") == "blocked":
                 logger.debug(f"Ignoring message from blocked user {user.id}")
                 return
-            # Check approval policy for DMs
-            if db_user.get("access_level") == "pending":
-                await self._handle_pending_user(update, db_user)
-                return
             # DM received — send 👀 read receipt
             try:
                 await self.send_reaction(chat.id, update.message.message_id, "👀")
@@ -884,11 +880,6 @@ class TelegramChannel:
         else:
             db_user = {"access_level": "public"}
 
-        # Block pending users
-        if not is_group and db_user.get("access_level") == "pending":
-            await self._handle_pending_user(update, db_user)
-            return
-
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [photo] {caption[:100]}")
 
         # Reply context is now handled by InboundContext (build_user_context_prefix)
@@ -973,11 +964,6 @@ class TelegramChannel:
             db_user = await self._ensure_user(user, is_dm=True)
         else:
             db_user = {"access_level": "public"}
-
-        # Block pending users
-        if not is_group and db_user.get("access_level") == "pending":
-            await self._handle_pending_user(update, db_user)
-            return
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [voice message]")
 
@@ -1091,11 +1077,6 @@ class TelegramChannel:
                 return
 
         db_user = await self._ensure_user(user, is_dm=not is_group)
-
-        # Block pending users
-        if not is_group and db_user.get("access_level") == "pending":
-            await self._handle_pending_user(update, db_user)
-            return
 
         doc = update.message.document
         filename = doc.file_name or "unknown_file"
@@ -1216,11 +1197,6 @@ class TelegramChannel:
             return  # Ignore location in groups without reply to bot
 
         db_user = await self._ensure_user(user, is_dm=not is_group)
-
-        # Block pending users
-        if not is_group and db_user.get("access_level") == "pending":
-            await self._handle_pending_user(update, db_user)
-            return
 
         location = update.message.location
         lat = location.latitude
@@ -4514,7 +4490,7 @@ Or just send me a message!"""
         active_users = [u for u in users if u.get("access_level") != "blocked"]
         blocked_count = len(users) - len(active_users)
 
-        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4}
+        level_order = {"owner": 0, "family": 1, "public": 2}
         active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
 
         # Resolve model labels for display
@@ -4526,7 +4502,7 @@ Or just send me a message!"""
         buttons = []
         for u in active_users:
             access = u.get("access_level", "public")
-            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤", "approved": "✅", "pending": "⏳"}.get(access, "❓")
+            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤"}.get(access, "❓")
             name = u.get("display_name") or u.get("name", "?")
             pid = u.get("platform_id", "?")
             # Resolve per-user model or default
@@ -4609,7 +4585,7 @@ Or just send me a message!"""
         # Contextual action buttons
         caller_id = str(query.from_user.id)
         action_row = []
-        if not is_first_owner and access not in ("owner", "pending") and platform_id != caller_id:
+        if not is_first_owner and access != "owner" and platform_id != caller_id:
             action_row.append(InlineKeyboardButton("🗑 Release", callback_data=f"mbr:release:{platform_id}"))
         if action_row:
             buttons.append(action_row)
@@ -4714,11 +4690,9 @@ Or just send me a message!"""
                 await query.answer("⚠️ Can't modify yourself!", show_alert=True)
                 return
 
-            result = await update_user("telegram", platform_id, access_level="pending")
+            result = await update_user("telegram", platform_id, access_level="blocked")
             if result:
-                if hasattr(self, '_pending_notified'):
-                    self._pending_notified.discard(f"pending_notify:{platform_id}")
-                await query.answer("User set to pending")
+                await query.answer("User blocked")
             else:
                 await query.answer("Failed to update", show_alert=True)
             await self._members_menu_blocked(query)
@@ -4801,7 +4775,7 @@ Or just send me a message!"""
         lines = ["👥 <b>Registered Users</b>\n"]
 
         # Sort: owner first, then family, then public, then others
-        level_order = {"owner": 0, "family": 1, "public": 2, "approved": 3, "pending": 4}
+        level_order = {"owner": 0, "family": 1, "public": 2}
         active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("name", "")))
 
         for u in active_users:
@@ -4810,8 +4784,6 @@ Or just send me a message!"""
                 "owner": "👑",
                 "family": "👨‍👩‍👧",
                 "public": "👤",
-                "approved": "✅",
-                "pending": "⏳",
             }.get(access, "❓")
 
             name = u.get("display_name") or u.get("name", "?")
@@ -4826,7 +4798,7 @@ Or just send me a message!"""
     async def _members_set(self, update: Update, member_id: str, level: str):
         """Set a user's global access level."""
         level = level.lower()
-        valid_levels = ("owner", "family", "public", "pending", "blocked")
+        valid_levels = ("owner", "family", "public", "blocked")
         if level not in valid_levels:
             await update.message.reply_text(
                 f"❌ Access level must be one of: {', '.join(valid_levels)}"
