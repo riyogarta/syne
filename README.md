@@ -83,7 +83,7 @@ Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml`. 
 | `SOUL.md` | `soul` table | *"Be more casual and witty"* |
 | `AGENTS.md` | `rules` table | *"Add a rule: never share my location"* |
 | `IDENTITY.md` | `identity` table | *"Change your name to Atlas"* |
-| `CONFIG.yaml` | `config` table | *"Switch to GPT for chat"* |
+| `CONFIG.yaml` | `config` table | *"Turn on auto memory capture"* |
 
 Fresh install comes with sensible defaults. Override anything through conversation — no SQL, no files.
 
