@@ -19,6 +19,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
 - **No config files** — Everything lives in PostgreSQL. Change behavior through conversation, not YAML
 - **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding via Ollama (local, $0) or Together AI (~$0.008/1M tokens)
+- **Linux-style permissions** — 3-digit octal permissions (owner/family/public) for every tool and ability
 - **Interactive CLI** — Code like Claude Code, but with persistent memory and tools
 
 ---
@@ -135,6 +136,14 @@ User message
         └─ Does this already exist?
 ```
 
+### Memory Types
+
+| Type | Stored in | Decay | Created by |
+|------|-----------|-------|------------|
+| **Permanent** | `memory` table (`permanent=true`) | Never | Explicit "remember this" requests |
+| **Transient** | `memory` table (`permanent=false`) | Fades over time via `recall_count` | Auto-capture evaluation |
+| **Conversation history** | `messages` table | No decay (compacted when long) | Every message automatically |
+
 ### Conflict Resolution
 
 When storing a new memory, similarity to existing memories determines the action:
@@ -145,6 +154,15 @@ When storing a new memory, similarity to existing memories determines the action
 | 0.70–0.84 | **Update** existing | "I moved to Bandung" updates "lives in Jakarta" |
 | ≥ 0.85 | **Skip** duplicate | "I live in Jakarta" (already stored) |
 
+### Memory Decay
+
+Non-permanent memories fade naturally over time:
+
+- Every **50 conversations** (configurable), `recall_count` decreases by 1
+- When `recall_count` reaches 0, the memory is deleted
+- Memories that are **recalled** (used in context) get a +2 boost — useful memories survive naturally
+- Permanent memories never decay
+
 ### Auto Capture vs Manual
 
 | Mode | Trigger | Cost impact |
@@ -152,7 +170,7 @@ When storing a new memory, similarity to existing memories determines the action
 | `auto_capture = false` (default) | Only when user says "remember this" | No extra LLM calls |
 | `auto_capture = true` | Every message evaluated automatically | +1 LLM call + 1 embedding per message |
 
-> ⚠️ `auto_capture = true` adds extra LLM + embedding calls per message. On free-tier OAuth this exhausts rate limits faster.
+> `auto_capture = true` adds extra LLM + embedding calls per message. On free-tier OAuth this exhausts rate limits faster.
 
 ### Managing Your Memories
 
@@ -161,10 +179,10 @@ You:  What do you remember about my family?
 Syne: [recalls relevant memories via semantic search]
 
 You:  Remember: I'm allergic to shellfish.
-Syne: Stored. ✅
+Syne: Stored.
 
 You:  Forget that I like sushi.
-Syne: Removed from memory. ✅
+Syne: Removed from memory.
 ```
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
@@ -181,54 +199,91 @@ During `syne init`, you choose one of three embedding providers:
 
 **Ollama** is auto-installed during `syne init` if selected — binary, server, and model are all set up automatically. If your system doesn't meet the minimum requirements (2 CPU, 2 GB RAM, 2 GB disk), the Ollama option is shown but blocked.
 
-> ⚠️ **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces — there is no migration path. Use the `/embedding` command in Telegram to switch.
+> **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces — there is no migration path. Use the `/embedding` command in Telegram to switch.
 
 ---
 
-## Ability System
+## Permission System
 
-### Core Tools (19 — Always Available)
+Syne uses a Linux-inspired 3-digit octal permission system. Every tool and ability declares its own permission (e.g., `0o770` = owner + family can use).
 
-| Tool | Description |
-|------|-------------|
-| `exec` | Execute shell commands |
-| `memory_search` | Semantic search over memories |
-| `memory_store` | Store new memories |
-| `spawn_subagent` | Spawn background agents |
-| `subagent_status` | Check sub-agent status |
-| `update_config` | Change runtime configuration |
-| `update_ability` | Enable/disable/create abilities |
-| `update_soul` | Modify behavioral rules |
-| `manage_group` | Manage group chat settings |
-| `manage_user` | Manage user access levels |
-| `web_search` | Search the web (Brave Search API) |
-| `web_fetch` | Fetch and extract content from URLs |
-| `read_source` | Read Syne's own source code (for self-healing) |
-| `file_read` | Read files with offset/limit (max 100KB) |
-| `file_write` | Write files (restricted to safe directories) |
-| `manage_schedule` | Create/list/delete cron jobs and scheduled tasks |
-| `send_file` | Send files to chat (images as photos, others as documents) |
-| `send_reaction` | Send emoji reactions to messages |
-| `send_voice` | Send voice messages (STT via Groq Whisper) |
+### Access Levels
 
-### Bundled Abilities
+| Level | Who | Description |
+|-------|-----|-------------|
+| **owner** | System administrator | Full access to everything |
+| **family** | Trusted users (household, close friends) | Access based on tool/ability permission |
+| **public** | Anyone else who messages the bot | Limited to safe, read-only tools |
+| **blocked** | Denied users | No access to anything |
 
-Each ability requires its own API key. Just tell Syne in chat: *"Set up image generation"* — it will ask for the key and configure itself.
+The first user to message Syne automatically becomes `owner`.
 
-| Ability | Description | API Required |
-|---------|-------------|--------------|
-| `image_gen` | Generate images from text | Together AI |
-| `image_analysis` | Analyze and describe images | Google Gemini |
-| `maps` | Places, directions, geocoding | Google Maps/Places |
+### Permission Format: `0oOFP`
+
+Each digit controls access for Owner / Family / Public. Bits: `r`(4) read, `w`(2) write, `x`(1) execute.
+
+| Permission | Meaning | Example tools |
+|------------|---------|---------------|
+| `0o700` | Owner only | exec, db_query, file_write, update_config |
+| `0o770` | Owner + family | send_message, memory_store, manage_schedule |
+| `0o555` | Everyone (read/exec) | web_search, web_fetch |
+| `0o550` | Owner + family (read/exec) | memory_search, subagent_status |
+
+Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
+
+---
+
+## Core Tools (23)
+
+| Tool | Permission | Description |
+|------|-----------|-------------|
+| `web_search` | 555 | Search the web (Brave Search API) |
+| `web_fetch` | 555 | Fetch and extract content from URLs |
+| `exec` | 700 | Execute shell commands |
+| `db_query` | 700 | Read-only SQL queries (SELECT only, credentials redacted) |
+| `file_read` | 500 | Read files in workspace (max 100KB) |
+| `file_write` | 700 | Write files (restricted to safe directories) |
+| `read_source` | 500 | Read Syne's own source code (for self-healing) |
+| `send_message` | 770 | Send messages to any chat |
+| `send_file` | 770 | Send files/media to chat |
+| `send_voice` | 770 | Text-to-speech voice messages |
+| `send_reaction` | 771 | Emoji reactions on messages |
+| `manage_schedule` | 770 | Create/list/delete scheduled tasks |
+| `spawn_subagent` | 750 | Spawn background sub-agents |
+| `subagent_status` | 550 | Check sub-agent status |
+| `memory_search` | 550 | Semantic search over memories |
+| `memory_store` | 770 | Store new memories |
+| `memory_delete` | 700 | Delete memories |
+| `manage_group` | 700 | Manage group chat settings |
+| `manage_user` | 700 | Manage user access levels |
+| `update_config` | 700 | Change runtime configuration |
+| `update_ability` | 700 | Enable/disable/create abilities |
+| `update_soul` | 700 | Modify personality and behavioral rules |
+| `check_auth` | 700 | OAuth token management |
+
+---
+
+## Bundled Abilities
+
+| Ability | Permission | Description | Requires |
+|---------|-----------|-------------|----------|
+| `image_gen` | 777 | Generate images from text (FLUX.1) | Together AI API key |
+| `image_analysis` | 555 | Analyze and describe images | Google Gemini / Together AI |
+| `maps` | 555 | Places, directions, geocoding | Google Maps API key |
+| `pdf` | 770 | Generate PDF documents from HTML | wkhtmltopdf (auto-installed) |
+| `website_screenshot` | 550 | Capture website screenshots | Playwright + Chromium (auto-installed) |
+| `whatsapp` | 700 | WhatsApp bridge (send/receive via wacli) | wacli binary |
+
+Each ability manages its own dependencies via `ensure_dependencies()` — external binaries and packages are auto-installed when you enable the ability.
 
 ### Managing Abilities
 
 ```
 You:  Enable image generation
-Syne: Done — image_gen enabled. ✅
+Syne: Done — image_gen enabled.
 
 You:  What abilities do I have?
-Syne: ✅ image_gen, ✅ image_analysis, ❌ maps (disabled)
+Syne: image_gen (ready), image_analysis (ready), maps (disabled), ...
 ```
 
 ---
@@ -242,7 +297,8 @@ Syne can create new abilities at runtime — no restart required:
 ```
 User: "I wish you could check Bitcoin prices"
     │
-    ├─ Syne writes syne/abilities/crypto_price.py
+    ├─ Syne writes syne/abilities/custom/crypto_price.py
+    ├─ Validates syntax, structure, and schema
     ├─ Registers via update_ability (source='self_created')
     ├─ Ability is immediately available
     │
@@ -253,10 +309,10 @@ User: "I wish you could check Bitcoin prices"
 
 | Rule | Description |
 |------|-------------|
-| ✅ CAN | Create/edit files in `syne/abilities/` |
-| ❌ CANNOT | Modify core code (`syne/` engine, tools, channels, db, llm, security) |
-| ❌ CANNOT | Modify `syne/db/schema.sql` |
-| 📝 INSTEAD | Core bugs → draft GitHub issue for owner to post |
+| CAN | Create/edit files in `syne/abilities/custom/` |
+| CANNOT | Modify core code (engine, tools, channels, db, llm, security) |
+| CANNOT | Modify `syne/db/schema.sql` |
+| REPORTS | Core bugs → formats GitHub issue for owner to post |
 
 ### Ability Interface
 
@@ -265,19 +321,23 @@ class Ability:
     name: str
     description: str
     version: str
+    permission: int = 0o700  # 3-digit octal (owner/family/public)
 
     async def execute(self, params: dict, context: dict) -> dict: ...
     def get_schema(self) -> dict: ...
+    def get_guide(self, enabled: bool, config: dict) -> str: ...
+    async def ensure_dependencies(self) -> tuple[bool, str]: ...
 ```
 
-### ⚠️ Security Warning (exec)
+### Exec Security
 
-The `exec` tool gives Syne shell access on the host system. This is powerful but dangerous:
+The `exec` tool gives Syne shell access on the host system:
 
-- **Owner-only** — Only users with `owner` access level can trigger exec
-- **Timeout** — Configurable per-session via `session.max_tool_rounds` (default: 100)
-- **Sub-agents** — Inherit exec access but run in isolated sessions
-- **Your responsibility** — Review what Syne executes, especially on production systems
+- **Owner-only** (permission 700) — only the owner can trigger exec
+- **Configurable timeout** — `exec.timeout_max` (default: 300 seconds)
+- **Output limit** — `exec.output_max_chars` (default: 4000 chars)
+- **Sub-agents** — inherit exec access but run in isolated sessions
+- **Your responsibility** — review what Syne executes, especially on production systems
 
 ---
 
@@ -297,58 +357,67 @@ User: "Write full documentation for the project"
 |---------|---------|-------------|
 | `subagents.enabled` | `true` | Master ON/OFF switch |
 | `subagents.max_concurrent` | `2` | Max simultaneous sub-agents |
-| `subagents.timeout_seconds` | `300` | Sub-agent timeout (5 min) |
+| `subagents.timeout_seconds` | `900` | Sub-agent timeout (15 min) |
 
-Sub-agents inherit abilities and memory access but run in isolated sessions. They cannot spawn other sub-agents.
-
----
-
-## Multi-User Access
-
-Syne supports multiple users with different access levels:
-
-| Level | Permissions |
-|-------|------------|
-| `owner` | Full access — exec, config, abilities, memory, all tools (Rule 700) |
-| `family` | Memory access, conversation (Rule 760) |
-| `public` | Conversation only |
-
-The first user to message Syne automatically becomes `owner`.
-
-Manage via conversation: *"Make @alice family"*, *"Remove @bob's access"*
+Sub-agents inherit abilities and memory access but run in isolated sessions. They cannot spawn other sub-agents or use config/management tools.
 
 ---
 
 ## Configuration Reference
 
-All configuration lives in the `config` table. Defaults below reflect the recommended setup from `syne init` (Google Gemini + Together AI). Change via conversation or SQL.
+All configuration lives in the `config` table. Change via conversation or `update_config` tool.
 
 ### Provider Settings
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `provider.primary` | `google` | LLM provider |
-| `provider.chat_model` | `gemini-2.5-pro` | Chat model |
-| `provider.embedding_model` | Depends on init choice | Embedding model |
-| `provider.embedding_dimensions` | `1024` (Ollama) / `768` (Together AI) | Vector dimensions |
-| `provider.embedding_driver` | `ollama` / `together` / `openai` | Embedding provider driver |
+| `provider.active_model` | `"gemini-pro"` | Active chat model key |
+| `provider.active_embedding` | `"together-bge"` | Active embedding model key |
 
 ### Memory Settings
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `memory.auto_capture` | `false` | Auto-evaluate messages for storage |
-| `memory.recall_limit` | `10` | Max memories per query |
+| `memory.recall_limit` | `5` | Max memories per query |
+| `memory.decay_interval` | `50` | Decay every N conversations |
+| `memory.decay_amount` | `1` | Recall count decrease per decay cycle |
+| `memory.initial_recall_count` | `1` | Starting durability for new memories |
+| `memory.evaluator_driver` | `"ollama"` | Evaluator: "ollama" (local) or "provider" (main LLM) |
+| `memory.evaluator_model` | `"qwen3:0.6b"` | Ollama model for evaluation |
 
 ### Session Settings
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `session.compaction_threshold` | `80000` | Tokens before compaction |
-| `session.max_messages` | `100` | Messages before compaction |
-| `session.max_tool_rounds` | `100` | Max tool call rounds per turn |
-| `session.thinking_budget` | `null` | Thinking: `0`=off, `1024`=low, `4096`=medium, `8192`=high, `24576`=max |
-| `session.reasoning_visible` | `false` | Show thinking in responses |
+| `session.compaction_threshold` | `80000` | Characters before auto-compaction |
+| `session.compaction_keep_recent` | `40` | Messages kept after compaction |
+| `session.max_messages` | `100` | Messages before suggesting compaction |
+| `session.thinking_budget` | `null` | Thinking: `0`=off, `1024`=low, `8192`=high, `24576`=max |
+
+### Rate Limiting
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `ratelimit.max_requests` | `4` | Max requests per user per window |
+| `ratelimit.window_seconds` | `60` | Rate limit window |
+| `ratelimit.owner_exempt` | `true` | Owner exempt from rate limits |
+
+### Telegram Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `telegram.dm_policy` | `"approval"` | DM policy: "approval" or "open" |
+| `telegram.group_policy` | `"allowlist"` | Group policy: "allowlist" or "open" |
+| `telegram.require_mention` | `true` | Require @mention in groups |
+
+### Exec & Web Settings
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `exec.timeout_max` | `300` | Max exec timeout (seconds) |
+| `exec.output_max_chars` | `4000` | Max output characters |
+| `web_fetch.timeout` | `30` | HTTP fetch timeout (seconds) |
 
 ### Sub-agent Settings
 
@@ -356,7 +425,7 @@ All configuration lives in the `config` table. Defaults below reflect the recomm
 |-----|---------|-------------|
 | `subagents.enabled` | `true` | Enable sub-agents |
 | `subagents.max_concurrent` | `2` | Max concurrent sub-agents |
-| `subagents.timeout_seconds` | `300` | Sub-agent timeout |
+| `subagents.timeout_seconds` | `900` | Sub-agent timeout (15 min) |
 
 ---
 
@@ -377,8 +446,8 @@ syne restart               # Restart agent
 syne stop                  # Stop agent
 
 # Updates
-syne update                # Update to latest release (skips if version unchanged)
-syne updatedev             # Force pull + reinstall (ignores version check)
+syne update                # Update to latest release (includes restart)
+syne updatedev             # Force pull + reinstall (includes restart)
 
 # Database
 syne db init               # Initialize schema
@@ -393,6 +462,10 @@ syne prompt                # Show system prompt
 syne memory stats          # Memory statistics
 syne memory search "query" # Semantic search
 syne memory add "info"     # Manually add memory
+
+# Backup & Restore
+syne backup                # Backup database
+syne restore               # Restore from backup
 ```
 
 ### Interactive CLI Commands
@@ -452,25 +525,32 @@ syne memory add "info"     # Manually add memory
 |  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
 |  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
 |  |                                                      |  |
-|  |  Core Tools (19):                                    |  |
-|  |  exec · memory · web · config · files · cron · voice  |  |
-|  |  files · cron · reactions · voice                     |  |
+|  |  Core Tools (23):                                    |  |
+|  |  exec · db_query · memory · web · config · files     |  |
+|  |  send · schedule · reactions · voice · subagent      |  |
 |  +------------------------------------------------------+  |
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              ABILITIES (Pluggable)                   |  |
 |  |                                                      |  |
-|  |  [image_gen]  [image_analysis]  [maps]  [custom...]  |  |
+|  |  [image_gen]  [image_analysis]  [maps]  [pdf]        |  |
+|  |  [website_screenshot]  [whatsapp]  [custom...]       |  |
 |  |                                                      |  |
 |  |  Self-Created: Syne adds new abilities at runtime    |  |
 |  +------------------------------------------------------+  |
 |                                                            |
 |  +------------------------------------------------------+  |
+|  |              PERMISSION LAYER                        |  |
+|  |  Linux-style 3-digit octal: owner/family/public      |  |
+|  |  Every tool and ability has its own permission        |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  13 tables — all state in one database              |  |
-|  |  memory · sessions · messages · config · abilities · |  |
-|  |  groups · subagent_runs · capabilities ·             |  |
-|  |  scheduled_tasks                                     |  |
+|  |  14 tables — all state in one database              |  |
+|  |  memory · sessions · messages · config · abilities   |  |
+|  |  users · groups · group_members · identity · soul    |  |
+|  |  rules · scheduled_tasks · subagent_runs             |  |
 |  +------------------------------------------------------+  |
 +------------------------------------------------------------+
 ```
@@ -482,10 +562,11 @@ syne memory add "info"     # Manually add memory
 | Table | Purpose |
 |-------|---------|
 | `identity` | Agent name, motto, personality |
-| `soul` | Behavioral rules by category |
+| `soul` | Behavioral directives by category |
 | `rules` | Hard/soft rules with severity |
-| `users` | Multi-user with access levels |
+| `users` | Multi-user with access levels (owner/family/public/blocked) |
 | `groups` | Group chat configuration |
+| `group_members` | Per-group member access and aliases |
 | `memory` | Semantic memory with pgvector embeddings |
 | `sessions` | Conversation sessions |
 | `messages` | Full message history |
@@ -493,7 +574,6 @@ syne memory add "info"     # Manually add memory
 | `config` | Runtime configuration (key-value) |
 | `subagent_runs` | Sub-agent execution history |
 | `scheduled_tasks` | Cron jobs and scheduled task definitions |
-| `capabilities` | System capabilities registry |
 
 ---
 
@@ -501,9 +581,9 @@ syne memory add "info"     # Manually add memory
 
 | Component | Technology |
 |-----------|-----------|
-| Language | Python 3.12 |
+| Language | Python 3.11+ |
 | Database | PostgreSQL 16 + pgvector |
-| Chat LLM | Google Gemini 2.5 Pro (OAuth), Claude, GPT (6 drivers) |
+| Chat LLM | Google Gemini, Claude, ChatGPT, OpenAI, Together AI, Ollama (7 drivers) |
 | Embedding | Ollama (qwen3-embedding, local) or Together AI / OpenAI (cloud) |
 | Telegram | python-telegram-bot |
 | HTTP | httpx (async) |
@@ -517,40 +597,61 @@ syne memory add "info"     # Manually add memory
 syne/
 ├── syne/
 │   ├── main.py              # Entry point
-│   ├── agent.py             # Main agent coordinator
-│   ├── boot.py              # System prompt builder
-│   ├── config.py            # Settings loader
-│   ├── conversation.py      # Session management
-│   ├── context.py           # Context window management
+│   ├── agent.py             # Main agent: tool registration, OAuth, startup
+│   ├── boot.py              # System prompt builder (identity, soul, rules, guides)
+│   ├── conversation.py      # Conversation loop: context → LLM → tools → response
+│   ├── context.py           # Context window manager (token counting)
 │   ├── compaction.py        # Conversation summarization
-│   ├── security.py          # Rule 700/760 enforcement
-│   ├── cli.py               # CLI commands (init, start, repair, etc.)
+│   ├── security.py          # Permission system, SSRF protection, credential masking
+│   ├── ratelimit.py         # Per-user rate limiting
+│   ├── scheduler.py         # Cron/scheduled task runner
+│   ├── subagent.py          # Background sub-agent task runner
+│   ├── config_guide.py      # Config reference (injected into system prompt)
+│   ├── system_guide.py      # Architecture guide (injected into system prompt)
+│   ├── update_checker.py    # GitHub version checker
+│   ├── communication/
+│   │   ├── inbound.py       # InboundContext (source of truth per message)
+│   │   ├── formatting.py    # Output formatting, tag stripping
+│   │   └── errors.py        # Error classification
+│   ├── channels/
+│   │   ├── telegram.py      # Telegram bot (commands, groups, photos, voice, docs)
+│   │   └── cli_channel.py   # Interactive CLI (REPL)
 │   ├── auth/
-│   │   └── google_oauth.py  # Google CCA OAuth PKCE
+│   │   ├── google_oauth.py  # Google OAuth2 (for Gemini CCA)
+│   │   ├── codex_oauth.py   # ChatGPT/Codex OAuth
+│   │   └── claude_oauth.py  # Anthropic Claude OAuth
 │   ├── llm/
 │   │   ├── provider.py      # Abstract LLM interface
-│   │   ├── drivers.py       # Driver registry + model system
-│   │   ├── google.py        # Gemini (OAuth)
+│   │   ├── drivers.py       # Driver registry + embedding drivers
+│   │   ├── google.py        # Gemini (OAuth + API key)
 │   │   ├── codex.py         # ChatGPT/Codex (OAuth)
-│   │   ├── openai.py        # OpenAI-compatible (Groq, etc.)
-│   │   ├── anthropic.py     # Claude (OAuth)
-│   │   ├── together.py      # Together AI (embedding)
-│   │   ├── ollama.py        # Ollama (local embedding)
-│   │   └── hybrid.py        # Chat + Embed from different providers
+│   │   ├── anthropic.py     # Claude (OAuth + API key)
+│   │   ├── openai.py        # OpenAI-compatible
+│   │   ├── together.py      # Together AI
+│   │   ├── ollama.py        # Local Ollama models
+│   │   └── hybrid.py        # Multi-provider with failover
 │   ├── memory/
-│   │   ├── engine.py        # Store, recall, dedup, conflict resolution
+│   │   ├── engine.py        # Store, recall, decay, dedup, conflict resolution
 │   │   └── evaluator.py     # Auto-evaluate (3-layer filter)
-│   ├── channels/
-│   │   ├── telegram.py      # Telegram bot adapter
-│   │   └── cli_channel.py   # Interactive CLI (REPL)
-│   ├── tools/               # 19 core tools
+│   ├── tools/               # 23 core tools
 │   ├── abilities/           # Bundled + self-created abilities
-│   ├── scheduler.py         # Cron/scheduled task runner
-│   └── db/
-│       ├── schema.sql       # Database schema (13 tables)
-│       ├── connection.py    # Async connection pool
-│       └── models.py        # Data access layer
-├── tests/                   # 362 tests
+│   │   ├── custom/          # User-created abilities (only writable dir)
+│   │   └── ...              # 6 bundled abilities
+│   ├── db/
+│   │   ├── schema.sql       # Database schema (14 tables)
+│   │   ├── connection.py    # Async connection pool (asyncpg)
+│   │   ├── models.py        # Data access layer
+│   │   └── credentials.py   # Encrypted credential storage
+│   └── cli/                 # CLI commands package
+│       ├── cmd_init.py      # syne init
+│       ├── cmd_start.py     # syne start
+│       ├── cmd_status.py    # syne status
+│       ├── cmd_repair.py    # syne repair
+│       ├── cmd_update.py    # syne update
+│       ├── cmd_db.py        # syne db
+│       ├── cmd_memory.py    # syne memory
+│       ├── cmd_backup.py    # syne backup/restore
+│       └── ...
 ├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
@@ -582,7 +683,7 @@ pytest
 - [x] Conflict resolution (3-zone similarity)
 - [x] Ability system (bundled + self-created)
 - [x] Self-modification (abilities only)
-- [x] Multi-model support (6 drivers: Google, OpenAI, Anthropic, Groq, Together AI, Ollama)
+- [x] Multi-model support (7 drivers: Google, OpenAI, Anthropic, Codex, Together AI, Ollama, Hybrid)
 - [x] Interactive CLI mode
 - [x] Source code introspection (read_source)
 - [x] Systemd service auto-setup
@@ -590,9 +691,16 @@ pytest
 - [x] Multi-user access control
 - [x] File operations (read/write with security enforcement)
 - [x] Cron scheduler (DB-backed, once/interval/cron expressions)
-- [x] Telegram reactions (send/receive, 71 emojis)
+- [x] Telegram reactions (send/receive)
 - [x] Voice message support (STT via Groq Whisper)
 - [x] Ollama embedding (local, $0 — qwen3-embedding with auto-install)
+- [x] Linux-style permission system (3-digit octal per tool/ability)
+- [x] PDF generation (HTML to PDF via wkhtmltopdf)
+- [x] Website screenshots (Playwright + Chromium)
+- [x] WhatsApp bridge (via wacli)
+- [x] Memory decay system (conversation-based, configurable)
+- [x] Self-healing with bug reporting (diagnose → format GitHub issue)
+- [x] Comprehensive system prompt guides (config, architecture, security)
 - [ ] Ability marketplace
 - [ ] Web UI
 
