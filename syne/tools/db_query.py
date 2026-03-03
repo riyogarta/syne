@@ -29,18 +29,48 @@ _MAX_ROWS = 50
 _MAX_OUTPUT = 8000
 
 
+_DANGEROUS_KEYWORDS = frozenset({
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE",
+    "CREATE", "REPLACE", "UPSERT", "GRANT", "REVOKE",
+    "COPY", "EXECUTE", "CALL", "DO", "SET", "RESET",
+    "VACUUM", "REINDEX", "CLUSTER", "COMMENT", "LOCK",
+    "NOTIFY", "LISTEN", "UNLISTEN", "LOAD", "SECURITY",
+    "REASSIGN", "DISCARD", "REFRESH", "IMPORT",
+})
+
+
 def _is_read_only(sql: str) -> bool:
-    """Check if SQL is a read-only query."""
+    """Check if SQL is a read-only query.
+
+    Two-layer check:
+    1. First keyword must be SELECT, EXPLAIN, or SHOW
+    2. Entire query must NOT contain any dangerous keywords (INSERT, DROP, etc.)
+       This catches embedded writes like: SELECT 1; DROP TABLE users
+       or subquery tricks like: SELECT * FROM (DELETE FROM users RETURNING *)
+    """
     cleaned = sql.strip().rstrip(";").strip()
-    # Remove leading comments
+    # Remove comments
     cleaned = re.sub(r'--.*$', '', cleaned, flags=re.MULTILINE).strip()
     cleaned = re.sub(r'/\*.*?\*/', '', cleaned, flags=re.DOTALL).strip()
 
-    first_word = cleaned.split()[0].upper() if cleaned.split() else ""
+    if not cleaned:
+        return False
 
-    # Only allow SELECT and common read-only commands
-    allowed = {"SELECT", "EXPLAIN", "SHOW", "\\DT", "\\D"}
-    return first_word in allowed
+    # Layer 1: first keyword must be read-only
+    first_word = cleaned.split()[0].upper()
+    allowed_start = {"SELECT", "EXPLAIN", "SHOW", "\\DT", "\\D"}
+    if first_word not in allowed_start:
+        return False
+
+    # Layer 2: scan ALL tokens for dangerous keywords
+    # Tokenize: split on whitespace and common delimiters, uppercase
+    tokens = set(re.findall(r'[A-Za-z_]+', cleaned.upper()))
+    found = tokens & _DANGEROUS_KEYWORDS
+    if found:
+        logger.warning(f"db_query blocked — dangerous keywords found: {found}")
+        return False
+
+    return True
 
 
 def _redact_row(columns: list[str], row: tuple) -> tuple:
