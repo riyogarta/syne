@@ -39,7 +39,7 @@ def init():
     console.print("  2. ChatGPT / GPT [green](free via Codex OAuth)[/green]")
     console.print("  3. Claude [green](free via claude.ai OAuth)[/green]")
     console.print("  [dim]     Google/GPT OAuth need SSH port forwarding on headless servers.[/dim]")
-    console.print("  [dim]       Claude supports Device Code — no forwarding needed![/dim]")
+    console.print("  [dim]       Claude works everywhere — no forwarding needed![/dim]")
     console.print()
     console.print("  [bold yellow]API Key (paid per token):[/bold yellow]")
     console.print("  4. OpenAI [yellow](API key, paid)[/yellow]")
@@ -78,18 +78,9 @@ def init():
     elif choice == 3:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
-        console.print()
-        console.print("  [bold]Auth method:[/bold]")
-        console.print("  a) Browser on this machine (Auth Code + PKCE)")
-        console.print("  b) Headless / Device Code (open URL on any device)")
-        auth_method = click.prompt("Select", type=click.Choice(["a", "b"]), default="b")
 
-        if auth_method == "a":
-            from syne.auth.claude_oauth import login_claude
-            claude_creds = asyncio.run(login_claude())
-        else:
-            from syne.auth.claude_oauth import login_claude_device
-            claude_creds = asyncio.run(login_claude_device())
+        from syne.auth.claude_oauth import login_claude
+        claude_creds = asyncio.run(login_claude())
 
         provider_config = {
             "driver": "anthropic",

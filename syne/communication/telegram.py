@@ -2550,6 +2550,7 @@ Or just send me a message!"""
             keyboard = [
                 [InlineKeyboardButton("Google (OAuth)", callback_data="models:add:google_cca")],
                 [InlineKeyboardButton("OpenAI (OAuth)", callback_data="models:add:codex")],
+                [InlineKeyboardButton("Claude (OAuth)", callback_data="models:add:anthropic")],
                 [InlineKeyboardButton("🔑 AI API Key", callback_data="models:add_apikey")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="models:main")],
             ]
@@ -2757,12 +2758,14 @@ Or just send me a message!"""
             _oauth_meta = {
                 "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
                 "codex": ("OpenAI (OAuth)", "gpt-5.2, o3-pro"),
+                "anthropic": ("Claude (OAuth)", "claude-sonnet-4-20250514, claude-opus-4-20250514"),
             }
             driver_label, examples = _oauth_meta.get(driver, (driver, "model-name"))
             self._auth_state[user.id] = {
                 "type": "models_add",
                 "driver": driver,
                 "step": "model_id",
+                "auth_override": "oauth",
             }
             try:
                 await query.answer()
@@ -4889,39 +4892,54 @@ Or just send me a message!"""
         return False
 
     async def _process_oauth_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
-        """Process pasted OAuth callback URL."""
+        """Process pasted OAuth callback URL or paste-code."""
         from urllib.parse import urlparse, parse_qs
 
         text = text.strip()
-
-        # Check if this looks like a callback URL
-        if not text.startswith("http"):
-            # Not a URL — user might be chatting normally
-            bot = context.bot if context else self.app.bot
-            await bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ That doesn't look like a callback URL.\n"
-                     "Paste the full URL from your browser address bar, or send /cancel to abort.",
-            )
-            return True  # Still consume the message to prevent history save
-
-        parsed = urlparse(text)
-        params = parse_qs(parsed.query)
-        code = params.get("code", [None])[0]
-
-        if not code:
-            bot = context.bot if context else self.app.bot
-            await bot.send_message(
-                chat_id=chat_id,
-                text="⚠️ No authorization code found in that URL.\n"
-                     "Make sure you copy the ENTIRE URL from the browser address bar.",
-            )
-            return True
-
         provider = state["provider"]
         bot = context.bot if context else self.app.bot
 
-        await bot.send_message(chat_id=chat_id, text="🔄 Exchanging authorization code...")
+        # Claude uses paste-code flow (code or code#state, not a URL)
+        if provider == "claude":
+            if not text:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ No code provided. Paste the code from the page, or send /cancel to abort.",
+                )
+                return True
+
+            # Parse: may be "code#state" or just "code"
+            if "#" in text:
+                code, pasted_state = text.split("#", 1)
+                state["pasted_state"] = pasted_state
+            else:
+                code = text
+                state["pasted_state"] = state.get("verifier", "")
+
+            await bot.send_message(chat_id=chat_id, text="🔄 Exchanging authorization code...")
+        else:
+            # Other providers: expect callback URL
+            if not text.startswith("http"):
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ That doesn't look like a callback URL.\n"
+                         "Paste the full URL from your browser address bar, or send /cancel to abort.",
+                )
+                return True
+
+            parsed = urlparse(text)
+            params = parse_qs(parsed.query)
+            code = params.get("code", [None])[0]
+
+            if not code:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ No authorization code found in that URL.\n"
+                         "Make sure you copy the ENTIRE URL from the browser address bar.",
+                )
+                return True
+
+            await bot.send_message(chat_id=chat_id, text="🔄 Exchanging authorization code...")
 
         try:
             if provider == "google":
@@ -5098,7 +5116,7 @@ Or just send me a message!"""
                     return True
 
             # Build model entry and save
-            auth_type = self._DRIVER_AUTH_TYPES.get(driver, "api_key")
+            auth_type = state.get("auth_override") or self._DRIVER_AUTH_TYPES.get(driver, "api_key")
             entry = {
                 "key": state["model_id"].replace("/", "-").replace(".", "-").lower(),
                 "label": state["label"],
@@ -5505,9 +5523,18 @@ Or just send me a message!"""
                 "label": label,
             }
 
-            await bot.send_message(
-                chat_id=chat_id,
-                text=(
+            if driver == "claude":
+                instructions = (
+                    f"🔐 **{label} OAuth Setup**\n\n"
+                    f"1️⃣ Open this URL in your browser:\n\n"
+                    f"`{url}`\n\n"
+                    f"2️⃣ Sign in and authorize access\n"
+                    f"3️⃣ The page will display a code\n"
+                    f"4️⃣ Copy and paste the code here\n\n"
+                    f"⏱️ You have 5 minutes. Send /cancel to abort."
+                )
+            else:
+                instructions = (
                     f"🔐 **{label} OAuth Setup**\n\n"
                     f"1️⃣ Open this URL in your browser:\n\n"
                     f"`{url}`\n\n"
@@ -5516,7 +5543,11 @@ Or just send me a message!"""
                     f"4️⃣ Copy the ENTIRE URL from the browser address bar\n"
                     f"5️⃣ Paste it here\n\n"
                     f"⏱️ You have 5 minutes. Send /cancel to abort."
-                ),
+                )
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=instructions,
                 parse_mode="Markdown",
             )
             logger.info(f"OAuth flow started for {label} ({driver}) by user {user_id}")
@@ -5587,26 +5618,26 @@ Or just send me a message!"""
         return url, {"verifier": verifier, "challenge": challenge, "state": state}
 
     def _generate_claude_oauth_url(self) -> tuple[str, dict]:
-        """Generate Claude OAuth URL with PKCE."""
+        """Generate Claude OAuth URL with PKCE (paste-code flow)."""
         import base64, hashlib, secrets
         from urllib.parse import urlencode
 
         verifier = secrets.token_urlsafe(64)
         digest = hashlib.sha256(verifier.encode()).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-        state = secrets.token_hex(16)
 
         params = urlencode({
-            "response_type": "code",
+            "code": "true",
             "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-            "redirect_uri": "http://localhost:9742/oauth/callback",
-            "scope": "user:inference user:profile",
+            "response_type": "code",
+            "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+            "scope": "org:create_api_key user:inference user:profile",
             "code_challenge": challenge,
             "code_challenge_method": "S256",
-            "state": state,
+            "state": verifier,
         })
         url = f"https://claude.ai/oauth/authorize?{params}"
-        return url, {"verifier": verifier, "challenge": challenge, "state": state}
+        return url, {"verifier": verifier, "challenge": challenge, "state": verifier}
 
     async def _exchange_google_oauth(self, code: str, state: dict):
         """Exchange Google auth code for tokens and save to DB."""
@@ -5690,13 +5721,14 @@ Or just send me a message!"""
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://platform.claude.com/v1/oauth/token",
+                "https://console.anthropic.com/v1/oauth/token",
                 data={
                     "grant_type": "authorization_code",
                     "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
                     "code": code,
+                    "state": state.get("pasted_state", state.get("verifier", "")),
+                    "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
                     "code_verifier": state["verifier"],
-                    "redirect_uri": "http://localhost:9742/oauth/callback",
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
