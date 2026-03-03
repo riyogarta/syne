@@ -236,6 +236,7 @@ async def compact_session(
             ],
             temperature=0.1,
             max_tokens=16384,
+            thinking_budget=0,  # No thinking needed for summarization
         )
 
         summary = summary_response.content
