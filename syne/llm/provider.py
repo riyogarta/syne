@@ -1,8 +1,8 @@
 """Provider-agnostic LLM interface."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, Callable
 
 
 # ════════════════════════════════════════════════════════
@@ -46,6 +46,13 @@ class ChatResponse:
     output_tokens: int = 0
     tool_calls: Optional[list] = None
     thinking: Optional[str] = None  # Model's reasoning/thinking text (if returned)
+
+
+@dataclass
+class StreamCallbacks:
+    """Callbacks for real-time streaming of LLM output to the CLI."""
+    on_text: Optional[Callable[[str], None]] = None       # text delta
+    on_thinking: Optional[Callable[[str], None]] = None   # thinking delta
 
 
 @dataclass
@@ -103,6 +110,7 @@ class LLMProvider(ABC):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         """Send a chat completion request."""
         ...

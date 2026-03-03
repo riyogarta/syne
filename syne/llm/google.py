@@ -27,7 +27,7 @@ import random
 from collections import deque
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError, StreamCallbacks
 from ..auth.google_oauth import GoogleCredentials
 
 logger = logging.getLogger("syne.llm.google")
@@ -770,14 +770,15 @@ class GoogleProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
 
         if self._use_cca:
             await self._throttle_cca()
-            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k)
+            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
         else:
-            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k)
+            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
 
     async def _chat_cca(
         self,
@@ -789,6 +790,7 @@ class GoogleProvider(LLMProvider):
         thinking_budget: Optional[int] = None,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         """Chat via Cloud Code Assist (OAuth, free)."""
         token = await self.credentials.get_token()
@@ -847,9 +849,9 @@ class GoogleProvider(LLMProvider):
             **_CCA_HEADERS,
         }
 
-        return await self._chat_cca_streaming(body, headers, model)
+        return await self._chat_cca_streaming(body, headers, model, stream_callbacks=stream_callbacks)
 
-    async def _chat_cca_streaming(self, body: dict, headers: dict, model: str) -> ChatResponse:
+    async def _chat_cca_streaming(self, body: dict, headers: dict, model: str, stream_callbacks: Optional[StreamCallbacks] = None) -> ChatResponse:
         """Chat via CCA streaming endpoint with full OpenClaw-style retry logic.
 
         Implements:
@@ -922,10 +924,14 @@ class GoogleProvider(LLMProvider):
                                     has_content = True
                                     if part.get("thought"):
                                         thinking_parts.append(part["text"])
+                                        if stream_callbacks and stream_callbacks.on_thinking:
+                                            stream_callbacks.on_thinking(part["text"])
                                     else:
                                         # #10: Skip empty text blocks
                                         if part["text"].strip():
                                             text_parts.append(part["text"])
+                                            if stream_callbacks and stream_callbacks.on_text:
+                                                stream_callbacks.on_text(part["text"])
                                 elif "functionCall" in part:
                                     has_content = True
                                     fc = part["functionCall"]
@@ -1072,6 +1078,7 @@ class GoogleProvider(LLMProvider):
         thinking_budget: Optional[int] = None,
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         """Chat via standard Gemini API (API key, paid)."""
         system_text, contents = self._format_messages(messages, model)
@@ -1133,6 +1140,13 @@ class GoogleProvider(LLMProvider):
                         "arguments": json.dumps(fc.get("args", {})),
                     }
                 })
+
+        # Non-streaming: fire callbacks with full content at once
+        if stream_callbacks:
+            if thinking_parts and stream_callbacks.on_thinking:
+                stream_callbacks.on_thinking("".join(thinking_parts))
+            if text_parts and stream_callbacks.on_text:
+                stream_callbacks.on_text("".join(text_parts))
 
         usage = data.get("usageMetadata", {})
 

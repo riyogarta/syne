@@ -5,7 +5,7 @@ import json
 import logging
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 logger = logging.getLogger("syne.llm.openai")
 
@@ -179,6 +179,7 @@ class OpenAIProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         is_reasoning = "gpt-5" in model.lower() or "o3" in model.lower() or "o1" in model.lower()
@@ -275,12 +276,20 @@ class OpenAIProvider(LLMProvider):
                         # Content
                         if delta.get("content"):
                             content_parts.append(delta["content"])
+                            if stream_callbacks and stream_callbacks.on_text:
+                                stream_callbacks.on_text(delta["content"])
 
                         # Reasoning / thinking
                         if delta.get("reasoning_summary"):
-                            thinking_text = (thinking_text or "") + delta["reasoning_summary"]
+                            chunk = delta["reasoning_summary"]
+                            thinking_text = (thinking_text or "") + chunk
+                            if stream_callbacks and stream_callbacks.on_thinking:
+                                stream_callbacks.on_thinking(chunk)
                         elif delta.get("reasoning"):
-                            thinking_text = (thinking_text or "") + delta["reasoning"]
+                            chunk = delta["reasoning"]
+                            thinking_text = (thinking_text or "") + chunk
+                            if stream_callbacks and stream_callbacks.on_thinking:
+                                stream_callbacks.on_thinking(chunk)
 
                         # Tool calls — accumulate by index
                         if delta.get("tool_calls"):

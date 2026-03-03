@@ -2,6 +2,7 @@
 
 import asyncio
 import getpass
+import json
 import logging
 import os
 import sys
@@ -17,21 +18,29 @@ from rich.text import Text
 from ..agent import SyneAgent
 from ..config import load_settings
 from ..db.models import get_or_create_user, get_identity
+from ..llm.provider import StreamCallbacks
 
 logger = logging.getLogger("syne.cli_channel")
 console = Console()
 
+# ── ANSI helpers for raw streaming output ──
+_DIM = "\033[2m"
+_DIM_ITALIC = "\033[2;3m"
+_RESET = "\033[0m"
+_CYAN = "\033[36m"
+_BOLD = "\033[1m"
+
 
 async def cli_select(options: list[str], default: int = 0) -> int:
     """Arrow-key selector for CLI choices.
-    
-    Displays options vertically. User navigates with ↑/↓ and confirms with Enter.
+
+    Displays options vertically. User navigates with up/down and confirms with Enter.
     Selected option is marked with '>'.
-    
+
     Args:
         options: List of option labels (e.g. ["Yes", "No", "Always allow"])
         default: Index of initially selected option (0-based)
-        
+
     Returns:
         Index of chosen option
     """
@@ -91,6 +100,44 @@ async def cli_select(options: list[str], default: int = 0) -> int:
 _prompt_session: PromptSession | None = None
 
 
+# ── Session token usage tracker ──
+class _SessionUsage:
+    """Accumulate token counts across the entire CLI session."""
+    __slots__ = ("total_in", "total_out")
+
+    def __init__(self):
+        self.total_in = 0
+        self.total_out = 0
+
+_session_usage = _SessionUsage()
+
+
+def _short_model_name(model: str) -> str:
+    """Extract a short display name from a full model ID.
+
+    Examples:
+        claude-sonnet-4-20250514 → sonnet-4
+        gemini-2.5-pro-preview-05-06 → gemini-2.5-pro
+        gpt-5-0806 → gpt-5
+    """
+    name = model
+    # Strip date suffixes like -20250514, -0806, -preview-05-06
+    import re
+    name = re.sub(r'-preview(-\d{2}-\d{2})?$', '', name)
+    name = re.sub(r'-\d{6,}$', '', name)
+    name = re.sub(r'-\d{4}$', '', name)
+    return name
+
+
+def _format_tokens(n: int) -> str:
+    """Format token count: 1234 → '1,234'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 10_000:
+        return f"{n / 1_000:.1f}K"
+    return f"{n:,}"
+
+
 async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
     """Run Syne in interactive CLI mode (resumes previous session by default)."""
     if debug:
@@ -135,6 +182,14 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
             event.current_buffer.insert_text("\n")
     except Exception:
         pass  # Terminal doesn't support — Esc+Enter still works
+
+    # Ctrl+L to clear screen
+    @_kb.add("c-l")
+    def _clear_screen(event):
+        """Ctrl+L clears the terminal."""
+        sys.stdout.write("\033[2J\033[H")
+        sys.stdout.flush()
+        event.app.renderer.clear()
 
     _prompt_session = PromptSession(key_bindings=_kb, multiline=True)
 
@@ -271,12 +326,13 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
         identity = await get_identity()
         agent_name = identity.get("name", "Syne")
         motto = identity.get("motto", "")
+        model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
 
         console.print()
         console.print(Panel(
             f"[bold]{agent_name}[/bold]" + (f"\n[dim italic]{motto}[/dim italic]" if motto else ""),
             style="blue",
-            subtitle=f"Model: {agent.provider.name} | Tools: {len(agent.tools.list_tools('owner'))} | Type /help for commands",
+            subtitle=f"Model: {model_short} | Tools: {len(agent.tools.list_tools('owner'))} | Type /help for commands",
         ))
 
         # Check for pending update notice
@@ -340,10 +396,17 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
         _last_ctrl_c = 0.0
         while True:
             # Phase 1: Get input (idle)
+            # Resolve model name for prompt (may change mid-session via /models)
+            _prompt_model = _short_model_name(getattr(agent.provider, 'chat_model', ''))
+            # Check if active conversation has a different provider (per-session override)
+            _conv_active = agent.conversations._active.get(f"cli:{chat_id}")
+            if _conv_active and hasattr(_conv_active, 'provider'):
+                _prompt_model = _short_model_name(getattr(_conv_active.provider, 'chat_model', _prompt_model))
+
             try:
-                user_input = await _get_input()
+                user_input = await _get_input(_prompt_model)
             except (KeyboardInterrupt, asyncio.CancelledError):
-                # Ctrl+C at prompt → double-tap to exit
+                # Ctrl+C at prompt -> double-tap to exit
                 now = _time.time()
                 if now - _last_ctrl_c < 2.0:
                     console.print("\n[dim]Goodbye![/dim]")
@@ -371,7 +434,53 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
 
             # Phase 2: Process (Ctrl+C or Esc = cancel this request)
             console.print()
+
+            # ── Streaming state ──
+            _streamed_any_text = False
+            _streamed_any_thinking = False
+            _in_thinking = False
+            _thinking_done = False
             status = None
+
+            # Get reasoning_visible from active conversation (or False)
+            _reasoning_visible = False
+            _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
+            if _active_conv:
+                _reasoning_visible = _active_conv.reasoning_visible
+
+            def _on_text(chunk: str):
+                nonlocal _streamed_any_text, _in_thinking, _thinking_done, status
+                # First text token: stop spinner, print separator after thinking
+                if not _streamed_any_text:
+                    _streamed_any_text = True
+                    if status:
+                        status.stop()
+                        status = None
+                    if _streamed_any_thinking and not _thinking_done:
+                        _thinking_done = True
+                        sys.stdout.write(f"{_RESET}\n")
+                        sys.stdout.flush()
+                    _in_thinking = False
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+
+            def _on_thinking(chunk: str):
+                nonlocal _streamed_any_thinking, _in_thinking, status
+                if not _reasoning_visible:
+                    return
+                if not _streamed_any_thinking:
+                    _streamed_any_thinking = True
+                    if status:
+                        status.stop()
+                        status = None
+                    _in_thinking = True
+                    sys.stdout.write(_DIM_ITALIC)
+                if not _in_thinking:
+                    _in_thinking = True
+                    sys.stdout.write(_DIM_ITALIC)
+                sys.stdout.write(chunk)
+                sys.stdout.flush()
+
             try:
                 msg = user_input
                 status = console.status("[bold blue]Thinking...", spinner="dots")
@@ -379,28 +488,49 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                 agent.conversations._active_status = status
                 _cli_status_callback._active_status = status
 
-                # Wire tool callback to update spinner
-                _TOOL_LABELS = {
-                    "exec": "🔧 Running command...",
-                    "memory_search": "🔍 Searching memory...",
-                    "memory_store": "💾 Storing memory...",
-                    "web_search": "🌐 Searching web...",
-                    "web_fetch": "🌐 Fetching page...",
-                    "spawn_subagent": "🤖 Spawning sub-agent...",
-                    "file_read": "📖 Reading file...",
-                    "file_write": "📝 Writing file...",
-                    "read_source": "📖 Reading source...",
-                    "update_config": "⚙️ Updating config...",
-                    "update_soul": "✨ Updating soul...",
-                    "update_ability": "🧩 Updating ability...",
-                    "manage_schedule": "⏰ Managing schedule...",
-                    "manage_user": "👤 Managing user...",
-                    "manage_group": "👥 Managing group...",
-                }
+                # Wire streaming callbacks
+                stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
+                agent.conversations.set_stream_callbacks(stream_cbs)
 
+                # Wire tool detail callback (replaces simple spinner labels)
+                async def _on_tool_detail(name: str, args: dict, result_preview: str):
+                    nonlocal status, _streamed_any_text
+                    # Ensure we're on a clean line
+                    if _streamed_any_text:
+                        sys.stdout.write("\n")
+                        _streamed_any_text = False
+                    if status:
+                        status.stop()
+                        status = None
+                    # Format args concisely
+                    args_str = ""
+                    if args:
+                        parts = []
+                        for k, v in list(args.items())[:3]:
+                            vs = str(v)
+                            if len(vs) > 40:
+                                vs = vs[:37] + "..."
+                            parts.append(f'{k}="{vs}"')
+                        args_str = ", ".join(parts)
+                    sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
+                    # Show result preview
+                    preview = result_preview.strip().replace("\n", " ")
+                    if len(preview) > 80:
+                        preview = preview[:77] + "..."
+                    if preview:
+                        sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
+                    sys.stdout.flush()
+                    # Restart spinner for next LLM call
+                    status = console.status("[bold blue]Thinking...", spinner="dots")
+                    status.start()
+                    agent.conversations._active_status = status
+
+                agent.conversations.set_tool_detail_callback(_on_tool_detail)
+
+                # Wire simple tool callback for spinner updates (fallback)
                 async def _on_tool(name: str):
-                    label = _TOOL_LABELS.get(name, f"🔧 {name}...")
-                    status.update(f"[bold blue]{label}")
+                    if status:
+                        status.update(f"[bold blue]Running {name}...")
 
                 agent.conversations.set_tool_callback(_on_tool)
 
@@ -420,19 +550,56 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                     message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
                 )
 
-                # Cleanup spinner
+                # Cleanup spinner + callbacks
                 _stop_status(status, agent)
                 status = None
 
-                # Display response
-                if response:
+                # Reset ANSI state
+                sys.stdout.write(_RESET)
+                sys.stdout.flush()
+
+                # Display response — skip if already streamed
+                if _streamed_any_text:
+                    # Already streamed; just ensure newline
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                elif response:
                     _display_response(response)
+
+                # Token usage line
+                _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
+                if _active_conv_final and hasattr(_active_conv_final, '_last_response_usage'):
+                    in_tok = _active_conv_final._last_response_usage.get("input_tokens", 0)
+                    out_tok = _active_conv_final._last_response_usage.get("output_tokens", 0)
+                elif response:
+                    # Parse from conversation's last chat response
+                    in_tok = 0
+                    out_tok = 0
+                else:
+                    in_tok = 0
+                    out_tok = 0
+
+                # Update session totals from the conversation's last response
+                if _active_conv_final:
+                    # The response object isn't directly available, but we stored it
+                    last_resp = getattr(_active_conv_final, '_last_chat_response', None)
+                    if last_resp:
+                        in_tok = last_resp.input_tokens
+                        out_tok = last_resp.output_tokens
+
+                if in_tok or out_tok:
+                    _session_usage.total_in += in_tok
+                    _session_usage.total_out += out_tok
+                    console.print(f"[dim][{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out][/dim]")
+
                 console.print()
             except (KeyboardInterrupt, asyncio.CancelledError):
-                # Ctrl+C during processing → cancel, back to prompt
+                # Ctrl+C during processing -> cancel, back to prompt
+                sys.stdout.write(_RESET)
+                sys.stdout.flush()
                 _stop_status(status, agent)
                 status = None
-                console.print("\n[yellow]⚡ Cancelled[/yellow]\n")
+                console.print("\n[yellow]Cancelled[/yellow]\n")
                 continue
 
     except Exception as e:
@@ -463,17 +630,20 @@ def _stop_status(status, agent):
         agent.conversations._active_status = None
         _cli_status_callback._active_status = None
         agent.conversations.set_tool_callback(None)
+        agent.conversations.set_stream_callbacks(None)
+        agent.conversations.set_tool_detail_callback(None)
     except Exception:
         pass
 
 
-async def _get_input() -> str | None:
+async def _get_input(model_name: str = "") -> str | None:
     """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
+    prompt_str = f"{model_name} > " if model_name else "> "
     try:
         result = await _prompt_session.prompt_async(
-            "> ",
+            prompt_str,
             multiline=True,
-            prompt_continuation="… ",
+            prompt_continuation="  ",
         )
         return result
     except EOFError:
@@ -509,7 +679,7 @@ async def _handle_cli_command(
     command: str, agent: SyneAgent, user: dict, chat_id: str
 ) -> str | bool:
     """Handle CLI-specific slash commands.
-    
+
     Returns:
         - "exit" to quit
         - True if handled
@@ -525,24 +695,55 @@ async def _handle_cli_command(
     elif cmd == "/help":
         console.print(Panel(
             "[bold]CLI Commands[/bold]\n\n"
-            "/help          — Show this help\n"
-            "/status        — Show agent status\n"
-            "/models        — Show/switch model\n"
-            "/memory        — Search memories\n"
-            "/compact       — Compact conversation\n"
-            "/clear         — Clear conversation history\n"
-            "/think [level] — Set thinking budget\n"
-            "/exit          — Exit CLI\n"
+            "/help          \u2014 Show this help\n"
+            "/status        \u2014 Show agent status\n"
+            "/models        \u2014 Show/switch model\n"
+            "/memory        \u2014 Search memories\n"
+            "/compact       \u2014 Compact conversation\n"
+            "/clear         \u2014 Clear conversation history\n"
+            "/think [level] \u2014 Set thinking budget\n"
+            "/cost          \u2014 Show session token usage\n"
+            "/context       \u2014 Show context usage\n"
+            "/exit          \u2014 Exit CLI\n"
             "\n[dim]All other messages are sent to the agent.[/dim]\n"
-            "[dim]Shift+Enter or Esc+Enter for new line.[/dim]",
+            "[dim]Shift+Enter or Esc+Enter for new line. Ctrl+L to clear screen.[/dim]",
             style="blue",
         ))
+        return True
+
+    elif cmd == "/cost":
+        console.print(
+            f"[bold]Session token usage[/bold]\n"
+            f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
+            f"  Output: {_format_tokens(_session_usage.total_out)}\n"
+            f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}"
+        )
+        return True
+
+    elif cmd == "/context":
+        conv = agent.conversations._active.get(f"cli:{chat_id}")
+        if conv:
+            msg_count = len(conv._message_cache)
+            # Estimate token usage
+            from ..context import estimate_messages_tokens
+            est_tokens = estimate_messages_tokens(conv._message_cache)
+            ctx_window = conv.provider.context_window
+            pct = min(100, int(est_tokens / ctx_window * 100)) if ctx_window else 0
+            console.print(
+                f"[bold]Context usage[/bold]\n"
+                f"  Messages: {msg_count}\n"
+                f"  Estimated tokens: ~{_format_tokens(est_tokens)}\n"
+                f"  Context window: {_format_tokens(ctx_window)}\n"
+                f"  Usage: ~{pct}%"
+            )
+        else:
+            console.print("[dim]No active conversation.[/dim]")
         return True
 
     elif cmd == "/status":
         # Reuse the status logic
         from ..db.models import get_config, list_users
-        
+
         identity = await get_identity()
         model_name = getattr(agent.provider, 'chat_model', 'unknown')
         provider_name = agent.provider.name
@@ -572,14 +773,14 @@ async def _handle_cli_command(
         from .. import __version__ as syne_version
 
         console.print(Panel(
-            f"[bold]{identity.get('name', 'Syne')}[/bold] · Syne v{syne_version}\n"
-            f"🤖 Model: {model_name} ({provider_name})\n"
-            f"📚 Memories: {mem_count}\n"
-            f"👥 Users: {user_count} | Groups: {group_count}\n"
-            f"💬 Sessions: {session_count} active • {total_messages} messages\n"
-            f"🔧 Tools: {tool_count} | Abilities: {ability_count}\n"
-            f"💭 Thinking: {thinking}\n"
-            f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
+            f"[bold]{identity.get('name', 'Syne')}[/bold] \u00b7 Syne v{syne_version}\n"
+            f"Model: {model_name} ({provider_name})\n"
+            f"Memories: {mem_count}\n"
+            f"Users: {user_count} | Groups: {group_count}\n"
+            f"Sessions: {session_count} active \u2022 {total_messages} messages\n"
+            f"Tools: {tool_count} | Abilities: {ability_count}\n"
+            f"Thinking: {thinking}\n"
+            f"Auto-capture: {'ON' if auto_capture else 'OFF'}",
             title="Status",
             style="blue",
         ))
@@ -596,7 +797,7 @@ async def _handle_cli_command(
                     "DELETE FROM messages WHERE session_id = $1", conv.session_id
                 )
             conv._message_cache.clear()
-            console.print("[green]✓ Conversation cleared.[/green]")
+            console.print("[green]Conversation cleared.[/green]")
         else:
             console.print("[dim]No active conversation.[/dim]")
         return True
@@ -609,7 +810,8 @@ async def _handle_cli_command(
         if args:
             # Forward model switch to agent
             return False
-        console.print(f"[bold]Current model:[/bold] {agent.provider.chat_model} ({agent.provider.name})")
+        model_name = getattr(agent.provider, 'chat_model', 'unknown')
+        console.print(f"[bold]Current model:[/bold] {model_name} ({agent.provider.name})")
         return True
 
     elif cmd == "/think":

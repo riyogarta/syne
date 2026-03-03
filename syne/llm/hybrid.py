@@ -4,7 +4,7 @@ Default setup: Google CCA (free OAuth chat) + Together AI (cheap embedding).
 """
 
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 
 class HybridProvider(LLMProvider):
@@ -50,11 +50,13 @@ class HybridProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         return await self._chat.chat(
             messages, model, temperature, max_tokens, tools, thinking_budget,
             top_p=top_p, top_k=top_k,
             frequency_penalty=frequency_penalty, presence_penalty=presence_penalty,
+            stream_callbacks=stream_callbacks,
         )
 
     async def embed(

@@ -7,7 +7,7 @@ import os
 import time
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 logger = logging.getLogger("syne.llm.codex")
 
@@ -248,6 +248,7 @@ class CodexProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         instructions, input_msgs = self._format_input(messages)

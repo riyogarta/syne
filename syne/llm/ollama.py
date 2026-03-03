@@ -7,7 +7,7 @@ Only implements embed/embed_batch — no chat support (use other providers for c
 import httpx
 import logging
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 logger = logging.getLogger("syne.llm.ollama")
 
@@ -39,6 +39,11 @@ class OllamaProvider(LLMProvider):
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         thinking_budget: Optional[int] = None,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
+        frequency_penalty: Optional[float] = None,
+        presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         """Not supported — Ollama provider is embedding-only."""
         raise NotImplementedError("OllamaProvider is embedding-only. Use another provider for chat.")

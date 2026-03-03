@@ -2,7 +2,7 @@
 
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 
 class TogetherProvider(LLMProvider):
@@ -46,6 +46,7 @@ class TogetherProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
 

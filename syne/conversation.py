@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Optional
 from .db.connection import get_connection
-from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator
+from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens
@@ -52,6 +52,7 @@ class Conversation:
         self.chat_id: Optional[str] = inbound.chat_id if inbound else None
         self.model_params: dict = {}  # Per-model LLM params (all 7: temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty)
         self.reasoning_visible: bool = False  # Per-model reasoning visibility
+        self.stream_callbacks: Optional[StreamCallbacks] = None  # Set by ConversationManager for CLI streaming
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
@@ -382,6 +383,7 @@ class Conversation:
             response = await self.provider.chat(
                 messages=context,
                 tools=tool_schemas if tool_schemas else None,
+                stream_callbacks=self.stream_callbacks,
                 **chat_kwargs,
             )
 
@@ -415,6 +417,9 @@ class Conversation:
 
         # Store thinking for the channel to optionally display
         self._last_thinking = response.thinking
+
+        # Store last response for CLI token display
+        self._last_chat_response = response
 
         # Attach any media collected during tool calls to the final response
         final_response = response.content
@@ -656,6 +661,14 @@ class Conversation:
                 from .communication.outbound import strip_server_paths
                 result = strip_server_paths(str(result))
 
+                # Notify CLI about tool execution details
+                if self._mgr and self._mgr._tool_detail_callback:
+                    try:
+                        preview = str(result)[:200]
+                        await self._mgr._tool_detail_callback(name, args, preview)
+                    except Exception:
+                        pass
+
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
@@ -670,6 +683,7 @@ class Conversation:
             current = await self.provider.chat(
                 messages=context,
                 tools=tool_schemas if tool_schemas else None,
+                stream_callbacks=self.stream_callbacks,
                 **self._build_chat_kwargs(),
             )
             usage.add(current)
@@ -684,6 +698,7 @@ class Conversation:
             current = await self.provider.chat(
                 messages=context,
                 tools=None,
+                stream_callbacks=self.stream_callbacks,
                 **self._build_chat_kwargs(),
             )
             usage.add(current)
@@ -810,6 +825,8 @@ class ConversationManager:
         self._delivery_callbacks: list = []  # Multi-slot: channels register via add/remove
         self._status_callbacks: list = []  # Multi-slot: channels register via add/remove
         self._tool_callback = None  # Single-slot (CLI only, per-cycle)
+        self._stream_callbacks: Optional[StreamCallbacks] = None  # CLI streaming
+        self._tool_detail_callback = None  # async (name, args, result_preview) — CLI tool display
 
         # Wire up sub-agent completion callback
         if self.subagents:
@@ -866,10 +883,21 @@ class ConversationManager:
 
     def set_tool_callback(self, callback):
         """Set callback for tool activity notifications.
-        
+
         callback(tool_name: str) -> None
         """
         self._tool_callback = callback
+
+    def set_stream_callbacks(self, callbacks: Optional[StreamCallbacks]):
+        """Set streaming callbacks (CLI only). Applied to conversations in handle_message."""
+        self._stream_callbacks = callbacks
+
+    def set_tool_detail_callback(self, callback):
+        """Set callback for detailed tool execution display.
+
+        callback(tool_name: str, args: dict, result_preview: str) -> Awaitable
+        """
+        self._tool_detail_callback = callback
 
     def _session_key(self, platform: str, chat_id: str) -> str:
         return f"{platform}:{chat_id}"
@@ -1098,6 +1126,9 @@ class ConversationManager:
                 conv.model_params = _wa_entry.get("params") or conv.model_params
                 conv.reasoning_visible = bool(_wa_entry.get("reasoning_visible", False))
                 logger.info(f"WA model override for {chat_id}: {wa_override}")
+
+        # Apply streaming callbacks (CLI only — None for Telegram/WA)
+        conv.stream_callbacks = self._stream_callbacks
 
         response = await conv.chat(message, message_metadata=message_metadata)
 

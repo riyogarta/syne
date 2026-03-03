@@ -9,7 +9,7 @@ from typing import Optional
 
 import httpx
 
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
 
 logger = logging.getLogger("syne.llm.anthropic")
 
@@ -271,6 +271,7 @@ class AnthropicProvider(LLMProvider):
         top_k: Optional[int] = None,
         frequency_penalty: Optional[float] = None,
         presence_penalty: Optional[float] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
         
@@ -501,9 +502,15 @@ class AnthropicProvider(LLMProvider):
                                 continue
 
                             if dtype == "text_delta":
-                                ab["text"] += delta.get("text", "")
+                                chunk = delta.get("text", "")
+                                ab["text"] += chunk
+                                if chunk and stream_callbacks and stream_callbacks.on_text:
+                                    stream_callbacks.on_text(chunk)
                             elif dtype == "thinking_delta":
-                                ab["text"] += delta.get("thinking", "")
+                                chunk = delta.get("thinking", "")
+                                ab["text"] += chunk
+                                if chunk and stream_callbacks and stream_callbacks.on_thinking:
+                                    stream_callbacks.on_thinking(chunk)
                             elif dtype == "input_json_delta":
                                 ab["json"] += delta.get("partial_json", "")
 
