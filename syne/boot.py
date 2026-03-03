@@ -621,6 +621,10 @@ async def build_system_prompt(
     if ability_guide:
         parts.append(ability_guide)
 
+    # [13] SYSTEM GUIDE — architecture, diagnostics, bug reporting
+    from .system_guide import SYSTEM_GUIDE
+    parts.append(SYSTEM_GUIDE)
+
     return "\n".join(parts)
 
 
