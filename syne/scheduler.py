@@ -14,26 +14,52 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, Awaitable
 
+try:
+    from zoneinfo import ZoneInfo
+except Exception:  # pragma: no cover
+    ZoneInfo = None
+
 logger = logging.getLogger("syne.scheduler")
 
 # Check interval in seconds
 _CHECK_INTERVAL = 30
 
 
-def _parse_cron_next(cron_expr: str, from_time: datetime) -> Optional[datetime]:
+def _get_tz(tz_name: str):
+    """Resolve IANA timezone name to a tzinfo, fallback to UTC."""
+    if ZoneInfo:
+        try:
+            return ZoneInfo(tz_name)
+        except Exception:
+            logger.warning(f"Invalid timezone '{tz_name}', falling back to UTC")
+            return ZoneInfo("UTC")
+    return timezone.utc
+
+
+def _parse_cron_next(cron_expr: str, from_time: datetime, tz=None) -> Optional[datetime]:
     """Parse cron expression and calculate next run time.
-    
+
     Args:
         cron_expr: Cron expression (e.g., "0 9 * * *" for 9 AM daily)
-        from_time: Calculate next run from this time
-        
+        from_time: Calculate next run from this time (UTC)
+        tz: Optional timezone — cron is interpreted in this timezone,
+            result is converted back to UTC.
+
     Returns:
-        Next run datetime or None if parsing fails
+        Next run datetime (UTC) or None if parsing fails
     """
     try:
         from croniter import croniter
-        cron = croniter(cron_expr, from_time)
-        return cron.get_next(datetime)
+        if tz and tz != timezone.utc:
+            # Convert from_time to local timezone for cron interpretation
+            local_time = from_time.astimezone(tz)
+            cron = croniter(cron_expr, local_time)
+            next_local = cron.get_next(datetime)
+            # Convert back to UTC for storage
+            return next_local.astimezone(timezone.utc)
+        else:
+            cron = croniter(cron_expr, from_time)
+            return cron.get_next(datetime)
     except ImportError:
         logger.error("croniter not installed. Run: pip install croniter")
         return None
@@ -46,9 +72,10 @@ def _calculate_next_run(
     schedule_type: str,
     schedule_value: str,
     from_time: Optional[datetime] = None,
+    tz=None,
 ) -> Optional[datetime]:
     """Calculate next run time based on schedule type.
-    
+
     Args:
         schedule_type: 'once', 'interval', or 'cron'
         schedule_value: Value depends on type:
@@ -56,12 +83,13 @@ def _calculate_next_run(
             - interval: seconds as string
             - cron: cron expression
         from_time: Calculate from this time (default: now)
-        
+        tz: Optional timezone for cron interpretation
+
     Returns:
         Next run datetime (timezone-aware UTC) or None
     """
     now = from_time or datetime.now(timezone.utc)
-    
+
     if schedule_type == "once":
         # Parse ISO timestamp
         try:
@@ -72,7 +100,7 @@ def _calculate_next_run(
         except Exception as e:
             logger.error(f"Invalid ISO timestamp '{schedule_value}': {e}")
             return None
-    
+
     elif schedule_type == "interval":
         # Interval in seconds
         try:
@@ -81,13 +109,24 @@ def _calculate_next_run(
         except ValueError:
             logger.error(f"Invalid interval value '{schedule_value}'")
             return None
-    
+
     elif schedule_type == "cron":
-        return _parse_cron_next(schedule_value, now)
-    
+        return _parse_cron_next(schedule_value, now, tz=tz)
+
     else:
         logger.error(f"Unknown schedule type: {schedule_type}")
         return None
+
+
+async def _get_system_tz():
+    """Read system.timezone from config and resolve to tzinfo."""
+    from .db.models import get_config
+    tz_name = await get_config("system.timezone", "UTC")
+    if isinstance(tz_name, str):
+        tz_name = tz_name.strip()
+    else:
+        tz_name = "UTC"
+    return _get_tz(tz_name)
 
 
 class Scheduler:
@@ -192,9 +231,10 @@ class Scheduler:
                 now,
             )
             
-            # Load misfire grace window (default 5 minutes)
+            # Load misfire grace window and system timezone
             from .db.models import get_config
             grace = await get_config("scheduler.misfire_grace_seconds", 300)
+            sys_tz = await _get_system_tz()
 
             for task in due_tasks:
                 task_id = task["id"]
@@ -215,7 +255,8 @@ class Scheduler:
                             f"{overdue:.0f}s late (grace={grace}s)"
                         )
                         # Advance next_run without executing
-                        next_run = _calculate_next_run(schedule_type, schedule_value, now)
+                        cron_tz = sys_tz if schedule_type == "cron" else None
+                        next_run = _calculate_next_run(schedule_type, schedule_value, now, tz=cron_tz)
                         if next_run:
                             await conn.execute(
                                 """
@@ -254,7 +295,8 @@ class Scheduler:
                         )
                     else:
                         # Calculate next run for interval/cron
-                        next_run = _calculate_next_run(schedule_type, schedule_value, now)
+                        cron_tz = sys_tz if schedule_type == "cron" else None
+                        next_run = _calculate_next_run(schedule_type, schedule_value, now, tz=cron_tz)
                         
                         if next_run:
                             # Check end_date: if next_run exceeds end_date, disable task
@@ -334,8 +376,9 @@ async def create_task(
     if schedule_type not in ("once", "interval", "cron"):
         return {"success": False, "error": f"Invalid schedule_type: {schedule_type}"}
     
-    # Calculate initial next_run
-    next_run = _calculate_next_run(schedule_type, schedule_value)
+    # Calculate initial next_run (use configured timezone for cron)
+    cron_tz = await _get_system_tz() if schedule_type == "cron" else None
+    next_run = _calculate_next_run(schedule_type, schedule_value, tz=cron_tz)
     if not next_run:
         return {"success": False, "error": f"Invalid schedule_value for {schedule_type}: {schedule_value}"}
     

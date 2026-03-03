@@ -178,18 +178,38 @@ class Conversation:
         # LLMs often hallucinate the current date/time unless we provide it explicitly.
         # This is not a privileged system/credential (Rule 700); it's safe to expose in groups.
         try:
-            if ZoneInfo:
-                wib = ZoneInfo("Asia/Jakarta")
-                now_wib = datetime.now(wib)
+            from .db.models import get_config as _get_tz_config
+            tz_name = await _get_tz_config("system.timezone", "UTC")
+            if isinstance(tz_name, str):
+                tz_name = tz_name.strip()
             else:
-                now_wib = datetime.now(timezone(timedelta(hours=7)))
-            now_utc = now_wib.astimezone(timezone.utc)
+                tz_name = "UTC"
+
+            # Resolve timezone, fallback to UTC on invalid name
+            local_tz = None
+            if ZoneInfo:
+                try:
+                    local_tz = ZoneInfo(tz_name)
+                except Exception:
+                    logger.warning(f"Invalid timezone '{tz_name}', falling back to UTC")
+                    tz_name = "UTC"
+                    local_tz = ZoneInfo("UTC")
+
+            if local_tz:
+                now_local = datetime.now(local_tz)
+            else:
+                now_local = datetime.now(timezone.utc)
+                tz_name = "UTC"
+            now_utc = now_local.astimezone(timezone.utc)
+
             time_lines = [
                 "# Runtime context (authoritative)",
                 "Use this as the ground truth for the current time/date. Do not guess.",
-                f"- Now (WIB / Asia/Jakarta): {now_wib.isoformat(timespec='seconds')}",
-                f"- Now (UTC): {now_utc.isoformat(timespec='seconds')}",
+                f"- Now ({tz_name}): {now_local.isoformat(timespec='seconds')}",
             ]
+            # Show UTC as secondary reference if local tz is not UTC
+            if tz_name != "UTC":
+                time_lines.append(f"- Now (UTC): {now_utc.isoformat(timespec='seconds')}")
             messages.append(ChatMessage(role="system", content="\n".join(time_lines)))
         except Exception as e:
             # If time injection fails, continue without it.

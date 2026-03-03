@@ -374,7 +374,9 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.evaluator_model', '"qwen3:0.6b"', 'Ollama model for memory evaluation'),
     -- Evaluator model registry (CRUD via /evaluator)
     ('memory.evaluator_models', '[{"key":"qwen3-0-6b","label":"qwen3:0.6b (Ollama)","driver":"ollama","model_id":"qwen3:0.6b","base_url":"http://localhost:11434"}]', 'Evaluator model registry'),
-    ('memory.active_evaluator', '"qwen3-0-6b"', 'Active evaluator model key')
+    ('memory.active_evaluator', '"qwen3-0-6b"', 'Active evaluator model key'),
+    -- System timezone
+    ('system.timezone', '"UTC"', 'System timezone (IANA format, e.g. Asia/Jakarta, America/New_York)')
 ON CONFLICT (key) DO NOTHING;
 
 -- Add memory decay columns (permanent flag + recall_count for conversation-based decay)
@@ -564,6 +566,11 @@ BEGIN
         UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
     END IF;
 END $$;
+
+-- v0.23.9: add system.timezone config
+INSERT INTO config (key, value, description) VALUES
+    ('system.timezone', '"UTC"', 'System timezone (IANA format, e.g. Asia/Jakarta, America/New_York)')
+ON CONFLICT (key) DO NOTHING;
 
 -- v0.23.5: remove rpm_limit from model registry (was arbitrary CCA throttle)
 DO $$

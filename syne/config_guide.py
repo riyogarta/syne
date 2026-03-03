@@ -102,6 +102,22 @@ Controls extended thinking/reasoning for supported models.
 - **Warning**: Higher budgets significantly increase token usage and response time.
   Not all models support thinking budgets — ignored by models without this feature.
 
+## System Timezone
+
+| Key | Default | Type |
+|-----|---------|------|
+| `system.timezone` | `"UTC"` | string (IANA timezone) |
+
+Controls what timezone the agent uses for:
+- Time context injected into conversations (ground truth for LLM)
+- Cron schedule interpretation ("0 9 * * *" = 9 AM in this timezone)
+
+Examples: `"Asia/Jakarta"`, `"America/New_York"`, `"Europe/London"`, `"UTC"`
+- **Change when**: Bot operator is not in UTC and wants local time awareness.
+- **Warning**: Changing timezone does NOT retroactively adjust existing scheduled tasks'
+  `next_run` values. Existing cron tasks will pick up the new timezone on their next
+  recalculation (after the current `next_run` fires).
+
 ## Rate Limiting
 
 | Key | Default | Type |
