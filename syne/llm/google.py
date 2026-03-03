@@ -524,7 +524,6 @@ class GoogleProvider(LLMProvider):
         api_key: Optional[str] = None,
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
-        cca_rpm: Optional[int] = None,  # kept for interface compat, ignored
     ):
         self.credentials = credentials
         self.api_key = api_key
