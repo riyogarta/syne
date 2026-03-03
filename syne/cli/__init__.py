@@ -29,7 +29,7 @@ def _show_help():
         ],
         "Usage": [
             ("start", "Start Syne agent (Telegram bot)"),
-            ("cli", "Interactive CLI chat"),
+            ("cli", "Interactive CLI chat (resumes per-directory, -n for fresh)"),
             ("status", "Show agent status"),
         ],
         "Data": [
