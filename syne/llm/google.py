@@ -52,12 +52,12 @@ _CCA_HEADERS = {
 # Standard Gemini API endpoint (used with API keys)
 _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 
-# Retry configuration — match OpenClaw exactly
-_MAX_RETRIES = 3
-_BASE_DELAY_MS = 1_000
+# Retry configuration
+_MAX_RETRIES = 5
+_BASE_DELAY_MS = 2_000
 _MAX_EMPTY_STREAM_RETRIES = 2
 _EMPTY_STREAM_BASE_DELAY_MS = 500
-_MAX_RETRY_DELAY_MS = 60_000
+_MAX_RETRY_DELAY_MS = 120_000
 _STREAM_OVERALL_TIMEOUT = 300  # 5min hard cap on entire SSE stream
 
 # CCA rate limiting is handled server-side. No client-side throttle —
