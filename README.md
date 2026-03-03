@@ -18,37 +18,9 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
 - **No config files** — Everything lives in PostgreSQL. Change behavior through conversation, not YAML
-- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding via Ollama (local, $0) or Together AI (~$0.008/1M tokens)
+- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding + memory evaluator via Ollama (local, $0). Entire stack can run at $0/month
 - **Linux-style permissions** — 3-digit octal permissions (owner/family/public) for every tool and ability
 - **Interactive CLI** — Code like Claude Code, but with persistent memory and tools
-
----
-
-## Cost
-
-The table below shows the **minimum cost** setup using free OAuth providers. During `syne init`, you choose your own chat LLM and embedding provider — costs vary depending on your choice.
-
-**Minimum cost setup (Google Gemini + Ollama):**
-
-| Component | Model | Cost | Notes |
-|-----------|-------|------|-------|
-| Chat LLM | Gemini 2.5 Pro (Google OAuth) | **$0** | Free, rate-limited |
-| Embedding | qwen3-embedding:0.6b (Ollama) | **$0** | Local, requires 2GB+ RAM |
-| Image Gen | FLUX.1-schnell (Together AI) | **~$0.003/image** | Optional ability |
-| PostgreSQL | Self-hosted (Docker) | **$0** | |
-| Telegram Bot | Telegram Bot API | **$0** | |
-| **Typical monthly** | | **$0** | With Ollama embedding |
-
-**Other provider options available during install:**
-
-| Type | Providers |
-|------|-----------|
-| Chat (OAuth, free) | Google Gemini, ChatGPT, Claude |
-| Chat (API key, paid) | OpenAI, Anthropic, Together AI, Groq |
-| Embedding (local, free) | **Ollama** (qwen3-embedding:0.6b) |
-| Embedding (cloud, paid) | Together AI, OpenAI |
-
-> Costs depend entirely on which providers you choose. The free OAuth + Ollama combo above gives you a **completely free** setup.
 
 ---
 
@@ -56,13 +28,13 @@ The table below shows the **minimum cost** setup using free OAuth providers. Dur
 
 | Requirement | Details |
 |-------------|---------|
-| **CPU** | 1 vCPU minimum (2+ for Ollama embedding) |
+| **CPU** | 1 vCPU minimum (2+ recommended for Ollama embedding + evaluator) |
 | **OS** | Linux (Ubuntu 22.04+, Debian 12+) |
 | **Python** | 3.11+ |
-| **RAM** | 1 GB + 1 GB swap minimum. 2 GB+ recommended (Ollama adds ~1.3 GB when active) |
-| **Storage** | 500 MB + ~700 MB for Ollama model (if using local embedding) |
+| **RAM** | 2 GB minimum (Ollama loads one model at a time, ~1.3 GB per model). 4 GB recommended for smooth operation |
+| **Storage** | 1 GB base + ~1 GB for Ollama models (embedding + evaluator). ~2.5 GB total recommended |
 | **Docker** | Required — PostgreSQL 16 + pgvector runs in Docker |
-| **Network** | Google OAuth (chat), Telegram API (bot), Brave Search (optional). Cloud embedding requires Together AI or OpenAI access |
+| **Network** | Outbound HTTPS to: LLM provider (Google/OpenAI/Anthropic), Telegram API, Brave Search (optional). Ollama runs locally — no network needed for embedding and memory evaluation |
 
 ---
 
@@ -78,9 +50,9 @@ bash install.sh
 
 `install.sh` automatically installs all dependencies (python3-venv, pip, etc.), creates a virtual environment, installs Syne, and runs `syne init`.
 
-### What `syne init` Does
+### What Installation Does
 
-`syne init` is fully automated — no manual steps mid-install:
+`install.sh` runs `syne init` which is fully automated — no manual steps mid-install:
 
 1. **Choose AI provider** — OAuth (free) or API key (paid)
 2. **Choose embedding provider** — Ollama (free, local), Together AI, or OpenAI
@@ -119,30 +91,121 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 ## Memory System
 
-### Three-Layer Anti-Hallucination
+Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, the **embedding model** makes memories searchable, and the **decay engine** ensures only relevant memories survive.
 
-Only user-confirmed facts are stored. Never assistant suggestions.
+### How It Works
+
+```
+                         ┌──────────────────────────────────┐
+                         │          USER MESSAGE            │
+                         └──────────────┬───────────────────┘
+                                        │
+                    ┌───────────────────┬┴───────────────────┐
+                    │                   │                    │
+                    ▼                   ▼                    ▼
+           ┌───────────────┐  ┌─────────────────┐  ┌───────────────┐
+           │  CHAT (LLM)   │  │  AUTO-CAPTURE   │  │    RECALL     │
+           │               │  │  (Evaluator)    │  │  (Embedding)  │
+           │ Gemini/Claude │  │                 │  │               │
+           │ processes the │  │ Worth storing?  │  │ Find relevant │
+           │ conversation  │  │ What category?  │  │ memories for  │
+           │               │  │ How important?  │  │ this message  │
+           └───────────────┘  └────────┬────────┘  └───────┬───────┘
+                                       │                    │
+                                       ▼                    │
+                              ┌─────────────────┐           │
+                              │    EMBEDDING     │           │
+                              │                  │           │
+                              │ Convert text to  │◄──────────┘
+                              │ vector (1024-dim)│
+                              │ for similarity   │
+                              │ search           │
+                              └────────┬─────────┘
+                                       │
+                                       ▼
+                              ┌─────────────────┐
+                              │   PostgreSQL +   │
+                              │    pgvector      │
+                              │                  │
+                              │ HNSW index for   │
+                              │ fast semantic    │
+                              │ search over      │
+                              │ millions of      │
+                              │ memories         │
+                              └────────┬─────────┘
+                                       │
+                                       ▼
+                              ┌─────────────────┐
+                              │  DECAY ENGINE    │
+                              │                  │
+                              │ Every 50 convos: │
+                              │ recall_count - 1 │
+                              │ Unused = deleted │
+                              │ Recalled = +2    │
+                              └─────────────────┘
+```
+
+### The Three Engines
+
+#### 1. Evaluator — "Is this worth remembering?"
+
+A small, local LLM (default: Ollama qwen3:0.6b, **$0**) evaluates every message through a 3-layer filter:
 
 ```
 User message
     │
     ├─ Layer 1: Quick Filter (no LLM call)
-    │   └─ Skip: greetings, short messages, questions-only
+    │   └─ Skip: greetings, short messages, questions-only, technical noise
     │
-    ├─ Layer 2: LLM Evaluation
-    │   └─ Is this worth remembering?
+    ├─ Layer 2: LLM Evaluation (evaluator model)
+    │   └─ Is this a fact, preference, event, decision, or lesson?
+    │   └─ Assigns: category, importance score (0.0–1.0), cleaned content
     │
-    └─ Layer 3: Similarity Dedup
-        └─ Does this already exist?
+    └─ Layer 3: Similarity Dedup (embedding model)
+        └─ Does this already exist? (cosine similarity check)
 ```
+
+The evaluator runs **asynchronously** — it never blocks the chat response. Only user-confirmed facts are stored, never assistant suggestions.
+
+| Evaluator Driver | Model | Cost | Speed | Accuracy |
+|------------------|-------|------|-------|----------|
+| **Ollama** (default) | qwen3:0.6b | **$0** | Fast (local) | Good for most content |
+| Provider (main LLM) | Same as chat model | Tokens + 40s delay | Slower | Higher accuracy |
+
+#### 2. Embedding — "How do I find this later?"
+
+Every memory is converted to a high-dimensional vector (embedding) for semantic search. When the user asks a question, the question is also embedded, and pgvector finds the most similar memories using cosine distance with an HNSW index.
+
+This is what makes memory **unlimited** — you can store millions of memories and still find the right one in milliseconds, because the search is by meaning, not keywords.
+
+| Embedding Provider | Model | Dimensions | Cost | Requirements |
+|--------------------|-------|------------|------|-------------|
+| **Ollama** (recommended) | qwen3-embedding:0.6b | 1024 | **$0** | 2+ CPU cores, 2 GB+ RAM |
+| Together AI | bge-base-en-v1.5 | 768 | ~$0.008/1M tokens | API key |
+| OpenAI | text-embedding-3-small | 1536 | ~$0.02/1M tokens | API key |
+
+**Ollama** is auto-installed during `syne init` — binary, server, and model are all set up automatically.
+
+> **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces. Use the `/embedding` command in Telegram to switch.
+
+#### 3. Decay Engine — "What should I forget?"
+
+Non-permanent memories fade naturally, mimicking human forgetting:
+
+- Every **50 conversations** (configurable), `recall_count` decreases by 1
+- When `recall_count` reaches 0, the memory is **deleted**
+- Memories that are **recalled** (used in context) get a **+2 boost** each time
+- **Permanent** memories (explicit "remember this") **never decay**
+
+This creates a natural selection: useful memories that keep getting recalled survive indefinitely, while irrelevant ones fade away. You don't need to manually clean up — the system self-maintains.
 
 ### Memory Types
 
-| Type | Stored in | Decay | Created by |
-|------|-----------|-------|------------|
-| **Permanent** | `memory` table (`permanent=true`) | Never | Explicit "remember this" requests |
-| **Transient** | `memory` table (`permanent=false`) | Fades over time via `recall_count` | Auto-capture evaluation |
-| **Conversation history** | `messages` table | No decay (compacted when long) | Every message automatically |
+| Type | Decay | Created by | Example |
+|------|-------|------------|---------|
+| **Permanent** | Never | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
+| **Transient** | Fades over time | Auto-capture evaluation | Casual mentions, observations |
+| **Conversation history** | Compacted when long | Every message automatically | Full chat logs in `messages` table |
 
 ### Conflict Resolution
 
@@ -154,25 +217,18 @@ When storing a new memory, similarity to existing memories determines the action
 | 0.70–0.84 | **Update** existing | "I moved to Bandung" updates "lives in Jakarta" |
 | ≥ 0.85 | **Skip** duplicate | "I live in Jakarta" (already stored) |
 
-### Memory Decay
-
-Non-permanent memories fade naturally over time:
-
-- Every **50 conversations** (configurable), `recall_count` decreases by 1
-- When `recall_count` reaches 0, the memory is deleted
-- Memories that are **recalled** (used in context) get a +2 boost — useful memories survive naturally
-- Permanent memories never decay
+Source priority resolves conflicts: `user_confirmed` > `observed` > `auto_captured` > `system`.
 
 ### Auto Capture vs Manual
 
 | Mode | Trigger | Cost impact |
 |------|---------|-------------|
-| `auto_capture = false` (default) | Only when user says "remember this" | No extra LLM calls |
-| `auto_capture = true` | Every message evaluated automatically | +1 LLM call + 1 embedding per message |
+| `auto_capture = false` (default) | Only when user says "remember this" | No extra calls |
+| `auto_capture = true` | Every message evaluated | +1 evaluator call + 1 embedding per message |
 
-> `auto_capture = true` adds extra LLM + embedding calls per message. On free-tier OAuth this exhausts rate limits faster.
+With Ollama as both evaluator and embedding provider, auto-capture costs **$0** — both run locally.
 
-### Managing Your Memories
+### Managing Memories
 
 ```
 You:  What do you remember about my family?
@@ -186,20 +242,6 @@ Syne: Removed from memory.
 ```
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
-
-### Embedding Providers
-
-During `syne init`, you choose one of three embedding providers:
-
-| Provider | Model | Dimensions | Cost | Requirements |
-|----------|-------|------------|------|-------------|
-| **Ollama** (recommended) | qwen3-embedding:0.6b | 1024 | **$0** | 2+ CPU cores, 2 GB+ RAM, 2 GB disk |
-| Together AI | bge-base-en-v1.5 | 768 | ~$0.008/1M tokens | API key ($5 free credit) |
-| OpenAI | text-embedding-3-small | 1536 | ~$0.02/1M tokens | API key |
-
-**Ollama** is auto-installed during `syne init` if selected — binary, server, and model are all set up automatically. If your system doesn't meet the minimum requirements (2 CPU, 2 GB RAM, 2 GB disk), the Ollama option is shown but blocked.
-
-> **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces — there is no migration path. Use the `/embedding` command in Telegram to switch.
 
 ---
 

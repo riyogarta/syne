@@ -1,3 +1,3 @@
 """Syne — AI Agent Framework with Unlimited Memory."""
 
-__version__ = "0.21.8"
+__version__ = "0.21.9"
