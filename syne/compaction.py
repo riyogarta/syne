@@ -12,7 +12,9 @@ from .llm.provider import LLMProvider, ChatMessage
 
 logger = logging.getLogger("syne.compaction")
 
-MAX_SUMMARIZE_CHARS = 400_000
+CHARS_PER_TOKEN = 3.5  # rough estimate, same as context.py
+PROMPT_OVERHEAD_TOKENS = 2_000  # space for compaction prompt template + tags
+OUTPUT_TOKENS = 16_384  # max_tokens for summary output
 
 # ── Initial summary prompt (no previous summary exists) ─────
 
@@ -205,10 +207,15 @@ async def compact_session(
         summarized_chars = sum(len(r["content"]) for r in old_rows)
         conv_text = _serialize_messages(old_rows)
 
-        # Cap input to summarizer to prevent exceeding its own context window
-        if len(conv_text) > MAX_SUMMARIZE_CHARS:
-            conv_text = conv_text[-MAX_SUMMARIZE_CHARS:]
-            logger.info(f"Truncated summarizer input to {MAX_SUMMARIZE_CHARS} chars (from {summarized_chars})")
+        # Cap input based on provider's actual context window
+        available_tokens = provider.context_window - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
+        max_input_chars = int(available_tokens * CHARS_PER_TOKEN)
+        if len(conv_text) > max_input_chars:
+            conv_text = conv_text[-max_input_chars:]
+            logger.info(
+                f"Truncated summarizer input to {max_input_chars} chars "
+                f"(from {summarized_chars}, context_window={provider.context_window} tokens)"
+            )
 
         logger.info(
             f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary"
