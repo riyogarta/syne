@@ -589,8 +589,12 @@ async def build_system_prompt(
     # [6.6] WORKSPACE RULES
     parts.append(_get_workspace_section())
 
-    # [7-8] ABILITY STATUS & CONFIG — removed to save ~520 tokens.
-    # Agent can query via update_ability(action='list') and update_config(action='list').
+    # [7] CONFIG GUIDE — operational manual for all config keys
+    from .config_guide import CONFIG_GUIDE
+    parts.append(CONFIG_GUIDE)
+
+    # [8] ABILITY STATUS — removed to save tokens.
+    # Agent can query via update_ability(action='list').
 
     # [9] SOUL MANAGEMENT — removed to save ~140 tokens.
     # Only needed for personality changes; agent can use update_soul tool.
