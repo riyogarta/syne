@@ -41,7 +41,7 @@ async def wait_for_auth_code(
 
     Whichever arrives first wins.
     """
-    code_event = threading.Event()  # Use threading.Event, not asyncio.Event
+    code_event = threading.Event()
     result_code: list[str] = []
     paste_result: list[str] = []
 
@@ -57,62 +57,40 @@ async def wait_for_auth_code(
                 code_event.set()
                 return
 
-    # Thread 2: Read stdin line-by-line with select for non-blocking check
+    # Thread 2: Read URL via input() — simple and reliable
     def _read_stdin():
-        """Read callback URL from stdin. Exits promptly when code_event is set."""
-        import select
-
-        sys.stdout.write(">>> Paste URL: ")
-        sys.stdout.flush()
-
-        buf = ""
+        """Read callback URL from stdin using input()."""
         while not code_event.is_set():
             try:
-                # Use select to avoid blocking forever on read(1).
-                # This lets us check code_event regularly.
-                ready, _, _ = select.select([sys.stdin], [], [], 0.5)
-                if not ready:
-                    continue  # timeout — loop back and check code_event
-
-                ch = sys.stdin.read(1)
-                if not ch:  # EOF
-                    break
-                if ch in ("\n", "\r"):
-                    line = buf.strip()
-                    buf = ""
-                    if code_event.is_set():
-                        return  # Code already received via callback
-                    if not line:
-                        if not code_event.is_set():
-                            sys.stdout.write(">>> Paste URL: ")
-                            sys.stdout.flush()
-                        continue
-
-                    code = _extract_code_from_url(line)
-                    if code:
-                        paste_result.append(code)
-                        code_event.set()
-                        return
-                    else:
-                        if code_event.is_set():
-                            return  # Don't print error if already authenticated
-                        if "/authorize" in line or "oauth2/v2/auth" in line:
-                            sys.stdout.write(
-                                "\n⚠  That's the authorize URL. You need the REDIRECT URL.\n"
-                                "   Click 'Authorize' first, then copy the URL from the\n"
-                                "   address bar (even if the page shows an error).\n\n"
-                            )
-                        else:
-                            sys.stdout.write(
-                                "\n⚠  Could not find authorization code in that URL.\n"
-                                "   The URL should contain '?code=...' in it.\n\n"
-                            )
-                        sys.stdout.write(">>> Paste URL: ")
-                        sys.stdout.flush()
-                else:
-                    buf += ch
-            except (EOFError, OSError, KeyboardInterrupt, ValueError):
+                line = input(">>> Paste URL: ").strip()
+            except (EOFError, KeyboardInterrupt):
                 return
+
+            if code_event.is_set():
+                return  # Code already received via callback
+
+            if not line:
+                continue
+
+            code = _extract_code_from_url(line)
+            if code:
+                paste_result.append(code)
+                code_event.set()
+                return
+            else:
+                if code_event.is_set():
+                    return
+                if "/authorize" in line or "oauth2/v2/auth" in line:
+                    print(
+                        "\n⚠  That's the authorize URL. You need the REDIRECT URL.\n"
+                        "   Click 'Authorize' first, then copy the URL from the\n"
+                        "   address bar (even if the page shows an error).\n"
+                    )
+                else:
+                    print(
+                        "\n⚠  Could not find authorization code in that URL.\n"
+                        "   The URL should contain '?code=...' in it.\n"
+                    )
 
     # Start stdin reader thread
     stdin_thread = threading.Thread(target=_read_stdin, daemon=True)
@@ -126,7 +104,6 @@ async def wait_for_auth_code(
 
     # Also check if paste got it while we were waiting
     if not result_code and not paste_result:
-        # Give stdin thread a moment
         code_event.wait(timeout=2)
 
     if result_code:
