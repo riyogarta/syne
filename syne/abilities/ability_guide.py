@@ -93,27 +93,51 @@ Combine bits by adding: `r+w+x = 7`, `r+x = 5`, `r = 4`, none = `0`.
 | `0o750` | owner full + family read/exec | Family can use but not modify |
 | `0o550` | owner + family read/exec | Read-only tools for trusted users |
 | `0o555` | everyone read/exec | Safe public tools: search, lookup, info |
-| `0o777` | everyone full access | Safe creative tools: image gen, translation |
+| `0o777` | everyone full access | Safe stateless tools with NO side effects (see warning below) |
+
+**WARNING about `0o777`**: This grants access to ALL users including anonymous/public
+users — anyone who can message the bot. Only use for abilities that are:
+- Completely stateless (no data modification)
+- Free or negligible cost per call
+- Cannot be abused for spam or resource exhaustion
+- Do not expose private information
+Example: image generation (creative, no side effects, output goes only to requester)
 
 #### How to choose the right permission
-Ask these questions in order:
+Ask these questions **in order** — stop at the first YES:
 
-1. **Can this cause harm or cost money if misused?** (API costs, send messages, modify data)
-   → Start with `0o700` (owner-only)
-2. **Is this useful for family/household members?**
-   → Consider `0o770` (owner + family)
-3. **Is this safe for anyone to use?** (read-only, no side effects, no cost)
-   → Consider `0o555` or `0o777`
-4. **Does this access private data?** (health, finances, personal notes)
-   → Keep at `0o700` regardless of other factors
+1. **Does it access private/sensitive data?** (health, finances, personal notes, credentials)
+   → `0o700` — owner-only, non-negotiable
+2. **Can it modify system state?** (write files, change config, manage users, delete data)
+   → `0o700` — owner-only
+3. **Does it send messages to external services?** (email, WhatsApp, SMS, webhooks)
+   → max `0o770` — never give public send access
+4. **Does it cost significant money per call?** (paid APIs, token-heavy operations)
+   → `0o700` unless owner explicitly requests otherwise
+5. **Is it useful for family members?** (scheduling, personal tools, family-shared features)
+   → `0o770` (read+write) or `0o550` (read-only)
+6. **Is it safe for literally anyone?** (lookup, search, display public info, creative generation)
+   → `0o555` (read/exec) or `0o777` (full access if truly harmless)
 
-#### Security rules
-- **Default to 0o700** when unsure — you can always relax later
-- **Never give public (xx7) write access** to abilities that modify system state
-- Abilities that **send messages** to external services → max `0o770`
-- Abilities that **cost money** per call (paid APIs) → `0o700` unless owner says otherwise
-- Abilities that only **read/display** public info → `0o555` is safe
-- The `blocked` access level is always denied regardless of permission
+#### Security rules — MANDATORY
+These rules are non-negotiable. Always follow them, even if the owner asks otherwise.
+If the owner insists on a risky permission, **warn them clearly** before applying it.
+
+1. **Default to `0o700`** when unsure — it is always safe to be restrictive first.
+   The owner can relax permissions later; damage from overly permissive defaults cannot be undone.
+2. **Never give public (xx7) write/exec access** to abilities that modify system state,
+   send external messages, or access private data — regardless of what is requested.
+3. **Always warn the owner** when setting permission higher than `0o700`:
+   - For `0o770`: "This allows family members to use this ability."
+   - For `0o555`: "This allows ALL users including public/anonymous to use this ability."
+   - For `0o777`: "This allows ALL users full access. Confirm this ability has no side effects and no significant cost."
+4. **The `blocked` access level is always denied** regardless of permission value — no exceptions.
+5. **Validate permission makes sense** for the ability's behavior:
+   - An ability that runs shell commands should NEVER be > `0o700`
+   - An ability that reads files from disk should NEVER be > `0o700`
+   - An ability that calls paid APIs without rate limiting should NEVER be > `0o770`
+6. **When in doubt, ask the owner** — it is better to ask "should public users have access?"
+   than to silently grant it.
 
 ### External Dependencies
 If the ability needs an external binary, package, or service to work,

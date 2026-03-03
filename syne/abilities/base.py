@@ -179,7 +179,7 @@ class Ability(ABC):
             context: Execution context containing:
                 - user_id: Database user ID
                 - session_id: Current session ID
-                - access_level: User's access level (public/friend/family/admin/owner)
+                - access_level: User's access level (owner/family/public/blocked)
                 - config: Ability-specific configuration from DB
         
         Returns:
