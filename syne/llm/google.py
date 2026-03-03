@@ -582,13 +582,15 @@ class GoogleProvider(LLMProvider):
                 level = "LOW"
             return {"includeThoughts": True, "thinkingLevel": level}
 
-        # Gemini 2.5 — thinkingBudget
+        # Gemini 2.5 / Claude on CCA — thinkingBudget
+        # CCA enforces max 24576 for all models
+        _CCA_MAX_THINKING = 24576
         if thinking_budget is None:
             budget = -1  # dynamic thinking
         elif thinking_budget == 0:
             budget = 128  # minimum allowed
         else:
-            budget = thinking_budget
+            budget = min(thinking_budget, _CCA_MAX_THINKING)
         return {"includeThoughts": True, "thinkingBudget": budget}
 
     def _format_messages(self, messages: list[ChatMessage], model: str = "") -> tuple[Optional[str], list[dict]]:

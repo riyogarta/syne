@@ -845,11 +845,12 @@ async def _handle_cli_command(
             console.print(f"[dim]Already using {models[chosen].get('label', new_key)}.[/dim]")
             return True
 
-        # Switch: update DB, create new provider, invalidate cached conversation
+        # Switch: update DB, create new provider, replace everywhere
         await set_config("provider.active_model", new_key)
         new_provider = await agent.create_provider_for_model(new_key)
         if new_provider:
             agent.provider = new_provider
+            agent.conversations.provider = new_provider  # ConversationManager uses this
             # Invalidate cached conversation so next message uses new provider
             conv_key = f"cli:{chat_id}"
             if conv_key in agent.conversations._active:
