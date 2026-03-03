@@ -535,8 +535,6 @@ class GoogleProvider(LLMProvider):
             raise ValueError("Either credentials (OAuth) or api_key is required")
 
         self._use_cca = credentials is not None
-        # Limit concurrent embed calls to prevent burst 429s
-        self._embed_semaphore = asyncio.Semaphore(3)
 
     @property
     def name(self) -> str:
@@ -1128,49 +1126,48 @@ class GoogleProvider(LLMProvider):
             "content": {"parts": [{"text": text}]},
         }
 
-        async with self._embed_semaphore:
-            for attempt in range(_MAX_RETRIES + 1):
-                if self._use_cca:
-                    token = await self.credentials.get_token()
-                    headers = {"Authorization": f"Bearer {token}"}
-                    params = {}
-                else:
-                    headers = {}
-                    params = {"key": self.api_key}
+        for attempt in range(_MAX_RETRIES + 1):
+            if self._use_cca:
+                token = await self.credentials.get_token()
+                headers = {"Authorization": f"Bearer {token}"}
+                params = {}
+            else:
+                headers = {}
+                params = {"key": self.api_key}
 
-                try:
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        resp = await client.post(url, json=body, headers=headers, params=params)
-                        resp.raise_for_status()
-                        data = resp.json()
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.post(url, json=body, headers=headers, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
 
-                    vector = data["embedding"]["values"]
-                    return EmbeddingResponse(vector=vector, model=model, dimensions=len(vector))
+                vector = data["embedding"]["values"]
+                return EmbeddingResponse(vector=vector, model=model, dimensions=len(vector))
 
-                except httpx.HTTPStatusError as e:
-                    status = e.response.status_code
-                    error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
-                    if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
-                        server_delay = _extract_retry_delay(error_text, e.response.headers)
-                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                            raise LLMRateLimitError(
-                                f"Embed rate limited (429). Server requested {server_delay // 1000}s wait."
-                            ) from e
-                        logger.warning(f"Embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
-                        await asyncio.sleep(delay_ms / 1000)
-                        continue
-                    if status == 429:
-                        raise LLMRateLimitError(f"Embed rate limited (429) after {attempt + 1} attempts.") from e
-                    raise
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
+                if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
+                    server_delay = _extract_retry_delay(error_text, e.response.headers)
+                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                        raise LLMRateLimitError(
+                            f"Embed rate limited (429). Server requested {server_delay // 1000}s wait."
+                        ) from e
+                    logger.warning(f"Embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                    await asyncio.sleep(delay_ms / 1000)
+                    continue
+                if status == 429:
+                    raise LLMRateLimitError(f"Embed rate limited (429) after {attempt + 1} attempts.") from e
+                raise
 
-                except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                    if attempt < _MAX_RETRIES:
-                        delay_ms = _BASE_DELAY_MS * (2 ** attempt)
-                        logger.warning(f"Embed network error: {e}, retrying in {delay_ms}ms")
-                        await asyncio.sleep(delay_ms / 1000)
-                        continue
-                    raise
+            except (httpx.ConnectError, httpx.ReadTimeout) as e:
+                if attempt < _MAX_RETRIES:
+                    delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                    logger.warning(f"Embed network error: {e}, retrying in {delay_ms}ms")
+                    await asyncio.sleep(delay_ms / 1000)
+                    continue
+                raise
 
     async def embed_batch(
         self,
@@ -1186,50 +1183,49 @@ class GoogleProvider(LLMProvider):
             for t in texts
         ]
 
-        async with self._embed_semaphore:
-            for attempt in range(_MAX_RETRIES + 1):
-                if self._use_cca:
-                    token = await self.credentials.get_token()
-                    headers = {"Authorization": f"Bearer {token}"}
-                    params = {}
-                else:
-                    headers = {}
-                    params = {"key": self.api_key}
+        for attempt in range(_MAX_RETRIES + 1):
+            if self._use_cca:
+                token = await self.credentials.get_token()
+                headers = {"Authorization": f"Bearer {token}"}
+                params = {}
+            else:
+                headers = {}
+                params = {"key": self.api_key}
 
-                try:
-                    async with httpx.AsyncClient(timeout=60) as client:
-                        resp = await client.post(
-                            url, json={"requests": requests}, headers=headers, params=params
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        url, json={"requests": requests}, headers=headers, params=params
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
 
-                    return [
-                        EmbeddingResponse(vector=emb["values"], model=model, dimensions=len(emb["values"]))
-                        for emb in data["embeddings"]
-                    ]
+                return [
+                    EmbeddingResponse(vector=emb["values"], model=model, dimensions=len(emb["values"]))
+                    for emb in data["embeddings"]
+                ]
 
-                except httpx.HTTPStatusError as e:
-                    status = e.response.status_code
-                    error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
-                    if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
-                        server_delay = _extract_retry_delay(error_text, e.response.headers)
-                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                            raise LLMRateLimitError(
-                                f"Batch embed rate limited. Server requested {server_delay // 1000}s wait."
-                            ) from e
-                        logger.warning(f"Batch embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
-                        await asyncio.sleep(delay_ms / 1000)
-                        continue
-                    if status == 429:
-                        raise LLMRateLimitError(f"Batch embed rate limited (429) after {attempt + 1} attempts.") from e
-                    raise
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
+                if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
+                    server_delay = _extract_retry_delay(error_text, e.response.headers)
+                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                        raise LLMRateLimitError(
+                            f"Batch embed rate limited. Server requested {server_delay // 1000}s wait."
+                        ) from e
+                    logger.warning(f"Batch embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                    await asyncio.sleep(delay_ms / 1000)
+                    continue
+                if status == 429:
+                    raise LLMRateLimitError(f"Batch embed rate limited (429) after {attempt + 1} attempts.") from e
+                raise
 
-                except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                    if attempt < _MAX_RETRIES:
-                        delay_ms = _BASE_DELAY_MS * (2 ** attempt)
-                        logger.warning(f"Batch embed network error: {e}, retrying in {delay_ms}ms")
-                        await asyncio.sleep(delay_ms / 1000)
-                        continue
-                    raise
+            except (httpx.ConnectError, httpx.ReadTimeout) as e:
+                if attempt < _MAX_RETRIES:
+                    delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                    logger.warning(f"Batch embed network error: {e}, retrying in {delay_ms}ms")
+                    await asyncio.sleep(delay_ms / 1000)
+                    continue
+                raise
