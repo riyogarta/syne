@@ -193,11 +193,11 @@ def _ensure_evaluator_model(eval_model="qwen3:0.6b"):
 
 
 def _ensure_evaluator_if_enabled(syne_dir: str):
-    """Check DB if auto_capture is ON, and if so ensure Ollama + evaluator model.
+    """Ensure Ollama models are available: embedding always, evaluator if auto_capture is ON.
 
     Called during `syne update` / `syne updatedev`. Reads the config table
     directly via asyncpg to avoid importing the full Syne stack.
-    Non-fatal: if DB is unreachable or auto_capture is OFF, silently skip.
+    Non-fatal: if DB is unreachable, silently skip.
     """
     import asyncio
 
@@ -210,20 +210,19 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
         import json
         conn = await asyncpg.connect(db_url)
         try:
+            # Read auto_capture status
             row = await conn.fetchrow(
                 "SELECT value FROM config WHERE key = 'memory.auto_capture'"
             )
-            if not row:
-                return False, "qwen3:0.6b", "qwen3-embedding:0.6b"
-            enabled = bool(json.loads(row["value"]))
-            # Read evaluator model from DB config
+            auto_capture = bool(json.loads(row["value"])) if row else False
+
+            # Read evaluator model
             model_row = await conn.fetchrow(
                 "SELECT value FROM config WHERE key = 'memory.evaluator_model'"
             )
-            eval_model = "qwen3:0.6b"
-            if model_row:
-                eval_model = json.loads(model_row["value"])
-            # Read active embedding model from DB config
+            eval_model = json.loads(model_row["value"]) if model_row else "qwen3:0.6b"
+
+            # Read active embedding model from registry
             embed_model_id = "qwen3-embedding:0.6b"
             active_key_row = await conn.fetchrow(
                 "SELECT value FROM config WHERE key = 'provider.active_embedding'"
@@ -234,27 +233,30 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
                     "SELECT value FROM config WHERE key = 'provider.embedding_models'"
                 )
                 if registry_row:
-                    models = json.loads(registry_row["value"])
-                    for m in models:
+                    for m in json.loads(registry_row["value"]):
                         if m.get("key") == active_key:
                             embed_model_id = m.get("model_id", embed_model_id)
                             break
-            return enabled, eval_model, embed_model_id
+            return auto_capture, eval_model, embed_model_id
         finally:
             await conn.close()
 
     try:
-        enabled, eval_model, embed_model = asyncio.run(_check())
+        auto_capture, eval_model, embed_model = asyncio.run(_check())
     except Exception:
         return
 
-    if enabled:
-        console.print(f"[dim]Auto-capture is enabled — ensuring Ollama + embedding ({embed_model}) + evaluator ({eval_model})...[/dim]")
-        try:
-            _ensure_ollama(embed_model=embed_model)
-        except SystemExit:
-            console.print("[yellow]⚠️ Ollama setup failed — auto_capture may not work until fixed.[/yellow]")
-            return
+    # Embedding model — always needed (memory search)
+    console.print(f"[dim]Ensuring Ollama + embedding model ({embed_model})...[/dim]")
+    try:
+        _ensure_ollama(embed_model=embed_model)
+    except SystemExit:
+        console.print("[yellow]⚠️ Ollama setup failed — embedding may not work until fixed.[/yellow]")
+        return
+
+    # Evaluator model — only needed if auto_capture is ON
+    if auto_capture:
+        console.print(f"[dim]Auto-capture is enabled — ensuring evaluator model ({eval_model})...[/dim]")
         _ensure_evaluator_model(eval_model=eval_model)
     else:
         console.print("[dim]⏭ Auto-capture disabled — skipping evaluator model[/dim]")
