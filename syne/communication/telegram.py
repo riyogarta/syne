@@ -1479,17 +1479,15 @@ class TelegramChannel:
         web_search_ready = bool(web_key)
 
         # Fetch abilities from DB (dynamic — no hardcoded list)
+        import json as _json
         ability_rows = []
         try:
             async with get_connection() as conn:
                 ability_rows = await conn.fetch(
-                    "SELECT name, description, enabled FROM abilities ORDER BY name"
+                    "SELECT name, description, enabled, config FROM abilities ORDER BY name"
                 )
         except Exception:
             pass
-
-        def _status(ready: bool, yes: str = "ready", no: str = "not active") -> str:
-            return f"✅ {yes}" if ready else f"⚠️ {no}"
 
         # Build message
         lines = [f"Hi! I'm **{name}**."]
@@ -1501,20 +1499,30 @@ class TelegramChannel:
 
         # Core tools (always available)
         lines.append("🧠 Memory — I remember our conversations")
-        lines.append(f"🔍 Web Search — {_status(web_search_ready, 'ready', 'needs API key')}")
+        if web_search_ready:
+            lines.append("🔍 Web Search — ✅ ready")
+        else:
+            lines.append("🔍 Web Search — ⚠️ needs API key")
         lines.append("🌐 Web Fetch — read web pages")
         lines.append("📁 Files — read & write files")
         lines.append("⚙️ Shell — run system commands")
         lines.append("⏰ Scheduler — schedule tasks & reminders")
         lines.append("🔊 Voice — receive & transcribe voice messages")
 
-        # Abilities from DB
+        # Abilities from DB — check actual config readiness
         if ability_rows:
             lines.append("")
             for row in ability_rows:
-                status = _status(row["enabled"])
                 desc = row["description"] or row["name"]
-                lines.append(f"🔧 {desc} — {status}")
+                if not row["enabled"]:
+                    lines.append(f"🔧 {desc} — ⚠️ not active")
+                else:
+                    config = _json.loads(row["config"]) if row["config"] else {}
+                    has_config = any(v for v in config.values() if v)
+                    if has_config:
+                        lines.append(f"🔧 {desc} — ✅ ready")
+                    else:
+                        lines.append(f"🔧 {desc} — ⚠️ needs setup")
 
         lines.append("")
         lines.append("Use /models to manage AI models.")
