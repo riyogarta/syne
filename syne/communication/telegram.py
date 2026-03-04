@@ -2598,8 +2598,8 @@ Or just send me a message!"""
                 "vertex_ai": {
                     "label": "Google Vertex AI",
                     "driver": "google_cca",
-                    "base_url": "https://aiplatform.googleapis.com/v1/publishers/google",
-                    "credential_key": "credential.google_ai_api_key",
+                    "base_url": "https://us-central1-aiplatform.googleapis.com/v1/publishers/google",
+                    "credential_key": "credential.vertex_ai_api_key",
                     "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
                 },
                 "openai": {

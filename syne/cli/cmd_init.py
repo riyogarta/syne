@@ -118,7 +118,7 @@ def init():
         console.print("\n[bold green]✓ Google Vertex AI selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.cloud.google.com (APIs & Services > Credentials).[/dim]")
         api_key = click.prompt("Google Cloud API key")
-        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.google_cca_api_key", "_vertex_base_url": "https://aiplatform.googleapis.com/v1/publishers/google"}
+        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key", "_vertex_base_url": "https://us-central1-aiplatform.googleapis.com/v1/publishers/google"}
 
     elif choice == 6:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
