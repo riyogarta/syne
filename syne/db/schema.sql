@@ -615,48 +615,8 @@ BEGIN
     END IF;
 END $$;
 
--- v0.24.2: add qwen3-embedding:4b/8b to embedding registry, qwen3:1.7b/4b to evaluator registry
-DO $$
-DECLARE
-    models jsonb;
-    updated jsonb;
-    changed boolean := false;
-BEGIN
-    -- Embedding models: add 4b and 8b if not present
-    SELECT value::jsonb INTO models FROM config WHERE key = 'provider.embedding_models';
-    IF models IS NOT NULL THEN
-        updated := models;
-        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'ollama-qwen3-4b') THEN
-            updated := updated || '[{"key": "ollama-qwen3-4b", "label": "Ollama — qwen3-embedding:4b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:4b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 2560, "cost": "FREE (local CPU)"}]'::jsonb;
-            changed := true;
-        END IF;
-        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'ollama-qwen3-8b') THEN
-            updated := updated || '[{"key": "ollama-qwen3-8b", "label": "Ollama — qwen3-embedding:8b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:8b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 4096, "cost": "FREE (local CPU)"}]'::jsonb;
-            changed := true;
-        END IF;
-        IF changed THEN
-            UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.embedding_models';
-        END IF;
-    END IF;
-
-    -- Evaluator models: add 1.7b and 4b if not present
-    changed := false;
-    SELECT value::jsonb INTO models FROM config WHERE key = 'memory.evaluator_models';
-    IF models IS NOT NULL THEN
-        updated := models;
-        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'qwen3-1-7b') THEN
-            updated := updated || '[{"key":"qwen3-1-7b","label":"qwen3:1.7b (Ollama)","driver":"ollama","model_id":"qwen3:1.7b","base_url":"http://localhost:11434"}]'::jsonb;
-            changed := true;
-        END IF;
-        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'qwen3-4b') THEN
-            updated := updated || '[{"key":"qwen3-4b","label":"qwen3:4b (Ollama)","driver":"ollama","model_id":"qwen3:4b","base_url":"http://localhost:11434"}]'::jsonb;
-            changed := true;
-        END IF;
-        IF changed THEN
-            UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'memory.evaluator_models';
-        END IF;
-    END IF;
-END $$;
+-- v0.24.2: (removed) — was re-adding embedding/evaluator models on every update,
+-- overriding user deletions. Models can be added via /embedding and /evaluator.
 
 -- v0.24.6: add web_search.driver config, update web_search.api_key description
 INSERT INTO config (key, value, description) VALUES
