@@ -2871,7 +2871,12 @@ Or just send me a message!"""
         buttons.append([InlineKeyboardButton("➕ Add Embedding", callback_data="embed:add_menu")])
 
         count = len(models)
-        text = f"🧬 <b>Embedding</b> — {count} registered"
+        text = (
+            f"🧬 <b>Embedding</b> — {count} registered\n\n"
+            f"⚠️ <b>Warning:</b> Changing the active embedding model may "
+            f"require resetting ALL memories (re-embedding is not yet supported). "
+            f"Only switch if you understand the consequences."
+        )
         markup = InlineKeyboardMarkup(buttons)
 
         if hasattr(update_or_query, 'message') and update_or_query.message:
@@ -2926,14 +2931,57 @@ Or just send me a message!"""
         elif data.startswith("embed:set_active:"):
             embed_key = data.split(":", 2)[2]
             models = await get_config("provider.embedding_models", [])
+            active_key = await get_config("provider.active_embedding", "together-bge")
             entry = next((m for m in models if m.get("key") == embed_key), None)
             if not entry:
                 await query.answer("Embedding not found", show_alert=True)
                 return
-            # Apply embedding (test + dimension change handling)
+            if embed_key == active_key:
+                await query.answer("Already active", show_alert=True)
+                return
+            # Check dimension change — warn about memory loss
+            current_dims = await get_config("provider.embedding_dimensions", 768)
+            new_dims = entry.get("dimensions", 768)
+            if current_dims != new_dims:
+                from ..db.connection import get_connection
+                async with get_connection() as conn:
+                    row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM memory WHERE embedding IS NOT NULL")
+                    mem_count = row["cnt"] if row else 0
+                warn = (
+                    f"⚠️ <b>Warning: This will DELETE all memories!</b>\n\n"
+                    f"Dimension change: {current_dims} → {new_dims}\n"
+                    f"Memories affected: <b>{mem_count}</b>\n\n"
+                    f"Vectors from different embedding models are incompatible. "
+                    f"Re-embedding is not yet supported — all existing memories "
+                    f"will be permanently deleted.\n\n"
+                    f"Are you sure?"
+                )
+            else:
+                warn = (
+                    f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
+                    f"Same dimensions ({new_dims}), memories will be preserved."
+                )
+            await query.edit_message_text(
+                warn,
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("✅ Yes, Switch", callback_data=f"embed:confirm_active:{embed_key}"),
+                        InlineKeyboardButton("❌ Cancel", callback_data=f"embed:detail:{embed_key}"),
+                    ],
+                ]),
+            )
+
+        elif data.startswith("embed:confirm_active:"):
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
             chat_id = query.message.chat_id
-            from telegram.ext import ContextTypes
-            success, result = await self._apply_embedding(embed_key, chat_id, None)
+            bot = query._bot or self.app.bot
+            success, result = await self._apply_embedding(embed_key, chat_id, bot)
             if success:
                 await query.answer(f"Active → {entry.get('label', embed_key)}")
             else:
@@ -3045,87 +3093,72 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-    async def _apply_embedding(self, embed_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
+    async def _apply_embedding(self, embed_key: str, chat_id: int, bot) -> tuple[bool, str]:
         """Apply an embedding model from registry — test before switching.
-        
+
         If the new model has different dimensions, all existing memories are
-        deleted (incompatible vector spaces cannot be mixed). User is warned.
-        
+        deleted (incompatible vector spaces cannot be mixed).
+
         Args:
             embed_key: Key of embedding model to switch to
             chat_id: Chat ID for sending status messages
-            context: Telegram context for sending messages
-            
+            bot: Telegram Bot instance for sending messages
+
         Returns:
             Tuple of (success, message)
         """
         from ..llm.drivers import test_embedding, get_model_from_list
         from ..db.connection import get_connection
-        
+
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
         embed_entry = get_model_from_list(models, embed_key)
-        
+
         if not embed_entry:
             return False, f"Embedding '{embed_key}' not found in registry"
-        
+
         # Save current for rollback
         previous_key = await get_config("provider.active_embedding", "together-bge")
         await set_config("provider.previous_embedding", previous_key)
-        
+
         # Check if dimensions will change (requires memory reset)
         current_dims = await get_config("provider.embedding_dimensions", 768)
         new_dims = embed_entry.get("dimensions", 768)
         dims_changed = (current_dims != new_dims)
-        
-        if dims_changed:
-            # Count existing memories
-            async with get_connection() as conn:
-                row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM memory WHERE embedding IS NOT NULL")
-                mem_count = row["cnt"] if row else 0
-            
-            if mem_count > 0:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"⚠️ **Dimension change** ({current_dims} → {new_dims})\n"
-                        f"This will delete all {mem_count} existing memories.\n"
-                        f"Vectors from different models are incompatible."
-                    ),
-                    parse_mode="Markdown",
-                )
-        
+
         # Send "testing" message
-        await context.bot.send_message(
+        await bot.send_message(
             chat_id=chat_id,
             text=f"🔄 Testing {embed_entry.get('label', embed_key)}...",
         )
-        
+
         try:
             success, error = await test_embedding(embed_entry, timeout=15)
-            
+
             if success:
                 # Reset memory if dimensions changed
                 if dims_changed:
                     async with get_connection() as conn:
-                        deleted = await conn.execute("DELETE FROM memory WHERE embedding IS NOT NULL")
-                    await context.bot.send_message(
+                        row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM memory WHERE embedding IS NOT NULL")
+                        mem_count = row["cnt"] if row else 0
+                        await conn.execute("DELETE FROM memory WHERE embedding IS NOT NULL")
+                    await bot.send_message(
                         chat_id=chat_id,
-                        text="🗑️ Memories cleared (incompatible vector dimensions).",
+                        text=f"🗑️ {mem_count} memories cleared (incompatible vector dimensions).",
                     )
-                
+
                 await set_config("provider.active_embedding", embed_key)
                 await set_config("provider.embedding_model", embed_entry.get("model_id", ""))
                 await set_config("provider.embedding_dimensions", new_dims)
                 await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
-                
+
                 # Hot-reload provider (picks up new embedding)
                 await self.agent.reload_provider()
-                
+
                 return True, embed_entry.get("label", embed_key)
             else:
                 return False, f"{embed_entry.get('label', embed_key)} failed: {error}"
-                
+
         except Exception as e:
             return False, f"{embed_entry.get('label', embed_key)} failed: {str(e)[:100]}"
 
