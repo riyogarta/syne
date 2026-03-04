@@ -92,6 +92,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
             return GoogleProvider(
                 api_key=api_key,
                 chat_model=model_id,
+                base_url=model_entry.get("base_url"),
             )
         else:
             from ..auth.google_oauth import get_credentials

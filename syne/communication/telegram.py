@@ -2565,6 +2565,7 @@ Or just send me a message!"""
             # Sub-menu: pick an API key provider
             providers = [
                 ("google_ai", "Google AI Studio (Gemini)"),
+                ("vertex_ai", "Google Vertex AI (GCP)"),
                 ("openai", "OpenAI"),
                 ("anthropic", "Anthropic (Claude)"),
                 ("groq", "Groq"),
@@ -2591,6 +2592,13 @@ Or just send me a message!"""
                 "google_ai": {
                     "label": "Google AI Studio",
                     "driver": "google_cca",
+                    "credential_key": "credential.google_ai_api_key",
+                    "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
+                },
+                "vertex_ai": {
+                    "label": "Google Vertex AI",
+                    "driver": "google_cca",
+                    "base_url": "https://aiplatform.googleapis.com/v1/publishers/google",
                     "credential_key": "credential.google_ai_api_key",
                     "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
                 },

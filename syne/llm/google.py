@@ -524,11 +524,13 @@ class GoogleProvider(LLMProvider):
         api_key: Optional[str] = None,
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
+        base_url: Optional[str] = None,
     ):
         self.credentials = credentials
         self.api_key = api_key
         self.chat_model = chat_model
         self.embedding_model = embedding_model
+        self._base_url = base_url or _GEMINI_API
 
         if not credentials and not api_key:
             raise ValueError("Either credentials (OAuth) or api_key is required")
@@ -1060,7 +1062,7 @@ class GoogleProvider(LLMProvider):
             if gemini_tools:
                 body["tools"] = gemini_tools
 
-        url = f"{_GEMINI_API}/models/{model}:generateContent"
+        url = f"{self._base_url}/models/{model}:generateContent"
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, json=body, params={"key": self.api_key})
@@ -1118,7 +1120,7 @@ class GoogleProvider(LLMProvider):
         Includes retry with exponential backoff for transient errors (429, 5xx).
         """
         model = model or self.embedding_model
-        url = f"{_GEMINI_API}/models/{model}:embedContent"
+        url = f"{self._base_url}/models/{model}:embedContent"
 
         body = {
             "model": f"models/{model}",
@@ -1175,7 +1177,7 @@ class GoogleProvider(LLMProvider):
     ) -> list[EmbeddingResponse]:
         """Batch embedding with retry + exponential backoff."""
         model = model or self.embedding_model
-        url = f"{_GEMINI_API}/models/{model}:batchEmbedContents"
+        url = f"{self._base_url}/models/{model}:batchEmbedContents"
 
         requests = [
             {"model": f"models/{model}", "content": {"parts": [{"text": t}]}}
