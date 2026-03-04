@@ -1511,9 +1511,9 @@ class TelegramChannel:
         lines.append("⚙️ Shell — run system commands")
         lines.append("⏰ Scheduler — schedule tasks & reminders")
         if stt_ready:
-            lines.append("🔊 Voice — ✅ ready")
+            lines.append("🔊 Voice (STT) — ✅ ready")
         else:
-            lines.append("🔊 Voice — ⚠️ needs API key")
+            lines.append("🔊 Voice (STT) — ⚠️ needs API key")
 
         # Abilities from DB — enabled means configured & ready
         if ability_rows:
