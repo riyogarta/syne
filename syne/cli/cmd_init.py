@@ -19,6 +19,23 @@ from .helpers import (
 from rich.panel import Panel
 
 
+def _detect_server_tier(sys_cpu, sys_ram_gb):
+    """Detect server tier based on hardware resources.
+
+    Returns: (tier_name, embed_model, embed_dims, embed_size, eval_model, eval_size)
+    """
+    if sys_cpu >= 4 and sys_ram_gb >= 16:
+        return ("beast", "qwen3-embedding:8b", 4096, "~4.7GB", "qwen3:4b", "~2.5GB")
+    elif sys_cpu >= 4 and sys_ram_gb >= 8:
+        return ("strong", "qwen3-embedding:4b", 2560, "~2.5GB", "qwen3:1.7b", "~1.3GB")
+    elif sys_ram_gb >= 4:
+        return ("moderate", "qwen3-embedding:0.6b", 1024, "~700MB", "qwen3:1.7b", "~1.3GB")
+    elif sys_ram_gb >= 2 and sys_cpu >= 2:
+        return ("minimal", "qwen3-embedding:0.6b", 1024, "~700MB", "qwen3:0.6b", "~400MB")
+    else:
+        return ("cloud", None, None, None, None, None)
+
+
 @cli.command()
 def init():
     """Initialize Syne: authenticate, setup database, configure."""
@@ -113,9 +130,8 @@ def init():
     # 2. Embedding provider (for memory)
     console.print("\n[bold]Step 2: Choose embedding provider (for memory)[/bold]")
     console.print()
-    # Detect system resources for Ollama eligibility
-    ollama_available = True
-    ollama_reason = ""
+
+    # Detect system resources
     sys_cpu = os.cpu_count() or 1
     try:
         with open("/proc/meminfo") as f:
@@ -127,50 +143,85 @@ def init():
                 sys_ram_gb = 0
     except Exception:
         sys_ram_gb = 0
-    sys_disk_gb = 0
-    try:
-        import shutil as _shutil
-        disk = _shutil.disk_usage("/")
-        sys_disk_gb = disk.free / (1024 ** 3)
-    except Exception:
-        pass
 
-    min_cpu, min_ram, min_disk = 2, 2.0, 2.0
-    reasons = []
-    if sys_cpu < min_cpu:
-        reasons.append(f"{sys_cpu} CPU (need {min_cpu}+)")
-    if sys_ram_gb < min_ram:
-        reasons.append(f"{sys_ram_gb:.1f}GB RAM (need {min_ram:.0f}GB+)")
-    if sys_disk_gb < min_disk:
-        reasons.append(f"{sys_disk_gb:.1f}GB disk (need {min_disk:.0f}GB+)")
-    if reasons:
-        ollama_available = False
-        ollama_reason = ", ".join(reasons)
+    # Detect tier
+    tier_name, tier_embed, tier_dims, tier_embed_size, tier_eval, tier_eval_size = _detect_server_tier(sys_cpu, sys_ram_gb)
+    ollama_available = tier_name != "cloud"
 
-    # Show options — Ollama recommended if system supports it
-    if ollama_available:
-        console.print("  1. Together AI [dim](~$0.008/1M tokens)[/dim]")
-        console.print("  2. OpenAI [dim](~$0.02/1M tokens)[/dim]")
-        console.print("  3. Ollama [green](recommended — FREE, local, qwen3-embedding:0.6b)[/green]")
-        console.print("     [dim]Trade-off: ~1.3GB RAM when active, CPU burst during embedding[/dim]")
-        default_embed = 3
-    else:
-        console.print("  1. Together AI [green](recommended — ~$0.008/1M tokens)[/green]")
-        console.print("  2. OpenAI [yellow](~$0.02/1M tokens)[/yellow]")
-        console.print(f"  3. Ollama (FREE — local)  [red dim]\\[unavailable][/red dim]")
-        console.print(f"     [dim]Your system: {ollama_reason}[/dim]")
-        console.print(f"     [dim]Minimum: {min_cpu} CPU, {min_ram:.0f}GB RAM, {min_disk:.0f}GB disk[/dim]")
-        default_embed = 1
+    # Permanent warning
+    console.print("  [bold yellow]Warning:[/bold yellow] Your embedding model choice is [bold]permanent[/bold] for this installation.")
+    console.print("  [dim]Changing it later requires resetting ALL memories (re-embedding is not yet supported).[/dim]")
+    console.print("  [dim]Choose based on your server's long-term capacity.[/dim]")
     console.print()
 
-    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 3), default=default_embed)
+    # Cloud options
+    console.print("  [bold cyan]Cloud providers:[/bold cyan]")
+    console.print("  1. Together AI [dim](~$0.008/1M tokens)[/dim]")
+    console.print("  2. OpenAI [dim](~$0.02/1M tokens)[/dim]")
+    console.print()
+
+    # Ollama options with tier-based availability
+    console.print("  [bold cyan]Local (Ollama — FREE, no API costs):[/bold cyan]")
+
+    # Option 3: qwen3-embedding:0.6b — min 2 CPU, 2GB RAM
+    if sys_cpu >= 2 and sys_ram_gb >= 2:
+        console.print("  3. qwen3-embedding:0.6b  [dim](1024d, ~700MB)       min 2 CPU, 2GB RAM[/dim]")
+    else:
+        console.print("  3. qwen3-embedding:0.6b  [red dim]\\[unavailable — need 2 CPU, 2GB RAM][/red dim]")
+
+    # Option 4: qwen3-embedding:4b — min 4 CPU, 8GB RAM
+    if sys_cpu >= 4 and sys_ram_gb >= 8:
+        console.print("  4. qwen3-embedding:4b    [dim](2560d, ~2.5GB)       min 4 CPU, 8GB RAM[/dim]")
+    else:
+        console.print("  4. qwen3-embedding:4b    [red dim]\\[unavailable — need 4 CPU, 8GB RAM][/red dim]")
+
+    # Option 5: qwen3-embedding:8b — min 4 CPU, 16GB RAM
+    if sys_cpu >= 4 and sys_ram_gb >= 16:
+        console.print("  5. qwen3-embedding:8b    [dim](4096d, ~4.7GB)       min 4 CPU, 16GB RAM[/dim]")
+    else:
+        console.print("  5. qwen3-embedding:8b    [red dim]\\[unavailable — need 4 CPU, 16GB RAM][/red dim]")
+
+    console.print()
+
+    # Determine default and show recommendation
+    # Map tier to recommended option
+    tier_defaults = {"beast": 5, "strong": 4, "moderate": 3, "minimal": 3, "cloud": 1}
+    default_embed = tier_defaults.get(tier_name, 1)
+    console.print(f"  [dim]Your server: {sys_cpu} CPU, {sys_ram_gb:.0f}GB RAM[/dim]", end="")
+    if ollama_available:
+        console.print(f" [dim]-> recommended: option {default_embed}[/dim]")
+    else:
+        console.print(f" [dim]-> Ollama unavailable, recommended: option 1[/dim]")
+    console.print()
+
+    embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 5), default=default_embed)
     embedding_config = None
 
-    # Block unavailable Ollama selection
-    if embed_choice == 3 and not ollama_available:
-        console.print(f"\n[red]Ollama not available on this system: {ollama_reason}[/red]")
-        console.print("[dim]Please select option 1 or 2.[/dim]")
-        embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 2), default=1)
+    # Validate Ollama selection against system capacity
+    ollama_reqs = {
+        3: (2, 2, "qwen3-embedding:0.6b"),
+        4: (4, 8, "qwen3-embedding:4b"),
+        5: (4, 16, "qwen3-embedding:8b"),
+    }
+    if embed_choice in ollama_reqs:
+        req_cpu, req_ram, model_label = ollama_reqs[embed_choice]
+        if sys_cpu < req_cpu or sys_ram_gb < req_ram:
+            console.print(f"\n[red]{model_label} not available — need {req_cpu} CPU, {req_ram}GB RAM (you have {sys_cpu} CPU, {sys_ram_gb:.0f}GB RAM)[/red]")
+            console.print("[dim]Please select a different option.[/dim]")
+            embed_choice = click.prompt("Select embedding provider", type=click.IntRange(1, 5), default=default_embed)
+            # Re-validate once more
+            if embed_choice in ollama_reqs:
+                req_cpu, req_ram, model_label = ollama_reqs[embed_choice]
+                if sys_cpu < req_cpu or sys_ram_gb < req_ram:
+                    console.print(f"[red]{model_label} still not available. Falling back to Together AI.[/red]")
+                    embed_choice = 1
+
+    # Ollama model configs
+    ollama_models = {
+        3: ("qwen3-embedding:0.6b", 1024),
+        4: ("qwen3-embedding:4b", 2560),
+        5: ("qwen3-embedding:8b", 4096),
+    }
 
     if embed_choice == 1:
         console.print("\n[bold green]✓ Together AI selected for embeddings[/bold green]")
@@ -193,14 +244,15 @@ def init():
             "_api_key": embed_api_key,
             "_credential_key": "credential.openai_compat_api_key",
         }
-    elif embed_choice == 3:
-        console.print("\n[bold green]✓ Ollama selected for embeddings (FREE, local)[/bold green]")
-        _ensure_ollama()
+    elif embed_choice in ollama_models:
+        selected_embed_model, selected_embed_dims = ollama_models[embed_choice]
+        console.print(f"\n[bold green]✓ Ollama selected for embeddings — {selected_embed_model} (FREE, local)[/bold green]")
+        _ensure_ollama(embed_model=selected_embed_model)
         embedding_config = {
             "driver": "ollama",
-            "model": "qwen3-embedding:0.6b",
-            "dimensions": 1024,
-            "_ollama": True,  # Flag: no API key needed
+            "model": selected_embed_model,
+            "dimensions": selected_embed_dims,
+            "_ollama": True,
         }
 
     # 3. Telegram bot
@@ -244,29 +296,37 @@ def init():
         console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
 
     # 3c. Auto-capture memory
+    # Auto-select evaluator model based on tier
+    selected_eval_model = tier_eval or "qwen3:0.6b"
+    selected_eval_size = tier_eval_size or "~400MB"
+
     console.print("\n[bold]Step 3c: Auto-capture Memory[/bold]")
     console.print("  When enabled, Syne automatically remembers important facts from conversations")
     console.print("  (e.g. \"I live in Jakarta\", \"My wife's name is Yuli\").")
     console.print()
-    console.print("  Uses a small local AI model ([bold]qwen3:0.6b[/bold], ~500MB) via Ollama —")
-    console.print("  no extra API costs, no rate limit impact.")
+    if ollama_available:
+        console.print(f"  Uses a local AI model ([bold]{selected_eval_model}[/bold], {selected_eval_size}) via Ollama —")
+        console.print("  no extra API costs, no rate limit impact.")
+        console.print(f"  [dim]Evaluator model auto-selected for your server ({tier_name} tier).[/dim]")
+    else:
+        console.print("  Uses a local AI model via Ollama — no extra API costs.")
     console.print()
     console.print("  1. ON  [green](recommended)[/green]")
     console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
     console.print()
-    if not ollama_available and embed_choice != 3:
-        console.print(f"  [yellow]Your system may be too small for local AI: {ollama_reason}[/yellow]")
+    if not ollama_available and embed_choice not in (3, 4, 5):
+        console.print("  [yellow]Your system may be too small for local AI.[/yellow]")
         console.print("  [dim]Auto-capture requires Ollama (~1.3GB RAM when active).[/dim]")
         console.print()
 
-    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if (ollama_available or embed_choice == 3) else 2)
+    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if (ollama_available or embed_choice in (3, 4, 5)) else 2)
     auto_capture_enabled = auto_capture_choice == 1
 
     if auto_capture_enabled:
         # Ensure Ollama is installed (may already be if embedding uses Ollama)
-        if embed_choice != 3:
+        if embed_choice not in (3, 4, 5):
             _ensure_ollama()
-        _ensure_evaluator_model()
+        _ensure_evaluator_model(eval_model=selected_eval_model)
         console.print("[green]✓ Auto-capture enabled[/green]")
     else:
         console.print("[dim]  Auto-capture disabled — you can enable it later via /autocapture or chat.[/dim]")
@@ -494,17 +554,24 @@ def init():
             # Build and save embedding model registry entry
             driver = embedding_config["driver"]
             if driver == "ollama":
+                # Build registry key from model name (e.g. "qwen3-embedding:4b" → "ollama-qwen3-4b")
+                model_id = embedding_config["model"]
+                ollama_key_map = {
+                    "qwen3-embedding:0.6b": "ollama-qwen3",
+                    "qwen3-embedding:4b": "ollama-qwen3-4b",
+                    "qwen3-embedding:8b": "ollama-qwen3-8b",
+                }
+                active_key = ollama_key_map.get(model_id, "ollama-qwen3")
                 embed_entry = {
-                    "key": "ollama-qwen3",
-                    "label": "Ollama — qwen3-embedding:0.6b (local, FREE)",
+                    "key": active_key,
+                    "label": f"Ollama — {model_id} (local, FREE)",
                     "driver": "ollama",
-                    "model_id": embedding_config["model"],
+                    "model_id": model_id,
                     "auth": "none",
                     "base_url": "http://localhost:11434",
                     "dimensions": embedding_config["dimensions"],
                     "cost": "FREE (local CPU)",
                 }
-                active_key = "ollama-qwen3"
             elif driver == "together":
                 embed_entry = {
                     "key": "together-bge",
@@ -536,7 +603,7 @@ def init():
         await set_config("memory.auto_capture", auto_capture_enabled)
         if auto_capture_enabled:
             await set_config("memory.evaluator_driver", "ollama")
-            await set_config("memory.evaluator_model", "qwen3:0.6b")
+            await set_config("memory.evaluator_model", selected_eval_model)
         await close_db()
 
     asyncio.run(_save_identity())

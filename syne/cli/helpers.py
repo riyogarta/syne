@@ -17,15 +17,22 @@ def _docker_ok(use_sudo=False) -> bool:
         return False
 
 
-def _ensure_ollama():
-    """Ensure Ollama is installed and qwen3-embedding model is pulled.
+def _ensure_ollama(embed_model="qwen3-embedding:0.6b"):
+    """Ensure Ollama is installed and the specified embedding model is pulled.
 
     Skips download if already present.
     """
     import shutil
     import time
 
-    model_name = "qwen3-embedding:0.6b"
+    model_name = embed_model
+    # Estimate download size for display
+    model_sizes = {
+        "qwen3-embedding:0.6b": "~700MB",
+        "qwen3-embedding:4b": "~2.5GB",
+        "qwen3-embedding:8b": "~4.7GB",
+    }
+    download_size = model_sizes.get(model_name, "~700MB")
 
     # 1. Install Ollama if missing
     if not shutil.which("ollama"):
@@ -129,7 +136,7 @@ def _ensure_ollama():
         pass
 
     # 4. Pull model
-    console.print(f"\n[bold]Downloading {model_name} (~700MB)...[/bold]")
+    console.print(f"\n[bold]Downloading {model_name} ({download_size})...[/bold]")
     console.print("[dim]This may take a few minutes depending on your connection.[/dim]")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -141,15 +148,21 @@ def _ensure_ollama():
     console.print(f"[green]✓ Model {model_name} ready[/green]")
 
 
-def _ensure_evaluator_model():
-    """Ensure the Ollama evaluator model (qwen3:0.6b) is available.
+def _ensure_evaluator_model(eval_model="qwen3:0.6b"):
+    """Ensure the Ollama evaluator model is available.
 
     Non-fatal: if Ollama is not installed or pull fails, just warn.
-    The evaluator model is small (~500MB) and used for memory auto_capture.
     """
     import shutil
 
-    model_name = "qwen3:0.6b"
+    model_name = eval_model
+    # Estimate download size for display
+    eval_sizes = {
+        "qwen3:0.6b": "~400MB",
+        "qwen3:1.7b": "~1.3GB",
+        "qwen3:4b": "~2.5GB",
+    }
+    download_size = eval_sizes.get(model_name, "~400MB")
 
     if not shutil.which("ollama"):
         console.print("[dim]⏭ Ollama not installed — skipping evaluator model[/dim]")
@@ -167,7 +180,7 @@ def _ensure_evaluator_model():
         pass
 
     # Pull model
-    console.print(f"\n[bold]Downloading evaluator model {model_name} (~500MB)...[/bold]")
+    console.print(f"\n[bold]Downloading evaluator model {model_name} ({download_size})...[/bold]")
     console.print("[dim]Used for memory auto-capture (local, no API costs).[/dim]")
     sys.stdout.flush()
     sys.stderr.flush()
@@ -194,32 +207,39 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
 
     async def _check():
         import asyncpg
+        import json
         conn = await asyncpg.connect(db_url)
         try:
             row = await conn.fetchrow(
                 "SELECT value FROM config WHERE key = 'memory.auto_capture'"
             )
-            if row:
-                import json
-                val = json.loads(row["value"])
-                return bool(val)
-            return False
+            if not row:
+                return False, "qwen3:0.6b"
+            enabled = bool(json.loads(row["value"]))
+            # Read evaluator model from DB config
+            model_row = await conn.fetchrow(
+                "SELECT value FROM config WHERE key = 'memory.evaluator_model'"
+            )
+            eval_model = "qwen3:0.6b"
+            if model_row:
+                eval_model = json.loads(model_row["value"])
+            return enabled, eval_model
         finally:
             await conn.close()
 
     try:
-        enabled = asyncio.run(_check())
+        enabled, eval_model = asyncio.run(_check())
     except Exception:
         return
 
     if enabled:
-        console.print("[dim]Auto-capture is enabled — ensuring Ollama + evaluator model...[/dim]")
+        console.print(f"[dim]Auto-capture is enabled — ensuring Ollama + evaluator model ({eval_model})...[/dim]")
         try:
             _ensure_ollama()
         except SystemExit:
             console.print("[yellow]⚠️ Ollama setup failed — auto_capture may not work until fixed.[/yellow]")
             return
-        _ensure_evaluator_model()
+        _ensure_evaluator_model(eval_model=eval_model)
     else:
         console.print("[dim]⏭ Auto-capture disabled — skipping evaluator model[/dim]")
 

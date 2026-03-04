@@ -55,15 +55,29 @@ bash install.sh
 `install.sh` runs `syne init` which is fully automated — no manual steps mid-install:
 
 1. **Choose AI provider** — OAuth (free) or API key (paid)
-2. **Choose embedding provider** — Ollama (free, local), Together AI, or OpenAI
+2. **Choose embedding provider** — auto-detects server tier, recommends best model your hardware can run
 3. **Enter Telegram bot token** — from @BotFather
 4. **Web search API key** (optional) — Brave Search, free tier 2,000 queries/month. Can be added later via chat.
 5. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
-6. **Install Ollama** (if selected) — Auto-install binary + pull qwen3-embedding model
+6. **Install Ollama** (if selected) — Auto-install binary + pull embedding + evaluator models
 7. **Initialize database** — Schema, identity, credentials saved to DB
 8. **Setup systemd service** — Auto-start on boot, linger enabled
 
 When init finishes, Syne is running.
+
+### Server Tiers
+
+During `syne init`, the installer detects your server's CPU and RAM to recommend the best embedding and evaluator models. Higher-tier models produce better memory recall quality.
+
+| Server | CPU | RAM | Embedding | Evaluator |
+|--------|-----|-----|-----------|-----------|
+| No Ollama | <2 core | <2 GB | Together AI (cloud) | - (no auto-capture) |
+| Minimal | 2+ core | 2-4 GB | qwen3-embedding:0.6b (1024d) | qwen3:0.6b |
+| Moderate | 2+ core | 4-8 GB | qwen3-embedding:0.6b (1024d) | qwen3:1.7b |
+| Strong | 4+ core | 8-16 GB | qwen3-embedding:4b (2560d) | qwen3:1.7b |
+| Beast | 4+ core | 16+ GB | qwen3-embedding:8b (4096d) | qwen3:4b |
+
+> **Embedding model is permanent** — changing it later requires resetting all memories (re-embedding is not yet supported). The evaluator model can be changed anytime via `/evaluator` in Telegram.
 
 ### Verify Installation
 
@@ -128,11 +142,13 @@ This is what makes memory **unlimited** — you can store millions of memories a
 
 | Embedding Provider | Model | Dimensions | Cost | Requirements |
 |--------------------|-------|------------|------|-------------|
-| **Ollama** (recommended) | qwen3-embedding:0.6b | 1024 | **$0** | 2+ CPU cores, 2 GB+ RAM |
+| **Ollama** (recommended) | qwen3-embedding:0.6b | 1024 | **$0** | 2+ CPU, 2 GB+ RAM |
+| **Ollama** | qwen3-embedding:4b | 2560 | **$0** | 4+ CPU, 8 GB+ RAM |
+| **Ollama** | qwen3-embedding:8b | 4096 | **$0** | 4+ CPU, 16 GB+ RAM |
 | Together AI | bge-base-en-v1.5 | 768 | ~$0.008/1M tokens | API key |
 | OpenAI | text-embedding-3-small | 1536 | ~$0.02/1M tokens | API key |
 
-**Ollama** is auto-installed during `syne init` — binary, server, and model are all set up automatically.
+**Ollama** is auto-installed during `syne init` — binary, server, and model are all set up automatically. The installer recommends the best model for your hardware (see [Server Tiers](#server-tiers)).
 
 > **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces. Use the `/embedding` command in Telegram to switch.
 
@@ -416,6 +432,9 @@ All configuration lives in the `config` table. Change via conversation or `updat
 syne init                  # Interactive setup (fully automated)
 syne start                 # Start Telegram agent
 syne start --debug         # Start with debug logging
+syne cli                   # Interactive CLI chat (resumes per-directory)
+syne cli -n                # Start fresh conversation (clear history)
+syne cli --yolo            # Skip file write approvals (auto-yes)
 syne status                # Show status
 syne repair                # Diagnose and repair
 syne restart               # Restart agent

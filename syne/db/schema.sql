@@ -373,13 +373,13 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": 10000, "top_p": 1.0, "top_k": null, "frequency_penalty": 0, "presence_penalty": 0}, "reasoning_visible": false}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}]', 'Available LLM models with driver configuration'),
     ('provider.active_model', '"gemini-pro"', 'Currently active model key from provider.models'),
     -- Embedding model registry (same pattern as chat model registry)
-    ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
+    ('provider.embedding_models', '[{"key": "together-bge", "label": "Together AI — bge-base-en-v1.5", "driver": "together", "model_id": "BAAI/bge-base-en-v1.5", "auth": "api_key", "credential_key": "credential.together_api_key", "dimensions": 768, "cost": "~$0.008/1M tokens"}, {"key": "google-embed", "label": "Google — text-embedding-004", "driver": "openai_compat", "model_id": "text-embedding-004", "auth": "api_key", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "credential_key": "credential.google_api_key", "dimensions": 768, "cost": "~$0.006/1M tokens"}, {"key": "openai-small", "label": "OpenAI — text-embedding-3-small", "driver": "openai_compat", "model_id": "text-embedding-3-small", "auth": "api_key", "credential_key": "credential.openai_api_key", "dimensions": 1536, "cost": "$0.02/1M tokens"}, {"key": "ollama-qwen3", "label": "Ollama — qwen3-embedding:0.6b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:0.6b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 1024, "cost": "FREE (local CPU)"}, {"key": "ollama-qwen3-4b", "label": "Ollama — qwen3-embedding:4b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:4b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 2560, "cost": "FREE (local CPU)"}, {"key": "ollama-qwen3-8b", "label": "Ollama — qwen3-embedding:8b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:8b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 4096, "cost": "FREE (local CPU)"}]', 'Available embedding models with driver configuration'),
     ('provider.active_embedding', '"together-bge"', 'Currently active embedding model key'),
     -- Memory evaluator config (local Ollama to avoid main LLM rate limits)
     ('memory.evaluator_driver', '"ollama"', 'Driver for memory evaluator: "ollama" (local) or "provider" (main LLM)'),
     ('memory.evaluator_model', '"qwen3:0.6b"', 'Ollama model for memory evaluation'),
     -- Evaluator model registry (CRUD via /evaluator)
-    ('memory.evaluator_models', '[{"key":"qwen3-0-6b","label":"qwen3:0.6b (Ollama)","driver":"ollama","model_id":"qwen3:0.6b","base_url":"http://localhost:11434"}]', 'Evaluator model registry'),
+    ('memory.evaluator_models', '[{"key":"qwen3-0-6b","label":"qwen3:0.6b (Ollama)","driver":"ollama","model_id":"qwen3:0.6b","base_url":"http://localhost:11434"}, {"key":"qwen3-1-7b","label":"qwen3:1.7b (Ollama)","driver":"ollama","model_id":"qwen3:1.7b","base_url":"http://localhost:11434"}, {"key":"qwen3-4b","label":"qwen3:4b (Ollama)","driver":"ollama","model_id":"qwen3:4b","base_url":"http://localhost:11434"}]', 'Evaluator model registry'),
     ('memory.active_evaluator', '"qwen3-0-6b"', 'Active evaluator model key'),
     -- System timezone
     ('system.timezone', '"UTC"', 'System timezone (IANA format, e.g. Asia/Jakarta, America/New_York)')
@@ -610,6 +610,49 @@ BEGIN
 
     IF changed THEN
         UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
+    END IF;
+END $$;
+
+-- v0.24.2: add qwen3-embedding:4b/8b to embedding registry, qwen3:1.7b/4b to evaluator registry
+DO $$
+DECLARE
+    models jsonb;
+    updated jsonb;
+    changed boolean := false;
+BEGIN
+    -- Embedding models: add 4b and 8b if not present
+    SELECT value::jsonb INTO models FROM config WHERE key = 'provider.embedding_models';
+    IF models IS NOT NULL THEN
+        updated := models;
+        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'ollama-qwen3-4b') THEN
+            updated := updated || '[{"key": "ollama-qwen3-4b", "label": "Ollama — qwen3-embedding:4b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:4b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 2560, "cost": "FREE (local CPU)"}]'::jsonb;
+            changed := true;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'ollama-qwen3-8b') THEN
+            updated := updated || '[{"key": "ollama-qwen3-8b", "label": "Ollama — qwen3-embedding:8b (local, FREE)", "driver": "ollama", "model_id": "qwen3-embedding:8b", "auth": "none", "base_url": "http://localhost:11434", "dimensions": 4096, "cost": "FREE (local CPU)"}]'::jsonb;
+            changed := true;
+        END IF;
+        IF changed THEN
+            UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.embedding_models';
+        END IF;
+    END IF;
+
+    -- Evaluator models: add 1.7b and 4b if not present
+    changed := false;
+    SELECT value::jsonb INTO models FROM config WHERE key = 'memory.evaluator_models';
+    IF models IS NOT NULL THEN
+        updated := models;
+        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'qwen3-1-7b') THEN
+            updated := updated || '[{"key":"qwen3-1-7b","label":"qwen3:1.7b (Ollama)","driver":"ollama","model_id":"qwen3:1.7b","base_url":"http://localhost:11434"}]'::jsonb;
+            changed := true;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM jsonb_array_elements(models) e WHERE e->>'key' = 'qwen3-4b') THEN
+            updated := updated || '[{"key":"qwen3-4b","label":"qwen3:4b (Ollama)","driver":"ollama","model_id":"qwen3:4b","base_url":"http://localhost:11434"}]'::jsonb;
+            changed := true;
+        END IF;
+        IF changed THEN
+            UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'memory.evaluator_models';
+        END IF;
     END IF;
 END $$;
 
