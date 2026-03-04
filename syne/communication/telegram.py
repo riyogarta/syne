@@ -1479,12 +1479,11 @@ class TelegramChannel:
         web_search_ready = bool(web_key)
 
         # Fetch abilities from DB (dynamic — no hardcoded list)
-        import json as _json
         ability_rows = []
         try:
             async with get_connection() as conn:
                 ability_rows = await conn.fetch(
-                    "SELECT name, description, enabled, config FROM abilities ORDER BY name"
+                    "SELECT name, description, enabled FROM abilities ORDER BY name"
                 )
         except Exception:
             pass
@@ -1509,20 +1508,15 @@ class TelegramChannel:
         lines.append("⏰ Scheduler — schedule tasks & reminders")
         lines.append("🔊 Voice — receive & transcribe voice messages")
 
-        # Abilities from DB — check actual config readiness
+        # Abilities from DB — enabled means configured & ready
         if ability_rows:
             lines.append("")
             for row in ability_rows:
                 desc = row["description"] or row["name"]
-                if not row["enabled"]:
-                    lines.append(f"🔧 {desc} — ⚠️ not active")
+                if row["enabled"]:
+                    lines.append(f"🔧 {desc} — ✅ active")
                 else:
-                    config = _json.loads(row["config"]) if row["config"] else {}
-                    has_config = any(v for v in config.values() if v)
-                    if has_config:
-                        lines.append(f"🔧 {desc} — ✅ ready")
-                    else:
-                        lines.append(f"🔧 {desc} — ⚠️ needs setup")
+                    lines.append(f"🔧 {desc} — ⚠️ not active")
 
         lines.append("")
         lines.append("Use /models to manage AI models.")

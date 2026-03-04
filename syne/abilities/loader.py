@@ -61,7 +61,7 @@ def load_bundled_abilities(registry: AbilityRegistry) -> int:
                 ability=ability,
                 source="bundled",
                 module_path=f"syne.abilities.{ability.name}",
-                enabled=True,
+                enabled=False,
                 permission=getattr(ability, 'permission', 0o700),
             )
             count += 1

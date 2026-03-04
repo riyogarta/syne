@@ -267,7 +267,7 @@ CREATE TABLE IF NOT EXISTS abilities (
     source VARCHAR(20) NOT NULL,          -- 'bundled' or 'dynamic'
     module_path TEXT NOT NULL,            -- Python import path (e.g. syne.abilities.screenshot)
     config JSONB DEFAULT '{}',
-    enabled BOOLEAN DEFAULT true,
+    enabled BOOLEAN DEFAULT false,
     requires_access_level VARCHAR(20) DEFAULT 'family',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -277,6 +277,7 @@ CREATE INDEX IF NOT EXISTS idx_abilities_enabled ON abilities (enabled) WHERE en
 CREATE INDEX IF NOT EXISTS idx_abilities_source ON abilities (source);
 
 -- Default bundled abilities (screenshot is NOT here — Syne creates it dynamically)
+-- enabled defaults to false — user must enable and configure each ability
 INSERT INTO abilities (name, description, version, source, module_path, requires_access_level) VALUES
     ('image_gen', 'Generate images from text descriptions using AI', '1.0', 'bundled', 'syne.abilities.image_gen', 'family'),
     ('image_analysis', 'Analyze and describe images using AI vision', '1.0', 'bundled', 'syne.abilities.image_analysis', 'family'),
@@ -664,4 +665,9 @@ ON CONFLICT (key) DO NOTHING;
 UPDATE config SET description = 'Web search API key — Tavily (tvly-...) or Brave Search'
     WHERE key = 'web_search.api_key'
     AND description LIKE '%Brave%';
+
+-- v0.25.3: abilities default to disabled — disable unconfigured abilities
+UPDATE abilities SET enabled = false
+    WHERE enabled = true
+    AND (config IS NULL OR config = '{}');
 
