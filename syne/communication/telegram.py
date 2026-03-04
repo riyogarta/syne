@@ -1474,9 +1474,13 @@ class TelegramChannel:
         name = identity.get("name", "Syne")
         motto = identity.get("motto", "")
 
-        # Check web search config
+        # Check tool configs
         web_key = await get_config("web_search.api_key", "")
         web_search_ready = bool(web_key)
+        groq_key = await get_config("credential.groq_api_key", None)
+        if not groq_key:
+            groq_key = await get_config("credential.openai_compat_api_key", None)
+        stt_ready = bool(groq_key)
 
         # Fetch abilities from DB (dynamic — no hardcoded list)
         ability_rows = []
@@ -1506,7 +1510,10 @@ class TelegramChannel:
         lines.append("📁 Files — read & write files")
         lines.append("⚙️ Shell — run system commands")
         lines.append("⏰ Scheduler — schedule tasks & reminders")
-        lines.append("🔊 Voice — receive & transcribe voice messages")
+        if stt_ready:
+            lines.append("🔊 Voice — ✅ ready")
+        else:
+            lines.append("🔊 Voice — ⚠️ needs API key")
 
         # Abilities from DB — enabled means configured & ready
         if ability_rows:
