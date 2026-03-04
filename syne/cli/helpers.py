@@ -214,7 +214,7 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
                 "SELECT value FROM config WHERE key = 'memory.auto_capture'"
             )
             if not row:
-                return False, "qwen3:0.6b"
+                return False, "qwen3:0.6b", "qwen3-embedding:0.6b"
             enabled = bool(json.loads(row["value"]))
             # Read evaluator model from DB config
             model_row = await conn.fetchrow(
@@ -223,19 +223,35 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
             eval_model = "qwen3:0.6b"
             if model_row:
                 eval_model = json.loads(model_row["value"])
-            return enabled, eval_model
+            # Read active embedding model from DB config
+            embed_model_id = "qwen3-embedding:0.6b"
+            active_key_row = await conn.fetchrow(
+                "SELECT value FROM config WHERE key = 'provider.active_embedding'"
+            )
+            if active_key_row:
+                active_key = json.loads(active_key_row["value"])
+                registry_row = await conn.fetchrow(
+                    "SELECT value FROM config WHERE key = 'provider.embedding_models'"
+                )
+                if registry_row:
+                    models = json.loads(registry_row["value"])
+                    for m in models:
+                        if m.get("key") == active_key:
+                            embed_model_id = m.get("model_id", embed_model_id)
+                            break
+            return enabled, eval_model, embed_model_id
         finally:
             await conn.close()
 
     try:
-        enabled, eval_model = asyncio.run(_check())
+        enabled, eval_model, embed_model = asyncio.run(_check())
     except Exception:
         return
 
     if enabled:
-        console.print(f"[dim]Auto-capture is enabled — ensuring Ollama + evaluator model ({eval_model})...[/dim]")
+        console.print(f"[dim]Auto-capture is enabled — ensuring Ollama + embedding ({embed_model}) + evaluator ({eval_model})...[/dim]")
         try:
-            _ensure_ollama()
+            _ensure_ollama(embed_model=embed_model)
         except SystemExit:
             console.print("[yellow]⚠️ Ollama setup failed — auto_capture may not work until fixed.[/yellow]")
             return
