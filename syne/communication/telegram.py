@@ -1466,18 +1466,82 @@ class TelegramChannel:
     # ── Command handlers ─────────────────────────────────────
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /start command."""
-        from ..db.models import get_identity
+        """Handle /start command — welcome with capabilities overview."""
+        from ..db.models import get_identity, get_config
+        from ..db.connection import get_connection
+
         identity = await get_identity()
         name = identity.get("name", "Syne")
         motto = identity.get("motto", "")
 
-        welcome = f"Hi! I'm **{name}**."
-        if motto:
-            welcome += f"\n_{motto}_"
-        welcome += "\n\nSend me a message to get started!"
+        # Check web search config
+        web_key = await get_config("web_search.api_key", "")
+        web_ready = bool(web_key)
 
-        await update.message.reply_text(welcome, parse_mode="Markdown")
+        # Check abilities from DB
+        abilities = {}
+        try:
+            async with get_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT name, enabled FROM abilities ORDER BY name"
+                )
+                abilities = {r["name"]: r["enabled"] for r in rows}
+        except Exception:
+            pass
+
+        def _status(ready: bool, yes: str = "ready", no: str = "not active") -> str:
+            return f"✅ {yes}" if ready else f"⚠️ {no}"
+
+        # Build message
+        lines = [f"Hi! I'm **{name}**."]
+        if motto:
+            lines.append(f"_{motto}_")
+        lines.append("")
+        lines.append("Here's what I can do:")
+        lines.append("")
+
+        # Core tools (always available)
+        lines.append("🧠 Memory — I remember our conversations")
+        lines.append(f"🔍 Web Search — {_status(web_ready, 'ready', 'needs API key')}")
+        lines.append("🌐 Web Fetch — read web pages")
+        lines.append("📁 Files — read & write files")
+        lines.append("⚙️ Shell — run system commands")
+        lines.append("⏰ Scheduler — schedule tasks & reminders")
+        lines.append("🔊 Voice — receive & transcribe voice messages")
+
+        # Abilities (from DB)
+        known_abilities = {
+            "image_gen": ("🎨", "Image Generation"),
+            "image_analysis": ("👁", "Image Analysis"),
+            "maps": ("🗺", "Google Maps"),
+            "whatsapp": ("💬", "WhatsApp"),
+            "pdf": ("📄", "PDF"),
+            "website_screenshot": ("📸", "Screenshot"),
+        }
+
+        ability_lines = []
+        for ab_name, (icon, label) in known_abilities.items():
+            if ab_name in abilities:
+                ability_lines.append(
+                    f"{icon} {label} — {_status(abilities[ab_name])}"
+                )
+
+        # Custom/unknown abilities
+        for ab_name, enabled in abilities.items():
+            if ab_name not in known_abilities:
+                ability_lines.append(
+                    f"🔧 {ab_name} — {_status(enabled)}"
+                )
+
+        if ability_lines:
+            lines.append("")
+            lines.extend(ability_lines)
+
+        lines.append("")
+        lines.append("Use /models to manage AI models.")
+        lines.append("Tell me which features you'd like to enable!")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
