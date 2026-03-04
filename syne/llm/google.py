@@ -1066,6 +1066,8 @@ class GoogleProvider(LLMProvider):
 
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(url, json=body, params={"key": self.api_key})
+            if resp.status_code != 200:
+                logger.error(f"Gemini API error {resp.status_code}: url={resp.request.url} body={resp.text[:500]}")
             resp.raise_for_status()
             data = resp.json()
 
