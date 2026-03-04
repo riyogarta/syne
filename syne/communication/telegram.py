@@ -1476,16 +1476,15 @@ class TelegramChannel:
 
         # Check web search config
         web_key = await get_config("web_search.api_key", "")
-        web_ready = bool(web_key)
+        web_search_ready = bool(web_key)
 
-        # Check abilities from DB
-        abilities = {}
+        # Fetch abilities from DB (dynamic — no hardcoded list)
+        ability_rows = []
         try:
             async with get_connection() as conn:
-                rows = await conn.fetch(
-                    "SELECT name, enabled FROM abilities ORDER BY name"
+                ability_rows = await conn.fetch(
+                    "SELECT name, description, enabled FROM abilities ORDER BY name"
                 )
-                abilities = {r["name"]: r["enabled"] for r in rows}
         except Exception:
             pass
 
@@ -1502,40 +1501,20 @@ class TelegramChannel:
 
         # Core tools (always available)
         lines.append("🧠 Memory — I remember our conversations")
-        lines.append(f"🔍 Web Search — {_status(web_ready, 'ready', 'needs API key')}")
+        lines.append(f"🔍 Web Search — {_status(web_search_ready, 'ready', 'needs API key')}")
         lines.append("🌐 Web Fetch — read web pages")
         lines.append("📁 Files — read & write files")
         lines.append("⚙️ Shell — run system commands")
         lines.append("⏰ Scheduler — schedule tasks & reminders")
         lines.append("🔊 Voice — receive & transcribe voice messages")
 
-        # Abilities (from DB)
-        known_abilities = {
-            "image_gen": ("🎨", "Image Generation"),
-            "image_analysis": ("👁", "Image Analysis"),
-            "maps": ("🗺", "Google Maps"),
-            "whatsapp": ("💬", "WhatsApp"),
-            "pdf": ("📄", "PDF"),
-            "website_screenshot": ("📸", "Screenshot"),
-        }
-
-        ability_lines = []
-        for ab_name, (icon, label) in known_abilities.items():
-            if ab_name in abilities:
-                ability_lines.append(
-                    f"{icon} {label} — {_status(abilities[ab_name])}"
-                )
-
-        # Custom/unknown abilities
-        for ab_name, enabled in abilities.items():
-            if ab_name not in known_abilities:
-                ability_lines.append(
-                    f"🔧 {ab_name} — {_status(enabled)}"
-                )
-
-        if ability_lines:
+        # Abilities from DB
+        if ability_rows:
             lines.append("")
-            lines.extend(ability_lines)
+            for row in ability_rows:
+                status = _status(row["enabled"])
+                desc = row["description"] or row["name"]
+                lines.append(f"🔧 {desc} — {status}")
 
         lines.append("")
         lines.append("Use /models to manage AI models.")
