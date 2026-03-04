@@ -318,15 +318,19 @@ def init():
     else:
         console.print("  Uses a local AI model via Ollama — no extra API costs.")
     console.print()
-    console.print("  1. ON  [green](recommended)[/green]")
-    console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
-    console.print()
-    if not ollama_available and embed_choice not in (3, 4, 5):
-        console.print("  [yellow]Your system may be too small for local AI.[/yellow]")
-        console.print("  [dim]Auto-capture requires Ollama (~1.3GB RAM when active).[/dim]")
+    can_run_ollama = ollama_available or embed_choice in (3, 4, 5)
+    if can_run_ollama:
+        console.print("  1. ON  [green](recommended)[/green]")
+        console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
+    else:
+        console.print("  1. ON  [dim](requires Ollama — your server may be too small)[/dim]")
+        console.print("  2. OFF [green](recommended for your server)[/green]")
         console.print()
+        console.print("  [yellow]Your system has limited resources for local AI.[/yellow]")
+        console.print("  [dim]Auto-capture requires Ollama (~1.3GB RAM when active).[/dim]")
+    console.print()
 
-    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if (ollama_available or embed_choice in (3, 4, 5)) else 2)
+    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if can_run_ollama else 2)
     auto_capture_enabled = auto_capture_choice == 1
 
     if auto_capture_enabled:
