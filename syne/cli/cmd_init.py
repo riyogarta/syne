@@ -657,22 +657,28 @@ def init():
         console.print("\n[bold green]Setup complete! Syne is running.[/bold green]")
         if docker_group_added:
             console.print()
-            console.print("[yellow]Note: Docker group was just added to your user.[/yellow]")
-            console.print("[yellow]Service works now via workaround, but for reliability:[/yellow]")
-            console.print("[yellow]  → Log out and back in when convenient, then:[/yellow]")
-            console.print("[yellow]    systemctl --user restart syne[/yellow]")
+            console.print(Panel(
+                "[bold]Docker group was just added to your user.[/bold]\n"
+                "Service works now via workaround, but for reliability:\n\n"
+                "  [bold]1.[/bold] Log out (exit SSH / close terminal)\n"
+                "  [bold]2.[/bold] Log back in\n"
+                "  [bold]3.[/bold] [bold]syne restart[/bold]",
+                title="ACTION REQUIRED",
+                style="bold yellow",
+            ))
     else:
         if docker_group_added:
             console.print("\n[bold yellow]Setup complete, but the service needs a session restart.[/bold yellow]")
             console.print()
-            console.print("[bold]Docker group was just added to your user.[/bold]")
-            console.print("The systemd service can't access Docker until you log out and back in.")
-            console.print()
-            console.print("Please run:")
-            console.print("  [bold]1.[/bold] Log out (exit SSH / close terminal)")
-            console.print("  [bold]2.[/bold] Log back in")
-            console.print("  [bold]3.[/bold] [bold]systemctl --user restart syne[/bold]")
-            console.print()
+            console.print(Panel(
+                "[bold]Docker group was just added to your user.[/bold]\n"
+                "The systemd service can't access Docker until you log out and back in.\n\n"
+                "  [bold]1.[/bold] Log out (exit SSH / close terminal)\n"
+                "  [bold]2.[/bold] Log back in\n"
+                "  [bold]3.[/bold] [bold]syne restart[/bold]",
+                title="ACTION REQUIRED",
+                style="bold red",
+            ))
         else:
             _journal = subprocess.run(
                 ["journalctl", "--user", "-u", "syne", "-n", "10", "--no-pager", "-o", "cat"],
@@ -684,18 +690,17 @@ def init():
             if _is_docker_perm:
                 console.print("\n[bold yellow]Setup complete, but the service can't access Docker.[/bold yellow]")
                 console.print()
-                console.print("Try logging out and back in, then:")
-                console.print("  [bold]systemctl --user restart syne[/bold]")
-                console.print()
+                console.print(Panel(
+                    "Try logging out and back in, then:\n\n"
+                    "  [bold]syne restart[/bold]",
+                    title="ACTION REQUIRED",
+                    style="bold yellow",
+                ))
             else:
                 console.print("\n[bold yellow]Setup complete, but the service failed to start.[/bold yellow]")
                 console.print("[dim]Check logs: journalctl --user -u syne -n 20 --no-pager[/dim]")
                 console.print()
 
-    console.print("Commands:")
-    console.print("  [bold]syne cli[/bold]                        # Interactive chat")
-    console.print("  [bold]syne status[/bold]                     # Check agent status")
-    console.print("  [bold]systemctl --user status syne[/bold]    # Service status")
-    console.print("  [bold]systemctl --user restart syne[/bold]   # Restart")
-    console.print("  [bold]journalctl --user -u syne -f[/bold]   # Logs")
+    console.print()
+    console.print("[dim]Run [bold]syne --help[/bold] to see all available commands.[/dim]")
     console.print()
