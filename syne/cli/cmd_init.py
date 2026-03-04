@@ -309,7 +309,7 @@ def init():
         if web_search_api_key:
             console.print("[green]✓ Tavily API key saved[/green]")
         else:
-            console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
+            console.print("[dim]  Skipped — you can set it up later by giving Syne your API key via chat.[/dim]")
     elif web_search_choice == 2:
         console.print()
         console.print("  [bold cyan]How to get a Brave Search API key:[/bold cyan]")
@@ -322,9 +322,9 @@ def init():
         if web_search_api_key:
             console.print("[green]✓ Brave Search API key saved[/green]")
         else:
-            console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
+            console.print("[dim]  Skipped — you can set it up later by giving Syne your API key via chat.[/dim]")
     else:
-        console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
+        console.print("[dim]  Skipped — you can set it up later by giving Syne your API key via chat.[/dim]")
 
     # 3c. Auto-capture memory
     # Auto-select evaluator model based on tier
