@@ -59,13 +59,14 @@ def init():
     console.print("  [dim]       Claude works everywhere — no forwarding needed![/dim]")
     console.print()
     console.print("  [bold yellow]API Key (paid per token):[/bold yellow]")
-    console.print("  4. OpenAI [yellow](API key, paid)[/yellow]")
-    console.print("  5. Anthropic Claude [yellow](API key, paid)[/yellow]")
-    console.print("  6. Together AI [yellow](API key, paid)[/yellow]")
-    console.print("  7. Groq [yellow](API key, free tier available)[/yellow]")
+    console.print("  4. Google Gemini [yellow](API key, free tier available)[/yellow]")
+    console.print("  5. OpenAI [yellow](API key, paid)[/yellow]")
+    console.print("  6. Anthropic Claude [yellow](API key, paid)[/yellow]")
+    console.print("  7. Together AI [yellow](API key, paid)[/yellow]")
+    console.print("  8. Groq [yellow](API key, free tier available)[/yellow]")
     console.print()
 
-    choice = click.prompt("Select provider", type=click.IntRange(1, 7), default=1)
+    choice = click.prompt("Select provider", type=click.IntRange(1, 8), default=1)
 
     env_lines = []
     provider_config = None  # Will be saved to DB after schema init
@@ -107,21 +108,27 @@ def init():
         }
 
     elif choice == 4:
+        console.print("\n[bold green]✓ Google Gemini selected (API key)[/bold green]")
+        console.print("  [dim]Get your key at aistudio.google.com/apikey — free tier available.[/dim]")
+        api_key = click.prompt("Google AI API key")
+        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.google_cca_api_key"}
+
+    elif choice == 5:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key")
         provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.openai.com/v1"}
 
-    elif choice == 5:
+    elif choice == 6:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
 
-    elif choice == 6:
+    elif choice == 7:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key")
         provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.together.xyz/v1"}
 
-    elif choice == 7:
+    elif choice == 8:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.groq.com[/dim]")
         api_key = click.prompt("Groq API key")
@@ -493,8 +500,8 @@ def init():
             console.print(f"[green]✓ Claude OAuth credentials saved to database ({cdata.get('email', 'unknown')})[/green]")
         # Save API key to DB if provided (not in .env!)
         if provider_config and provider_config.get("_api_key"):
-            driver = provider_config["driver"]
-            await set_config(f"credential.{driver}_api_key", provider_config["_api_key"])
+            cred_key = provider_config.get("_credential_key", f"credential.{provider_config['driver']}_api_key")
+            await set_config(cred_key, provider_config["_api_key"])
             console.print("[green]✓ API key saved to database[/green]")
         # Save provider config to DB
         if provider_config:
@@ -509,10 +516,17 @@ def init():
             models_registry = []
 
             if driver == "google_cca":
-                models_registry = [
-                    {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
-                    {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
-                ]
+                if auth == "api_key":
+                    cred_key = provider_config.get("_credential_key", "credential.google_cca_api_key")
+                    models_registry = [
+                        {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576},
+                        {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576},
+                    ]
+                else:
+                    models_registry = [
+                        {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
+                        {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
+                    ]
                 active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
             elif driver == "codex":
                 models_registry = [
