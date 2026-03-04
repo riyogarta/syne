@@ -286,19 +286,43 @@ def init():
 
     # 3b. Web Search (optional)
     console.print("\n[bold]Step 3b: Web Search (optional)[/bold]")
-    console.print("  Brave Search API lets Syne search the web. Free tier: 2,000 queries/month.")
+    console.print("  Lets Syne search the web for you.")
     console.print()
-    console.print("  [bold cyan]How to get a free API key:[/bold cyan]")
-    console.print("  1. Go to [link]https://brave.com/search/api/[/link]")
-    console.print("  2. Click \"Get Started\" → sign up (free)")
-    console.print("  3. Create an app → copy the API key")
+    console.print("  1. Tavily [green](recommended — 1,000 free searches/month, no credit card)[/green]")
+    console.print("  2. Brave Search [dim](paid)[/dim]")
+    console.print("  3. Skip [dim](can be added later via chat)[/dim]")
     console.print()
-    console.print("  [dim]Press Enter to skip — you can add it later via chat.[/dim]")
-    console.print()
-    brave_api_key = click.prompt("Brave Search API key (optional)", default="", show_default=False)
-    brave_api_key = brave_api_key.strip()
-    if brave_api_key:
-        console.print("[green]✓ Brave Search API key saved[/green]")
+
+    web_search_choice = click.prompt("Select web search provider", type=click.IntRange(1, 3), default=1)
+    web_search_api_key = ""
+    web_search_driver = ""
+
+    if web_search_choice == 1:
+        console.print()
+        console.print("  [bold cyan]How to get a free Tavily API key:[/bold cyan]")
+        console.print("  1. Go to [link]https://app.tavily.com[/link]")
+        console.print("  2. Sign up (free, no credit card)")
+        console.print("  3. Copy your API key (starts with tvly-)")
+        console.print()
+        web_search_api_key = click.prompt("Tavily API key", default="", show_default=False).strip()
+        web_search_driver = "tavily"
+        if web_search_api_key:
+            console.print("[green]✓ Tavily API key saved[/green]")
+        else:
+            console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
+    elif web_search_choice == 2:
+        console.print()
+        console.print("  [bold cyan]How to get a Brave Search API key:[/bold cyan]")
+        console.print("  1. Go to [link]https://brave.com/search/api/[/link]")
+        console.print("  2. Sign up and choose a plan")
+        console.print("  3. Create an app → copy the API key")
+        console.print()
+        web_search_api_key = click.prompt("Brave Search API key", default="", show_default=False).strip()
+        web_search_driver = "brave"
+        if web_search_api_key:
+            console.print("[green]✓ Brave Search API key saved[/green]")
+        else:
+            console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
     else:
         console.print("[dim]  Skipped — tell Syne to \"enable web search\" later to configure.[/dim]")
 
@@ -478,9 +502,11 @@ def init():
             await set_telegram_bot_token(telegram_token)
             console.print("[green]✓ Telegram bot token saved to database[/green]")
         # Save Brave Search API key to DB if provided
-        if brave_api_key:
-            await set_config("web_search.api_key", brave_api_key)
-            console.print("[green]✓ Brave Search API key saved to database[/green]")
+        if web_search_api_key:
+            await set_config("web_search.api_key", web_search_api_key)
+            if web_search_driver:
+                await set_config("web_search.driver", web_search_driver)
+            console.print("[green]✓ Web search API key saved to database[/green]")
         # Save Google OAuth credentials to DB if collected
         if google_creds:
             await google_creds.save_to_db()

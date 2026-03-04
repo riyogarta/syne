@@ -367,7 +367,8 @@ INSERT INTO config (key, value, description) VALUES
     ('exec.timeout_max', '300', 'Maximum exec timeout in seconds'),
     ('exec.output_max_chars', '4000', 'Maximum output characters to return'),
     -- Web tools config
-    ('web_search.api_key', '""', 'Brave Search API key (get from https://brave.com/search/api/)'),
+    ('web_search.api_key', '""', 'Web search API key — Tavily (tvly-...) or Brave Search'),
+    ('web_search.driver', '""', 'Web search driver: "tavily" or "brave" (auto-detected from key prefix if empty)'),
     ('web_fetch.timeout', '30', 'Web fetch timeout in seconds'),
     -- Model registry (driver-based model system)
     ('provider.models', '[{"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": -1, "top_p": 0.95, "top_k": 40, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1047576, "params": {"temperature": 0.7, "max_tokens": null, "thinking_budget": 10000, "top_p": 1.0, "top_k": null, "frequency_penalty": 0, "presence_penalty": 0}, "reasoning_visible": false}, {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}, {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-0-20250514", "auth": "oauth", "context_window": 200000, "params": {"temperature": 0.3, "max_tokens": null, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50, "frequency_penalty": null, "presence_penalty": null}, "reasoning_visible": false}]', 'Available LLM models with driver configuration'),
@@ -655,4 +656,12 @@ BEGIN
         END IF;
     END IF;
 END $$;
+
+-- v0.24.6: add web_search.driver config, update web_search.api_key description
+INSERT INTO config (key, value, description) VALUES
+    ('web_search.driver', '""', 'Web search driver: "tavily" or "brave" (auto-detected from key prefix if empty)')
+ON CONFLICT (key) DO NOTHING;
+UPDATE config SET description = 'Web search API key — Tavily (tvly-...) or Brave Search'
+    WHERE key = 'web_search.api_key'
+    AND description LIKE '%Brave%';
 
