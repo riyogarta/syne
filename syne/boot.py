@@ -602,8 +602,8 @@ async def build_system_prompt(
     # [10] MEMORY BEHAVIOR INSTRUCTIONS
     parts.append(_get_memory_behavior_section())
 
-    # [10.5] SUB-AGENT DELEGATION — removed to save ~115 tokens.
-    # Sub-agents have their own prompt (build_subagent_prompt).
+    # [10.5] SUB-AGENT DELEGATION
+    parts.append(_get_subagent_behavior_section())
 
     # [10.7] SELF-HEALING BEHAVIOR
     parts.append(_get_self_healing_section())
