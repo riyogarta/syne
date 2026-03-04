@@ -200,16 +200,12 @@ class Conversation:
             else:
                 now_local = datetime.now(timezone.utc)
                 tz_name = "UTC"
-            now_utc = now_local.astimezone(timezone.utc)
 
             time_lines = [
                 "# Runtime context (authoritative)",
                 "Use this as the ground truth for the current time/date. Do not guess.",
-                f"- Now ({tz_name}): {now_local.isoformat(timespec='seconds')}",
+                f"- Current time: {now_local.strftime('%Y-%m-%d %H:%M:%S')} ({tz_name})",
             ]
-            # Show UTC as secondary reference if local tz is not UTC
-            if tz_name != "UTC":
-                time_lines.append(f"- Now (UTC): {now_utc.isoformat(timespec='seconds')}")
             messages.append(ChatMessage(role="system", content="\n".join(time_lines)))
         except Exception as e:
             # If time injection fails, continue without it.
