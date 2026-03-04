@@ -626,8 +626,6 @@ UPDATE config SET description = 'Web search API key — Tavily (tvly-...) or Bra
     WHERE key = 'web_search.api_key'
     AND description LIKE '%Brave%';
 
--- v0.25.3: abilities default to disabled — disable unconfigured abilities
-UPDATE abilities SET enabled = false
-    WHERE enabled = true
-    AND (config IS NULL OR config = '{}');
+-- v0.25.3: (removed) — was disabling abilities on every update.
+-- Abilities now default to enabled=false in schema, which only affects new installs.
 
