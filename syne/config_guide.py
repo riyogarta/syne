@@ -113,6 +113,21 @@ takes priority — this only applies when the per-model value is null.
 - **Warning**: Higher budgets significantly increase token usage and response time.
   Not all models support thinking budgets — ignored by models without this feature.
 
+## Time & Date Formatting
+
+| Key | Default | Type |
+|-----|---------|------|
+| `time.locale` | `"id"` | string |
+| `time.format.full` | `"{day_name}, {date} {time}"` | string |
+| `time.format.date` | `"{date}"` | string |
+| `time.format.time` | `"{time}"` | string |
+| `time.format.day` | `"{day_name}"` | string |
+
+Controls how the runtime time context is formatted when injected into conversations.
+- `time.locale` affects day/month names (currently `id` and `en`).
+- Formats use Python `str.format` templates with fields: `{day_name}`, `{date}`, `{time}`, `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, `{second}`.
+- **Warning**: Invalid templates fall back to ISO/full string.
+
 ## System Timezone
 
 | Key | Default | Type |

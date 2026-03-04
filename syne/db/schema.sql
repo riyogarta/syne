@@ -347,6 +347,12 @@ INSERT INTO config (key, value, description) VALUES
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
+    -- Time & locale (used for injected runtime time context)
+    ('time.locale', '"id"', 'Default locale for time/date/day formatting (id/en)'),
+    ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template'),
+    ('time.format.date', '"{date}"', 'Default date-only format template'),
+    ('time.format.time', '"{time}"', 'Default time-only format template'),
+    ('time.format.day', '"{day_name}"', 'Default day-only format template'),
     -- session.max_tool_rounds removed in v0.18.5 (no hard limit, loop detection handles runaway)
     -- Telegram channel config
     ('telegram.dm_policy', '"approval"', 'DM policy: approval (owner approves new users) or open (accept all)'),
@@ -571,6 +577,16 @@ END $$;
 INSERT INTO config (key, value, description) VALUES
     ('system.timezone', '"UTC"', 'System timezone (IANA format, e.g. Asia/Jakarta, America/New_York)')
 ON CONFLICT (key) DO NOTHING;
+
+-- v0.23.10: time formatting defaults
+INSERT INTO config (key, value, description) VALUES
+    ('time.locale', '"id"', 'Default locale for time/date/day formatting (id/en)'),
+    ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template'),
+    ('time.format.date', '"{date}"', 'Default date-only format template'),
+    ('time.format.time', '"{time}"', 'Default time-only format template'),
+    ('time.format.day', '"{day_name}"', 'Default day-only format template')
+ON CONFLICT (key) DO NOTHING;
+
 
 -- v0.23.5: remove rpm_limit from model registry (was arbitrary CCA throttle)
 DO $$

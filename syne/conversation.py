@@ -177,36 +177,165 @@ class Conversation:
         # 1b. Runtime time context (ground truth)
         # LLMs often hallucinate the current date/time unless we provide it explicitly.
         # This is not a privileged system/credential (Rule 700); it's safe to expose in groups.
+        #
+        # IMPORTANT POLICY (OWNER SPEC):
+        # - If user asks current time/date/day with no qualifier → answer using SYNE time
+        #   (timezone from config system.timezone), WITHOUT timezone label.
+        # - If user explicitly mentions 'server' → answer using SERVER time and append ' (Server)'.
+        # - If user explicitly mentions 'UTC' → answer using UTC time and append ' UTC'.
+        # - If user asks for multiple (e.g., Syne + server + UTC) → answer all requested.
         try:
-            from .db.models import get_config as _get_tz_config
-            tz_name = await _get_tz_config("system.timezone", "UTC")
-            if isinstance(tz_name, str):
-                tz_name = tz_name.strip()
-            else:
-                tz_name = "UTC"
+            from .db.models import get_config as _get_time_config
 
-            # Resolve timezone, fallback to UTC on invalid name
-            local_tz = None
-            if ZoneInfo:
+            def _resolve_tz(tz_name: str):
+                tz_name = (tz_name or 'UTC').strip() if isinstance(tz_name, str) else 'UTC'
+                if ZoneInfo:
+                    try:
+                        return ZoneInfo(tz_name), tz_name
+                    except Exception:
+                        return ZoneInfo('UTC'), 'UTC'
+                return timezone.utc, 'UTC'
+
+            def _fmt_offset(td: timedelta) -> str:
+                if td is None:
+                    return "+00:00"
+                total = int(td.total_seconds())
+                sign = "+" if total >= 0 else "-"
+                total = abs(total)
+                hh, rem = divmod(total, 3600)
+                mm = rem // 60
+                return f"{sign}{hh:02d}:{mm:02d}"
+
+            def _fmt_components(dt: datetime, locale: str):
+                # Locale controls day/month names only.
+                loc = (locale or 'id').lower()
+                if loc.startswith('id'):
+                    days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu']
+                    months = [
+                        'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+                        'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
+                    ]
+                else:
+                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    months = [
+                        'January', 'February', 'March', 'April', 'May', 'June',
+                        'July', 'August', 'September', 'October', 'November', 'December'
+                    ]
+
+                day_name = days[dt.weekday()]
+                month_name = months[dt.month - 1]
+                date = f"{dt.day} {month_name} {dt.year}"
+                time_str = dt.strftime('%H:%M:%S')
+                full = f"{day_name}, {date} {time_str}"
+                return {
+                    'day_name': day_name,
+                    'month_name': month_name,
+                    'year': dt.year,
+                    'month': dt.month,
+                    'day': dt.day,
+                    'hour': dt.hour,
+                    'minute': dt.minute,
+                    'second': dt.second,
+                    'date': date,
+                    'time': time_str,
+                    'full': full,
+                    'iso': dt.isoformat(timespec='seconds'),
+                }
+
+            def _apply_template(tpl: str, components: dict) -> str:
                 try:
-                    local_tz = ZoneInfo(tz_name)
+                    return (tpl or '').format(**components)
                 except Exception:
-                    logger.warning(f"Invalid timezone '{tz_name}', falling back to UTC")
-                    tz_name = "UTC"
-                    local_tz = ZoneInfo("UTC")
+                    # Fall back to a sane default if template is invalid
+                    return components.get('full') or components.get('iso')
 
-            if local_tz:
-                now_local = datetime.now(local_tz)
-            else:
-                now_local = datetime.now(timezone.utc)
-                tz_name = "UTC"
+            # Read config
+            syne_tz_name = await _get_time_config('system.timezone', 'UTC')
+            time_locale = await _get_time_config('time.locale', 'id')
+            fmt_full = await _get_time_config('time.format.full', '{day_name}, {date} {time}')
+            fmt_date = await _get_time_config('time.format.date', '{date}')
+            fmt_time = await _get_time_config('time.format.time', '{time}')
+            fmt_day = await _get_time_config('time.format.day', '{day_name}')
+
+            syne_tz, syne_tz_name = _resolve_tz(syne_tz_name)
+
+            # Single base time (UTC) to avoid drift between the three clocks
+            base_utc = datetime.now(timezone.utc)
+
+            # Server tz: use OS local timezone (whatever the host is configured to)
+            server_tz = datetime.now().astimezone().tzinfo or timezone.utc
+
+            syne_now = base_utc.astimezone(syne_tz)
+            server_now = base_utc.astimezone(server_tz)
+            utc_now = base_utc
+
+            syne_c = _fmt_components(syne_now, time_locale)
+            server_c = _fmt_components(server_now, time_locale)
+            utc_c = _fmt_components(utc_now, time_locale)
+
+            syne_out = {
+                'full': _apply_template(fmt_full, syne_c),
+                'date': _apply_template(fmt_date, syne_c),
+                'time': _apply_template(fmt_time, syne_c),
+                'day': _apply_template(fmt_day, syne_c),
+                'iso': syne_c['iso'],
+                'utc_offset': _fmt_offset(syne_now.utcoffset()),
+            }
+            server_out = {
+                'full': _apply_template(fmt_full, server_c),
+                'date': _apply_template(fmt_date, server_c),
+                'time': _apply_template(fmt_time, server_c),
+                'day': _apply_template(fmt_day, server_c),
+                'iso': server_c['iso'],
+                'utc_offset': _fmt_offset(server_now.utcoffset()),
+            }
+            utc_out = {
+                'full': _apply_template(fmt_full, utc_c),
+                'date': _apply_template(fmt_date, utc_c),
+                'time': _apply_template(fmt_time, utc_c),
+                'day': _apply_template(fmt_day, utc_c),
+                'iso': utc_c['iso'],
+                'utc_offset': _fmt_offset(timedelta(0)),
+            }
+
+            # Differences (offset arithmetic)
+            syne_offset = syne_now.utcoffset() or timedelta(0)
+            server_offset = server_now.utcoffset() or timedelta(0)
+            diff_syne_server = syne_offset - server_offset
 
             time_lines = [
-                "# Runtime context (authoritative)",
-                "Use this as the ground truth for the current time/date. Do not guess.",
-                f"- Current time: {now_local.strftime('%Y-%m-%d %H:%M:%S')} ({tz_name})",
+                '# Runtime Time Context (authoritative — DO NOT GUESS)',
+                f"SYNE_TZ_NAME: {syne_tz_name}",
+                f"SYNE_UTC_OFFSET: {syne_out['utc_offset']}",
+                f"SERVER_UTC_OFFSET: {server_out['utc_offset']}",
+                f"DIFF_SYNE_MINUS_SERVER: {_fmt_offset(diff_syne_server)}",
+                '',
+                f"SYNE_NOW_FULL: {syne_out['full']}",
+                f"SYNE_NOW_DATE: {syne_out['date']}",
+                f"SYNE_NOW_TIME: {syne_out['time']}",
+                f"SYNE_NOW_DAY: {syne_out['day']}",
+                f"SYNE_NOW_ISO: {syne_out['iso']}",
+                '',
+                f"SERVER_NOW_FULL: {server_out['full']}",
+                f"SERVER_NOW_DATE: {server_out['date']}",
+                f"SERVER_NOW_TIME: {server_out['time']}",
+                f"SERVER_NOW_DAY: {server_out['day']}",
+                f"SERVER_NOW_ISO: {server_out['iso']}",
+                '',
+                f"UTC_NOW_FULL: {utc_out['full']}",
+                f"UTC_NOW_DATE: {utc_out['date']}",
+                f"UTC_NOW_TIME: {utc_out['time']} UTC",
+                f"UTC_NOW_DAY: {utc_out['day']}",
+                f"UTC_NOW_ISO: {utc_out['iso']}",
+                '',
+                'Answering policy for time/date/day questions:',
+                "- Default (no qualifier): use SYNE_NOW_* (NO timezone label)",
+                "- If user mentions 'server': use SERVER_NOW_* and append ' (Server)'",
+                "- If user mentions 'UTC': use UTC_NOW_* and append ' UTC'",
+                '- If multiple are requested: answer all requested lines',
+                '- If user asks for time difference/selisih: use the offsets above',
             ]
-            messages.append(ChatMessage(role="system", content="\n".join(time_lines)))
+            messages.append(ChatMessage(role='system', content='\n'.join(time_lines)))
         except Exception as e:
             # If time injection fails, continue without it.
             logger.debug(f"Time context injection failed: {e}")
