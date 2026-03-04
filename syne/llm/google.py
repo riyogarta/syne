@@ -1064,12 +1064,37 @@ class GoogleProvider(LLMProvider):
 
         url = f"{self._base_url}/models/{model}:generateContent"
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(url, json=body, params={"key": self.api_key})
-            if resp.status_code != 200:
-                logger.error(f"Gemini API error {resp.status_code}: url={resp.request.url} body={resp.text[:500]}")
-            resp.raise_for_status()
-            data = resp.json()
+        data = None
+        for attempt in range(_MAX_RETRIES + 1):
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(url, json=body, params={"key": self.api_key})
+                if resp.status_code == 200:
+                    data = resp.json()
+                    break
+
+                error_text = resp.text[:500]
+                logger.error(f"Gemini API error {resp.status_code}: url={resp.request.url} body={error_text}")
+
+                if attempt < _MAX_RETRIES and _is_retryable_error(resp.status_code, error_text):
+                    server_delay = _extract_retry_delay(error_text, resp.headers)
+                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
+                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
+                        raise LLMRateLimitError(
+                            f"Rate limited ({resp.status_code}). Server requested {server_delay // 1000}s wait."
+                        )
+                    logger.warning(
+                        f"Gemini API {resp.status_code}, retrying in {delay_ms}ms "
+                        f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
+                    )
+                    await asyncio.sleep(delay_ms / 1000)
+                    continue
+
+                if resp.status_code == 429:
+                    raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.")
+                resp.raise_for_status()
+
+        if data is None:
+            raise LLMRateLimitError(f"Rate limited after {_MAX_RETRIES + 1} attempts.")
 
         candidate = data["candidates"][0]
         parts = candidate.get("content", {}).get("parts", [])
