@@ -430,17 +430,13 @@ class TelegramChannel:
             return
 
         # ═══════════════════════════════════════════════════════════════
-        # CREDENTIAL LEAK PREVENTION: Detect credential patterns in
-        # normal chat. Warn user and skip history/memory.
+        # CREDENTIAL HANDLING: Detect credential patterns in normal chat.
+        # Let the message through to the LLM (user may be setting a key),
+        # but redact credentials from stored conversation history.
         # ═══════════════════════════════════════════════════════════════
-        if not is_group and self._contains_credential(text):
-            await update.message.reply_text(
-                "⚠️ Credential detected in message. Use `/models` to manage credentials.\n"
-                "This message was NOT saved to history or memory.",
-                parse_mode="Markdown",
-            )
-            logger.warning(f"Credential pattern detected in chat from user {user.id} — skipped history")
-            return
+        _has_credential = not is_group and self._contains_credential(text)
+        if _has_credential:
+            logger.info(f"Credential pattern in chat from user {user.id} — will redact in history, forwarding to LLM")
 
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: {text[:100]}")
 
@@ -468,6 +464,7 @@ class TelegramChannel:
                     "chat_id": str(chat.id),
                     "inbound": inbound,  # Single source of truth for all context
                     "original_text": original_text,  # Without context prefix, for evaluator
+                    "has_credential": _has_credential,  # Redact in history, not in LLM
                 }
 
                 # Browse mode: route to CLI-compatible session with cwd

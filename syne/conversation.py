@@ -436,8 +436,12 @@ class Conversation:
                 user_message, message_metadata
             )
 
-        # Save user message
-        await self.save_message("user", user_message)
+        # Save user message (redact credentials from history if flagged)
+        if message_metadata and message_metadata.get("has_credential"):
+            from .security import redact_content_output
+            await self.save_message("user", redact_content_output(user_message))
+        else:
+            await self.save_message("user", user_message)
 
         # ═══════════════════════════════════════════════════════════════
         # PRE-FLIGHT COMPACTION CHECK
