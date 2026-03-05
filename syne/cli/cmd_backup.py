@@ -11,7 +11,7 @@ from .shared import console, _read_env_value, _get_syne_dir
 
 
 @cli.command()
-@click.option("--output", "-o", default=None, help="Output file path (default: ~/syne-backup-TIMESTAMP.sql.gz)")
+@click.option("--output", "-o", default=None, help="Output file path (default: ~/syne/backup/syne-backup-TIMESTAMP.sql.gz)")
 def backup(output):
     """Backup Syne database to a compressed SQL file."""
     syne_dir = _get_syne_dir()
@@ -22,10 +22,12 @@ def backup(output):
         console.print("[red]Cannot read DB credentials from .env. Run 'syne init' first.[/red]")
         return
 
-    # Default output path
+    # Default output path: ~/syne/backup/
     if output is None:
+        backup_dir = os.path.join(syne_dir, "backup")
+        os.makedirs(backup_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        output = os.path.expanduser(f"~/syne-backup-{timestamp}.sql.gz")
+        output = os.path.join(backup_dir, f"syne-backup-{timestamp}.sql.gz")
 
     output = os.path.expanduser(output)
 
