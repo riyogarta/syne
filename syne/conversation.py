@@ -19,7 +19,7 @@ from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulat
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens
-from .compaction import auto_compact_check, _build_preservation_context
+from .compaction import compact_session, _build_preservation_context
 from .boot import get_full_prompt
 from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
@@ -481,10 +481,11 @@ class Conversation:
             _keep = max(20, min(200, _ctx_tokens // 5000))
             _recent = self._message_cache[-_keep:] if self._message_cache else []
             _preservation = _build_preservation_context(_recent)
-            result = await auto_compact_check(
+            # IMPORTANT: auto-compact must call the same function as manual /compact.
+            result = await compact_session(
                 session_id=self.session_id,
                 provider=self.provider,
-                ctx_window=self.context_mgr.available,
+                keep_recent=_keep,
                 recent_context=_preservation,
             )
             if result:
