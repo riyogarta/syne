@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from typing import Optional
 
@@ -17,6 +18,21 @@ logger = logging.getLogger("syne.llm.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 _BETA_HEADER = "oauth-2025-04-20"
+
+# Retry constants (aligned with OpenAI/Codex providers)
+_MAX_RETRIES = 4  # 5 total attempts
+_TOTAL_ATTEMPTS = _MAX_RETRIES + 1
+_BASE_DELAY_MS = 1_000
+_MAX_RETRY_DELAY_MS = 30_000
+_STREAM_IDLE_TIMEOUT = 300  # 5min per-chunk
+
+
+def _backoff_delay(base_ms: int, attempt: int) -> float:
+    """Exponential backoff with ±10% jitter. Returns seconds."""
+    delay_ms = base_ms * (2 ** (attempt - 1))
+    jitter = random.uniform(0.9, 1.1)
+    delay_ms = min(delay_ms * jitter, _MAX_RETRY_DELAY_MS)
+    return delay_ms / 1000.0
 
 
 def _parse_retry_delay(resp: httpx.Response, default: float = 1.0) -> float:
@@ -35,7 +51,7 @@ def _parse_retry_delay(resp: httpx.Response, default: float = 1.0) -> float:
 
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using OAuth tokens from DB or API key.
-    
+
     Token sources (priority order):
     1. DB (Claude OAuth credentials from `syne init`)
     2. Environment (ANTHROPIC_API_KEY)
@@ -70,13 +86,13 @@ class AnthropicProvider(LLMProvider):
 
     async def _load_token(self) -> str:
         """Load Anthropic token from DB or environment.
-        
+
         Priority:
         1. DB — Claude OAuth credentials (from `syne init`)
         2. Environment — ANTHROPIC_API_KEY
         """
         now = time.time()
-        
+
         # Cache: re-check at most every 30 seconds
         if self._access_token and (now - self._last_load) < 30:
             # If OAuth, check expiry and auto-refresh
@@ -86,7 +102,7 @@ class AnthropicProvider(LLMProvider):
                     self._access_token = token
                     return token
             return self._access_token
-        
+
         # Try DB first
         try:
             from ..auth.claude_oauth import ClaudeCredentials
@@ -101,7 +117,7 @@ class AnthropicProvider(LLMProvider):
                 return creds.access_token
         except Exception as e:
             logger.debug(f"DB credential load failed: {e}")
-        
+
         # Try DB API key
         try:
             from ..db.models import get_config
@@ -121,7 +137,7 @@ class AnthropicProvider(LLMProvider):
             self._is_oauth = env_token.startswith("sk-ant-oat")
             self._last_load = now
             return env_token
-        
+
         raise RuntimeError(
             "No Claude/Anthropic credentials found. Options:\n"
             "  1. Run 'syne init' and select Claude (OAuth)\n"
@@ -142,22 +158,22 @@ class AnthropicProvider(LLMProvider):
     @staticmethod
     def _sanitize_conversation(conversation: list[dict]) -> list[dict]:
         """Sanitize conversation to ensure Anthropic tool_use/tool_result pairing.
-        
+
         Anthropic requires:
         1. Every tool_result must reference a tool_use_id from the immediately preceding assistant message
         2. Every tool_use in an assistant message must have a matching tool_result in the next user message
-        
+
         This removes orphaned tool_results and converts orphaned tool_use assistant
         messages to plain text to prevent 400 errors from context trimming/compaction.
         """
         if not conversation:
             return conversation
-        
+
         sanitized = []
         i = 0
         while i < len(conversation):
             msg = conversation[i]
-            
+
             # Check if this is an assistant message with tool_use blocks
             if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
                 tool_use_ids = {
@@ -165,21 +181,21 @@ class AnthropicProvider(LLMProvider):
                     for block in msg["content"]
                     if isinstance(block, dict) and block.get("type") == "tool_use"
                 }
-                
+
                 if tool_use_ids:
                     # Look ahead: next message must be user with matching tool_results
                     next_msg = conversation[i + 1] if i + 1 < len(conversation) else None
-                    
+
                     if next_msg and next_msg.get("role") == "user" and isinstance(next_msg.get("content"), list):
                         result_ids = {
                             block.get("tool_use_id")
                             for block in next_msg["content"]
                             if isinstance(block, dict) and block.get("type") == "tool_result"
                         }
-                        
+
                         if tool_use_ids & result_ids:
                             matched_ids = tool_use_ids & result_ids
-                            
+
                             filtered_assistant = [
                                 block for block in msg["content"]
                                 if block.get("type") != "tool_use" or block.get("id") in matched_ids
@@ -188,13 +204,13 @@ class AnthropicProvider(LLMProvider):
                                 block for block in next_msg["content"]
                                 if block.get("type") != "tool_result" or block.get("tool_use_id") in matched_ids
                             ]
-                            
+
                             sanitized.append({"role": "assistant", "content": filtered_assistant})
                             if filtered_results:
                                 sanitized.append({"role": "user", "content": filtered_results})
                             i += 2
                             continue
-                    
+
                     # No matching tool_results — convert to plain text
                     text_parts = [
                         block.get("text", "")
@@ -205,14 +221,14 @@ class AnthropicProvider(LLMProvider):
                     sanitized.append({"role": "assistant", "content": text})
                     i += 1
                     continue
-            
+
             # Check if this is a user message with tool_results (orphaned)
             if msg.get("role") == "user" and isinstance(msg.get("content"), list):
                 has_tool_results = any(
                     isinstance(block, dict) and block.get("type") == "tool_result"
                     for block in msg["content"]
                 )
-                
+
                 if has_tool_results:
                     prev = sanitized[-1] if sanitized else None
                     if prev and prev.get("role") == "assistant" and isinstance(prev.get("content"), list):
@@ -231,10 +247,10 @@ class AnthropicProvider(LLMProvider):
                         logger.debug("Dropping orphaned tool_result message (no preceding tool_use)")
                     i += 1
                     continue
-            
+
             sanitized.append(msg)
             i += 1
-        
+
         # Final pass: merge consecutive same-role messages
         merged = []
         for msg in sanitized:
@@ -251,7 +267,7 @@ class AnthropicProvider(LLMProvider):
                     merged[-1]["content"] = prev_content + [{"type": "text", "text": new_content}]
             else:
                 merged.append(msg)
-        
+
         return merged
 
     # Claude-specific defaults — tuned for quality over creativity
@@ -274,12 +290,12 @@ class AnthropicProvider(LLMProvider):
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
-        
+
         # Separate system message from conversation messages
         system_text = None
         conversation = []
         pending_tool_results = []
-        
+
         for m in messages:
             if m.role == "system":
                 system_text = m.content
@@ -294,7 +310,7 @@ class AnthropicProvider(LLMProvider):
                 if pending_tool_results:
                     conversation.append({"role": "user", "content": pending_tool_results})
                     pending_tool_results = []
-                
+
                 tool_calls_meta = (m.metadata or {}).get("tool_calls", [])
                 if tool_calls_meta:
                     content_blocks = []
@@ -330,7 +346,7 @@ class AnthropicProvider(LLMProvider):
                 if pending_tool_results:
                     conversation.append({"role": "user", "content": pending_tool_results})
                     pending_tool_results = []
-                
+
                 img_meta = (m.metadata or {}).get("image")
                 if img_meta:
                     content_parts = []
@@ -350,12 +366,12 @@ class AnthropicProvider(LLMProvider):
                     conversation.append({"role": m.role, "content": content_parts})
                 else:
                     conversation.append({"role": m.role, "content": m.content})
-        
+
         if pending_tool_results:
             conversation.append({"role": "user", "content": pending_tool_results})
-        
+
         conversation = self._sanitize_conversation(conversation)
-        
+
         body: dict = {
             "model": model,
             "messages": conversation,
@@ -375,7 +391,7 @@ class AnthropicProvider(LLMProvider):
             body["temperature"] = 1  # required by Anthropic when thinking is on
         else:
             body["temperature"] = temperature
-        
+
         # Anthropic: top_p and top_k are not allowed when thinking is enabled
         if top_p is not None and effective_budget <= 0:
             body["top_p"] = top_p
@@ -391,7 +407,7 @@ class AnthropicProvider(LLMProvider):
         headers = self._build_headers(token)
 
         async with httpx.AsyncClient(timeout=180) as client:
-          for attempt in range(3):
+          for attempt in range(_TOTAL_ATTEMPTS):
             # Accumulated state — reset each attempt
             content_text = ""
             thinking_text = ""
@@ -400,6 +416,7 @@ class AnthropicProvider(LLMProvider):
             active_blocks: dict[int, dict] = {}
             usage: dict = {}
             resp_model = model
+            last_attempt = attempt >= _MAX_RETRIES
 
             try:
                 async with client.stream(
@@ -414,11 +431,14 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         retry_after = _parse_retry_delay(resp)
                         status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
-                        if attempt < 2:
-                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {retry_after}s (attempt {attempt + 1}/3)")
-                            await asyncio.sleep(retry_after)
+                        if not last_attempt:
+                            # Use max(backoff, server delay) for rate limits
+                            backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                            delay = max(backoff, retry_after)
+                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                            await asyncio.sleep(delay)
                             continue
-                        raise RuntimeError(f"{status_label} ({resp.status_code}) after 3 attempts")
+                        raise RuntimeError(f"{status_label} ({resp.status_code}) after {_TOTAL_ATTEMPTS} attempts")
 
                     if resp.status_code == 401:
                         await resp.aread()
@@ -447,9 +467,10 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         error_text = resp.text[:500]
                         logger.error(f"Anthropic {resp.status_code}: {error_text}")
-                        if attempt < 2:
-                            logger.warning(f"Server error ({resp.status_code}), retrying in 1s (attempt {attempt + 1}/3)")
-                            await asyncio.sleep(1)
+                        if not last_attempt:
+                            delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                            logger.warning(f"Server error ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                            await asyncio.sleep(delay)
                             continue
                         resp.raise_for_status()
 
@@ -457,9 +478,16 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         resp.raise_for_status()
 
-                    # ── Parse SSE stream ──
+                    # ── Parse SSE stream with idle timeout ──
                     event_type = ""
+                    last_data_time = time.monotonic()
                     async for line in resp.aiter_lines():
+                        now = time.monotonic()
+                        if now - last_data_time > _STREAM_IDLE_TIMEOUT:
+                            logger.warning(f"Anthropic stream idle for {_STREAM_IDLE_TIMEOUT}s, aborting")
+                            raise httpx.ReadTimeout(f"Stream idle timeout ({_STREAM_IDLE_TIMEOUT}s)")
+                        last_data_time = now
+
                         if line.startswith("event:"):
                             event_type = line[6:].strip()
                             continue
@@ -544,16 +572,17 @@ class AnthropicProvider(LLMProvider):
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
             except httpx.ReadTimeout:
-                if attempt < 2:
-                    logger.warning(f"Anthropic stream read timeout, retrying (attempt {attempt + 1}/3)")
-                    await asyncio.sleep(1)
+                if not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"Anthropic stream read timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    await asyncio.sleep(delay)
                     continue
-                raise RuntimeError("Anthropic stream timed out after 3 attempts")
+                raise RuntimeError(f"Anthropic stream timed out after {_TOTAL_ATTEMPTS} attempts")
 
             # Success — exit retry loop
             break
           else:
-            raise RuntimeError("Anthropic API failed after 3 attempts")
+            raise RuntimeError(f"Anthropic API failed after {_TOTAL_ATTEMPTS} attempts")
 
         return ChatResponse(
             content=content_text,

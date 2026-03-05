@@ -3,11 +3,21 @@
 import asyncio
 import json
 import logging
+import time
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
+from .provider import (
+    LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
+    LLMRateLimitError, LLMAuthError, LLMBadRequestError, StreamCallbacks,
+)
+from .openai_common import (
+    _MAX_RETRIES, _BASE_DELAY_MS, _STREAM_IDLE_TIMEOUT,
+    _backoff_delay, _classify_openai_error,
+)
 
 logger = logging.getLogger("syne.llm.openai")
+
+_TOTAL_ATTEMPTS = _MAX_RETRIES + 1  # 5
 
 
 def _merge_consecutive(messages: list[dict]) -> list[dict]:
@@ -29,7 +39,7 @@ def _merge_consecutive(messages: list[dict]) -> list[dict]:
 
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible API provider.
-    
+
     Works with any OpenAI-compatible endpoint:
     - OpenAI: https://api.openai.com/v1
     - Groq:   https://api.groq.com/openai/v1
@@ -214,7 +224,7 @@ class OpenAIProvider(LLMProvider):
         stream_body = {**body, "stream": True, "stream_options": {"include_usage": True}}
 
         async with httpx.AsyncClient(timeout=180) as client:
-          for attempt in range(2):
+          for attempt in range(_TOTAL_ATTEMPTS):
             # Accumulated state
             content_parts: list[str] = []
             # tool_calls keyed by index: {index: {"id": ..., "name": ..., "arguments": ...}}
@@ -222,6 +232,7 @@ class OpenAIProvider(LLMProvider):
             thinking_text: str | None = None
             resp_model = model
             usage: dict = {}
+            last_attempt = attempt >= _MAX_RETRIES
 
             try:
                 async with client.stream(
@@ -231,27 +242,44 @@ class OpenAIProvider(LLMProvider):
                     headers=self._get_headers(),
                     timeout=httpx.Timeout(30.0 if attempt > 0 else 120.0, connect=10.0),
                 ) as resp:
-                    if resp.status_code == 429:
-                        await resp.aread()
-                        logger.error(f"Rate limited (429): {resp.text[:200]}")
-                        retry_after = resp.headers.get("retry-after", "a moment")
-                        raise httpx.HTTPStatusError(
-                            f"Rate limited. Retry after {retry_after}.",
-                            request=resp.request,
-                            response=resp,
-                        )
-
-                    if 500 <= resp.status_code < 600 and attempt < 1:
-                        await resp.aread()
-                        logger.warning(f"OpenAI {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {resp.text[:200]}")
-                        await asyncio.sleep(1)
-                        continue
-
                     if resp.status_code >= 400:
                         await resp.aread()
-                        resp.raise_for_status()
+                        error_text = resp.text[:500]
+                        classification = _classify_openai_error(resp.status_code, resp.text, resp.headers)
 
+                        if classification.is_terminal:
+                            if "context_length" in (classification.reason or ""):
+                                raise LLMBadRequestError(classification.reason)
+                            raise LLMRateLimitError(classification.reason)
+
+                        if resp.status_code in (401, 403):
+                            raise LLMAuthError(classification.reason or f"Auth error ({resp.status_code})")
+
+                        if not classification.is_retryable or last_attempt:
+                            if resp.status_code == 400:
+                                raise LLMBadRequestError(f"OpenAI 400: {error_text}")
+                            raise RuntimeError(f"OpenAI {resp.status_code}: {error_text}")
+
+                        # Retryable — backoff with server delay
+                        backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                        server_delay = classification.delay_ms / 1000.0 if classification.delay_ms else 0
+                        delay = max(backoff, server_delay)
+                        logger.warning(
+                            f"OpenAI {resp.status_code}, retrying in {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{_TOTAL_ATTEMPTS}): {error_text[:200]}"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    # ── Parse SSE stream with idle timeout ──
+                    last_data_time = time.monotonic()
                     async for line in resp.aiter_lines():
+                        now = time.monotonic()
+                        if now - last_data_time > _STREAM_IDLE_TIMEOUT:
+                            logger.warning(f"OpenAI stream idle for {_STREAM_IDLE_TIMEOUT}s, aborting")
+                            raise httpx.ReadTimeout(f"Stream idle timeout ({_STREAM_IDLE_TIMEOUT}s)")
+                        last_data_time = now
+
                         if not line.startswith("data:"):
                             continue
                         data_str = line[5:].strip()
@@ -305,17 +333,20 @@ class OpenAIProvider(LLMProvider):
                                 if fn.get("arguments"):
                                     tc_accum[idx]["arguments"] += fn["arguments"]
 
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+                raise
             except httpx.ReadTimeout:
-                if attempt < 1:
-                    logger.warning("OpenAI stream read timeout, retrying (attempt 1/2)")
-                    await asyncio.sleep(1)
+                if not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"OpenAI stream read timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    await asyncio.sleep(delay)
                     continue
-                raise RuntimeError("OpenAI stream timed out after 2 attempts")
+                raise RuntimeError(f"OpenAI stream timed out after {_TOTAL_ATTEMPTS} attempts")
 
             # If we got here without continue, we have a valid response
             break
           else:
-            raise RuntimeError("OpenAI API failed after 2 attempts")
+            raise RuntimeError(f"OpenAI API failed after {_TOTAL_ATTEMPTS} attempts")
 
         # Parse accumulated tool calls
         tool_calls = None
@@ -342,26 +373,60 @@ class OpenAIProvider(LLMProvider):
             thinking=thinking_text,
         )
 
+    async def _embed_with_retry(
+        self,
+        body: dict,
+        timeout: int,
+    ) -> dict:
+        """Shared embed request with retry logic."""
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(_TOTAL_ATTEMPTS):
+                last_attempt = attempt >= _MAX_RETRIES
+                try:
+                    resp = await client.post(
+                        f"{self.base_url}/embeddings",
+                        json=body,
+                        headers=self._get_headers(),
+                    )
+                    if resp.status_code >= 400:
+                        error_text = resp.text[:500]
+                        classification = _classify_openai_error(resp.status_code, resp.text, resp.headers)
+
+                        if classification.is_terminal:
+                            raise LLMRateLimitError(classification.reason)
+                        if resp.status_code in (401, 403):
+                            raise LLMAuthError(classification.reason)
+                        if not classification.is_retryable or last_attempt:
+                            raise RuntimeError(f"OpenAI embed {resp.status_code}: {error_text}")
+
+                        backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                        server_delay = classification.delay_ms / 1000.0 if classification.delay_ms else 0
+                        delay = max(backoff, server_delay)
+                        logger.warning(f"OpenAI embed {resp.status_code}, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                        await asyncio.sleep(delay)
+                        continue
+
+                    return resp.json()
+                except (LLMRateLimitError, LLMAuthError):
+                    raise
+                except httpx.ReadTimeout:
+                    if not last_attempt:
+                        delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                        logger.warning(f"OpenAI embed timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                        await asyncio.sleep(delay)
+                        continue
+                    raise RuntimeError(f"OpenAI embed timed out after {_TOTAL_ATTEMPTS} attempts")
+
+        raise RuntimeError(f"OpenAI embed failed after {_TOTAL_ATTEMPTS} attempts")
+
     async def embed(
         self,
         text: str,
         model: Optional[str] = None,
     ) -> EmbeddingResponse:
         model = model or self.embedding_model
-
-        body = {
-            "model": model,
-            "input": text,
-        }
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{self.base_url}/embeddings",
-                json=body,
-                headers=self._get_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        body = {"model": model, "input": text}
+        data = await self._embed_with_retry(body, timeout=30)
 
         vector = data["data"][0]["embedding"]
         usage = data.get("usage", {})
@@ -379,20 +444,8 @@ class OpenAIProvider(LLMProvider):
         model: Optional[str] = None,
     ) -> list[EmbeddingResponse]:
         model = model or self.embedding_model
-
-        body = {
-            "model": model,
-            "input": texts,
-        }
-
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self.base_url}/embeddings",
-                json=body,
-                headers=self._get_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        body = {"model": model, "input": texts}
+        data = await self._embed_with_retry(body, timeout=60)
 
         usage = data.get("usage", {})
         results = []

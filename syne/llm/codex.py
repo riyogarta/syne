@@ -7,7 +7,14 @@ import os
 import time
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, StreamCallbacks
+from .provider import (
+    LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
+    LLMRateLimitError, LLMAuthError, LLMBadRequestError, StreamCallbacks,
+)
+from .openai_common import (
+    _MAX_RETRIES, _BASE_DELAY_MS, _STREAM_IDLE_TIMEOUT,
+    _backoff_delay, _classify_openai_error,
+)
 
 logger = logging.getLogger("syne.llm.codex")
 
@@ -20,10 +27,16 @@ _CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 # Token refresh buffer — refresh if expires within this many seconds
 _REFRESH_BUFFER_SECONDS = 300  # 5 minutes
 
+_TOTAL_ATTEMPTS = _MAX_RETRIES + 1  # 5
+
+# Terminal error codes from Codex CLI response.failed handling
+_TERMINAL_CODES = {"context_length_exceeded", "insufficient_quota", "invalid_prompt"}
+_RETRYABLE_CODES = {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}
+
 
 class CodexProvider(LLMProvider):
     """OpenAI Codex via ChatGPT backend (Responses API, OAuth).
-    
+
     Free via ChatGPT subscription (Plus/Pro/Team).
     Tokens stored in DB (credential.codex_access_token, credential.codex_refresh_token).
     """
@@ -39,7 +52,7 @@ class CodexProvider(LLMProvider):
         self.refresh_token = refresh_token
         self.chat_model = chat_model
         self.base_url = base_url.rstrip("/")
-        
+
         # Cache for parsed auth file
         self._auth_cache: Optional[dict] = None
         self._auth_cache_time: float = 0
@@ -58,25 +71,25 @@ class CodexProvider(LLMProvider):
     def supports_vision(self) -> bool:
         return True
 
-    def _refresh_token(self) -> bool:
+    def _refresh_token_sync(self) -> bool:
         """Refresh Codex OAuth token if expired or about to expire.
-        
+
         Uses the same refresh endpoint as OpenClaw/Codex CLI:
         POST https://auth.openai.com/oauth/token
-        
+
         Returns:
             True if token was refreshed, False otherwise
         """
         now = time.time()
-        
+
         # Check if refresh needed
         if self._token_expires_at > 0 and (now + _REFRESH_BUFFER_SECONDS) < self._token_expires_at:
             return False
-        
+
         if not self.refresh_token:
             logger.warning("No refresh token available for Codex")
             return False
-        
+
         try:
             # Synchronous refresh using httpx (called from sync context)
             with httpx.Client(timeout=30) as client:
@@ -89,41 +102,41 @@ class CodexProvider(LLMProvider):
                     },
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )
-                
+
                 if not resp.is_success:
                     logger.error(f"Codex token refresh failed: {resp.status_code} {resp.text[:200]}")
                     self._auth_failure = f"Codex OAuth token refresh failed ({resp.status_code}). Run `syne reauth` to re-authenticate."
                     return False
-                
+
                 data = resp.json()
-            
+
             new_access = data.get("access_token")
             new_refresh = data.get("refresh_token")
             expires_in = data.get("expires_in", 0)
-            
+
             if not new_access or not new_refresh:
                 logger.error("Codex token refresh response missing fields")
                 return False
-            
+
             self.access_token = new_access
             self.refresh_token = new_refresh
             self._token_expires_at = now + expires_in
-            
+
             # Save refreshed tokens to DB (fire and forget via thread)
             self._save_tokens_to_db(new_access, new_refresh, self._token_expires_at)
-            
+
             logger.info("Codex OAuth token refreshed successfully")
             return True
-            
+
         except Exception as e:
             logger.error(f"Codex token refresh error: {e}")
             return False
-    
+
     def _save_tokens_to_db(self, access_token: str, refresh_token: str, expires_at: float):
         """Save refreshed tokens to DB in background."""
         import asyncio
         import threading
-        
+
         async def _save():
             try:
                 from ..db.models import set_config
@@ -133,7 +146,7 @@ class CodexProvider(LLMProvider):
                 logger.debug("Codex tokens saved to DB")
             except Exception as e:
                 logger.warning(f"Failed to save Codex tokens to DB: {e}")
-        
+
         def _run():
             try:
                 loop = asyncio.new_event_loop()
@@ -141,12 +154,12 @@ class CodexProvider(LLMProvider):
                 loop.close()
             except Exception:
                 pass
-        
+
         threading.Thread(target=_run, daemon=True).start()
 
     def _get_headers(self) -> dict:
         # Refresh token if needed before building headers
-        self._refresh_token()
+        self._refresh_token_sync()
         return {
             "Authorization": f"Bearer {self.access_token}",
             "Content-Type": "application/json",
@@ -155,7 +168,7 @@ class CodexProvider(LLMProvider):
 
     def _format_input(self, messages: list[ChatMessage]) -> tuple[str, list[dict]]:
         """Convert ChatMessages to Codex Responses format.
-        
+
         Returns:
             (system_instructions, input_messages)
         """
@@ -277,7 +290,7 @@ class CodexProvider(LLMProvider):
 
         url = f"{self.base_url}/codex/responses"
         headers = self._get_headers()
-        
+
         # Log request body (exclude input/instructions for brevity)
         body_log = {k: v for k, v in body.items() if k not in ("input", "instructions")}
         body_log["input_count"] = len(input_msgs)
@@ -295,57 +308,89 @@ class CodexProvider(LLMProvider):
         thinking_text = ""
         actual_model = model
         event_counts: dict[str, int] = {}  # track all event types
+        token_refreshed_for_401 = False  # track if we already retried 401 with refresh
 
         async with httpx.AsyncClient(timeout=180) as client:
-          for attempt in range(2):
-            # Shorter timeout for retry attempt to avoid long waits
-            req_timeout = 30 if attempt > 0 else 180
-            async with client.stream(
-                "POST", url, json=body, headers=headers,
-                timeout=req_timeout,
-            ) as resp:
-                if resp.status_code == 429:
-                    error_text = ""
-                    async for chunk in resp.aiter_text():
-                        error_text += chunk
-                    logger.error(f"Rate limited (429): {error_text[:200]}")
-                    raise httpx.HTTPStatusError(
-                        f"Rate limited: {error_text[:200]}",
-                        request=resp.request,
-                        response=resp,
-                    )
+          for attempt in range(_TOTAL_ATTEMPTS):
+            # Reset accumulated state each attempt
+            content_text = ""
+            tool_calls = []
+            current_tool_call = None
+            usage = {"input_tokens": 0, "output_tokens": 0}
+            thinking_text = ""
+            event_counts = {}
+            last_attempt = attempt >= _MAX_RETRIES
 
-                if 500 <= resp.status_code < 600 and attempt < 1:
+            try:
+              # Shorter timeout for retry attempts
+              req_timeout = 30 if attempt > 0 else 180
+              async with client.stream(
+                  "POST", url, json=body, headers=headers,
+                  timeout=req_timeout,
+              ) as resp:
+                if resp.status_code >= 400:
                     error_text = ""
                     async for chunk in resp.aiter_text():
                         error_text += chunk
-                    logger.warning(f"Codex {resp.status_code}, retrying in 1s (attempt {attempt + 1}/2): {error_text[:200]}")
-                    await asyncio.sleep(1)
+                    error_text_short = error_text[:500]
+
+                    # 401 with refresh token — try once
+                    if resp.status_code == 401 and self.refresh_token and not token_refreshed_for_401:
+                        logger.info("Codex 401 — attempting token refresh...")
+                        if self._refresh_token_sync():
+                            headers = self._get_headers()
+                            token_refreshed_for_401 = True
+                            continue
+                        raise LLMAuthError(
+                            "Codex OAuth token expired. Run `syne reauth` to re-authenticate."
+                        )
+
+                    classification = _classify_openai_error(resp.status_code, error_text, resp.headers)
+
+                    if classification.is_terminal:
+                        if "context_length" in (classification.reason or ""):
+                            raise LLMBadRequestError(classification.reason)
+                        raise LLMRateLimitError(classification.reason)
+
+                    if resp.status_code in (401, 403):
+                        raise LLMAuthError(classification.reason or f"Codex auth error ({resp.status_code})")
+
+                    if not classification.is_retryable or last_attempt:
+                        if resp.status_code == 400:
+                            raise LLMBadRequestError(f"Codex 400: {error_text_short}")
+                        raise RuntimeError(f"Codex {resp.status_code}: {error_text_short}")
+
+                    # Retryable — backoff with server delay
+                    backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    server_delay = classification.delay_ms / 1000.0 if classification.delay_ms else 0
+                    delay = max(backoff, server_delay)
+                    logger.warning(
+                        f"Codex {resp.status_code}, retrying in {delay:.1f}s "
+                        f"(attempt {attempt + 1}/{_TOTAL_ATTEMPTS}): {error_text_short[:200]}"
+                    )
+                    await asyncio.sleep(delay)
                     continue
 
-                if resp.status_code != 200:
-                    error_text = ""
-                    async for chunk in resp.aiter_text():
-                        error_text += chunk
-                    logger.error(f"Codex error {resp.status_code}: {error_text[:300]}")
-                    raise httpx.HTTPStatusError(
-                        f"Codex API error {resp.status_code}: {error_text[:200]}",
-                        request=resp.request,
-                        response=resp,
-                    )
-
+                # ── Parse SSE stream with idle timeout ──
                 buffer = ""
+                last_data_time = time.monotonic()
                 async for chunk in resp.aiter_text():
+                    now = time.monotonic()
+                    if now - last_data_time > _STREAM_IDLE_TIMEOUT:
+                        logger.warning(f"Codex stream idle for {_STREAM_IDLE_TIMEOUT}s, aborting")
+                        raise httpx.ReadTimeout(f"Stream idle timeout ({_STREAM_IDLE_TIMEOUT}s)")
+                    last_data_time = now
+
                     buffer += chunk
                     while "\n" in buffer:
                         line, buffer = buffer.split("\n", 1)
                         line = line.strip()
-                        
+
                         if not line or line.startswith("event:"):
                             continue
                         if not line.startswith("data:"):
                             continue
-                        
+
                         data_str = line[5:].strip()
                         if not data_str:
                             continue
@@ -401,6 +446,28 @@ class CodexProvider(LLMProvider):
                                 # Log completed function call item for verification
                                 logger.info(f"Codex output_item.done: function_call name={item.get('name', '')}, call_id={item.get('call_id', '')}, status={item.get('status', '')}")
 
+                        # ── response.failed — Codex SSE error event ──
+                        elif event_type == "response.failed":
+                            resp_data = event.get("response", {})
+                            err = resp_data.get("error", {})
+                            err_code = err.get("code", "") or ""
+                            err_message = err.get("message", "") or str(err)
+                            logger.error(f"Codex response.failed: code={err_code}, message={err_message[:200]}")
+
+                            if err_code in _TERMINAL_CODES:
+                                if err_code == "context_length_exceeded":
+                                    raise LLMBadRequestError(err_message or "Context length exceeded")
+                                raise LLMRateLimitError(err_message or f"Terminal error: {err_code}")
+
+                            if err_code in _RETRYABLE_CODES and not last_attempt:
+                                backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                                logger.warning(f"Codex response.failed retryable ({err_code}), retrying in {backoff:.1f}s")
+                                await asyncio.sleep(backoff)
+                                raise _RetrySignal()
+
+                            # Unknown code or last attempt — raise
+                            raise RuntimeError(f"Codex response.failed: [{err_code}] {err_message[:300]}")
+
                         # Completion with usage
                         elif event_type == "response.completed":
                             resp_data = event.get("response", {})
@@ -420,6 +487,18 @@ class CodexProvider(LLMProvider):
                             usage["input_tokens"] = u.get("input_tokens", 0)
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
+            except _RetrySignal:
+                continue
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+                raise
+            except httpx.ReadTimeout:
+                if not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"Codex stream timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(f"Codex stream timed out after {_TOTAL_ATTEMPTS} attempts")
+
             # Log stream summary
             logger.info(
                 f"Codex stream summary: text={len(content_text)} chars, "
@@ -435,7 +514,7 @@ class CodexProvider(LLMProvider):
 
             break  # success — exit retry loop
           else:
-            raise RuntimeError("Codex API failed after 2 attempts")
+            raise RuntimeError(f"Codex API failed after {_TOTAL_ATTEMPTS} attempts")
 
         # Convert tool calls to Syne format
         parsed_tool_calls = None
@@ -466,3 +545,8 @@ class CodexProvider(LLMProvider):
 
     async def embed_batch(self, texts: list[str], model: Optional[str] = None) -> list[EmbeddingResponse]:
         raise NotImplementedError("Codex provider does not support embeddings. Use HybridProvider with Together AI.")
+
+
+class _RetrySignal(Exception):
+    """Internal signal to trigger retry from inside the SSE parsing loop."""
+    pass
