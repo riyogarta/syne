@@ -310,7 +310,14 @@ class TelegramChannel:
             await self.app.shutdown()
             logger.info("Telegram bot stopped.")
 
-    async def process_scheduled_message(self, chat_id: int, payload: str, task_id: int | None = None):
+    async def process_scheduled_message(
+        self,
+        chat_id: int,
+        payload: str,
+        task_id: int | None = None,
+        *,
+        echo_response: bool = True,
+    ):
         """Process a scheduled task payload as if the user sent it.
         
         This is called by the scheduler when a task executes.
@@ -318,6 +325,10 @@ class TelegramChannel:
         Args:
             chat_id: Telegram chat ID (user ID for DMs)
             payload: Message payload to process
+            task_id: Scheduled task ID (for session isolation)
+            echo_response: If False, do not send the final LLM response back
+                to the user's DM. Useful for scheduled tasks that only exist
+                to perform side effects (e.g., send messages to groups).
         """
         if not self.app or not self.app.bot:
             logger.warning("Cannot process scheduled message: bot not initialized")
@@ -365,7 +376,7 @@ class TelegramChannel:
                 message_metadata={"scheduled": True, "task_id": task_id, "inbound": sched_inbound},
             )
             
-            if response:
+            if response and echo_response:
                 # Parse reply tags (no incoming message for cron)
                 response, reply_to = parse_reply_tag(response)
                 await self._send_response_with_media(chat_id, response, None, reply_to_message_id=reply_to)

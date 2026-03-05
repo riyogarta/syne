@@ -629,3 +629,10 @@ UPDATE config SET description = 'Web search API key — Tavily (tvly-...) or Bra
 -- v0.25.3: (removed) — was disabling abilities on every update.
 -- Abilities now default to enabled=false in schema, which only affects new installs.
 
+
+-- Default scheduler output policy
+INSERT INTO config (key, value, description) VALUES (
+  'scheduler.echo_response_to_creator',
+  'false'::jsonb,
+  'If true, scheduled task execution will echo the final LLM response back to the creator DM. Default false.'
+) ON CONFLICT (key) DO NOTHING;

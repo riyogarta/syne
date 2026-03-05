@@ -117,7 +117,13 @@ async def _scheduler_callback(task_id: int, payload: str, created_by: int):
     
     # Process the payload as if the user sent it
     try:
-        await _telegram_channel.process_scheduled_message(chat_id, payload, task_id=task_id)
+        # Scheduled tasks may be side-effect only (e.g., send_message to groups).
+        # By default we do NOT echo the final LLM response back to the creator DM.
+        from .db.models import get_config
+        echo = await get_config('scheduler.echo_response_to_creator', False)
+        await _telegram_channel.process_scheduled_message(
+            chat_id, payload, task_id=task_id, echo_response=bool(echo)
+        )
     except Exception as e:
         logger.error(f"Scheduler: Error executing task {task_id}: {e}", exc_info=True)
 
