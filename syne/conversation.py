@@ -361,11 +361,9 @@ class Conversation:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
 
-        # 5. Current user message (with optional image metadata)
-        msg_metadata = getattr(self, '_message_metadata', None)
-        messages.append(ChatMessage(role="user", content=user_message, metadata=msg_metadata))
-
         # 5. Trim to fit context window
+        # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)
+        # Do NOT append it again here — that caused the LLM to see duplicate user messages.
         messages = self.context_mgr.trim_context(messages)
 
         return messages
@@ -442,6 +440,20 @@ class Conversation:
             await self.save_message("user", redact_content_output(user_message))
         else:
             await self.save_message("user", user_message)
+
+        # Attach media metadata (image/audio/doc) to the cached message for LLM context.
+        # This is NOT persisted to DB — only needed for the current turn.
+        if message_metadata and self._message_cache:
+            media_meta = {}
+            for key in ("image", "audio", "document"):
+                if key in message_metadata:
+                    media_meta[key] = message_metadata[key]
+            if media_meta:
+                self._message_cache[-1] = ChatMessage(
+                    role="user",
+                    content=self._message_cache[-1].content,
+                    metadata=media_meta,
+                )
 
         # ═══════════════════════════════════════════════════════════════
         # PRE-FLIGHT COMPACTION CHECK
