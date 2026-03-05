@@ -10,84 +10,6 @@ from . import cli
 from .shared import console, _read_env_value, _get_syne_dir
 
 
-@cli.command()
-@click.option("--output", "-o", default=None, help="Output file path (default: ~/syne/backup/syne-backup-TIMESTAMP.sql.gz)")
-def backup(output):
-    """Backup Syne database to a compressed SQL file."""
-    syne_dir = _get_syne_dir()
-    db_user = _read_env_value("SYNE_DB_USER", syne_dir)
-    db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
-
-    if not db_user or not db_name:
-        console.print("[red]Cannot read DB credentials from .env. Run 'syne init' first.[/red]")
-        return
-
-    # Default output path: ~/syne/backup/
-    if output is None:
-        backup_dir = os.path.join(syne_dir, "backup")
-        os.makedirs(backup_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        output = os.path.join(backup_dir, f"syne-backup-{timestamp}.sql.gz")
-
-    output = os.path.expanduser(output)
-
-    # Check that syne-db container is running
-    check = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
-        capture_output=True, text=True,
-    )
-    if check.returncode != 0 or check.stdout.strip() != "running":
-        console.print("[red]syne-db container is not running.[/red]")
-        console.print("[dim]Start it with: docker start syne-db[/dim]")
-        return
-
-    console.print(f"[bold]Backing up database '{db_name}'...[/bold]")
-
-    # pg_dump → gzip → file (streaming via Popen pipes)
-    try:
-        dump_proc = subprocess.Popen(
-            ["docker", "exec", "syne-db", "pg_dump", "-U", db_user, "-d", db_name],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        with open(output, "wb") as f:
-            gzip_proc = subprocess.Popen(
-                ["gzip"],
-                stdin=dump_proc.stdout,
-                stdout=f,
-                stderr=subprocess.PIPE,
-            )
-            # Allow dump_proc to receive SIGPIPE if gzip exits
-            dump_proc.stdout.close()
-            gzip_proc.wait()
-            dump_proc.wait()
-
-        if dump_proc.returncode != 0:
-            stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else ""
-            console.print(f"[red]pg_dump failed (exit {dump_proc.returncode}): {stderr.strip()}[/red]")
-            # Clean up partial file
-            if os.path.exists(output):
-                os.remove(output)
-            return
-
-        # Show result
-        size = os.path.getsize(output)
-        if size > 1024 * 1024:
-            size_str = f"{size / (1024 * 1024):.1f} MB"
-        elif size > 1024:
-            size_str = f"{size / 1024:.1f} KB"
-        else:
-            size_str = f"{size} bytes"
-
-        console.print(f"[green]✓ Backup saved: {output} ({size_str})[/green]")
-
-    except FileNotFoundError as e:
-        console.print(f"[red]Command not found: {e}[/red]")
-        console.print("[dim]Ensure 'docker' and 'gzip' are installed.[/dim]")
-    except Exception as e:
-        console.print(f"[red]Backup failed: {e}[/red]")
-
-
 def _get_backup_dir():
     """Return the backup directory path."""
     return os.path.join(_get_syne_dir(), "backup")
@@ -115,6 +37,74 @@ def _format_size(size):
     elif size > 1024:
         return f"{size / 1024:.1f} KB"
     return f"{size} bytes"
+
+
+def run_backup(output=None):
+    """Core backup logic. Returns (success, message, filename).
+
+    Used by both CLI `syne backup` and Telegram `/backup`.
+    """
+    syne_dir = _get_syne_dir()
+    db_user = _read_env_value("SYNE_DB_USER", syne_dir)
+    db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
+
+    if not db_user or not db_name:
+        return False, "Cannot read DB credentials from .env.", None
+
+    # Default output path
+    if output is None:
+        backup_dir = os.path.join(syne_dir, "backup")
+        os.makedirs(backup_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        output = os.path.join(backup_dir, f"syne-backup-{timestamp}.sql.gz")
+    output = os.path.expanduser(output)
+
+    # Check container
+    check = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0 or check.stdout.strip() != "running":
+        return False, "syne-db container is not running.", None
+
+    try:
+        dump_proc = subprocess.Popen(
+            ["docker", "exec", "syne-db", "pg_dump", "-U", db_user, "-d", db_name],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        with open(output, "wb") as f:
+            gzip_proc = subprocess.Popen(
+                ["gzip"], stdin=dump_proc.stdout, stdout=f, stderr=subprocess.PIPE,
+            )
+            dump_proc.stdout.close()
+            gzip_proc.wait()
+            dump_proc.wait()
+
+        if dump_proc.returncode != 0:
+            stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else ""
+            if os.path.exists(output):
+                os.remove(output)
+            return False, f"pg_dump failed: {stderr.strip()[:300]}", None
+
+        size_str = _format_size(os.path.getsize(output))
+        return True, f"{os.path.basename(output)} ({size_str})", output
+
+    except FileNotFoundError as e:
+        return False, f"Command not found: {e}", None
+    except Exception as e:
+        return False, f"Backup failed: {e}", None
+
+
+@cli.command()
+@click.option("--output", "-o", default=None, help="Output file path (default: ~/syne/backup/syne-backup-TIMESTAMP.sql.gz)")
+def backup(output):
+    """Backup Syne database to a compressed SQL file."""
+    console.print("[bold]Backing up database...[/bold]")
+    success, message, path = run_backup(output)
+    if success:
+        console.print(f"[green]Backup saved: {message}[/green]")
+    else:
+        console.print(f"[red]{message}[/red]")
 
 
 @cli.command()
@@ -237,7 +227,7 @@ def restore(file, list_backups, yes):
         if returncode != 0:
             console.print(f"[yellow]Restore completed with warnings: {stderr.strip()[:200]}[/yellow]")
         else:
-            console.print("[green]✓ Database restored successfully[/green]")
+            console.print("[green]Database restored successfully[/green]")
 
         # Run schema migration to ensure compatibility with current version
         console.print("[dim]Running schema migration for compatibility...[/dim]")

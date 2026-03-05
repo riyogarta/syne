@@ -3229,75 +3229,14 @@ Or just send me a message!"""
             await update.message.reply_text("Only the owner can run backups.")
             return
 
-        import subprocess, os
-        from datetime import datetime
-
-        syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        env_path = os.path.join(syne_dir, ".env")
-
-        # Read DB credentials from .env
-        db_user = db_name = None
-        if os.path.exists(env_path):
-            with open(env_path) as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith("SYNE_DB_USER="):
-                        db_user = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    elif line.startswith("SYNE_DB_NAME="):
-                        db_name = line.split("=", 1)[1].strip().strip('"').strip("'")
-
-        if not db_user or not db_name:
-            await update.message.reply_text("Cannot read DB credentials from .env.")
-            return
-
-        # Check container
-        check = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
-            capture_output=True, text=True,
-        )
-        if check.returncode != 0 or check.stdout.strip() != "running":
-            await update.message.reply_text("syne-db container is not running.")
-            return
-
-        backup_dir = os.path.join(syne_dir, "backup")
-        os.makedirs(backup_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
-        output = os.path.join(backup_dir, f"syne-backup-{timestamp}.sql.gz")
+        from ..cli.cmd_backup import run_backup
 
         await update.message.reply_text("Backing up database...")
-
-        try:
-            dump_proc = subprocess.Popen(
-                ["docker", "exec", "syne-db", "pg_dump", "-U", db_user, "-d", db_name],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            )
-            with open(output, "wb") as f:
-                gzip_proc = subprocess.Popen(
-                    ["gzip"], stdin=dump_proc.stdout, stdout=f, stderr=subprocess.PIPE,
-                )
-                dump_proc.stdout.close()
-                gzip_proc.wait()
-                dump_proc.wait()
-
-            if dump_proc.returncode != 0:
-                stderr = dump_proc.stderr.read().decode() if dump_proc.stderr else ""
-                await update.message.reply_text(f"Backup failed: {stderr[:300]}")
-                if os.path.exists(output):
-                    os.remove(output)
-                return
-
-            size = os.path.getsize(output)
-            if size > 1024 * 1024:
-                size_str = f"{size / (1024 * 1024):.1f} MB"
-            elif size > 1024:
-                size_str = f"{size / 1024:.1f} KB"
-            else:
-                size_str = f"{size} bytes"
-
-            await update.message.reply_text(f"Backup saved: {os.path.basename(output)} ({size_str})")
-
-        except Exception as e:
-            await update.message.reply_text(f"Backup failed: {str(e)[:300]}")
+        success, message, _ = run_backup()
+        if success:
+            await update.message.reply_text(f"Backup saved: {message}")
+        else:
+            await update.message.reply_text(f"Backup failed: {message}")
 
     async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restart command — owner only, restarts the Syne process."""
