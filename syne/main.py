@@ -13,12 +13,18 @@ from .scheduler import Scheduler
 _log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_file = os.path.expanduser("~/syne.log")
 
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format=_log_format,
     handlers=[
         logging.StreamHandler(),                          # stderr (console)
-        logging.FileHandler(_log_file, encoding="utf-8"), # ~/syne.log
+        RotatingFileHandler(                              # ~/syne.log (rotated)
+            _log_file, encoding="utf-8",
+            maxBytes=5 * 1024 * 1024,                     # 5 MB per file
+            backupCount=3,                                # keep syne.log.1, .2, .3
+        ),
     ],
 )
 logger = logging.getLogger("syne")

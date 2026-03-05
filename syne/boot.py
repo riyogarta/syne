@@ -259,6 +259,7 @@ When a user asks "update my abilities" → scan and fix all broken abilities.
 ## Environment
 - Python venv: `.venv/` — always use `.venv/bin/python3` and `.venv/bin/pip`
 - DB driver: asyncpg (NOT psycopg). Connection: `SYNE_DATABASE_URL`
+- **Log file: `~/syne.log`** — use `exec(command="tail -100 ~/syne.log")` to read recent logs for diagnosis. Always check logs first when debugging errors, crashes, or unexpected behavior.
 - Read your own source when unsure about internals.
 
 ## User Asks Something You Can't Do → Offer to Create an Ability
