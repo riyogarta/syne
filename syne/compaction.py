@@ -309,11 +309,13 @@ async def should_compact_by_chars(session_id: int, char_threshold: int = 150000)
 async def auto_compact_check(
     session_id: int,
     provider: LLMProvider,
+    ctx_window: Optional[int] = None,
 ) -> Optional[dict]:
-    """Check and compact if needed using config thresholds. Returns result dict or None."""
-    # Get thresholds from config
-    msg_threshold = int(await get_config("session.max_messages", 100))
-    char_threshold = int(await get_config("session.compaction_threshold", 150000))
+    """Check and compact if needed. Thresholds derived from ctx_window (per-model)."""
+    ctx_tokens = ctx_window or provider.context_window
+    msg_threshold = max(100, min(2000, ctx_tokens // 1000))
+    char_threshold = int(ctx_tokens * 0.75 * 3.5)
+    keep_recent = max(20, min(200, ctx_tokens // 5000))
 
     needs_compact = (
         await should_compact(session_id, msg_threshold)
@@ -321,5 +323,5 @@ async def auto_compact_check(
     )
 
     if needs_compact:
-        return await compact_session(session_id, provider)  # keep_recent from config
+        return await compact_session(session_id, provider, keep_recent=keep_recent)
     return None

@@ -187,15 +187,6 @@ class SyneAgent:
         self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
         logger.info(f"Context window updated: {ctx_window} tokens (reserved output: {reserved})")
 
-        # Auto-adjust compaction_threshold (chars) = 75% of context * 3.5 chars/token
-        new_threshold = int(ctx_window * 0.75 * 3.5)
-        await set_config("session.compaction_threshold", new_threshold)
-
-        # Scale keep_recent proportional to context window
-        new_keep = max(20, min(200, ctx_window // 5000))
-        await set_config("session.compaction_keep_recent", new_keep)
-        logger.info(f"Compaction adjusted: threshold={new_threshold} chars, keep_recent={new_keep}")
-
         # Update conversation manager's provider + memory + context_mgr
         if self.conversations:
             self.conversations.provider = new_provider
@@ -240,43 +231,94 @@ class SyneAgent:
             return None
 
     def _get_oauth_provider(self):
-        """Get the actual OAuth-capable provider (unwrap HybridProvider if needed)."""
+        """Get the actual OAuth-capable provider (unwrap HybridProvider if needed).
+
+        Recognizes three provider types:
+        - Codex: has _refresh_token (sync) + _token_expires_at
+        - Google: has credentials (GoogleCredentials with async get_token + expires_at)
+        - Claude: has _claude_creds (ClaudeCredentials with async get_token + expires_at)
+        """
         provider = self.provider
         # HybridProvider wraps chat + embed providers; OAuth tokens live on the chat provider
         if hasattr(provider, '_chat'):
             provider = provider._chat
+        # Codex
         if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
+            return provider
+        # Google CCA
+        if hasattr(provider, 'credentials') and provider.credentials is not None:
+            return provider
+        # Claude OAuth
+        if hasattr(provider, '_claude_creds') and provider._claude_creds is not None:
             return provider
         return None
 
+    @staticmethod
+    def _get_provider_token_expiry(oauth) -> float:
+        """Get token expiry timestamp from any provider type."""
+        # Codex
+        if hasattr(oauth, '_token_expires_at'):
+            return oauth._token_expires_at
+        # Google CCA
+        if hasattr(oauth, 'credentials') and oauth.credentials:
+            return oauth.credentials.expires_at
+        # Claude OAuth
+        if hasattr(oauth, '_claude_creds') and oauth._claude_creds:
+            return oauth._claude_creds.expires_at
+        return 0
+
+    @staticmethod
+    async def _refresh_provider_token(oauth) -> bool:
+        """Refresh token for any provider type. Returns True on success."""
+        try:
+            # Codex (sync)
+            if hasattr(oauth, '_refresh_token'):
+                return oauth._refresh_token()
+            # Google CCA (async)
+            if hasattr(oauth, 'credentials') and oauth.credentials:
+                oauth.credentials.expires_at = 0  # force invalidate
+                await oauth.credentials.get_token()
+                return True
+            # Claude OAuth (async)
+            if hasattr(oauth, '_claude_creds') and oauth._claude_creds:
+                oauth._claude_creds.expires_at = 0  # force invalidate
+                await oauth._claude_creds.get_token()
+                return True
+        except Exception as e:
+            logger.warning(f"Token refresh failed: {e}")
+            return False
+        return False
+
     async def _ensure_token_fresh(self):
         """Proactive OAuth token refresh at startup.
-        
+
         Checks if the current provider uses OAuth and if the token is expired
         or about to expire. If so, triggers a refresh immediately — before
         the first API call — so the user never sees an auth error.
-        
-        If refresh fails, logs a warning (the existing _auth_failure mechanism
-        in conversation.py will notify the owner on first chat).
+
+        Supports Codex (sync _refresh_token), Google (async credentials.get_token),
+        and Claude (async _claude_creds.get_token).
         """
         import time
         try:
             oauth = self._get_oauth_provider()
-            if oauth:
-                now = time.time()
-                expires = oauth._token_expires_at
-                buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
-                if expires > 0 and now >= (expires - buffer):
-                    logger.info(f"OAuth token expired or expiring soon (expires_at={expires}, now={now}). Refreshing...")
-                    result = oauth._refresh_token()
-                    if result:
-                        logger.info("OAuth token refreshed successfully at startup.")
-                    else:
-                        logger.warning("OAuth token refresh failed at startup. User will need to run `syne reauth`.")
-                elif expires == 0:
-                    # No expiry recorded — try refresh to establish baseline
-                    logger.info("No token expiry recorded. Attempting proactive refresh...")
-                    oauth._refresh_token()
+            if not oauth:
+                return
+
+            now = time.time()
+            buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
+            expires = self._get_provider_token_expiry(oauth)
+
+            if expires > 0 and now >= (expires - buffer):
+                logger.info(f"OAuth token expired or expiring soon (expires_at={expires}, now={now}). Refreshing...")
+                result = await self._refresh_provider_token(oauth)
+                if result:
+                    logger.info("OAuth token refreshed successfully at startup.")
+                else:
+                    logger.warning("OAuth token refresh failed at startup. User will need to run `syne reauth`.")
+            elif expires == 0:
+                logger.info("No token expiry recorded. Attempting proactive refresh...")
+                await self._refresh_provider_token(oauth)
         except Exception as e:
             logger.warning(f"Startup token check failed: {e}")
 
@@ -339,8 +381,8 @@ class SyneAgent:
                 
                 now = time.time()
                 buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
-                expires = oauth._token_expires_at
-                
+                expires = self._get_provider_token_expiry(oauth)
+
                 if expires > 0 and now >= (expires - buffer):
                     # In-process lock to prevent double-refresh
                     if getattr(self, '_refreshing_token', False):
@@ -350,7 +392,7 @@ class SyneAgent:
                     try:
                         self._last_refresh_at = now
                         logger.info("Periodic check: token expired/expiring, refreshing...")
-                        result = oauth._refresh_token()
+                        result = await self._refresh_provider_token(oauth)
                         if result:
                             logger.info("Periodic token refresh successful.")
                             self._last_refresh_success = time.time()
@@ -395,6 +437,23 @@ class SyneAgent:
         active_model_key = await get_config("provider.active_model", None)
         
         if models and active_model_key:
+            # Migrate legacy Vertex models (google_cca + aiplatform URL → vertex driver)
+            migrated = False
+            for m in models:
+                if m.get("driver") == "google_cca" and "aiplatform.googleapis.com" in (m.get("base_url") or ""):
+                    old_url = m["base_url"]
+                    # Extract region from URL like https://us-central1-aiplatform.googleapis.com/...
+                    import re as _re
+                    region_match = _re.match(r'https://([^-]+-[^-]+)-aiplatform', old_url)
+                    region = region_match.group(1) if region_match else "us-central1"
+                    m["driver"] = "vertex"
+                    m["region"] = region
+                    m.pop("base_url", None)
+                    logger.info(f"Migrated Vertex model '{m.get('key')}': google_cca → vertex (region={region})")
+                    migrated = True
+            if migrated:
+                await set_config("provider.models", models)
+
             # New driver-based system
             model_entry = get_model_from_list(models, active_model_key)
             if model_entry:
@@ -1002,7 +1061,7 @@ class SyneAgent:
         
         oauth = self._get_oauth_provider()
         if oauth:
-            expires = oauth._token_expires_at
+            expires = self._get_provider_token_expiry(oauth)
             now = time.time()
             buffer = int(await get_config("auth.refresh_buffer_seconds", 600))
             token_expired = False

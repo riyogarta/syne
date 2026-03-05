@@ -118,7 +118,7 @@ def init():
         console.print("\n[bold green]✓ Google Vertex AI selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.cloud.google.com (APIs & Services > Credentials).[/dim]")
         api_key = click.prompt("Google Cloud API key")
-        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key", "_vertex_base_url": "https://us-central1-aiplatform.googleapis.com/v1/publishers/google"}
+        provider_config = {"driver": "vertex", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key"}
 
     elif choice == 6:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
@@ -552,13 +552,28 @@ def init():
             model_id = provider_config["model"]
             models_registry = []
 
-            if driver == "google_cca":
+            if driver == "vertex":
+                cred_key = provider_config.get("_credential_key", "credential.vertex_ai_api_key")
+                # Auto-detect region
+                api_key = provider_config.get("_api_key", "")
+                try:
+                    import asyncio as _aio
+                    from syne.llm.vertex import detect_vertex_region
+                    region = _aio.get_event_loop().run_until_complete(detect_vertex_region(api_key))
+                    console.print(f"  [green]Auto-detected region: {region}[/green]")
+                except Exception:
+                    region = "us-central1"
+                    console.print(f"  [yellow]Region detection failed, using {region}[/yellow]")
+                base_entry = {"key": "", "label": "", "driver": "vertex", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576, "region": region}
+                models_registry = [
+                    {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
+                    {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},
+                ]
+                active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
+            elif driver == "google_cca":
                 if auth == "api_key":
                     cred_key = provider_config.get("_credential_key", "credential.google_cca_api_key")
                     base_entry = {"key": "", "label": "", "driver": "google_cca", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576}
-                    vertex_url = provider_config.get("_vertex_base_url")
-                    if vertex_url:
-                        base_entry["base_url"] = vertex_url
                     models_registry = [
                         {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
                         {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},

@@ -1655,9 +1655,9 @@ Or just send me a message!"""
             else:
                 ctx_display = f"{context_window // 1000}K"
 
-            # Compaction thresholds
-            msg_thresh = int(await get_config("session.max_messages", 100))
-            chr_thresh = int(await get_config("session.compaction_threshold", 150000))
+            # Compaction thresholds — derived from context window (per-model)
+            msg_thresh = max(100, min(2000, context_window // 1000))
+            chr_thresh = int(context_window * 0.75 * 3.5)
 
             # Build progress bar (10 blocks)
             filled = min(10, pct // 10)
@@ -2649,8 +2649,7 @@ Or just send me a message!"""
                 },
                 "vertex_ai": {
                     "label": "Google Vertex AI",
-                    "driver": "google_cca",
-                    "base_url": "https://us-central1-aiplatform.googleapis.com/v1/publishers/google",
+                    "driver": "vertex",
                     "credential_key": "credential.vertex_ai_api_key",
                     "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
                 },
@@ -5108,6 +5107,7 @@ Or just send me a message!"""
     # Default context windows per driver (used as suggestion)
     _DEFAULT_CONTEXT_WINDOWS = {
         "google_cca": 1048576,  # 1M
+        "vertex": 1048576,      # 1M
         "codex": 1048576,       # 1M
         "anthropic": 200000,    # 200K
         "openai_compat": 128000,
@@ -5117,6 +5117,7 @@ Or just send me a message!"""
     # Default auth type per driver
     _DRIVER_AUTH_TYPES = {
         "google_cca": "oauth",
+        "vertex": "api_key",
         "codex": "oauth",
         "anthropic": "api_key",
         "openai_compat": "api_key",
@@ -5128,6 +5129,7 @@ Or just send me a message!"""
     # Default LLM parameters per driver (all 7 keys)
     _DRIVER_DEFAULT_PARAMS = {
         "google_cca":   {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
+        "vertex":       {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
         "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
         "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
         "openai_compat":{"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
@@ -5234,6 +5236,27 @@ Or just send me a message!"""
                 entry["base_url"] = state["base_url"]
             if state.get("credential_key"):
                 entry["credential_key"] = state["credential_key"]
+
+            # Auto-detect region for Vertex AI
+            if driver == "vertex":
+                cred_key = state.get("credential_key", "credential.vertex_ai_api_key")
+                from syne.db.models import get_config as _gc2
+                vertex_key = await _gc2(cred_key, None)
+                if vertex_key:
+                    try:
+                        from syne.llm.vertex import detect_vertex_region
+                        region = await detect_vertex_region(vertex_key, state["model_id"])
+                        entry["region"] = region
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=f"Auto-detected Vertex AI region: <b>{region}</b>",
+                            parse_mode="HTML",
+                        )
+                    except Exception as e:
+                        entry["region"] = "us-central1"
+                        logger.warning(f"Vertex region detection failed: {e}, using us-central1")
+                else:
+                    entry["region"] = "us-central1"
 
             # Append to provider.models in DB
             models = await get_config("provider.models", [])

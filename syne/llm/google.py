@@ -28,6 +28,19 @@ import httpx
 from typing import Optional
 from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError, StreamCallbacks
 from ..auth.google_oauth import GoogleCredentials
+from .gemini_common import (
+    _sanitize_surrogates,
+    _extract_retry_delay,
+    _is_retryable_error,
+    _is_valid_thought_signature,
+    _clean_schema_for_gemini,
+    _convert_tools_to_gemini,
+    _transform_messages,
+    _sanitize_turn_ordering,
+    _build_thinking_config,
+    format_messages_for_gemini,
+    _classify_google_error,
+)
 
 logger = logging.getLogger("syne.llm.google")
 
@@ -52,459 +65,33 @@ _CCA_HEADERS = {
 # Standard Gemini API endpoint (used with API keys)
 _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 
-# Retry configuration
-_MAX_RETRIES = 5
-_BASE_DELAY_MS = 2_000
-_MAX_EMPTY_STREAM_RETRIES = 2
+# Retry configuration — aligned with Gemini CLI
+_MAX_RETRIES = 9  # 10 total attempts
+_BASE_DELAY_MS = 5_000
+_MAX_EMPTY_STREAM_RETRIES = 1
 _EMPTY_STREAM_BASE_DELAY_MS = 500
-_MAX_RETRY_DELAY_MS = 120_000
+_MAX_RETRY_DELAY_MS = 30_000
 _STREAM_OVERALL_TIMEOUT = 300  # 5min hard cap on entire SSE stream
 
 # CCA rate limiting is handled server-side. No client-side throttle —
 # if the server returns 429, the retry loop handles it with backoff.
 
+# Limit concurrent Google LLM calls to avoid quota burst
+_chat_semaphore = asyncio.Semaphore(2)
+
 # Tool call ID counter
 _tool_call_counter = 0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# #6 — Unicode surrogate sanitization (from sanitize-unicode.js)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Regex to match unpaired surrogates in Python strings.
-# In Python 3, strings are Unicode — unpaired surrogates can appear from
-# malformed data (e.g. lone \ud83d without a following low surrogate).
-_SURROGATE_RE = re.compile(
-    r'[\ud800-\udbff](?![\udc00-\udfff])'  # high surrogate not followed by low
-    r'|(?<![\ud800-\udbff])[\udc00-\udfff]',  # low surrogate not preceded by high
-    re.UNICODE,
-)
-
-
-def _sanitize_surrogates(text: str) -> str:
-    """Remove unpaired Unicode surrogate characters.
-
-    Valid emoji (properly paired surrogates) are preserved.
-    Matches OpenClaw's sanitizeSurrogates().
-    """
-    if not text:
-        return text
-    try:
-        return _SURROGATE_RE.sub('', text)
-    except Exception:
-        return text
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# #2 — Extract retry delay from error response (from google-gemini-cli.js)
+# Shared helpers imported from gemini_common — re-exported for backward compat
+# _sanitize_surrogates, _extract_retry_delay, _is_retryable_error,
+# _is_valid_thought_signature, _clean_schema_for_gemini, _convert_tools_to_gemini,
+# _transform_messages, _sanitize_turn_ordering, _build_thinking_config,
+# format_messages_for_gemini, _classify_google_error
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _extract_retry_delay(error_text: str, headers: Optional[httpx.Headers] = None) -> Optional[int]:
-    """Extract retry delay in milliseconds from error response.
-
-    Checks headers first, then parses body patterns. Matches OpenClaw's extractRetryDelay().
-    Returns milliseconds or None.
-    """
-    def _normalize(ms: float) -> Optional[int]:
-        return int(ms + 1000) if ms > 0 else None
-
-    # Check headers
-    if headers:
-        # Retry-After header
-        retry_after = headers.get("retry-after")
-        if retry_after:
-            try:
-                seconds = float(retry_after)
-                delay = _normalize(seconds * 1000)
-                if delay is not None:
-                    return delay
-            except ValueError:
-                pass
-
-        # x-ratelimit-reset-after
-        reset_after = headers.get("x-ratelimit-reset-after")
-        if reset_after:
-            try:
-                seconds = float(reset_after)
-                delay = _normalize(seconds * 1000)
-                if delay is not None:
-                    return delay
-            except ValueError:
-                pass
-
-    # Pattern 1: "Your quota will reset after 18h31m10s" / "39s"
-    m = re.search(r'reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s', error_text, re.I)
-    if m:
-        hours = int(m.group(1)) if m.group(1) else 0
-        minutes = int(m.group(2)) if m.group(2) else 0
-        seconds = float(m.group(3))
-        total_ms = ((hours * 60 + minutes) * 60 + seconds) * 1000
-        delay = _normalize(total_ms)
-        if delay is not None:
-            return delay
-
-    # Pattern 2: "Please retry in Xs" / "Please retry in Xms"
-    m = re.search(r'Please retry in ([0-9.]+)(ms|s)', error_text, re.I)
-    if m:
-        value = float(m.group(1))
-        ms = value if m.group(2).lower() == "ms" else value * 1000
-        delay = _normalize(ms)
-        if delay is not None:
-            return delay
-
-    # Pattern 3: "retryDelay": "34.074824224s"
-    m = re.search(r'"retryDelay":\s*"([0-9.]+)(ms|s)"', error_text, re.I)
-    if m:
-        value = float(m.group(1))
-        ms = value if m.group(2).lower() == "ms" else value * 1000
-        delay = _normalize(ms)
-        if delay is not None:
-            return delay
-
-    return None
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# #3 — Retryable error detection (from google-gemini-cli.js)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_RETRYABLE_PATTERN = re.compile(
-    r'resource.?exhausted|rate.?limit|overloaded|service.?unavailable|other.?side.?closed',
-    re.I,
-)
-
-
-def _is_retryable_error(status: int, error_text: str) -> bool:
-    """Check if an error is retryable. Matches OpenClaw's isRetryableError().
-
-    400 Bad Request is NOT retryable.
-    """
-    if status in (429, 500, 502, 503, 504):
-        return True
-    return bool(_RETRYABLE_PATTERN.search(error_text))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# #11 — Thought signature validation (from google-shared.js)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_BASE64_SIGNATURE_RE = re.compile(r'^[A-Za-z0-9+/]+=*$')
-
-
-def _is_valid_thought_signature(sig: Optional[str]) -> bool:
-    """Validate thought signature is proper base64."""
-    if not sig:
-        return False
-    if len(sig) % 4 != 0:
-        return False
-    return bool(_BASE64_SIGNATURE_RE.match(sig))
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Tool schema sanitization — strip unsupported JSON Schema keywords for Gemini
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_GEMINI_UNSUPPORTED_KEYWORDS = {
-    "patternProperties", "additionalProperties", "$schema", "$id", "$ref",
-    "$defs", "definitions", "examples", "minLength", "maxLength",
-    "minimum", "maximum", "multipleOf", "pattern", "format",
-    "minItems", "maxItems", "uniqueItems", "minProperties", "maxProperties",
-}
-
-
-def _is_null_schema(variant: dict) -> bool:
-    """Check if a schema variant represents null type."""
-    if not isinstance(variant, dict):
-        return False
-    if variant.get("const") is None and "const" in variant:
-        return True
-    enum_val = variant.get("enum")
-    if isinstance(enum_val, list) and len(enum_val) == 1 and enum_val[0] is None:
-        return True
-    t = variant.get("type")
-    if t == "null":
-        return True
-    if isinstance(t, list) and len(t) == 1 and t[0] == "null":
-        return True
-    return False
-
-
-def _try_flatten_union(variants: list, parent: dict) -> Optional[dict]:
-    """Try to flatten anyOf/oneOf into a single schema.
-
-    Matches OpenClaw's simplifyUnionVariants + flattenUnionFallback:
-    1. Strip null variants
-    2. If all variants are literals (const/single-enum), merge to {type, enum}
-    3. If one variant left after stripping null, use it directly
-    4. If all variants share same type, use that type
-    5. Otherwise use first variant's type
-    """
-    # Strip null variants
-    non_null = [v for v in variants if isinstance(v, dict) and not _is_null_schema(v)]
-    if not non_null:
-        return None
-
-    # Try literal flattening: {const: "a"} + {const: "b"} → {type: "string", enum: ["a", "b"]}
-    all_values = []
-    common_type = None
-    all_literal = True
-    for v in non_null:
-        if "const" in v:
-            literal = v["const"]
-        elif isinstance(v.get("enum"), list) and len(v["enum"]) == 1:
-            literal = v["enum"][0]
-        else:
-            all_literal = False
-            break
-        vtype = v.get("type")
-        if not isinstance(vtype, str):
-            all_literal = False
-            break
-        if common_type is None:
-            common_type = vtype
-        elif common_type != vtype:
-            all_literal = False
-            break
-        all_values.append(literal)
-
-    if all_literal and common_type and all_values:
-        result = {"type": common_type, "enum": all_values}
-        for mk in ("description", "title", "default"):
-            if mk in parent:
-                result[mk] = parent[mk]
-        return result
-
-    # Single variant after null stripping
-    if len(non_null) == 1:
-        result = dict(non_null[0])
-        for mk in ("description", "title", "default"):
-            if mk in parent:
-                result[mk] = parent[mk]
-        return result
-
-    # All same type — use that type
-    types = {v.get("type") for v in non_null if isinstance(v.get("type"), str)}
-    if len(types) == 1:
-        result = {"type": types.pop()}
-        for mk in ("description", "title", "default"):
-            if mk in parent:
-                result[mk] = parent[mk]
-        return result
-
-    # Fallback: first variant's type
-    first_type = non_null[0].get("type") if non_null else None
-    if first_type:
-        result = {"type": first_type}
-        for mk in ("description", "title", "default"):
-            if mk in parent:
-                result[mk] = parent[mk]
-        return result
-
-    return None
-
-
-def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
-    """Remove unsupported JSON Schema keywords for Gemini.
-
-    Recursively cleans nested schemas (properties, items, anyOf, oneOf).
-    Resolves $ref locally. Converts const→enum. Flattens unions.
-    Matches OpenClaw's cleanSchemaForGemini + simplifyUnionVariants.
-    """
-    if not isinstance(schema, dict):
-        return schema
-
-    if defs is None:
-        defs = schema.get("$defs") or schema.get("definitions") or {}
-
-    # Handle $ref before anything else
-    if "$ref" in schema and isinstance(schema["$ref"], str):
-        ref_name = schema["$ref"].rsplit("/", 1)[-1]
-        if ref_name in defs:
-            return _clean_schema_for_gemini(defs[ref_name], defs)
-
-    # Handle type: ["string", "null"] → type: "string" (strip null from type arrays)
-    raw_type = schema.get("type")
-    if isinstance(raw_type, list) and all(isinstance(t, str) for t in raw_type):
-        non_null_types = [t for t in raw_type if t != "null"]
-        schema = dict(schema)  # shallow copy to avoid mutating original
-        if len(non_null_types) == 1:
-            schema["type"] = non_null_types[0]
-        elif non_null_types:
-            schema["type"] = non_null_types
-
-    cleaned = {}
-    for key, value in schema.items():
-        if key in _GEMINI_UNSUPPORTED_KEYWORDS:
-            continue
-        if key == "const":
-            cleaned["enum"] = [value]
-            continue
-        if key == "properties" and isinstance(value, dict):
-            cleaned[key] = {k: _clean_schema_for_gemini(v, defs) for k, v in value.items()}
-        elif key == "items" and isinstance(value, dict):
-            cleaned[key] = _clean_schema_for_gemini(value, defs)
-        elif key in ("anyOf", "oneOf") and isinstance(value, list):
-            # Clean each variant first, then try to flatten
-            cleaned_variants = [_clean_schema_for_gemini(v, defs) for v in value]
-            flattened = _try_flatten_union(cleaned_variants, schema)
-            if flattened:
-                # Flattened successfully — merge into cleaned, skip the union key
-                cleaned.update(_clean_schema_for_gemini(flattened, defs))
-            else:
-                cleaned[key] = cleaned_variants
-        elif key == "allOf" and isinstance(value, list):
-            cleaned[key] = [_clean_schema_for_gemini(v, defs) for v in value]
-        else:
-            cleaned[key] = value
-
-    return cleaned
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# #1 — Tool schema conversion (parametersJsonSchema, not parameters)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _convert_tools_to_gemini(tools: list[dict], use_parameters: bool = False) -> list[dict]:
-    """Convert OpenAI function calling format to Gemini functionDeclarations.
-
-    By default uses `parametersJsonSchema` (full JSON Schema support).
-    Set `use_parameters=True` for legacy `parameters` field (Claude models on CCA).
-    Matches OpenClaw's convertTools().
-    """
-    if not tools:
-        return []
-
-    declarations = []
-    for tool in tools:
-        if tool.get("type") == "function" and "function" in tool:
-            func = tool["function"]
-            decl = {
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-            }
-            if "parameters" in func:
-                params = func["parameters"]
-                if use_parameters:
-                    decl["parameters"] = params
-                else:
-                    # #1: Use parametersJsonSchema for Gemini models
-                    # Clean unsupported keywords for non-legacy mode
-                    decl["parametersJsonSchema"] = _clean_schema_for_gemini(params)
-            declarations.append(decl)
-
-    if not declarations:
-        return []
-
-    return [{"functionDeclarations": declarations}]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# #12 — Transform messages (skip errored/aborted, synthetic orphan results)
-# From OpenClaw's transform-messages.js
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _transform_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
-    """Clean up message history before sending to Gemini.
-
-    - Skip errored/aborted assistant messages (incomplete turns)
-    - Insert synthetic empty tool results for orphaned tool calls
-    Matches OpenClaw's transformMessages().
-    """
-    # First pass: identify tool calls and their results
-    pending_tool_calls: list[dict] = []  # [{name, id}]
-    existing_result_ids: set[str] = set()
-    result: list[ChatMessage] = []
-
-    for msg in messages:
-        if msg.role == "assistant":
-            # If we have pending orphaned tool calls from previous assistant, insert synthetic results
-            if pending_tool_calls:
-                for tc in pending_tool_calls:
-                    if tc["id"] not in existing_result_ids:
-                        result.append(ChatMessage(
-                            role="tool",
-                            content="No result provided",
-                            metadata={
-                                "tool_name": tc["name"],
-                                "tool_call_id": tc["id"],
-                                "is_error": True,
-                                "synthetic": True,
-                            }
-                        ))
-                pending_tool_calls = []
-                existing_result_ids = set()
-
-            # Skip errored/aborted assistant messages — incomplete turns
-            stop_reason = msg.metadata.get("stop_reason") if msg.metadata else None
-            if stop_reason in ("error", "aborted"):
-                continue
-
-            # Track tool calls from this assistant message
-            tool_calls = msg.metadata.get("tool_calls") if msg.metadata else None
-            if tool_calls:
-                pending_tool_calls = []
-                existing_result_ids = set()
-                for tc in tool_calls:
-                    func = tc.get("function", tc)
-                    tc_id = tc.get("id", func.get("name", f"unknown_{time.time()}"))
-                    pending_tool_calls.append({"name": func.get("name", ""), "id": tc_id})
-
-            result.append(msg)
-
-        elif msg.role == "tool":
-            tc_id = msg.metadata.get("tool_call_id", "") if msg.metadata else ""
-            existing_result_ids.add(tc_id)
-            result.append(msg)
-
-        elif msg.role == "user":
-            # User message interrupts tool flow — insert synthetic results for orphaned calls
-            if pending_tool_calls:
-                for tc in pending_tool_calls:
-                    if tc["id"] not in existing_result_ids:
-                        result.append(ChatMessage(
-                            role="tool",
-                            content="No result provided",
-                            metadata={
-                                "tool_name": tc["name"],
-                                "tool_call_id": tc["id"],
-                                "is_error": True,
-                                "synthetic": True,
-                            }
-                        ))
-                pending_tool_calls = []
-                existing_result_ids = set()
-            result.append(msg)
-
-        else:
-            result.append(msg)
-
-    return result
-
-
-def _sanitize_turn_ordering(contents: list[dict]) -> list[dict]:
-    """Ensure Gemini user/model alternation.
-
-    Two fixes:
-    1. If first content is 'model', prepend bootstrap user message
-    2. Merge consecutive same-role messages (parts concatenation)
-    """
-    if not contents:
-        return contents
-
-    result = []
-
-    # Fix 1: Bootstrap — if first message is model, prepend user
-    if contents[0].get("role") == "model":
-        result.append({"role": "user", "parts": [{"text": "(session bootstrap)"}]})
-
-    # Fix 2: Merge consecutive same-role
-    for msg in contents:
-        if result and result[-1].get("role") == msg.get("role"):
-            result[-1]["parts"].extend(msg.get("parts", []))
-        else:
-            result.append(msg)
-
-    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -549,166 +136,9 @@ class GoogleProvider(LLMProvider):
     def context_window(self) -> int:
         return 1_000_000  # Gemini 2.5 Pro default
 
-    @staticmethod
-    def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Optional[dict]:
-        """Build thinkingConfig for Gemini models.
-
-        Defaults (when thinking_budget is None):
-          - Gemini 3: thinkingLevel HIGH
-          - Gemini 2.5: thinkingBudget -1 (dynamic, model decides, max 8192)
-
-        Explicit thinking_budget=0 → minimal thinking (LOW / budget 128).
-        """
-        is_gemini_3 = "gemini-3" in model.lower()
-
-        if is_gemini_3:
-            if thinking_budget is None:
-                level = "HIGH"
-            elif thinking_budget == 0:
-                level = "LOW"
-            elif thinking_budget > 8192:
-                level = "HIGH"
-            elif thinking_budget > 2048:
-                level = "MEDIUM"
-            else:
-                level = "LOW"
-            return {"includeThoughts": True, "thinkingLevel": level}
-
-        # Gemini 2.5 / Claude on CCA — thinkingBudget
-        # CCA enforces max 24576 for all models
-        _CCA_MAX_THINKING = 24576
-        if thinking_budget is None:
-            budget = -1  # dynamic thinking
-        elif thinking_budget == 0:
-            budget = 128  # minimum allowed
-        else:
-            budget = min(thinking_budget, _CCA_MAX_THINKING)
-        return {"includeThoughts": True, "thinkingBudget": budget}
-
     def _format_messages(self, messages: list[ChatMessage], model: str = "") -> tuple[Optional[str], list[dict]]:
-        """Convert ChatMessages to Gemini format. Returns (system_text, contents).
-
-        Implements:
-        - #6: Unicode sanitization on all text
-        - #9: functionResponse format {output: value} / {error: value}
-        - #10: Skip empty text blocks
-        - #11: thoughtSignature preserved & replayed
-        - #12: transformMessages (skip errored/aborted, synthetic orphan results)
-        """
-        # #12: Pre-process messages — handle orphan tool calls, skip errored
-        messages = _transform_messages(messages)
-
-        system_text = None
-        contents = []
-
-        is_gemini_3 = "gemini-3" in model.lower() if model else False
-
-        for msg in messages:
-            if msg.role == "system":
-                # Accumulate system messages
-                text = _sanitize_surrogates(msg.content)
-                if system_text is None:
-                    system_text = text
-                else:
-                    system_text += "\n\n" + text
-
-            elif msg.role == "user":
-                text = _sanitize_surrogates(msg.content)
-                # #10: Skip empty text
-                if not text or not text.strip():
-                    continue
-                parts = [{"text": text}]
-                # Include image data for vision if present in metadata
-                if msg.metadata and "image" in msg.metadata:
-                    img = msg.metadata["image"]
-                    parts.append({
-                        "inlineData": {
-                            "mimeType": img.get("mime_type", "image/jpeg"),
-                            "data": img.get("base64", ""),
-                        }
-                    })
-                contents.append({"role": "user", "parts": parts})
-
-            elif msg.role == "assistant":
-                tool_calls = msg.metadata.get("tool_calls") if msg.metadata else None
-                if tool_calls:
-                    parts = []
-                    # #10: Only add text if non-empty
-                    if msg.content and msg.content.strip():
-                        parts.append({"text": _sanitize_surrogates(msg.content)})
-                    for tc in tool_calls:
-                        func = tc.get("function", tc)
-                        # Handle both original ("arguments" as string) and normalized ("args" as dict)
-                        raw_args = func.get("arguments") or func.get("args") or "{}"
-                        try:
-                            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                        except json.JSONDecodeError:
-                            args = {}
-
-                        # #11: Get thoughtSignature if present
-                        thought_sig = tc.get("thoughtSignature")
-
-                        # #11: Gemini 3 requires thoughtSignature on all function calls
-                        # When replaying history without signatures, convert to text
-                        if is_gemini_3 and not _is_valid_thought_signature(thought_sig):
-                            args_str_pretty = json.dumps(args, indent=2)
-                            parts.append({
-                                "text": (
-                                    f'[Historical context: a different model called tool '
-                                    f'"{func.get("name", "")}" with arguments: {args_str_pretty}. '
-                                    f'Do not mimic this format - use proper function calling.]'
-                                )
-                            })
-                        else:
-                            fc_part: dict = {
-                                "functionCall": {
-                                    "name": func.get("name", ""),
-                                    "args": args,
-                                }
-                            }
-                            # #11: Preserve thoughtSignature
-                            if _is_valid_thought_signature(thought_sig):
-                                fc_part["thoughtSignature"] = thought_sig
-                            parts.append(fc_part)
-
-                    if parts:  # #10: Don't add empty model turns
-                        contents.append({"role": "model", "parts": parts})
-                else:
-                    # #10: Skip empty text blocks
-                    if not msg.content or not msg.content.strip():
-                        continue
-                    contents.append({"role": "model", "parts": [{"text": _sanitize_surrogates(msg.content)}]})
-
-            elif msg.role == "tool":
-                tool_name = msg.metadata.get("tool_name", "unknown") if msg.metadata else "unknown"
-                is_error = msg.metadata.get("is_error", False) if msg.metadata else False
-
-                # #9: functionResponse format — {output: value} for success, {error: value} for errors
-                result_text = _sanitize_surrogates(msg.content)
-                if is_error:
-                    response_data = {"error": result_text}
-                else:
-                    response_data = {"output": result_text}
-
-                fr_part: dict = {
-                    "functionResponse": {
-                        "name": tool_name,
-                        "response": response_data,
-                    }
-                }
-
-                # Merge consecutive tool results into one "user" message
-                if contents and contents[-1].get("role") == "user" and \
-                   contents[-1]["parts"] and "functionResponse" in contents[-1]["parts"][0]:
-                    contents[-1]["parts"].append(fr_part)
-                else:
-                    contents.append({
-                        "role": "user",
-                        "parts": [fr_part],
-                    })
-
-        contents = _sanitize_turn_ordering(contents)
-        return system_text, contents
+        """Convert ChatMessages to Gemini format. Delegates to gemini_common."""
+        return format_messages_for_gemini(messages, model)
 
     async def chat(
         self,
@@ -726,10 +156,11 @@ class GoogleProvider(LLMProvider):
     ) -> ChatResponse:
         model = model or self.chat_model
 
-        if self._use_cca:
-            return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
-        else:
-            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
+        async with _chat_semaphore:
+            if self._use_cca:
+                return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
+            else:
+                return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
 
     async def _chat_cca(
         self,
@@ -770,7 +201,7 @@ class GoogleProvider(LLMProvider):
             gen_config["topK"] = top_k
 
         # #8: Thinking config — always on, model-appropriate defaults
-        gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
+        gen_config["thinkingConfig"] = _build_thinking_config(model, thinking_budget)
 
         # #13: Only set generationConfig if non-empty
         if gen_config:
@@ -912,6 +343,8 @@ class GoogleProvider(LLMProvider):
         last_error: Optional[Exception] = None
         request_url: Optional[str] = None
         streamed = False
+        _auth_refresh_attempted = False
+        current_delay = _BASE_DELAY_MS
 
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -923,7 +356,6 @@ class GoogleProvider(LLMProvider):
                 break  # Success
 
             except httpx.HTTPStatusError as e:
-                # Streaming responses may not have body read yet
                 try:
                     await e.response.aread()
                     error_text = e.response.text
@@ -931,60 +363,80 @@ class GoogleProvider(LLMProvider):
                     error_text = str(e)
                 status = e.response.status_code
 
-                # #3: Check if retryable
-                if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
-                    # #2: Use server-provided delay or exponential backoff
-                    server_delay = _extract_retry_delay(error_text, e.response.headers)
-                    if not server_delay:
-                        logger.debug(f"CCA no server delay parsed. Headers: {dict(e.response.headers)}. Body snippet: {error_text[:300]}")
+                # Classify the error
+                classification = _classify_google_error(status, error_text, e.response.headers)
 
-                    # On 429: try next endpoint immediately (delay is per-endpoint).
-                    # Only wait the full delay if all endpoints are exhausted.
+                # Terminal errors — raise immediately
+                if classification.is_terminal:
+                    raise LLMRateLimitError(
+                        f"Terminal quota error: {classification.reason}"
+                    ) from e
+
+                # Auth errors — try token refresh once
+                if status in (401, 403):
+                    if not _auth_refresh_attempted and self.credentials:
+                        _auth_refresh_attempted = True
+                        logger.info(f"CCA {status} — attempting token refresh...")
+                        try:
+                            self.credentials.expires_at = 0
+                            new_token = await self.credentials.get_token()
+                            headers["Authorization"] = f"Bearer {new_token}"
+                            logger.info("CCA token refreshed, retrying...")
+                            _reset_output()
+                            continue
+                        except Exception as refresh_err:
+                            logger.error(f"CCA token refresh failed: {refresh_err}")
+                    raise LLMAuthError(f"Authentication failed ({status}): {error_text[:200]}") from e
+
+                if status == 400:
+                    logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
+                    raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
+
+                # Retryable — backoff with jitter
+                if attempt < _MAX_RETRIES and classification.is_retryable:
+                    # On 429: try next endpoint immediately if different
                     next_endpoint = _ENDPOINT_FALLBACKS[min(attempt + 1, len(_ENDPOINT_FALLBACKS) - 1)]
                     if status == 429 and next_endpoint != endpoint:
-                        delay_ms = 500  # Brief pause, then try other endpoint
+                        delay_ms = random.randint(1500, 2500)
                         logger.warning(
                             f"CCA 429 on {endpoint.split('//')[1].split('/')[0]}, "
                             f"switching to {next_endpoint.split('//')[1].split('/')[0]} "
                             f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
                         )
                     else:
-                        delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                        # Cap at max delay
-                        if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                            delay_s = server_delay // 1000
-                            raise LLMRateLimitError(
-                                f"Rate limited (429). Server requested {delay_s}s wait (max {_MAX_RETRY_DELAY_MS // 1000}s)."
-                            ) from e
+                        # Use max of backoff delay and server-requested delay
+                        delay_ms = max(current_delay, classification.delay_ms)
+                        # Jitter: +0-20% for quota w/ server delay, ±30% for others
+                        if classification.delay_ms > 0:
+                            jitter = random.uniform(1.0, 1.2)
+                        else:
+                            jitter = random.uniform(0.7, 1.3)
+                        delay_ms = int(delay_ms * jitter)
                         logger.warning(
-                            f"CCA {status}, retrying in {delay_ms}ms "
+                            f"CCA {status} ({classification.reason}), retrying in {delay_ms}ms "
                             f"(attempt {attempt + 1}/{_MAX_RETRIES + 1}, endpoint: {endpoint})"
                         )
 
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     _reset_output()
                     continue
 
-                # Not retryable or max retries exceeded — classify the error
+                # Max retries exceeded
                 if status == 429:
                     raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.") from e
-                elif status in (401, 403):
-                    raise LLMAuthError(f"Authentication failed ({status}): {error_text[:200]}") from e
-                elif status == 400:
-                    logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
-                    raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
-                else:
-                    raise
+                raise
 
             except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
-                raise  # Already classified, don't wrap again
+                raise
 
             except Exception as e:
                 last_error = e
                 if attempt < _MAX_RETRIES:
-                    delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                    delay_ms = int(current_delay * random.uniform(0.7, 1.3))
                     logger.warning(f"CCA network error: {e}, retrying in {delay_ms}ms")
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     _reset_output()
                     continue
                 raise
@@ -1050,7 +502,7 @@ class GoogleProvider(LLMProvider):
         if top_k is not None:
             gen_config["topK"] = top_k
         # #8: Thinking config — always on, model-appropriate defaults
-        gen_config["thinkingConfig"] = self._build_thinking_config(model, thinking_budget)
+        gen_config["thinkingConfig"] = _build_thinking_config(model, thinking_budget)
 
         # #13: Only set if non-empty
         if gen_config:
@@ -1065,6 +517,7 @@ class GoogleProvider(LLMProvider):
         url = f"{self._base_url}/models/{model}:generateContent"
 
         data = None
+        current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=body, params={"key": self.api_key})
@@ -1075,18 +528,24 @@ class GoogleProvider(LLMProvider):
                 error_text = resp.text[:500]
                 logger.error(f"Gemini API error {resp.status_code}: url={resp.request.url} body={error_text}")
 
-                if attempt < _MAX_RETRIES and _is_retryable_error(resp.status_code, error_text):
-                    server_delay = _extract_retry_delay(error_text, resp.headers)
-                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                        raise LLMRateLimitError(
-                            f"Rate limited ({resp.status_code}). Server requested {server_delay // 1000}s wait."
-                        )
+                classification = _classify_google_error(resp.status_code, error_text, resp.headers)
+
+                if classification.is_terminal:
+                    raise LLMRateLimitError(f"Terminal quota error: {classification.reason}")
+
+                if attempt < _MAX_RETRIES and classification.is_retryable:
+                    delay_ms = max(current_delay, classification.delay_ms)
+                    if classification.delay_ms > 0:
+                        jitter = random.uniform(1.0, 1.2)
+                    else:
+                        jitter = random.uniform(0.7, 1.3)
+                    delay_ms = int(delay_ms * jitter)
                     logger.warning(
-                        f"Gemini API {resp.status_code}, retrying in {delay_ms}ms "
+                        f"Gemini API {resp.status_code} ({classification.reason}), retrying in {delay_ms}ms "
                         f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
                     )
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
 
                 if resp.status_code == 429:
@@ -1154,6 +613,7 @@ class GoogleProvider(LLMProvider):
             "content": {"parts": [{"text": text}]},
         }
 
+        current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
             if self._use_cca:
                 token = await self.credentials.get_token()
@@ -1175,15 +635,19 @@ class GoogleProvider(LLMProvider):
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
-                if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
-                    server_delay = _extract_retry_delay(error_text, e.response.headers)
-                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                        raise LLMRateLimitError(
-                            f"Embed rate limited (429). Server requested {server_delay // 1000}s wait."
-                        ) from e
-                    logger.warning(f"Embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                classification = _classify_google_error(status, error_text, e.response.headers)
+                if classification.is_terminal:
+                    raise LLMRateLimitError(f"Terminal quota error: {classification.reason}") from e
+                if attempt < _MAX_RETRIES and classification.is_retryable:
+                    delay_ms = max(current_delay, classification.delay_ms)
+                    if classification.delay_ms > 0:
+                        jitter = random.uniform(1.0, 1.2)
+                    else:
+                        jitter = random.uniform(0.7, 1.3)
+                    delay_ms = int(delay_ms * jitter)
+                    logger.warning(f"Embed {status} ({classification.reason}), retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
                 if status == 429:
                     raise LLMRateLimitError(f"Embed rate limited (429) after {attempt + 1} attempts.") from e
@@ -1191,9 +655,10 @@ class GoogleProvider(LLMProvider):
 
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
                 if attempt < _MAX_RETRIES:
-                    delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                    delay_ms = int(current_delay * random.uniform(0.7, 1.3))
                     logger.warning(f"Embed network error: {e}, retrying in {delay_ms}ms")
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
                 raise
 
@@ -1211,6 +676,7 @@ class GoogleProvider(LLMProvider):
             for t in texts
         ]
 
+        current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
             if self._use_cca:
                 token = await self.credentials.get_token()
@@ -1236,15 +702,19 @@ class GoogleProvider(LLMProvider):
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 error_text = e.response.text[:300] if hasattr(e.response, 'text') else str(e)
-                if attempt < _MAX_RETRIES and _is_retryable_error(status, error_text):
-                    server_delay = _extract_retry_delay(error_text, e.response.headers)
-                    delay_ms = server_delay if server_delay else _BASE_DELAY_MS * (2 ** attempt)
-                    if server_delay and server_delay > _MAX_RETRY_DELAY_MS:
-                        raise LLMRateLimitError(
-                            f"Batch embed rate limited. Server requested {server_delay // 1000}s wait."
-                        ) from e
-                    logger.warning(f"Batch embed {status}, retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
+                classification = _classify_google_error(status, error_text, e.response.headers)
+                if classification.is_terminal:
+                    raise LLMRateLimitError(f"Terminal quota error: {classification.reason}") from e
+                if attempt < _MAX_RETRIES and classification.is_retryable:
+                    delay_ms = max(current_delay, classification.delay_ms)
+                    if classification.delay_ms > 0:
+                        jitter = random.uniform(1.0, 1.2)
+                    else:
+                        jitter = random.uniform(0.7, 1.3)
+                    delay_ms = int(delay_ms * jitter)
+                    logger.warning(f"Batch embed {status} ({classification.reason}), retrying in {delay_ms}ms (attempt {attempt + 1}/{_MAX_RETRIES + 1})")
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
                 if status == 429:
                     raise LLMRateLimitError(f"Batch embed rate limited (429) after {attempt + 1} attempts.") from e
@@ -1252,8 +722,9 @@ class GoogleProvider(LLMProvider):
 
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
                 if attempt < _MAX_RETRIES:
-                    delay_ms = _BASE_DELAY_MS * (2 ** attempt)
+                    delay_ms = int(current_delay * random.uniform(0.7, 1.3))
                     logger.warning(f"Batch embed network error: {e}, retrying in {delay_ms}ms")
                     await asyncio.sleep(delay_ms / 1000)
+                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
                 raise

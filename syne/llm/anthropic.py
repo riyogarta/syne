@@ -425,6 +425,7 @@ class AnthropicProvider(LLMProvider):
                         if self._claude_creds and attempt == 0:
                             logger.info("Got 401 — attempting token refresh...")
                             try:
+                                self._claude_creds.expires_at = 0  # force invalidate
                                 token = await self._claude_creds.get_token()
                                 self._access_token = token
                                 headers = self._build_headers(token)

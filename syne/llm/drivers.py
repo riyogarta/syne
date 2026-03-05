@@ -13,6 +13,7 @@ from typing import Optional, Type
 
 from .provider import LLMProvider, ChatMessage, ChatResponse
 from .google import GoogleProvider
+from .vertex import VertexProvider
 from .codex import CodexProvider
 from .openai import OpenAIProvider
 from .together import TogetherProvider
@@ -25,6 +26,7 @@ logger = logging.getLogger("syne.llm.drivers")
 # Driver name → Provider class mapping
 _DRIVER_MAP: dict[str, Type[LLMProvider]] = {
     "google_cca": GoogleProvider,
+    "vertex": VertexProvider,
     "codex": CodexProvider,
     "openai_compat": OpenAIProvider,
     "anthropic": AnthropicProvider,
@@ -104,6 +106,24 @@ async def create_provider(model_entry: dict) -> LLMProvider:
                 chat_model=model_id,
             )
     
+    # ═══════════════════════════════════════════════════════════════
+    # Vertex AI (API key + region)
+    # ═══════════════════════════════════════════════════════════════
+    elif driver_name == "vertex":
+        credential_key = model_entry.get("credential_key")
+        api_key = await _load_api_key(credential_key)
+        if not api_key:
+            raise RuntimeError(
+                f"No API key found for {model_entry.get('label', model_id)}. "
+                f"Set {credential_key} in config."
+            )
+        region = model_entry.get("region", "us-central1")
+        return VertexProvider(
+            api_key=api_key,
+            region=region,
+            chat_model=model_id,
+        )
+
     # ═══════════════════════════════════════════════════════════════
     # Codex (ChatGPT OAuth)
     # ═══════════════════════════════════════════════════════════════

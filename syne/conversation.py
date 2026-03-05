@@ -482,9 +482,10 @@ class Conversation:
             self._message_cache,
             threshold=0.90,
         )
-        from .db.models import get_config as _gc
-        _msg_thresh = int(await _gc("session.max_messages", 100))
-        _chr_thresh = int(await _gc("session.compaction_threshold", 150000))
+        # Derive thresholds from context window (per-model via ContextManager)
+        _ctx_tokens = self.context_mgr.max_context_tokens
+        _msg_thresh = max(100, min(2000, _ctx_tokens // 1000))
+        _chr_thresh = int(_ctx_tokens * 0.75 * 3.5)
         msg_count = len(self._message_cache) if self._message_cache else 0
         count_exceeded = msg_count >= _msg_thresh
         # Quick char estimate from message cache
@@ -505,6 +506,7 @@ class Conversation:
             result = await auto_compact_check(
                 session_id=self.session_id,
                 provider=self.provider,
+                ctx_window=self.context_mgr.max_context_tokens,
             )
             if result:
                 logger.info(
@@ -553,9 +555,11 @@ class Conversation:
         # Retry once on *empty* non-tool responses — some providers occasionally
         # return "" with no tool_calls, which would otherwise surface as a
         # channel-level fallback message.
+        # Google driver already retries empty streams internally — skip conversation-level retry
         chat_kwargs = self._build_chat_kwargs()
         response = None
-        for attempt in range(2):
+        max_attempts = 1 if self.provider.name in ("google", "vertex") else 2
+        for attempt in range(max_attempts):
             response = await self.provider.chat(
                 messages=context,
                 tools=tool_schemas if tool_schemas else None,
