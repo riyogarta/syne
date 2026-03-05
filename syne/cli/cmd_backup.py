@@ -95,6 +95,83 @@ def run_backup(output=None):
         return False, f"Backup failed: {e}", None
 
 
+def run_restore(filepath):
+    """Core restore logic. Returns (success, message).
+
+    Used by both CLI `syne restore` and Telegram `/restore`.
+    Caller is responsible for confirmation prompt.
+    """
+    from .helpers import _run_schema_migration
+
+    syne_dir = _get_syne_dir()
+    db_user = _read_env_value("SYNE_DB_USER", syne_dir)
+    db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
+
+    if not db_user or not db_name:
+        return False, "Cannot read DB credentials from .env."
+
+    if not os.path.exists(filepath):
+        return False, f"File not found: {filepath}"
+
+    # Check container
+    check = subprocess.run(
+        ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
+        capture_output=True, text=True,
+    )
+    if check.returncode != 0 or check.stdout.strip() != "running":
+        return False, "syne-db container is not running."
+
+    # Drop and recreate database
+    subprocess.run(
+        ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
+         "-c", f"DROP DATABASE IF EXISTS {db_name} WITH (FORCE);"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
+         "-c", f"CREATE DATABASE {db_name} OWNER {db_user};"],
+        capture_output=True,
+    )
+
+    try:
+        is_gzip = filepath.endswith(".gz")
+
+        if is_gzip:
+            gunzip_proc = subprocess.Popen(
+                ["gunzip", "-c", filepath],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            psql_proc = subprocess.Popen(
+                ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
+                stdin=gunzip_proc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            gunzip_proc.stdout.close()
+            psql_proc.wait()
+            gunzip_proc.wait()
+            returncode = psql_proc.returncode
+            stderr = psql_proc.stderr.read().decode() if psql_proc.stderr else ""
+        else:
+            with open(filepath, "rb") as f:
+                result = subprocess.run(
+                    ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
+                    stdin=f, capture_output=True,
+                )
+                returncode = result.returncode
+                stderr = result.stderr.decode() if result.stderr else ""
+
+        # Schema migration
+        _run_schema_migration(syne_dir)
+
+        if returncode != 0:
+            return True, f"Restored (with warnings): {stderr.strip()[:200]}"
+        return True, "Database restored successfully."
+
+    except FileNotFoundError as e:
+        return False, f"Command not found: {e}"
+    except Exception as e:
+        return False, f"Restore failed: {e}"
+
+
 @cli.command()
 @click.option("--output", "-o", default=None, help="Output file path (default: ~/syne/backup/syne-backup-TIMESTAMP.sql.gz)")
 def backup(output):
@@ -117,10 +194,6 @@ def restore(file, list_backups, yes):
     FILE is required — specify a filename or full path.
     Use --list to see available backups.
     """
-    from .helpers import _run_schema_migration
-
-    syne_dir = _get_syne_dir()
-
     # No args and no --list: show available backups
     if file is None and not list_backups:
         list_backups = True
@@ -140,16 +213,8 @@ def restore(file, list_backups, yes):
         console.print(f"\n[dim]Restore with: syne restore <filename>[/dim]")
         return
 
-    db_user = _read_env_value("SYNE_DB_USER", syne_dir)
-    db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
-
-    if not db_user or not db_name:
-        console.print("[red]Cannot read DB credentials from .env. Run 'syne init' first.[/red]")
-        return
-
     # Resolve file: explicit path or filename in backup dir
     if not os.path.isabs(file) and not os.path.exists(file):
-        # Try resolving as filename inside backup dir
         candidate = os.path.join(_get_backup_dir(), file)
         if os.path.exists(candidate):
             file = candidate
@@ -165,72 +230,9 @@ def restore(file, list_backups, yes):
         if not click.confirm("This will REPLACE all current data. Continue?"):
             return
 
-    # Check that syne-db container is running
-    check = subprocess.run(
-        ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
-        capture_output=True, text=True,
-    )
-    if check.returncode != 0 or check.stdout.strip() != "running":
-        console.print("[red]syne-db container is not running.[/red]")
-        console.print("[dim]Start it with: docker start syne-db[/dim]")
-        return
-
     console.print(f"[bold]Restoring database from {os.path.basename(file)}...[/bold]")
-
-    # Drop and recreate database to ensure clean restore
-    console.print("[dim]Dropping existing data...[/dim]")
-    subprocess.run(
-        ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
-         "-c", f"DROP DATABASE IF EXISTS {db_name} WITH (FORCE);"],
-        capture_output=True,
-    )
-    subprocess.run(
-        ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
-         "-c", f"CREATE DATABASE {db_name} OWNER {db_user};"],
-        capture_output=True,
-    )
-
-    try:
-        is_gzip = file.endswith(".gz")
-
-        if is_gzip:
-            gunzip_proc = subprocess.Popen(
-                ["gunzip", "-c", file],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            psql_proc = subprocess.Popen(
-                ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
-                stdin=gunzip_proc.stdout,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            gunzip_proc.stdout.close()
-            psql_proc.wait()
-            gunzip_proc.wait()
-            returncode = psql_proc.returncode
-            stderr = psql_proc.stderr.read().decode() if psql_proc.stderr else ""
-        else:
-            with open(file, "rb") as f:
-                result = subprocess.run(
-                    ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
-                    stdin=f,
-                    capture_output=True,
-                )
-                returncode = result.returncode
-                stderr = result.stderr.decode() if result.stderr else ""
-
-        if returncode != 0:
-            console.print(f"[yellow]Restore completed with warnings: {stderr.strip()[:200]}[/yellow]")
-        else:
-            console.print("[green]Database restored successfully[/green]")
-
-        # Run schema migration to ensure compatibility with current version
-        console.print("[dim]Running schema migration for compatibility...[/dim]")
-        _run_schema_migration(syne_dir)
-
-    except FileNotFoundError as e:
-        console.print(f"[red]Command not found: {e}[/red]")
-        console.print("[dim]Ensure 'docker' and 'gunzip' are installed.[/dim]")
-    except Exception as e:
-        console.print(f"[red]Restore failed: {e}[/red]")
+    success, message = run_restore(file)
+    if success:
+        console.print(f"[green]{message}[/green]")
+    else:
+        console.print(f"[red]{message}[/red]")

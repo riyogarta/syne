@@ -3249,8 +3249,9 @@ Or just send me a message!"""
             await update.message.reply_text("Only the owner can restore backups.")
             return
 
-        from ..cli.cmd_backup import _list_backups, _format_size
+        import os
         from datetime import datetime
+        from ..cli.cmd_backup import _list_backups, _format_size
 
         backups = _list_backups()
         if not backups:
@@ -3291,86 +3292,24 @@ Or just send me a message!"""
             return
 
         # Execute restore
+        import os
         actual_filename = filename[len("confirmed:"):]
-        from ..cli.cmd_backup import _get_backup_dir
-        filepath = os.path.join(_get_backup_dir(), actual_filename)
+        from ..cli.cmd_backup import _get_backup_dir, run_restore
 
+        filepath = os.path.join(_get_backup_dir(), actual_filename)
         if not os.path.exists(filepath):
             await query.edit_message_text(f"File not found: {actual_filename}")
             return
 
         await query.edit_message_text(f"Restoring from {actual_filename}...")
 
-        import subprocess
-        from ..cli.shared import _read_env_value, _get_syne_dir
-
-        syne_dir = _get_syne_dir()
-        db_user = _read_env_value("SYNE_DB_USER", syne_dir)
-        db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
-
-        if not db_user or not db_name:
-            await query.edit_message_text("Cannot read DB credentials from .env.")
-            return
-
-        # Check container
-        check = subprocess.run(
-            ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
-            capture_output=True, text=True,
-        )
-        if check.returncode != 0 or check.stdout.strip() != "running":
-            await query.edit_message_text("syne-db container is not running.")
-            return
-
-        # Drop and recreate
-        subprocess.run(
-            ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
-             "-c", f"DROP DATABASE IF EXISTS {db_name} WITH (FORCE);"],
-            capture_output=True,
-        )
-        subprocess.run(
-            ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
-             "-c", f"CREATE DATABASE {db_name} OWNER {db_user};"],
-            capture_output=True,
-        )
-
-        try:
-            is_gzip = filepath.endswith(".gz")
-            if is_gzip:
-                gunzip_proc = subprocess.Popen(
-                    ["gunzip", "-c", filepath],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                )
-                psql_proc = subprocess.Popen(
-                    ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
-                    stdin=gunzip_proc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                )
-                gunzip_proc.stdout.close()
-                psql_proc.wait()
-                gunzip_proc.wait()
-                returncode = psql_proc.returncode
-            else:
-                with open(filepath, "rb") as f:
-                    result = subprocess.run(
-                        ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
-                        stdin=f, capture_output=True,
-                    )
-                    returncode = result.returncode
-
-            # Schema migration
-            from ..cli.helpers import _run_schema_migration
-            _run_schema_migration(syne_dir)
-
-            if returncode != 0:
-                await query.edit_message_text(f"Restored {actual_filename} (with warnings). Restarting...")
-            else:
-                await query.edit_message_text(f"Restored {actual_filename} successfully. Restarting...")
-
-            # Restart to reload DB state
+        success, message = run_restore(filepath)
+        if success:
+            await query.edit_message_text(f"Restored {actual_filename}. Restarting...")
             import sys
             sys.exit(1)
-
-        except Exception as e:
-            await query.edit_message_text(f"Restore failed: {str(e)[:300]}")
+        else:
+            await query.edit_message_text(f"Restore failed: {message}")
 
     async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restart command — owner only, restarts the Syne process."""
