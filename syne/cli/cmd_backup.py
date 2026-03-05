@@ -108,6 +108,9 @@ def run_restore(filepath):
 
     Used by both CLI `syne restore` and Telegram `/restore`.
     Caller is responsible for confirmation prompt.
+
+    Safety: auto-backup current DB before restore. If restore fails,
+    the pre-restore backup can be used to recover.
     """
     from .helpers import _run_schema_migration
 
@@ -128,6 +131,35 @@ def run_restore(filepath):
     )
     if check.returncode != 0 or check.stdout.strip() != "running":
         return False, "syne-db container is not running."
+
+    # Safety: auto-backup current DB before restore
+    backup_dir = os.path.join(syne_dir, "backup")
+    os.makedirs(backup_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    safety_path = os.path.join(backup_dir, f"pre-restore-{timestamp}.sql.gz")
+
+    try:
+        dump_proc = subprocess.Popen(
+            ["docker", "exec", "syne-db", "pg_dump", "-U", db_user, "-d", db_name],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        with open(safety_path, "wb") as f:
+            gzip_proc = subprocess.Popen(
+                ["gzip"], stdin=dump_proc.stdout, stdout=f, stderr=subprocess.PIPE,
+            )
+            dump_proc.stdout.close()
+            gzip_proc.wait()
+            dump_proc.wait()
+
+        if dump_proc.returncode != 0 or os.path.getsize(safety_path) == 0:
+            # Safety backup failed — abort restore
+            if os.path.exists(safety_path):
+                os.remove(safety_path)
+            return False, "Safety backup failed — restore aborted to protect current data."
+    except Exception as e:
+        if os.path.exists(safety_path):
+            os.remove(safety_path)
+        return False, f"Safety backup failed: {e} — restore aborted."
 
     # Drop and recreate database
     subprocess.run(
@@ -170,14 +202,15 @@ def run_restore(filepath):
         # Schema migration
         _run_schema_migration(syne_dir)
 
+        safety_name = os.path.basename(safety_path)
         if returncode != 0:
-            return True, f"Restored (with warnings): {stderr.strip()[:200]}"
-        return True, "Database restored successfully."
+            return True, f"Restored (with warnings). Safety backup: {safety_name}"
+        return True, f"Database restored successfully. Safety backup: {safety_name}"
 
     except FileNotFoundError as e:
-        return False, f"Command not found: {e}"
+        return False, f"Command not found: {e} — safety backup available: {os.path.basename(safety_path)}"
     except Exception as e:
-        return False, f"Restore failed: {e}"
+        return False, f"Restore failed: {e} — safety backup available: {os.path.basename(safety_path)}"
 
 
 @cli.command()
