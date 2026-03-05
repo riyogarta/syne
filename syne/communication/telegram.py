@@ -264,6 +264,10 @@ class TelegramChannel:
         from ..tools.send_message import set_telegram_channel as set_msg_channel
         set_msg_channel(self)
 
+        # Wire up voice TTS tool with this channel reference
+        from ..tools.voice import set_telegram_channel as set_voice_channel
+        set_voice_channel(self)
+
         logger.info("Telegram bot started.")
 
         # Check if this startup follows a /restart command → notify user

@@ -1,19 +1,33 @@
 """Voice Tool — speech-to-text transcription and text-to-speech."""
 
+import io
 import logging
 import httpx
 import os
 from pathlib import Path
 from typing import Optional
 
+import edge_tts
+
 from ..db.models import get_config
 
 logger = logging.getLogger("syne.tools.voice")
+
+# Channel injection for TTS (same pattern as send_message.py)
+_telegram_channel = None
+
+
+def set_telegram_channel(channel):
+    global _telegram_channel
+    _telegram_channel = channel
 
 # Default STT settings
 DEFAULT_STT_PROVIDER = "groq"
 DEFAULT_STT_MODEL = "whisper-large-v3"
 GROQ_WHISPER_ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+# Default TTS settings
+DEFAULT_TTS_VOICE = "id-ID-GadisNeural"
 
 
 async def get_groq_api_key() -> Optional[str]:
@@ -140,31 +154,61 @@ async def send_voice_handler(
     text: str,
     chat_id: str = "",
 ) -> str:
-    """Send a voice message (text-to-speech).
-    
+    """Send a voice message (text-to-speech) via edge-tts.
+
     Args:
         text: Text to convert to speech
         chat_id: Target chat ID
-        
+
     Returns:
         Success or error message
     """
-    # TODO: Implement TTS sending
-    # Options:
-    # 1. Google Gemini TTS (if available via OAuth)
-    # 2. ElevenLabs (requires API key)
-    # 3. OpenAI TTS (requires API key)
-    
-    return (
-        "TTS not yet configured. Voice message sending is planned for a future update. "
-        "For now, I can only receive and transcribe voice messages."
-    )
+    if not _telegram_channel:
+        return "Voice channel not available — Telegram not connected."
+
+    if not text or not text.strip():
+        return "No text provided for TTS."
+
+    # Resolve chat_id — fall back to last active chat
+    target_chat_id = chat_id
+    if not target_chat_id and hasattr(_telegram_channel, "_last_chat_id"):
+        target_chat_id = str(_telegram_channel._last_chat_id)
+    if not target_chat_id:
+        return "No chat_id specified and no active chat available."
+
+    # Get configured voice
+    voice = await get_config("voice.tts_voice", DEFAULT_TTS_VOICE)
+
+    try:
+        # Stream edge-tts audio into memory buffer
+        communicate = edge_tts.Communicate(text, voice)
+        buf = io.BytesIO()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                buf.write(chunk["data"])
+
+        if buf.tell() == 0:
+            return "TTS produced empty audio — check voice setting or text content."
+
+        buf.seek(0)
+        buf.name = "voice.mp3"
+
+        await _telegram_channel.app.bot.send_voice(
+            chat_id=int(target_chat_id),
+            voice=buf,
+        )
+        logger.info(f"Sent TTS voice message to {target_chat_id} ({len(text)} chars, {buf.getbuffer().nbytes} bytes)")
+        return f"Voice message sent to {target_chat_id}."
+
+    except Exception as e:
+        logger.error(f"TTS error: {e}")
+        return f"TTS failed: {str(e)}"
 
 
 # Tool metadata for registration
 SEND_VOICE_TOOL = {
     "name": "send_voice",
-    "description": "Send a voice message (text-to-speech). Currently not implemented — voice receiving works, but TTS sending is TODO.",
+    "description": "Send a voice message (text-to-speech) using edge-tts. Converts text to speech and sends as a Telegram voice message. Voice configurable via voice.tts_voice config (default: id-ID-GadisNeural).",
     "parameters": {
         "type": "object",
         "properties": {
