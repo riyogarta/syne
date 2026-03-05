@@ -370,29 +370,3 @@ async def should_compact_by_chars(session_id: int, char_threshold: int = 150000)
     """Check if a session needs compaction based on total character count."""
     stats = await get_session_stats(session_id)
     return stats["total_chars"] >= char_threshold
-
-
-async def auto_compact_check(
-    session_id: int,
-    provider: LLMProvider,
-    ctx_window: Optional[int] = None,
-    recent_context: str = "",
-) -> Optional[dict]:
-    """Check and compact if needed. Thresholds derived from ctx_window (per-model)."""
-    ctx_tokens = ctx_window or provider.context_window
-    msg_threshold = max(100, min(2000, ctx_tokens // 1000))
-    char_threshold = int(ctx_tokens * 0.75 * 3.5)
-    keep_recent = max(20, min(200, ctx_tokens // 5000))
-
-    needs_compact = (
-        await should_compact(session_id, msg_threshold)
-        or await should_compact_by_chars(session_id, char_threshold)
-    )
-
-    if needs_compact:
-        return await compact_session(
-            session_id, provider,
-            keep_recent=keep_recent,
-            recent_context=recent_context,
-        )
-    return None
