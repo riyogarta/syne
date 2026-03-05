@@ -114,12 +114,16 @@ def backup(output):
 def restore(file, list_backups, yes):
     """Restore Syne database from a backup file.
 
-    If FILE is omitted, restores the most recent backup from ~/syne/backup/.
+    FILE is required — specify a filename or full path.
     Use --list to see available backups.
     """
     from .helpers import _run_schema_migration
 
     syne_dir = _get_syne_dir()
+
+    # No args and no --list: show available backups
+    if file is None and not list_backups:
+        list_backups = True
 
     # --list: show available backups and exit
     if list_backups:
@@ -143,16 +147,8 @@ def restore(file, list_backups, yes):
         console.print("[red]Cannot read DB credentials from .env. Run 'syne init' first.[/red]")
         return
 
-    # Resolve file: explicit path, filename in backup dir, or latest
-    if file is None:
-        backups = _list_backups()
-        if not backups:
-            console.print("[yellow]No backups found in ~/syne/backup/[/yellow]")
-            console.print("[dim]Create one with: syne backup[/dim]")
-            return
-        file = backups[0][0]
-        console.print(f"[dim]Using latest backup: {os.path.basename(file)}[/dim]")
-    elif not os.path.isabs(file) and not os.path.exists(file):
+    # Resolve file: explicit path or filename in backup dir
+    if not os.path.isabs(file) and not os.path.exists(file):
         # Try resolving as filename inside backup dir
         candidate = os.path.join(_get_backup_dir(), file)
         if os.path.exists(candidate):
