@@ -87,6 +87,14 @@ def run_backup(output=None):
             return False, f"pg_dump failed: {stderr.strip()[:300]}", None
 
         size_str = _format_size(os.path.getsize(output))
+
+        # Keep max 10 backups — delete oldest
+        for path, _, _ in _list_backups()[10:]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
         return True, f"{os.path.basename(output)} ({size_str})", output
 
     except FileNotFoundError as e:
