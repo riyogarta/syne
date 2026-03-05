@@ -38,9 +38,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 
 ---
 
-## Quick Start
-
-### Installation
+## 🚀 Quick Start — 3 Commands
 
 ```bash
 git clone https://github.com/riyogarta/syne.git
@@ -48,22 +46,18 @@ cd syne
 bash install.sh
 ```
 
-`install.sh` automatically installs all dependencies (python3-venv, pip, etc.), creates a virtual environment, installs Syne, and runs `syne init`.
+**That's it.** `install.sh` is fully automated:
 
-### What Installation Does
+| Step | What happens |
+|------|---|
+| ① | Choose AI provider (OAuth free / API key) |
+| ② | Auto-detect hardware → recommend models |
+| ③ | Enter Telegram bot token |
+| ④ | Docker + PostgreSQL + pgvector |
+| ⑤ | Ollama + embedding + evaluator models |
+| ⑥ | Database schema + systemd service |
 
-`install.sh` runs `syne init` which is fully automated — no manual steps mid-install:
-
-1. **Choose AI provider** — OAuth (free) or API key (paid)
-2. **Choose embedding provider** — auto-detects server tier, recommends best model your hardware can run
-3. **Enter Telegram bot token** — from @BotFather
-4. **Web search API key** (optional) — Brave Search, free tier 2,000 queries/month. Can be added later via chat.
-5. **Start PostgreSQL** — Docker container with pgvector, auto-install Docker if needed
-6. **Install Ollama** (if selected) — Auto-install binary + pull embedding + evaluator models
-7. **Initialize database** — Schema, identity, credentials saved to DB
-8. **Setup systemd service** — Auto-start on boot, linger enabled
-
-When init finishes, Syne is running.
+> When install finishes, Syne is running.
 
 ### Server Tiers
 

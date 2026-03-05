@@ -170,6 +170,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
+        self.app.add_handler(CommandHandler("update", self._cmd_update))
+        self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO & ~filters.LOCATION, self._handle_photo))
@@ -237,6 +239,7 @@ class TelegramChannel:
             BotCommand("groups", "Manage groups, members & aliases"),
             BotCommand("members", "Manage global user access levels"),
             BotCommand("wamembers", "Manage WhatsApp allowlist (owner only)"),
+            BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
@@ -277,9 +280,10 @@ class TelegramChannel:
                 data = json.load(f)
             chat_id = data.get("chat_id")
             if chat_id:
+                msg = data.get("message", "✅ Syne restarted successfully.")
                 await self.app.bot.send_message(
                     chat_id=chat_id,
-                    text="✅ Syne restarted successfully.",
+                    text=msg,
                 )
                 logger.info(f"Sent restart-complete notification to chat {chat_id}")
         except Exception as e:
@@ -3237,6 +3241,156 @@ Or just send me a message!"""
         import sys
         # Exit with non-zero code so systemd (Restart=on-failure) will restart us
         # SIGTERM = exit 0 = clean exit = no restart. sys.exit(1) = failure = restart.
+        sys.exit(1)
+
+    async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /update — owner only, update to latest release (skip if same version)."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can update Syne.")
+            return
+
+        import subprocess, sys, os, json, tempfile
+
+        syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
+
+        await update.message.reply_text("🔍 Checking for updates...")
+
+        # Read current version
+        from syne import __version__ as current_version
+
+        # Fetch remote
+        subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
+
+        # Compare with remote version
+        result = subprocess.run(
+            ["git", "show", "origin/main:syne/__init__.py"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        remote_version = current_version
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("__version__"):
+                    remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    break
+
+        if remote_version == current_version:
+            await update.message.reply_text(f"✅ Already up to date (v{current_version})")
+            return
+
+        await update.message.reply_text(f"🔄 Updating v{current_version} → v{remote_version}...")
+
+        # git pull
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Git pull failed:\n{result.stderr[:500]}")
+            return
+        pull_msg = result.stdout.strip()
+
+        # pip install
+        result = subprocess.run(
+            [venv_pip, "install", "-e", ".", "-q"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Install failed:\n{result.stderr[:500]}")
+            return
+
+        # Read new version from updated source
+        new_version = "?"
+        try:
+            init_file = os.path.join(syne_dir, "syne", "__init__.py")
+            with open(init_file) as f:
+                for line in f:
+                    if line.startswith("__version__"):
+                        new_version = line.split("=")[1].strip().strip('"').strip("'")
+                        break
+        except Exception:
+            pass
+
+        # Save restart flag
+        restart_flag = os.path.join(tempfile.gettempdir(), "syne_restart_flag.json")
+        try:
+            with open(restart_flag, "w") as f:
+                json.dump({
+                    "chat_id": update.effective_chat.id,
+                    "user_id": user.id,
+                    "message": f"✅ Syne updated to v{new_version}\n{pull_msg}",
+                }, f)
+        except Exception as e:
+            logger.warning(f"Failed to save restart flag: {e}")
+
+        await update.message.reply_text(f"✅ Updated to v{new_version}, restarting...")
+        logger.info(f"Update requested by {user.id}, {current_version} → {new_version}")
+        sys.exit(1)
+
+    async def _cmd_updatedev(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /updatedev — owner only, pull latest + reinstall + restart."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can update Syne.")
+            return
+
+        import subprocess, sys, os, json, tempfile
+
+        syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
+
+        await update.message.reply_text("🔄 Updating Syne...")
+
+        # git pull
+        result = subprocess.run(
+            ["git", "pull", "origin", "main"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Git pull failed:\n{result.stderr[:500]}")
+            return
+        pull_msg = result.stdout.strip()
+
+        # pip install
+        result = subprocess.run(
+            [venv_pip, "install", "-e", ".", "-q"],
+            cwd=syne_dir, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            await update.message.reply_text(f"❌ Install failed:\n{result.stderr[:500]}")
+            return
+
+        # Read new version from updated source
+        new_version = "?"
+        try:
+            init_file = os.path.join(syne_dir, "syne", "__init__.py")
+            with open(init_file) as f:
+                for line in f:
+                    if line.startswith("__version__"):
+                        new_version = line.split("=")[1].strip().strip('"').strip("'")
+                        break
+        except Exception:
+            pass
+
+        # Save restart flag with update message
+        restart_flag = os.path.join(tempfile.gettempdir(), "syne_restart_flag.json")
+        try:
+            with open(restart_flag, "w") as f:
+                json.dump({
+                    "chat_id": update.effective_chat.id,
+                    "user_id": user.id,
+                    "message": f"✅ Syne updated to v{new_version}\n{pull_msg}",
+                }, f)
+        except Exception as e:
+            logger.warning(f"Failed to save restart flag: {e}")
+
+        await update.message.reply_text(f"✅ Updated to v{new_version}, restarting...")
+        logger.info(f"Update (dev) requested by {user.id}, new version: {new_version}")
         sys.exit(1)
 
     def _path_id(self, path: str) -> str:
