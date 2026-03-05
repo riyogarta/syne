@@ -173,6 +173,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
+        self.app.add_handler(CommandHandler("restore", self._cmd_restore))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO & ~filters.LOCATION, self._handle_photo))
@@ -241,6 +242,7 @@ class TelegramChannel:
             BotCommand("members", "Manage global user access levels"),
             BotCommand("wamembers", "Manage WhatsApp allowlist (owner only)"),
             BotCommand("backup", "Backup database (owner only)"),
+            BotCommand("restore", "Restore database from backup (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
@@ -3237,6 +3239,138 @@ Or just send me a message!"""
             await update.message.reply_text(f"Backup saved: {message}")
         else:
             await update.message.reply_text(f"Backup failed: {message}")
+
+    async def _cmd_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /restore command — owner only, list backups and restore via inline buttons."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can restore backups.")
+            return
+
+        from ..cli.cmd_backup import _list_backups, _format_size
+        from datetime import datetime
+
+        backups = _list_backups()
+        if not backups:
+            await update.message.reply_text("No backups found. Create one with /backup")
+            return
+
+        buttons = []
+        for i, (path, size, mtime) in enumerate(backups[:10]):
+            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            filename = os.path.basename(path)
+            label = f"{ts}  ({_format_size(size)})"
+            buttons.append([InlineKeyboardButton(label, callback_data=f"restore:{filename}")])
+
+        buttons.append([InlineKeyboardButton("Cancel", callback_data="restore:cancel")])
+
+        await update.message.reply_text(
+            f"Select backup to restore ({len(backups)} available):",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _handle_restore_callback(self, query, filename):
+        """Handle restore confirmation/execution from inline callback."""
+        if filename == "cancel":
+            await query.edit_message_text("Restore cancelled.")
+            return
+
+        # Confirmation step
+        if not filename.startswith("confirmed:"):
+            buttons = [
+                [InlineKeyboardButton("Yes, restore", callback_data=f"restore:confirmed:{filename}")],
+                [InlineKeyboardButton("Cancel", callback_data="restore:cancel")],
+            ]
+            await query.edit_message_text(
+                f"This will REPLACE all current data with:\n`{filename}`\n\nContinue?",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+            return
+
+        # Execute restore
+        actual_filename = filename[len("confirmed:"):]
+        from ..cli.cmd_backup import _get_backup_dir
+        filepath = os.path.join(_get_backup_dir(), actual_filename)
+
+        if not os.path.exists(filepath):
+            await query.edit_message_text(f"File not found: {actual_filename}")
+            return
+
+        await query.edit_message_text(f"Restoring from {actual_filename}...")
+
+        import subprocess
+        from ..cli.shared import _read_env_value, _get_syne_dir
+
+        syne_dir = _get_syne_dir()
+        db_user = _read_env_value("SYNE_DB_USER", syne_dir)
+        db_name = _read_env_value("SYNE_DB_NAME", syne_dir)
+
+        if not db_user or not db_name:
+            await query.edit_message_text("Cannot read DB credentials from .env.")
+            return
+
+        # Check container
+        check = subprocess.run(
+            ["docker", "inspect", "--format", "{{.State.Status}}", "syne-db"],
+            capture_output=True, text=True,
+        )
+        if check.returncode != 0 or check.stdout.strip() != "running":
+            await query.edit_message_text("syne-db container is not running.")
+            return
+
+        # Drop and recreate
+        subprocess.run(
+            ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
+             "-c", f"DROP DATABASE IF EXISTS {db_name} WITH (FORCE);"],
+            capture_output=True,
+        )
+        subprocess.run(
+            ["docker", "exec", "syne-db", "psql", "-U", db_user, "-d", "postgres",
+             "-c", f"CREATE DATABASE {db_name} OWNER {db_user};"],
+            capture_output=True,
+        )
+
+        try:
+            is_gzip = filepath.endswith(".gz")
+            if is_gzip:
+                gunzip_proc = subprocess.Popen(
+                    ["gunzip", "-c", filepath],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
+                psql_proc = subprocess.Popen(
+                    ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
+                    stdin=gunzip_proc.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                )
+                gunzip_proc.stdout.close()
+                psql_proc.wait()
+                gunzip_proc.wait()
+                returncode = psql_proc.returncode
+            else:
+                with open(filepath, "rb") as f:
+                    result = subprocess.run(
+                        ["docker", "exec", "-i", "syne-db", "psql", "-U", db_user, "-d", db_name, "-q"],
+                        stdin=f, capture_output=True,
+                    )
+                    returncode = result.returncode
+
+            # Schema migration
+            from ..cli.helpers import _run_schema_migration
+            _run_schema_migration(syne_dir)
+
+            if returncode != 0:
+                await query.edit_message_text(f"Restored {actual_filename} (with warnings). Restarting...")
+            else:
+                await query.edit_message_text(f"Restored {actual_filename} successfully. Restarting...")
+
+            # Restart to reload DB state
+            import sys
+            sys.exit(1)
+
+        except Exception as e:
+            await query.edit_message_text(f"Restore failed: {str(e)[:300]}")
 
     async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restart command — owner only, restarts the Syne process."""
@@ -6340,6 +6474,10 @@ Or just send me a message!"""
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
+
+        elif data.startswith("restore:"):
+            filename = data.split(":", 1)[1]
+            await self._handle_restore_callback(query, filename)
 
         elif data.startswith("approve:") or data.startswith("reject:"):
             # User approval/rejection
