@@ -5,6 +5,7 @@ iterative updates and anti-hallucination rules.
 """
 
 import logging
+import re
 from typing import Optional
 from .db.connection import get_connection
 from .db.models import get_config
@@ -15,6 +16,9 @@ logger = logging.getLogger("syne.compaction")
 CHARS_PER_TOKEN = 3.5  # rough estimate, same as context.py
 PROMPT_OVERHEAD_TOKENS = 2_000  # space for compaction prompt template + tags
 OUTPUT_TOKENS = 16_384  # max_tokens for summary output
+
+_BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{200,}={0,2}')
+_MAX_TOOL_RESULT_FOR_SUMMARY = 2_000
 
 # ── Initial summary prompt (no previous summary exists) ─────
 
@@ -106,8 +110,13 @@ def _serialize_messages(rows: list) -> str:
     for row in rows:
         role = row["role"]
         content = row["content"]
-        # No truncation — let the summarizer see full messages
-        # (OpenClaw sends all messages to summarizer without truncation)
+
+        if role == "tool":
+            # Strip base64 blobs — waste of summarizer tokens
+            content = _BASE64_PATTERN.sub("[base64 data removed]", content)
+            # Cap long tool results for summarization
+            if len(content) > _MAX_TOOL_RESULT_FOR_SUMMARY:
+                content = content[:_MAX_TOOL_RESULT_FOR_SUMMARY] + "\n[... truncated for summary]"
 
         if role == "user":
             parts.append(f"[User]: {content}")
@@ -150,19 +159,70 @@ async def get_session_stats(session_id: int) -> dict:
         }
 
 
+def _build_preservation_context(messages: list) -> str:
+    """Build preservation context from recent messages for pre-compact injection.
+
+    Extracts key signals from the messages that will be KEPT (not summarized)
+    so the summarizer knows what is currently active and can prioritize
+    relevant context in its summary.
+
+    Returns a string (max ~500 chars) or empty string if nothing useful.
+    """
+    if not messages:
+        return ""
+
+    parts = []
+
+    # Last user message (what user is currently asking about)
+    for msg in reversed(messages):
+        role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
+        content = getattr(msg, "content", None) or (msg.get("content", "") if isinstance(msg, dict) else "")
+        if role == "user" and content:
+            parts.append(f"Last user request: {content[:150]}")
+            break
+
+    # Last 3 tool names used (what work is in progress)
+    tool_names = []
+    for msg in reversed(messages):
+        if len(tool_names) >= 3:
+            break
+        meta = getattr(msg, "metadata", None) or (msg.get("metadata") if isinstance(msg, dict) else None)
+        if meta and isinstance(meta, dict) and meta.get("tool_name"):
+            tool_names.append(meta["tool_name"])
+    if tool_names:
+        parts.append(f"Recent tools: {', '.join(reversed(tool_names))}")
+
+    # Check for in-progress patterns (assistant with tool_calls but no final text response yet)
+    has_pending = False
+    for msg in reversed(messages[:5]):
+        meta = getattr(msg, "metadata", None) or (msg.get("metadata") if isinstance(msg, dict) else None)
+        if meta and isinstance(meta, dict) and meta.get("tool_calls"):
+            has_pending = True
+            break
+    if has_pending:
+        parts.append("Status: tool execution in progress")
+
+    result = "\n".join(parts)
+    return result[:500]
+
+
 async def compact_session(
     session_id: int,
     provider: LLMProvider,
     keep_recent: int | None = None,
+    recent_context: str = "",
 ) -> Optional[dict]:
     """Compact a session by summarizing old messages.
-    
+
     Uses OpenClaw-style structured summaries with iterative updates:
     - First compaction: generates full structured summary
     - Subsequent compactions: merges new messages into existing summary
-    
+
     Keeps the most recent `keep_recent` messages and summarizes the rest.
     If keep_recent is None, reads from config (default: 40).
+    recent_context: preservation context from recent (kept) messages,
+        injected into the summarization prompt so the summarizer
+        prioritizes context relevant to ongoing activity.
     Returns dict with summary and stats, or None if no compaction needed.
     """
     if keep_recent is None:
@@ -223,18 +283,24 @@ async def compact_session(
         )
 
         # Build summarization prompt
+        preservation_block = ""
+        if recent_context:
+            preservation_block = (
+                f"\n\n<recent-activity>\n{recent_context}\n</recent-activity>\n\n"
+                "Note: The above shows what is currently active in the conversation. "
+                "Prioritize preserving context relevant to these ongoing activities."
+            )
+
         if previous_summary:
-            # Iterative update: merge new messages into existing summary
             prompt_text = (
                 f"<conversation>\n{conv_text}\n</conversation>\n\n"
                 f"<previous-summary>\n{previous_summary}\n</previous-summary>\n\n"
-                f"{UPDATE_COMPACTION_PROMPT}"
+                f"{UPDATE_COMPACTION_PROMPT}{preservation_block}"
             )
         else:
-            # First compaction: generate initial structured summary
             prompt_text = (
                 f"<conversation>\n{conv_text}\n</conversation>\n\n"
-                f"{COMPACTION_PROMPT}"
+                f"{COMPACTION_PROMPT}{preservation_block}"
             )
 
         summary_response = await provider.chat(
@@ -310,6 +376,7 @@ async def auto_compact_check(
     session_id: int,
     provider: LLMProvider,
     ctx_window: Optional[int] = None,
+    recent_context: str = "",
 ) -> Optional[dict]:
     """Check and compact if needed. Thresholds derived from ctx_window (per-model)."""
     ctx_tokens = ctx_window or provider.context_window
@@ -323,5 +390,9 @@ async def auto_compact_check(
     )
 
     if needs_compact:
-        return await compact_session(session_id, provider, keep_recent=keep_recent)
+        return await compact_session(
+            session_id, provider,
+            keep_recent=keep_recent,
+            recent_context=recent_context,
+        )
     return None

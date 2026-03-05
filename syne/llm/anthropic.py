@@ -579,6 +579,16 @@ class AnthropicProvider(LLMProvider):
                     continue
                 raise RuntimeError(f"Anthropic stream timed out after {_TOTAL_ATTEMPTS} attempts")
 
+            # Flush any partial blocks left by interrupted stream
+            # (e.g. stream ended before content_block_stop events)
+            for idx, ab in list(active_blocks.items()):
+                if ab["type"] == "text" and ab["text"]:
+                    content_text += ab["text"]
+                elif ab["type"] == "thinking" and ab["text"]:
+                    thinking_text += ab["text"]
+                # Don't flush partial tool_use — incomplete JSON is useless
+            active_blocks.clear()
+
             # Success — exit retry loop
             break
           else:

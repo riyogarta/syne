@@ -244,9 +244,9 @@ class SubAgentManager:
                 metadata={"tool_calls": response.tool_calls},
             ))
 
-            # Execute each tool call
+            # Parse all tool calls
+            parsed = []
             for tool_call in response.tool_calls:
-                # Handle both normalized format (name/args) and OpenAI raw (function.name/arguments)
                 if "function" in tool_call:
                     func = tool_call["function"]
                     name = func.get("name", "")
@@ -257,17 +257,21 @@ class SubAgentManager:
                     args = tool_call.get("args", {})
                     if isinstance(args, str):
                         args = json.loads(args)
-
                 tool_call_id = tool_call.get("id")
                 logger.info(f"Sub-agent {run_id[:8]} tool call (round {round_num + 1}): {name}({args})")
+                parsed.append((name, args, tool_call_id))
 
-                # Execute tool or ability
-                result = await self._execute_tool(name, args, access_level)
+            # Execute tools in parallel
+            tasks = [self._execute_tool(n, a, access_level) for n, a, _ in parsed]
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            for i, raw in enumerate(raw_results):
+                name, args, tool_call_id = parsed[i]
+                result = str(raw) if not isinstance(raw, Exception) else f"Error: {raw}"
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
-                messages.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
+                messages.append(ChatMessage(role="tool", content=result, metadata=tool_meta))
 
             # Get next response — may contain more tool calls
             response = await llm.chat(

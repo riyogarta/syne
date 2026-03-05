@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 from typing import Optional
@@ -18,9 +19,9 @@ from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulat
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens
-from .compaction import auto_compact_check
+from .compaction import auto_compact_check, _build_preservation_context
 from .boot import get_full_prompt
-from .tools.registry import ToolRegistry
+from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
 from .security import (
     get_group_context_restrictions,
@@ -29,6 +30,90 @@ from .security import (
 )
 
 logger = logging.getLogger("syne.conversation")
+
+# ── Time context helpers (module-level, not recreated per call) ──
+
+_TIME_CFG_KEYS = ['system.timezone', 'time.locale', 'time.format.full']
+_TIME_CFG_DEFAULTS = {
+    'system.timezone': 'UTC',
+    'time.locale': 'id',
+    'time.format.full': '{day_name}, {date} {time}',
+}
+
+_ID_DAYS = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu']
+_ID_MONTHS = [
+    'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+    'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+]
+_EN_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+_EN_MONTHS = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December',
+]
+
+
+def _resolve_tz(tz_name: str):
+    tz_name = (tz_name or 'UTC').strip() if isinstance(tz_name, str) else 'UTC'
+    if ZoneInfo:
+        try:
+            return ZoneInfo(tz_name), tz_name
+        except Exception:
+            return ZoneInfo('UTC'), 'UTC'
+    return timezone.utc, 'UTC'
+
+
+def _fmt_offset(td: timedelta) -> str:
+    if td is None:
+        return "+00:00"
+    total = int(td.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    total = abs(total)
+    hh, rem = divmod(total, 3600)
+    mm = rem // 60
+    return f"{sign}{hh:02d}:{mm:02d}"
+
+
+def _fmt_components(dt: datetime, locale: str) -> dict:
+    loc = (locale or 'id').lower()
+    if loc.startswith('id'):
+        days, months = _ID_DAYS, _ID_MONTHS
+    else:
+        days, months = _EN_DAYS, _EN_MONTHS
+    day_name = days[dt.weekday()]
+    month_name = months[dt.month - 1]
+    date_str = f"{dt.day} {month_name} {dt.year}"
+    time_str = dt.strftime('%H:%M:%S')
+    return {
+        'day_name': day_name, 'month_name': month_name,
+        'year': dt.year, 'month': dt.month, 'day': dt.day,
+        'hour': dt.hour, 'minute': dt.minute, 'second': dt.second,
+        'date': date_str, 'time': time_str,
+        'full': f"{day_name}, {date_str} {time_str}",
+        'iso': dt.isoformat(timespec='seconds'),
+    }
+
+
+def _apply_template(tpl: str, components: dict) -> str:
+    try:
+        return (tpl or '').format(**components)
+    except Exception:
+        return components.get('full') or components.get('iso')
+
+
+async def _load_time_config() -> dict:
+    """Fetch all time config in a single DB query (was 6 separate queries)."""
+    result = dict(_TIME_CFG_DEFAULTS)
+    try:
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT key, value FROM config WHERE key = ANY($1::text[])",
+                _TIME_CFG_KEYS,
+            )
+        for row in rows:
+            result[row['key']] = json.loads(row['value'])
+    except Exception:
+        pass
+    return result
 
 
 class Conversation:
@@ -65,6 +150,7 @@ class Conversation:
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
+        self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
 
     async def load_history(self) -> list[ChatMessage]:
@@ -107,6 +193,14 @@ class Conversation:
         # Strip null bytes — PostgreSQL text columns reject 0x00
         if content and "\x00" in content:
             content = content.replace("\x00", "")
+
+        # Dedup — skip immediate consecutive duplicates
+        msg_hash = hashlib.md5(f"{role}:{content}:{json.dumps(metadata, sort_keys=True) if metadata else ''}".encode()).hexdigest()
+        if msg_hash == self._last_saved_hash:
+            logger.debug(f"Skipping duplicate save: {role}")
+            return
+        self._last_saved_hash = msg_hash
+
         meta_json = json.dumps(metadata) if metadata else "{}"
 
         for attempt in range(2):
@@ -174,170 +268,46 @@ class Conversation:
         messages.append(ChatMessage(role="system", content=prompt))
 
 
-        # 1b. Runtime time context (ground truth)
-        # LLMs often hallucinate the current date/time unless we provide it explicitly.
-        # This is not a privileged system/credential (Rule 700); it's safe to expose in groups.
-        #
-        # IMPORTANT POLICY (OWNER SPEC):
-        # - If user asks current time/date/day with no qualifier → answer using SYNE time
-        #   (timezone from config system.timezone), WITHOUT timezone label.
-        # - If user explicitly mentions 'server' → answer using SERVER time and append ' (Server)'.
-        # - If user explicitly mentions 'UTC' → answer using UTC time and append ' UTC'.
-        # - If user asks for multiple (e.g., Syne + server + UTC) → answer all requested.
+        # 1b. Runtime time context (ground truth, compact format)
+        # Policy: default=SYNE (no tz label), 'server'→SERVER, 'UTC'→UTC
         try:
-            from .db.models import get_config as _get_time_config
-
-            def _resolve_tz(tz_name: str):
-                tz_name = (tz_name or 'UTC').strip() if isinstance(tz_name, str) else 'UTC'
-                if ZoneInfo:
-                    try:
-                        return ZoneInfo(tz_name), tz_name
-                    except Exception:
-                        return ZoneInfo('UTC'), 'UTC'
-                return timezone.utc, 'UTC'
-
-            def _fmt_offset(td: timedelta) -> str:
-                if td is None:
-                    return "+00:00"
-                total = int(td.total_seconds())
-                sign = "+" if total >= 0 else "-"
-                total = abs(total)
-                hh, rem = divmod(total, 3600)
-                mm = rem // 60
-                return f"{sign}{hh:02d}:{mm:02d}"
-
-            def _fmt_components(dt: datetime, locale: str):
-                # Locale controls day/month names only.
-                loc = (locale or 'id').lower()
-                if loc.startswith('id'):
-                    days = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu']
-                    months = [
-                        'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-                        'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
-                    ]
-                else:
-                    days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
-                    months = [
-                        'January', 'February', 'March', 'April', 'May', 'June',
-                        'July', 'August', 'September', 'October', 'November', 'December'
-                    ]
-
-                day_name = days[dt.weekday()]
-                month_name = months[dt.month - 1]
-                date = f"{dt.day} {month_name} {dt.year}"
-                time_str = dt.strftime('%H:%M:%S')
-                full = f"{day_name}, {date} {time_str}"
-                return {
-                    'day_name': day_name,
-                    'month_name': month_name,
-                    'year': dt.year,
-                    'month': dt.month,
-                    'day': dt.day,
-                    'hour': dt.hour,
-                    'minute': dt.minute,
-                    'second': dt.second,
-                    'date': date,
-                    'time': time_str,
-                    'full': full,
-                    'iso': dt.isoformat(timespec='seconds'),
-                }
-
-            def _apply_template(tpl: str, components: dict) -> str:
-                try:
-                    return (tpl or '').format(**components)
-                except Exception:
-                    # Fall back to a sane default if template is invalid
-                    return components.get('full') or components.get('iso')
-
-            # Read config
-            syne_tz_name = await _get_time_config('system.timezone', 'UTC')
-            time_locale = await _get_time_config('time.locale', 'id')
-            fmt_full = await _get_time_config('time.format.full', '{day_name}, {date} {time}')
-            fmt_date = await _get_time_config('time.format.date', '{date}')
-            fmt_time = await _get_time_config('time.format.time', '{time}')
-            fmt_day = await _get_time_config('time.format.day', '{day_name}')
-
-            syne_tz, syne_tz_name = _resolve_tz(syne_tz_name)
+            cfg = await _load_time_config()
+            syne_tz, syne_tz_name = _resolve_tz(cfg['system.timezone'])
+            locale = cfg['time.locale']
+            fmt_full = cfg['time.format.full']
 
             # Single base time (UTC) to avoid drift between the three clocks
             base_utc = datetime.now(timezone.utc)
-
-            # Server tz: use OS local timezone (whatever the host is configured to)
             server_tz = datetime.now().astimezone().tzinfo or timezone.utc
-
             syne_now = base_utc.astimezone(syne_tz)
             server_now = base_utc.astimezone(server_tz)
-            utc_now = base_utc
 
-            syne_c = _fmt_components(syne_now, time_locale)
-            server_c = _fmt_components(server_now, time_locale)
-            utc_c = _fmt_components(utc_now, time_locale)
+            syne_off = _fmt_offset(syne_now.utcoffset())
+            server_off = _fmt_offset(server_now.utcoffset())
+            same_tz = syne_off == server_off
 
-            syne_out = {
-                'full': _apply_template(fmt_full, syne_c),
-                'date': _apply_template(fmt_date, syne_c),
-                'time': _apply_template(fmt_time, syne_c),
-                'day': _apply_template(fmt_day, syne_c),
-                'iso': syne_c['iso'],
-                'utc_offset': _fmt_offset(syne_now.utcoffset()),
-            }
-            server_out = {
-                'full': _apply_template(fmt_full, server_c),
-                'date': _apply_template(fmt_date, server_c),
-                'time': _apply_template(fmt_time, server_c),
-                'day': _apply_template(fmt_day, server_c),
-                'iso': server_c['iso'],
-                'utc_offset': _fmt_offset(server_now.utcoffset()),
-            }
-            utc_out = {
-                'full': _apply_template(fmt_full, utc_c),
-                'date': _apply_template(fmt_date, utc_c),
-                'time': _apply_template(fmt_time, utc_c),
-                'day': _apply_template(fmt_day, utc_c),
-                'iso': utc_c['iso'],
-                'utc_offset': _fmt_offset(timedelta(0)),
-            }
+            syne_c = _fmt_components(syne_now, locale)
+            syne_full = _apply_template(fmt_full, syne_c)
 
-            # Differences (offset arithmetic)
-            syne_offset = syne_now.utcoffset() or timedelta(0)
-            server_offset = server_now.utcoffset() or timedelta(0)
-            diff_syne_server = syne_offset - server_offset
+            # UTC always English locale
+            utc_c = _fmt_components(base_utc, 'en')
+            utc_full = _apply_template(fmt_full, utc_c)
 
             time_lines = [
-                '# Runtime Time Context (authoritative — DO NOT GUESS)',
-                f"SYNE_TZ_NAME: {syne_tz_name}",
-                f"SYNE_UTC_OFFSET: {syne_out['utc_offset']}",
-                f"SERVER_UTC_OFFSET: {server_out['utc_offset']}",
-                f"DIFF_SYNE_MINUS_SERVER: {_fmt_offset(diff_syne_server)}",
-                '',
-                f"SYNE_NOW_FULL: {syne_out['full']}",
-                f"SYNE_NOW_DATE: {syne_out['date']}",
-                f"SYNE_NOW_TIME: {syne_out['time']}",
-                f"SYNE_NOW_DAY: {syne_out['day']}",
-                f"SYNE_NOW_ISO: {syne_out['iso']}",
-                '',
-                f"SERVER_NOW_FULL: {server_out['full']}",
-                f"SERVER_NOW_DATE: {server_out['date']}",
-                f"SERVER_NOW_TIME: {server_out['time']}",
-                f"SERVER_NOW_DAY: {server_out['day']}",
-                f"SERVER_NOW_ISO: {server_out['iso']}",
-                '',
-                f"UTC_NOW_FULL: {utc_out['full']}",
-                f"UTC_NOW_DATE: {utc_out['date']}",
-                f"UTC_NOW_TIME: {utc_out['time']} UTC",
-                f"UTC_NOW_DAY: {utc_out['day']}",
-                f"UTC_NOW_ISO: {utc_out['iso']}",
-                '',
-                'Answering policy for time/date/day questions:',
-                "- Default (no qualifier): use SYNE_NOW_* (NO timezone label)",
-                "- If user mentions 'server': use SERVER_NOW_* and append ' (Server)'",
-                "- If user mentions 'UTC': use UTC_NOW_* and append ' UTC'",
-                '- If multiple are requested: answer all requested lines',
-                '- If user asks for time difference/selisih: use the offsets above',
+                '# Current Time (authoritative — DO NOT GUESS)',
+                f"SYNE ({syne_tz_name}, UTC{syne_off}): {syne_full} | {syne_c['iso']}",
             ]
+            if same_tz:
+                time_lines.append("SERVER: same as SYNE")
+            else:
+                server_c = _fmt_components(server_now, locale)
+                server_full = _apply_template(fmt_full, server_c)
+                time_lines.append(f"SERVER (UTC{server_off}): {server_full} | {server_c['iso']}")
+            time_lines.append(f"UTC: {utc_full} | {utc_c['iso']}")
+            time_lines.append("Time policy: default=SYNE (no tz label), 'server'=SERVER+' (Server)', 'UTC'=UTC+' UTC', multiple=answer all")
+
             messages.append(ChatMessage(role='system', content='\n'.join(time_lines)))
         except Exception as e:
-            # If time injection fails, continue without it.
             logger.debug(f"Time context injection failed: {e}")
 
         # 2. Recall relevant memories (with Rule 760 filtering via access_level)
@@ -482,8 +452,8 @@ class Conversation:
             self._message_cache,
             threshold=0.90,
         )
-        # Derive thresholds from context window (per-model via ContextManager)
-        _ctx_tokens = self.context_mgr.max_context_tokens
+        # Derive thresholds from effective context (minus reserved output tokens)
+        _ctx_tokens = self.context_mgr.available
         _msg_thresh = max(100, min(2000, _ctx_tokens // 1000))
         _chr_thresh = int(_ctx_tokens * 0.75 * 3.5)
         msg_count = len(self._message_cache) if self._message_cache else 0
@@ -503,10 +473,15 @@ class Conversation:
                         )
                     except Exception as e:
                         logger.debug(f"Status callback failed: {e}")
+            # Build preservation context from recent messages
+            _keep = max(20, min(200, _ctx_tokens // 5000))
+            _recent = self._message_cache[-_keep:] if self._message_cache else []
+            _preservation = _build_preservation_context(_recent)
             result = await auto_compact_check(
                 session_id=self.session_id,
                 provider=self.provider,
-                ctx_window=self.context_mgr.max_context_tokens,
+                ctx_window=self.context_mgr.available,
+                recent_context=_preservation,
             )
             if result:
                 logger.info(
@@ -687,8 +662,10 @@ class Conversation:
             ))
 
             tool_calls_list = current.tool_calls
+
+            # ── Phase 1: Parse + Loop Detection (sequential, cheap) ──
+            parsed_calls = []
             for tc_idx, tool_call in enumerate(tool_calls_list):
-                # Handle both normalized format (name/args) and OpenAI raw (function.name/arguments)
                 if "function" in tool_call:
                     func = tool_call["function"]
                     name = func.get("name", "")
@@ -701,16 +678,13 @@ class Conversation:
                         args = json.loads(args)
 
                 tool_call_id = tool_call.get("id")
-
                 logger.info(f"Tool call (round {round_num + 1}): {name}({args})")
 
-                # ── Loop detection: record + check BEFORE execution ──
                 loop_record = detector.record_call(name, args, round_num)
                 loop_check = detector.detect()
 
                 if loop_check.stuck:
                     logger.warning(f"Tool loop detected (stuck): {loop_check.message}")
-                    # Append synthetic results for remaining tool calls in this batch
                     for skip_tc in tool_calls_list[tc_idx:]:
                         skip_id = skip_tc.get("id")
                         skip_name = skip_tc.get("name", skip_tc.get("function", {}).get("name", ""))
@@ -730,119 +704,159 @@ class Conversation:
                         content=f"WARNING: {loop_check.message}. Try a different approach or stop using this tool.",
                     ))
 
-                # Notify channel about tool activity
+                # Notify channel about tool activity (before execution for fast typing indicator)
                 if self._mgr and self._mgr._tool_callback:
                     try:
                         await self._mgr._tool_callback(name)
                     except Exception:
                         pass
 
-                # Check if this is a built-in tool or an ability
-                if self.tools.get(name):
-                    is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
-                    result = await self.tools.execute(
-                        name, args, access_level,
+                parsed_calls.append((name, args, tool_call_id, loop_record))
+
+            if loop_stuck:
+                break  # Skip Phase 2 & 3
+
+            # ── Phase 2: Execute tools in parallel ──
+            is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
+
+            async def _execute_single_tool(t_name, t_args, t_call_id):
+                """Execute one tool/ability and return ToolResult."""
+                if self.tools.get(t_name):
+                    return await self.tools.execute(
+                        t_name, t_args, access_level,
                         scheduled=is_scheduled,
                         provider=self.provider,
                     )
-                elif self.abilities and self.abilities.get(name):
-                    # Inject cached input data if ability needs it
-                    # (e.g. image_analysis retry after pre-process failed)
+                elif self.abilities and self.abilities.get(t_name):
                     cached = getattr(self, '_cached_input_data', {})
                     if cached:
-                        registered = self.abilities.get(name)
+                        registered = self.abilities.get(t_name)
                         if registered and registered.instance:
                             for itype, idata in cached.items():
                                 if registered.instance.handles_input_type(itype):
-                                    # Auto-fill missing params from cache
                                     if itype == "image":
-                                        if not args.get("image_base64") and not args.get("image_url"):
-                                            args["image_base64"] = idata.get("base64", "")
-                                            args.setdefault("mime_type", idata.get("mime_type", "image/jpeg"))
+                                        if not t_args.get("image_base64") and not t_args.get("image_url"):
+                                            t_args["image_base64"] = idata.get("base64", "")
+                                            t_args.setdefault("mime_type", idata.get("mime_type", "image/jpeg"))
                                     elif itype == "audio":
-                                        if not args.get("audio_base64"):
-                                            args["audio_base64"] = idata.get("base64", "")
-                                            args.setdefault("mime_type", idata.get("mime_type", "audio/ogg"))
+                                        if not t_args.get("audio_base64"):
+                                            t_args["audio_base64"] = idata.get("base64", "")
+                                            t_args.setdefault("mime_type", idata.get("mime_type", "audio/ogg"))
                                     elif itype == "document":
-                                        if not args.get("document_base64"):
-                                            args["document_base64"] = idata.get("base64", "")
-                                            args.setdefault("mime_type", idata.get("mime_type", "application/pdf"))
-                                    logger.debug(f"Injected cached {itype} data into ability '{name}' tool call")
+                                        if not t_args.get("document_base64"):
+                                            t_args["document_base64"] = idata.get("base64", "")
+                                            t_args.setdefault("mime_type", idata.get("mime_type", "application/pdf"))
+                                    logger.debug(f"Injected cached {itype} data into ability '{t_name}' tool call")
                                     break
 
-                    # Execute ability with context
                     ability_context = {
                         "user_id": self.user.get("id"),
                         "session_id": self.session_id,
                         "access_level": access_level,
-                        "config": self.abilities.get(name).config or {},
+                        "config": self.abilities.get(t_name).config or {},
                         "workspace": getattr(self._mgr, 'workspace_outputs', None) if self._mgr else None,
-                        "_registry": self.abilities,  # For call_ability() support
+                        "_registry": self.abilities,
                     }
-                    ability_result = await self.abilities.execute(name, args, ability_context)
+                    ability_result = await self.abilities.execute(t_name, t_args, ability_context)
                     if ability_result.get("success"):
-                        result = ability_result.get("result", "")
-                        # Collect media for the channel to deliver
-                        # Don't embed MEDIA: in tool result — strip_server_paths
-                        # would strip the path, leaving bare "MEDIA:" that the
-                        # LLM echoes without a valid path.
+                        content = ability_result.get("result", "")
                         if ability_result.get("media"):
                             media_path = ability_result["media"]
                             if hasattr(self, '_pending_media'):
                                 self._pending_media.append(media_path)
+                        return ToolResult(str(content), ok=True)
                     else:
-                        result = f"Error: {ability_result.get('error', 'Unknown error')}"
+                        return ToolResult(f"Error: {ability_result.get('error', 'Unknown error')}", ok=False, error_type="unknown")
                 else:
-                    result = f"Error: Unknown tool or ability '{name}'"
+                    return ToolResult(f"Error: Unknown tool or ability '{t_name}'", ok=False, error_type="not_found")
+
+            tasks = [
+                _execute_single_tool(name, args, tc_id)
+                for name, args, tc_id, _ in parsed_calls
+            ]
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Wrap exceptions as ToolResult
+            results = []
+            for r in raw_results:
+                if isinstance(r, Exception):
+                    results.append(ToolResult(f"Error: {r}", ok=False, error_type="unknown"))
+                elif isinstance(r, ToolResult):
+                    results.append(r)
+                else:
+                    # Legacy str return from abilities
+                    results.append(ToolResult(str(r), ok=True))
+
+            # ── Automatic retry for retryable failures (max 1 per tool per round) ──
+            for i, result in enumerate(results):
+                if result.retryable:
+                    name, args, tc_id, _ = parsed_calls[i]
+                    logger.info(f"Retrying retryable tool '{name}' (error_type={result.error_type})")
+                    try:
+                        retry_result = await _execute_single_tool(name, args, tc_id)
+                        if isinstance(retry_result, ToolResult):
+                            results[i] = retry_result
+                        else:
+                            results[i] = ToolResult(str(retry_result), ok=True)
+                    except Exception as e:
+                        results[i] = ToolResult(f"Error (retry failed): {e}", ok=False, error_type="unknown")
+
+            # ── Phase 3: Post-process results (sequential) ──
+            from .security import redact_content_output, redact_secrets_in_text
+            from .communication.outbound import strip_server_paths
+
+            for i, result in enumerate(results):
+                name, args, tool_call_id, loop_record = parsed_calls[i]
 
                 # Record result for loop detection
-                detector.record_result(loop_record, str(result))
+                detector.record_result(loop_record, result.content)
+
+                # Inject system hint for permanent failures
+                if not result.ok and not result.retryable:
+                    context.append(ChatMessage(
+                        role="system",
+                        content=f"Tool '{name}' failed permanently ({result.error_type}). Try an alternative approach.",
+                    ))
+
+                result_str = result.content
 
                 # ═══════════════════════════════════════════════════════
                 # GLOBAL TOOL RESULT SCRUBBER
-                # Each tool declares its own scrub_level:
-                #   "aggressive" — full regex (Cookie, PEM, querystring...)
-                #   "safe" — high-confidence only (JWT, sk-*, bot tokens)
-                #   "none" — tool has its own dedicated scrubber
-                # Default = "aggressive" (safest for new tools)
-                #
-                # BYPASS: Owner DM — owner identity is platform-verified,
-                # no scrubbing needed. Owner can see all output.
+                # BYPASS: Owner DM — owner identity is platform-verified
                 # ═══════════════════════════════════════════════════════
                 if not is_owner_dm:
                     tool_obj = self.tools.get(name)
                     scrub = tool_obj.scrub_level if tool_obj else "aggressive"
                     if scrub == "none":
-                        pass  # tool handles its own scrubbing
+                        pass
                     elif scrub == "safe":
-                        from .security import redact_content_output
-                        result = redact_content_output(str(result))
-                    else:  # "aggressive" (default)
-                        from .security import redact_secrets_in_text
-                        result = redact_secrets_in_text(str(result))
+                        result_str = redact_content_output(result_str)
+                    else:
+                        result_str = redact_secrets_in_text(result_str)
 
                 # Collect MEDIA: from tool results and strip from result
-                # so LLM never sees the MEDIA: protocol (prevents echoing)
-                result_str = str(result)
                 if "\n\nMEDIA: " in result_str or result_str.startswith("MEDIA: "):
                     if "\n\nMEDIA: " in result_str:
                         media_path = result_str.rsplit("\n\nMEDIA: ", 1)[1].strip()
-                        result = result_str.rsplit("\n\nMEDIA: ", 1)[0]
+                        result_str = result_str.rsplit("\n\nMEDIA: ", 1)[0]
                     else:
                         media_path = result_str[7:].strip()
-                        result = ""
+                        result_str = ""
                     if media_path and hasattr(self, '_pending_media'):
                         self._pending_media.append(media_path)
 
-                # Strip server paths from tool results before LLM sees them
-                # (prevents LLM from echoing /home/syne/... paths to users)
-                from .communication.outbound import strip_server_paths
-                result = strip_server_paths(str(result))
+                # Strip server paths
+                result_str = strip_server_paths(result_str)
+
+                # Cap oversized results — global safety net
+                _MAX_TOOL_RESULT_CHARS = 50_000
+                if len(result_str) > _MAX_TOOL_RESULT_CHARS:
+                    result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + "\n\n[... truncated, full result too large for context]"
 
                 # Notify CLI about tool execution details
                 if self._mgr and self._mgr._tool_detail_callback:
                     try:
-                        preview = str(result)[:200]
+                        preview = result_str[:200]
                         await self._mgr._tool_detail_callback(name, args, preview)
                     except Exception:
                         pass
@@ -850,12 +864,8 @@ class Conversation:
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
-                await self.save_message("tool", result, metadata=tool_meta)
-                context.append(ChatMessage(role="tool", content=str(result), metadata=tool_meta))
-
-            # If loop was detected mid-batch, break out
-            if loop_stuck:
-                break
+                await self.save_message("tool", result_str, metadata=tool_meta)
+                context.append(ChatMessage(role="tool", content=result_str, metadata=tool_meta))
 
             # Get next response — may contain more tool calls
             current = await self.provider.chat(
