@@ -415,6 +415,9 @@ def _get_function_calling_section() -> str:
 - If a tool returned MEDIA: path, the channel auto-sends it — no manual step needed.
 - After executing a tool, report the ACTUAL result, not what you imagine.
 
+## Tool Priority
+Always use dedicated tools instead of `db_query` for tables that have their own tool: config (`update_config`), soul (`update_soul`), identity (`update_identity`), rules (`update_rules`), abilities (`update_ability`), groups (`manage_group`), memory (`memory_store`/`memory_recall`). Reserve `db_query` for read-only queries or tables without a dedicated tool.
+
 ## Ability-First
 Input processing (images, audio, documents) tries abilities FIRST.
 - If you see "[... result: ...]" → use it, don't re-call the ability.
