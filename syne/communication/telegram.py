@@ -1793,7 +1793,7 @@ Or just send me a message!"""
             f"📨 Messages: {message_count['c']}",
         ]
 
-        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(lines))
 
     async def _cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /compact command — summarize old messages to free context."""
