@@ -6013,17 +6013,18 @@ Or just send me a message!"""
         digest = hashlib.sha256(verifier.encode()).digest()
         challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
+        from ..auth.claude_oauth import _REDIRECT_URI, _SCOPES, _AUTHORIZE_URL
         params = urlencode({
             "code": "true",
             "client_id": client_id,
             "response_type": "code",
-            "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
-            "scope": "org:create_api_key user:inference user:profile",
+            "redirect_uri": _REDIRECT_URI,
+            "scope": _SCOPES,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
             "state": verifier,
         })
-        url = f"https://claude.ai/oauth/authorize?{params}"
+        url = f"{_AUTHORIZE_URL}?{params}"
         return url, {"verifier": verifier, "challenge": challenge, "state": verifier}
 
     async def _exchange_google_oauth(self, code: str, state: dict):
@@ -6105,24 +6106,24 @@ Or just send me a message!"""
     async def _exchange_claude_oauth(self, code: str, state: dict):
         """Exchange Claude auth code for tokens and save to DB."""
         import time
-        from ..auth.claude_oauth import get_client_id
+        from ..auth.claude_oauth import get_client_id, _TOKEN_URL, _REDIRECT_URI, _BETA_HEADER
 
         client_id = await get_client_id()
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                "https://console.anthropic.com/v1/oauth/token",
+                _TOKEN_URL,
                 data={
                     "grant_type": "authorization_code",
                     "client_id": client_id,
                     "code": code,
                     "state": state.get("pasted_state", state.get("verifier", "")),
-                    "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+                    "redirect_uri": _REDIRECT_URI,
                     "code_verifier": state["verifier"],
                 },
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
-                    "anthropic-beta": "oauth-2025-04-20",
+                    "anthropic-beta": _BETA_HEADER,
                 },
             )
             resp.raise_for_status()
@@ -6138,13 +6139,14 @@ Or just send me a message!"""
         # Try to get user profile
         email = None
         try:
+            from ..auth.claude_oauth import _API_URL, _API_VERSION
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://api.anthropic.com/v1/me",
+                    f"{_API_URL}/v1/me",
                     headers={
                         "Authorization": f"Bearer {access_token}",
-                        "anthropic-version": "2023-06-01",
-                        "anthropic-beta": "oauth-2025-04-20",
+                        "anthropic-version": _API_VERSION,
+                        "anthropic-beta": _BETA_HEADER,
                     },
                 )
                 if resp.status_code == 200:
