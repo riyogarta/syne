@@ -171,6 +171,11 @@ async def ensure_dependencies(self) -> tuple[bool, str]:
 """
 
 
+def get_creation_guide() -> str:
+    """Return the ability creation guide for on-demand injection."""
+    return _CREATION_GUIDE
+
+
 async def build() -> str:
     """Build the full ``# Abilities`` section for the system prompt.
 
@@ -238,9 +243,8 @@ async def build() -> str:
             for name, mod_path, err in broken:
                 parts.append(f"- **{name}** (`{mod_path}`): {err}")
             parts.append("")
-
-        # ── Creation guide ──
-        parts.append(_CREATION_GUIDE)
+            # Include creation guide when there are broken abilities to fix
+            parts.append(_CREATION_GUIDE)
 
         return "\n".join(parts)
     except Exception as e:

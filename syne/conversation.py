@@ -633,6 +633,40 @@ class Conversation:
 
         return final_response
 
+    @staticmethod
+    def _get_on_demand_guide(tool_name: str, args: dict, injected: set) -> Optional[str]:
+        """Return a reference guide to inject when a relevant tool is called.
+
+        Returns None if the guide was already injected this turn or the tool
+        doesn't need one.
+        """
+        guide_key: Optional[str] = None
+        guide_text: Optional[str] = None
+
+        if tool_name == "update_config":
+            guide_key = "config"
+        elif tool_name == "update_ability" and args.get("action") == "create":
+            guide_key = "ability_create"
+        elif tool_name in ("read_source", "exec"):
+            guide_key = "system"
+
+        if not guide_key or guide_key in injected:
+            return None
+
+        if guide_key == "config":
+            from .config_guide import CONFIG_GUIDE
+            guide_text = CONFIG_GUIDE
+        elif guide_key == "ability_create":
+            from .abilities.ability_guide import get_creation_guide
+            guide_text = get_creation_guide()
+        elif guide_key == "system":
+            from .system_guide import SYSTEM_GUIDE
+            guide_text = SYSTEM_GUIDE
+
+        if guide_text:
+            injected.add(guide_key)
+        return guide_text
+
     async def _handle_tool_calls(
         self,
         response: ChatResponse,
@@ -664,6 +698,9 @@ class Conversation:
         current = response
         loop_stuck = False
         round_num = 0
+
+        # Track which on-demand guides have been injected this turn
+        _injected_guides: set = set()
 
         # Loop detection + usage accumulation
         detector = ToolLoopDetector()
@@ -883,6 +920,14 @@ class Conversation:
                     tool_meta["tool_call_id"] = tool_call_id
                 await self.save_message("tool", result_str, metadata=tool_meta)
                 context.append(ChatMessage(role="tool", content=result_str, metadata=tool_meta))
+
+            # ── On-demand guide injection ──
+            # Inject reference guides as system messages when relevant tools are called.
+            # Each guide is injected at most once per turn to avoid bloating context.
+            for name, args, _, _ in parsed_calls:
+                guide = self._get_on_demand_guide(name, args, _injected_guides)
+                if guide:
+                    context.append(ChatMessage(role="system", content=guide))
 
             # Get next response — may contain more tool calls
             current = await self.provider.chat(

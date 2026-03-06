@@ -212,75 +212,23 @@ def _get_self_healing_section() -> str:
 ## Ability Self-Healing
 When a user-created ability fails:
 1. Read the error and the ability source (`read_source`)
-2. Diagnose: syntax error? wrong API response? missing config?
-3. Fix the file (`file_write` to `syne/abilities/custom/<name>.py`)
-4. Re-register: `update_ability(action='create', name='<name>')`
-5. Verify: try executing the ability again
-6. Report the fix to the user
-
+2. Diagnose → Fix (`file_write`) → Re-register (`update_ability(action='create')`) → Verify
 You CANNOT fix bundled abilities — only user-created ones.
-For bundled ability failures: report the error clearly, suggest workarounds.
-
-## Ability Loader Errors & Upgrade
-User-created abilities may fail to load on startup. When they do, they appear under
-**"Broken Abilities (need repair)"** in the Abilities section of this prompt with the error.
-**Fix them proactively** — don't wait for the user to notice.
-
-Common errors and fixes:
-- `Can't instantiate abstract class ... without implementation for abstract method 'X'`
-  → The ability is missing a required method. Add it based on the template.
-- `No Ability subclass found in ...`
-  → The file doesn't define a class that extends `Ability`. Fix the import/class definition.
-- `ModuleNotFoundError: No module named ...`
-  → Missing dependency. Add to `ensure_dependencies()` or pip install.
-- `SyntaxError` / `IndentationError`
-  → Broken Python syntax. Read the file and fix it.
-
-All abilities MUST implement these 3 abstract methods:
-- `execute(self, params: dict, context: dict) -> dict`
-- `get_guide(self, enabled: bool, config: dict) -> str`
-- `get_schema(self) -> dict`
-
-How to fix:
-1. Read the source: `read_source(action="read", path="syne/abilities/custom/<name>.py")`
-2. Add/fix whatever is missing (see template in "Creating a New Ability")
-3. Rewrite: `file_write(path="syne/abilities/custom/<name>.py", content="...")`
-4. Re-register: `update_ability(action='create', name='<name>')`
-5. Tell the user what you fixed
-
 When you see broken abilities in this prompt → fix them on the FIRST message you handle.
-When a user asks "update my abilities" → scan and fix all broken abilities.
 
 ## Source Code Access
 - `read_source(action="tree/read/search")` — read-only access to entire codebase
 - You can READ all source. You can only WRITE to `syne/abilities/custom/`.
-- For core bugs: draft a bug report with diagnosis and suggested fix.
 
 ## Environment
 - Python venv: `.venv/` — always use `.venv/bin/python3` and `.venv/bin/pip`
 - DB driver: asyncpg (NOT psycopg). Connection: `SYNE_DATABASE_URL`
-- **Log file: `~/syne.log`** — use `exec(command="tail -100 ~/syne.log")` to read recent logs for diagnosis. Always check logs first when debugging errors, crashes, or unexpected behavior.
+- **Log file: `~/syne.log`** — use `exec(command="tail -100 ~/syne.log")` to read recent logs for diagnosis.
 - Read your own source when unsure about internals.
 
-## User Asks Something You Can't Do → Offer to Create an Ability
-When a user requests something and no existing ability or tool can handle it:
-1. Recognize the gap — don't just say "I can't do that"
-2. Evaluate: can a new ability solve this?
-   - YES → proactively offer: "I don't have that yet, but I can create an ability for it. Want me to build it?"
-   - NO (hardware/platform/security limit) → explain honestly why
-3. If the user agrees, create it (see "Creating a New Ability" in the Abilities section)
-4. Default assumption: you CAN build it, you just haven't yet.
-
-Examples of when to offer:
-- "Can you check the weather?" → offer to create a weather ability
-- "Remind me to take medicine" → offer to create a scheduler-based reminder ability
-- "Convert this PDF to text" → offer to create a PDF extraction ability
-- "Can you post to my Twitter?" → offer, but note it needs API credentials
-
-Do NOT offer for things that are:
-- Already covered by an existing ability or tool
-- Trivially answerable from your knowledge (no tool needed)
-- One-off questions that don't need a persistent capability
+## Can't Do Something? → Offer to Create an Ability
+When no existing tool can handle a request, proactively offer to create a custom ability.
+Creation guide will be provided when you use `update_ability(action='create')`.
 """
 
 
@@ -590,9 +538,8 @@ async def build_system_prompt(
     # [6.6] WORKSPACE RULES
     parts.append(_get_workspace_section())
 
-    # [7] CONFIG GUIDE — operational manual for all config keys
-    from .config_guide import CONFIG_GUIDE
-    parts.append(CONFIG_GUIDE)
+    # [7] CONFIG GUIDE — stub (full guide injected on-demand when update_config is called)
+    parts.append("# Configuration\nUse `update_config(action='list')` to see all config keys. Full config reference will be provided when you use the update_config tool.")
 
     # [8] ABILITY STATUS — removed to save tokens.
     # Agent can query via update_ability(action='list').
@@ -622,9 +569,8 @@ async def build_system_prompt(
     if ability_guide:
         parts.append(ability_guide)
 
-    # [13] SYSTEM GUIDE — architecture, diagnostics, bug reporting
-    from .system_guide import SYSTEM_GUIDE
-    parts.append(SYSTEM_GUIDE)
+    # [13] SYSTEM GUIDE — stub (full guide injected on-demand when read_source/exec is called)
+    parts.append("# System Architecture\nUse `read_source(action='tree')` to explore the codebase. Full system guide will be provided when you use read_source or exec tools for debugging.")
 
     return "\n".join(parts)
 
