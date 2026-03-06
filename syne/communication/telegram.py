@@ -5910,6 +5910,10 @@ Or just send me a message!"""
             if driver == "claude":
                 instructions = (
                     f"🔐 **{label} OAuth Setup**\n\n"
+                    f"⚠️ **WARNING**: Using Claude OAuth in third-party applications "
+                    f"may violate Anthropic's Terms of Service. Your account could be "
+                    f"suspended or terminated. Proceed at your own risk.\n"
+                    f"_Alternative: add Claude via API key instead._\n\n"
                     f"1️⃣ Open this URL in your browser:\n\n"
                     f"`{url}`\n\n"
                     f"2️⃣ Sign in and authorize access\n"

@@ -97,6 +97,16 @@ def init():
     elif choice == 3:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
+        console.print()
+        console.print("  [bold yellow]⚠️  WARNING: Using Claude OAuth in third-party applications[/bold yellow]")
+        console.print("  [yellow]may violate Anthropic's Terms of Service. Your account could[/yellow]")
+        console.print("  [yellow]be suspended or terminated. Proceed at your own risk.[/yellow]")
+        console.print("  [dim]Alternative: use option 7 (Anthropic API key) for ToS-compliant access.[/dim]")
+        console.print()
+        confirm = input("  Continue with Claude OAuth? (y/N): ").strip().lower()
+        if confirm != "y":
+            console.print("  [dim]Cancelled. Re-run 'syne init' to choose a different provider.[/dim]")
+            return
 
         from syne.auth.claude_oauth import login_claude
         claude_creds = asyncio.run(login_claude())
