@@ -82,7 +82,10 @@ def restart():
     if not os.path.exists(venv_python):
         console.print(f"[red]Venv not found at {venv_python}. Run 'syne init' first.[/red]")
         return
-    log_file = open("/tmp/syne.log", "a")
+    log_dir = os.path.expanduser("~/.log-syne")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "syne.log")
+    log_file = open(log_path, "a")
     try:
         subprocess.Popen(
             [venv_python, "-m", "syne.main"],
@@ -94,4 +97,4 @@ def restart():
     finally:
         log_file.close()
     console.print("[green]✓ Service restarted (PID in background)[/green]")
-    console.print("[dim]Logs: tail -f /tmp/syne.log[/dim]")
+    console.print(f"[dim]Logs: tail -f {log_path}[/dim]")

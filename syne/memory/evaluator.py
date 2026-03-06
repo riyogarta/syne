@@ -101,7 +101,7 @@ async def evaluate_message(
         "traceback", "stack trace", "foreignkey", "fk violation",
         "cron", "task id", "next run", "last run",
         "syne/", "/home/", ".py", "pip install", "apt install",
-        "syne.log",
+        ".log-syne",
     )
     if any(k in stripped for k in technical_skip_keywords) and not _is_explicit_remember(user_message):
         return None
@@ -196,7 +196,7 @@ async def evaluate_message_ollama(
         "traceback", "stack trace", "foreignkey", "fk violation",
         "cron", "task id", "next run", "last run",
         "syne/", "/home/", ".py", "pip install", "apt install",
-        "syne.log",
+        ".log-syne",
     )
     if any(k in stripped for k in technical_skip_keywords) and not _is_explicit_remember(user_message):
         return None

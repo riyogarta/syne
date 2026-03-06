@@ -145,9 +145,9 @@ syne/
 
 ### How to read logs
 ```
-exec(command="journalctl -u syne --no-pager -n 50")     — last 50 log lines
-exec(command="journalctl -u syne --no-pager --since '5 min ago'")  — recent logs
-exec(command="journalctl -u syne --no-pager | grep ERROR | tail -20")  — recent errors
+exec(command="tail -100 ~/.log-syne/syne.log")           — last 100 log lines
+exec(command="grep ERROR ~/.log-syne/syne.log | tail -20") — recent errors
+exec(command="ls -la ~/.log-syne/")                       — list all log files (rotated: .1, .2, .3)
 ```
 
 ### Common issues and diagnosis

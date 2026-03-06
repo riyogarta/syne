@@ -223,7 +223,7 @@ When you see broken abilities in this prompt → fix them on the FIRST message y
 ## Environment
 - Python venv: `.venv/` — always use `.venv/bin/python3` and `.venv/bin/pip`
 - DB driver: asyncpg (NOT psycopg). Connection: `SYNE_DATABASE_URL`
-- **Log file: `~/syne.log`** — use `exec(command="tail -100 ~/syne.log")` to read recent logs for diagnosis.
+- **Log directory: `~/.log-syne/`** — use `exec(command="tail -100 ~/.log-syne/syne.log")` to read recent logs for diagnosis.
 - Read your own source when unsure about internals.
 
 ## Can't Do Something? → Offer to Create an Ability

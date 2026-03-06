@@ -34,7 +34,7 @@ google_credentials.json
 
 # Logs
 *.log
-syne.log
+.log-syne/
 
 # User-created abilities (runtime, not source)
 user_abilities/

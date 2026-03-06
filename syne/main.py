@@ -11,7 +11,9 @@ from .communication.telegram import TelegramChannel
 from .scheduler import Scheduler
 
 _log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-_log_file = os.path.expanduser("~/syne.log")
+_log_dir = os.path.expanduser("~/.log-syne")
+os.makedirs(_log_dir, exist_ok=True)
+_log_file = os.path.join(_log_dir, "syne.log")
 
 from logging.handlers import RotatingFileHandler
 
@@ -20,7 +22,7 @@ logging.basicConfig(
     format=_log_format,
     handlers=[
         logging.StreamHandler(),                          # stderr (console)
-        RotatingFileHandler(                              # ~/syne.log (rotated)
+        RotatingFileHandler(                              # ~/.log-syne/syne.log (rotated)
             _log_file, encoding="utf-8",
             maxBytes=5 * 1024 * 1024,                     # 5 MB per file
             backupCount=3,                                # keep syne.log.1, .2, .3

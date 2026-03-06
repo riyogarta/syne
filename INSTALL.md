@@ -184,7 +184,7 @@ No config files to edit. Just talk.
 | DB connection refused | `docker compose up -d db` |
 | OAuth token expired | `syne repair --fix` or `syne init` |
 | 429 rate limit | Wait 30s, Syne has auto-retry (2s → 4s → 8s) |
-| Bot not responding | Check `syne status` and `tail -f /tmp/syne.log` |
+| Bot not responding | Check `syne status` and `tail -f ~/.log-syne/syne.log` |
 | Ability not working | Chat: "list my abilities" — check config status |
 
 ## Architecture
