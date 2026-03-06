@@ -323,6 +323,17 @@ Legacy keys from before the model registry system. Still read as fallback by som
 - `provider.embedding_dimensions` — vector dimensions for embeddings.
 - **Do not change directly** — use `/model` and `/embedding` commands instead.
 
+### Claude OAuth Client ID
+| Key | Default | Type |
+|-----|---------|------|
+| `claude.oauth_client_id` | *(built-in)* | string (UUID) |
+
+Overrides the OAuth client_id used for Claude/Anthropic OAuth flows.
+- Default uses the built-in client_id — no need to set this unless customizing.
+- **Change when**: Owner wants to use a different OAuth client registration.
+- **After changing**: must re-authenticate Claude OAuth via `/models` (existing tokens are tied to the old client_id).
+- **Warning**: Using Claude OAuth in third-party applications may violate Anthropic's Terms of Service.
+
 ### Auth Refresh (Advanced)
 | Key | Default | Type |
 |-----|---------|------|
