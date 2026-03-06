@@ -26,8 +26,8 @@ import httpx
 
 logger = logging.getLogger("syne.auth.claude")
 
-# Claude OAuth — same as Claude Code CLI
-_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Claude OAuth — default client_id (configurable via `claude.oauth_client_id` config key)
+_DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
 _TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 _REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
@@ -37,6 +37,26 @@ _BETA_HEADER = "oauth-2025-04-20"
 # API
 _API_URL = "https://api.anthropic.com"
 _API_VERSION = "2023-06-01"
+
+
+async def get_client_id() -> str:
+    """Get Claude OAuth client_id from config, fallback to default.
+
+    Allows overriding the client_id via config key `claude.oauth_client_id`.
+    """
+    try:
+        from ..db.models import get_config
+        custom = await get_config("claude.oauth_client_id", None)
+        if custom:
+            return custom
+    except Exception:
+        pass
+    return _DEFAULT_CLIENT_ID
+
+
+def get_client_id_sync() -> str:
+    """Sync version for contexts where event loop may not be available (e.g. syne init)."""
+    return _DEFAULT_CLIENT_ID
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -80,12 +100,13 @@ class ClaudeCredentials:
     async def _refresh(self):
         """Refresh the access token."""
         logger.info("Refreshing Claude access token...")
+        client_id = await get_client_id()
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 _TOKEN_URL,
                 data={
                     "grant_type": "refresh_token",
-                    "client_id": _CLIENT_ID,
+                    "client_id": client_id,
                     "refresh_token": self.refresh_token,
                 },
                 headers={
@@ -172,11 +193,17 @@ async def login_claude() -> ClaudeCredentials:
     User opens URL in any browser, Anthropic console shows the code,
     user pastes it back.
     """
+    # Try async config lookup, fallback to default (DB may not exist during syne init)
+    try:
+        client_id = await get_client_id()
+    except Exception:
+        client_id = _DEFAULT_CLIENT_ID
+
     verifier, challenge = _generate_pkce()
 
     params = urlencode({
         "code": "true",
-        "client_id": _CLIENT_ID,
+        "client_id": client_id,
         "response_type": "code",
         "redirect_uri": _REDIRECT_URI,
         "scope": _SCOPES,
@@ -208,7 +235,7 @@ async def login_claude() -> ClaudeCredentials:
             _TOKEN_URL,
             data={
                 "grant_type": "authorization_code",
-                "client_id": _CLIENT_ID,
+                "client_id": client_id,
                 "code": code,
                 "state": state,
                 "redirect_uri": _REDIRECT_URI,

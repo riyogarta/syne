@@ -5898,7 +5898,7 @@ Or just send me a message!"""
             return
 
         try:
-            url, pkce_state = generator()
+            url, pkce_state = await generator()
             self._auth_state[user_id] = {
                 "type": "oauth",
                 "provider": driver,  # Used by _exchange methods
@@ -5944,7 +5944,7 @@ Or just send me a message!"""
             )
             self._auth_state.pop(user_id, None)
 
-    def _generate_google_oauth_url(self) -> tuple[str, dict]:
+    async def _generate_google_oauth_url(self) -> tuple[str, dict]:
         """Generate Google OAuth URL with PKCE."""
         import base64, hashlib, secrets
         from urllib.parse import urlencode
@@ -5977,7 +5977,7 @@ Or just send me a message!"""
         url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
         return url, {"verifier": verifier, "challenge": challenge}
 
-    def _generate_codex_oauth_url(self) -> tuple[str, dict]:
+    async def _generate_codex_oauth_url(self) -> tuple[str, dict]:
         """Generate Codex/OpenAI OAuth URL with PKCE."""
         import base64, hashlib, secrets
         from urllib.parse import urlencode
@@ -6001,10 +6001,13 @@ Or just send me a message!"""
         url = f"https://auth.openai.com/oauth/authorize?{params}"
         return url, {"verifier": verifier, "challenge": challenge, "state": state}
 
-    def _generate_claude_oauth_url(self) -> tuple[str, dict]:
+    async def _generate_claude_oauth_url(self) -> tuple[str, dict]:
         """Generate Claude OAuth URL with PKCE (paste-code flow)."""
         import base64, hashlib, secrets
         from urllib.parse import urlencode
+        from ..auth.claude_oauth import get_client_id
+
+        client_id = await get_client_id()
 
         verifier = secrets.token_urlsafe(64)
         digest = hashlib.sha256(verifier.encode()).digest()
@@ -6012,7 +6015,7 @@ Or just send me a message!"""
 
         params = urlencode({
             "code": "true",
-            "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+            "client_id": client_id,
             "response_type": "code",
             "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
             "scope": "org:create_api_key user:inference user:profile",
@@ -6102,13 +6105,16 @@ Or just send me a message!"""
     async def _exchange_claude_oauth(self, code: str, state: dict):
         """Exchange Claude auth code for tokens and save to DB."""
         import time
+        from ..auth.claude_oauth import get_client_id
+
+        client_id = await get_client_id()
 
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 "https://console.anthropic.com/v1/oauth/token",
                 data={
                     "grant_type": "authorization_code",
-                    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                    "client_id": client_id,
                     "code": code,
                     "state": state.get("pasted_state", state.get("verifier", "")),
                     "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
