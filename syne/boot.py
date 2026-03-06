@@ -539,7 +539,7 @@ async def build_system_prompt(
     parts.append(_get_workspace_section())
 
     # [7] CONFIG GUIDE — stub (full guide injected on-demand when update_config is called)
-    parts.append("# Configuration\nUse `update_config(action='list')` to see all config keys. Full config reference will be provided when you use the update_config tool.")
+    parts.append("# Configuration\nUse `update_config(action='list')` to see all config keys. Full config reference will be provided when you use the update_config tool.\nNote: some config keys are optional overrides that don't exist in DB until explicitly set (e.g. `claude.oauth_client_id`). Use `update_config(action='set')` to create them.")
 
     # [8] ABILITY STATUS — removed to save tokens.
     # Agent can query via update_ability(action='list').
