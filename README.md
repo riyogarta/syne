@@ -198,7 +198,8 @@ You:  Suggest dinner for tonight.
 Syne: How about rendang or soto ayam? Avoiding shellfish as noted.
 
 You:  What do you remember about my family?
-Syne: [recalls relevant memories via semantic search]
+Syne: You have a partner and a child. You're allergic to shellfish.
+      Anything else you'd like me to note?
 
 You:  Forget that I like sushi.
 Syne: Removed from memory.
