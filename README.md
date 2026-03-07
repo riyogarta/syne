@@ -17,10 +17,10 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Unlimited memory** — Semantic search over millions of memories using pgvector
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **No config files** — Everything lives in PostgreSQL. Change behavior through conversation, not YAML
+- **No runtime config files** — No SOUL.md or CONFIG.yaml. All runtime behavior lives in PostgreSQL, changed through conversation
 - **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding + memory evaluator via Ollama (local, $0). Entire stack can run at $0/month
 - **Linux-style permissions** — 3-digit octal permissions (owner/family/public) for every tool and ability
-- **Interactive CLI** — Code like Claude Code, but with persistent memory and tools
+- **Interactive CLI** — Terminal-based chat with persistent memory and tools
 
 ---
 
@@ -82,9 +82,9 @@ syne status     # Quick status check
 
 ---
 
-## No Config Files — Just Talk
+## No Runtime Config Files — Just Talk
 
-Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml`. Syne has none of that. Everything lives in PostgreSQL, and you change it through chat:
+Most agent frameworks require editing `SOUL.md`, `AGENTS.md`, or `CONFIG.yaml` to change behavior. Syne has none of that — all runtime behavior lives in PostgreSQL, and you change it through conversation:
 
 | Traditional File | Syne Equivalent | Just say... |
 |------------------|-----------------|-------------|
@@ -362,7 +362,7 @@ All configuration lives in the `config` table. Change via conversation or `updat
 | Key | Default | Description |
 |-----|---------|-------------|
 | `provider.active_model` | `"gemini-pro"` | Active chat model key |
-| `provider.active_embedding` | `"together-bge"` | Active embedding model key |
+| `provider.active_embedding` | *(set during init)* | Active embedding model key (auto-detected by hardware tier) |
 
 ### Memory Settings
 
@@ -619,7 +619,7 @@ syne/
 │   │   ├── custom/          # User-created abilities (only writable dir)
 │   │   └── ...              # 6 bundled abilities
 │   ├── db/
-│   │   ├── schema.sql       # Database schema (14 tables)
+│   │   ├── schema.sql       # Database schema (13 tables)
 │   │   ├── connection.py    # Async connection pool (asyncpg)
 │   │   ├── models.py        # Data access layer
 │   │   └── credentials.py   # Encrypted credential storage
