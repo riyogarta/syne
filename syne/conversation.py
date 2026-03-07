@@ -775,6 +775,10 @@ class Conversation:
 
             async def _execute_single_tool(t_name, t_args, t_call_id):
                 """Execute one tool/ability and return ToolResult."""
+                # Auto-inject chat_id for send_reaction if not provided by LLM
+                if t_name == "send_reaction" and not t_args.get("chat_id") and self.chat_id:
+                    t_args["chat_id"] = str(self.chat_id)
+
                 if self.tools.get(t_name):
                     return await self.tools.execute(
                         t_name, t_args, access_level,
