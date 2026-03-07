@@ -383,7 +383,13 @@ All configuration lives in the `config` table. Change via conversation or `updat
 | `session.compaction_threshold` | `80000` | Characters before auto-compaction |
 | `session.compaction_keep_recent` | `40` | Messages kept after compaction |
 | `session.max_messages` | `100` | Messages before suggesting compaction |
-| `session.thinking_budget` | `null` | Thinking: `0`=off, `1024`=low, `8192`=high, `24576`=max |
+| `session.thinking_budget` | `null` | Global default only — per-model thinking is set via `/models` |
+
+### Claude OAuth (Optional)
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `claude.oauth_client_id` | *(built-in)* | Override OAuth client_id for Anthropic Claude |
 
 ### Rate Limiting
 
@@ -471,17 +477,19 @@ syne restore               # Restore from backup
 | `/identity` | Agent identity | All |
 | `/clear` | Clear conversation history | Owner |
 | `/compact` | Compact conversation | Owner |
-| `/think [level]` | Set thinking (off/low/medium/high/max) | Owner |
 | `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
 | `/autocapture [on/off]` | Toggle auto memory capture | Owner |
-| `/models` | Show/switch chat model | Owner |
-| `/embedding` | Show/switch embedding model | Owner |
-| `/evaluator` | Show/switch evaluator model | Owner |
-| `/browse` | Browse web page via LLM | Owner |
-| `/groups` | List active groups | Owner |
-| `/members` | List group members (Telegram) | Owner |
-| `/wamembers` | List group members (WhatsApp) | Owner |
-| `/cancel` | Cancel current operation | Owner |
+| `/models` | Manage LLM models (thinking, reasoning, context, params) | Owner |
+| `/embedding` | Manage embedding models | Owner |
+| `/evaluator` | Manage evaluator model | Owner |
+| `/browse` | Browse directories (share session with CLI) | Owner |
+| `/groups` | Manage groups & members | Owner |
+| `/members` | Manage global user access levels | Owner |
+| `/wamembers` | Manage WhatsApp allowlist | Owner |
+| `/backup` | Backup database | Owner |
+| `/restore` | Restore database from backup | Owner |
+| `/update` | Update Syne to latest version | Owner |
+| `/cancel` | Cancel active operation | Owner |
 | `/restart` | Restart agent | Owner |
 
 ---
@@ -520,9 +528,9 @@ syne restore               # Restore from backup
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  14 tables — all state in one database              |  |
+|  |  13 tables — all state in one database              |  |
 |  |  memory · sessions · messages · config · abilities   |  |
-|  |  users · groups · group_members · identity · soul    |  |
+|  |  users · groups · identity · soul · capabilities     |  |
 |  |  rules · scheduled_tasks · subagent_runs             |  |
 |  +------------------------------------------------------+  |
 +------------------------------------------------------------+
@@ -538,11 +546,11 @@ syne restore               # Restore from backup
 | `soul` | Behavioral directives by category |
 | `rules` | Hard/soft rules with severity |
 | `users` | Multi-user with access levels (owner/family/public/blocked) |
-| `groups` | Group chat configuration |
-| `group_members` | Per-group member access and aliases |
+| `groups` | Group chat configuration and member access |
 | `memory` | Semantic memory with pgvector embeddings |
 | `sessions` | Conversation sessions |
 | `messages` | Full message history |
+| `capabilities` | Tool capability registry |
 | `abilities` | Registered abilities + config |
 | `config` | Runtime configuration (key-value) |
 | `subagent_runs` | Sub-agent execution history |
@@ -649,7 +657,7 @@ pytest
 
 ## Roadmap
 
-- [ ] Interactive CLI
+- [x] Interactive CLI (`syne cli`)
 - [ ] Ability marketplace
 
 ---
