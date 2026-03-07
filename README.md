@@ -205,7 +205,7 @@ You:  Forget that I like sushi.
 Syne: Removed from memory.
 ```
 
-Memory recall respects the permission system — only the owner sees their own memories. Other users interacting with the bot cannot access them:
+Memory recall respects the permission system — only the owner and family-level users can access memories. Public users cannot:
 
 ```
 Stranger: What do you know about your owner's family?
