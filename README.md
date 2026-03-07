@@ -205,6 +205,13 @@ You:  Forget that I like sushi.
 Syne: Removed from memory.
 ```
 
+Memory recall respects the permission system — only the owner sees their own memories. Other users interacting with the bot cannot access them:
+
+```
+Stranger: What do you know about your owner's family?
+Syne:     I can't share that. That's private information.
+```
+
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
 
 ---
