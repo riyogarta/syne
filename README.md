@@ -189,11 +189,16 @@ With Ollama as both evaluator and embedding provider, auto-capture costs **$0** 
 ### Managing Memories
 
 ```
-You:  What do you remember about my family?
-Syne: [recalls relevant memories via semantic search]
-
 You:  Remember: I'm allergic to shellfish.
 Syne: Stored.
+
+              [3 days later]
+
+You:  Suggest dinner for tonight.
+Syne: How about rendang or soto ayam? Avoiding shellfish as noted.
+
+You:  What do you remember about my family?
+Syne: [recalls relevant memories via semantic search]
 
 You:  Forget that I like sushi.
 Syne: Removed from memory.
