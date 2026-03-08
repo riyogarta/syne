@@ -7,9 +7,12 @@
 # Prerequisites: Python 3.11+, git
 #
 # Usage:
-#   git clone https://github.com/riyogarta/syne.git
+#   git clone -b remote-node https://github.com/riyogarta/syne.git
 #   cd syne
 #   bash install-node.sh
+#
+# After remote-node is merged to main, just:
+#   git clone https://github.com/riyogarta/syne.git
 
 set -e
 
