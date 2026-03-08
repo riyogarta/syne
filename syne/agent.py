@@ -48,6 +48,7 @@ class SyneAgent:
         self._pending_sudo_command: Optional[str] = None
         self._pending_sudo_at: float = 0.0  # timestamp when pending was set
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
+        self.gateway = None  # Set by main.py if gateway is enabled
 
         # Workspace directory — central location for all generated/uploaded files
         project_root = str(Path(__file__).resolve().parent.parent)
@@ -612,6 +613,22 @@ class SyneAgent:
         else:
             raise RuntimeError(f"Unknown provider: {provider_name}")
 
+    @staticmethod
+    def _add_node_param(params: dict) -> dict:
+        """Add optional 'node' parameter to a tool's parameter schema.
+
+        This allows the LLM to target a specific remote node for execution.
+        The 'node' param is popped in conversation.py routing before reaching the handler.
+        """
+        params = dict(params)  # shallow copy
+        props = dict(params.get("properties", {}))
+        props["node"] = {
+            "type": "string",
+            "description": "Remote node ID to execute on (optional — use node_status to see online nodes)",
+        }
+        params["properties"] = props
+        return params
+
     def _register_default_tools(self):
         """Register built-in tools."""
         # ── Web Search (Core) ──
@@ -641,7 +658,7 @@ class SyneAgent:
         self.tools.register(
             name=READ_SOURCE_TOOL["name"],
             description=READ_SOURCE_TOOL["description"],
-            parameters=READ_SOURCE_TOOL["parameters"],
+            parameters=self._add_node_param(READ_SOURCE_TOOL["parameters"]),
             handler=READ_SOURCE_TOOL["handler"],
             permission=READ_SOURCE_TOOL["permission"],
             scrub_level="safe",  # source code — must not corrupt regex/patterns
@@ -663,7 +680,7 @@ class SyneAgent:
         self.tools.register(
             name=FILE_READ_TOOL["name"],
             description=FILE_READ_TOOL["description"],
-            parameters=FILE_READ_TOOL["parameters"],
+            parameters=self._add_node_param(FILE_READ_TOOL["parameters"]),
             handler=FILE_READ_TOOL["handler"],
             permission=FILE_READ_TOOL["permission"],
             scrub_level="safe",  # files may contain code/configs
@@ -671,7 +688,7 @@ class SyneAgent:
         self.tools.register(
             name=FILE_WRITE_TOOL["name"],
             description=FILE_WRITE_TOOL["description"],
-            parameters=FILE_WRITE_TOOL["parameters"],
+            parameters=self._add_node_param(FILE_WRITE_TOOL["parameters"]),
             handler=FILE_WRITE_TOOL["handler"],
             permission=FILE_WRITE_TOOL["permission"],
         )
@@ -730,7 +747,7 @@ class SyneAgent:
         self.tools.register(
             name="exec",
             description="Execute a shell command on the host system. Returns stdout, stderr, and exit code. Use for file operations, system checks, installing packages, running scripts, or any system task. Commands run as the Syne process user.",
-            parameters={
+            parameters=self._add_node_param({
                 "type": "object",
                 "properties": {
                     "command": {
@@ -747,7 +764,7 @@ class SyneAgent:
                     },
                 },
                 "required": ["command"],
-            },
+            }),
             handler=self._tool_exec,
             permission=0o700,
             scrub_level="none",  # exec has dedicated redact_exec_output()
@@ -1051,6 +1068,37 @@ class SyneAgent:
             handler=self._tool_check_auth,
             permission=0o700,
         )
+
+        # ── Node Status (Gateway) ──
+        self.tools.register(
+            name="node_status",
+            description="List remote nodes and their connection status. Use this to check which nodes are online before executing commands on them.",
+            parameters={
+                "type": "object",
+                "properties": {},
+            },
+            handler=self._tool_node_status,
+            permission=0o700,
+        )
+
+    async def _tool_node_status(self) -> str:
+        """List connected remote nodes."""
+        if not self.gateway:
+            return "Gateway is not enabled. No remote nodes available."
+
+        nodes = self.gateway._nodes
+        if not nodes:
+            return "No remote nodes currently connected."
+
+        lines = [f"Connected nodes ({len(nodes)}):"]
+        for nid, conn in nodes.items():
+            lines.append(
+                f"  - name: {conn.display_name}  |  node_id: {nid}  |  "
+                f"platform: {conn.platform}  |  cwd: {conn.cwd}"
+            )
+        lines.append("")
+        lines.append("Use the 'node' parameter with the name to target a specific node.")
+        return "\n".join(lines)
 
     async def _tool_check_auth(self) -> str:
         """Check OAuth token status without exposing credentials."""

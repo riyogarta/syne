@@ -92,9 +92,7 @@ async def handle_remote_message(
     # Set up the node tool interceptor on the conversation manager.
     # This tells _execute_single_tool to route NODE_TOOLS to the node.
     # We store it on the manager keyed by chat_id so concurrent nodes don't clash.
-    if not hasattr(agent.conversations, '_node_connections'):
-        agent.conversations._node_connections = {}
-    agent.conversations._node_connections[f"node:{chat_id}"] = node
+    agent.conversations._node_connections[chat_id] = node
 
     try:
         response = await agent.conversations.handle_message(
@@ -107,4 +105,4 @@ async def handle_remote_message(
         return response or ""
     finally:
         # Clean up node connection reference (don't leak)
-        agent.conversations._node_connections.pop(f"node:{chat_id}", None)
+        agent.conversations._node_connections.pop(chat_id, None)

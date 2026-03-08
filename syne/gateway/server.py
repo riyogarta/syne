@@ -68,7 +68,7 @@ class NodeConnection:
             ConnectionError: If node disconnects.
         """
         request_id = str(uuid.uuid4())
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_tools[request_id] = future
 
         try:
@@ -121,9 +121,17 @@ class Gateway:
             await self._server.wait_closed()
             logger.info("Gateway WebSocket server stopped")
 
-    def get_node(self, node_id: str) -> Optional[NodeConnection]:
-        """Get a connected node by ID."""
-        return self._nodes.get(node_id)
+    def get_node(self, name_or_id: str) -> Optional[NodeConnection]:
+        """Get a connected node by ID or display_name alias."""
+        # Try exact node_id first
+        node = self._nodes.get(name_or_id)
+        if node:
+            return node
+        # Try alias (display_name)
+        for conn in self._nodes.values():
+            if conn.display_name == name_or_id:
+                return conn
+        return None
 
     async def _handle_connection(self, ws: ServerConnection) -> None:
         """Handle a new WebSocket connection."""
@@ -192,7 +200,7 @@ class Gateway:
             if node:
                 self._nodes.pop(node.node_id, None)
                 # Cancel pending tool requests
-                for fut in node._pending_tools.values():
+                for fut in list(node._pending_tools.values()):
                     if not fut.done():
                         fut.set_exception(ConnectionError("Node disconnected"))
                 logger.info(f"Node disconnected: {node.node_id}")
@@ -204,13 +212,16 @@ class Gateway:
             await ws.send(encode(ErrorMsg(message="Missing pairing token", code="pair_invalid")))
             return
 
-        if not await auth.verify_pairing_token(pairing_token):
+        valid, node_name = await auth.verify_pairing_token(pairing_token)
+        if not valid:
             await ws.send(encode(ErrorMsg(message="Invalid or expired pairing token", code="pair_failed")))
             return
 
         # Token valid — register the node
-        node_id = msg.get("node_id", str(uuid.uuid4()))
-        display_name = msg.get("display_name", node_id)
+        # node_name from token takes priority (set by admin via `syne gateway token <name>`)
+        # Falls back to client-provided display_name or "node"
+        display_name = node_name or msg.get("display_name", "node")
+        node_id = f"{display_name}-{uuid.uuid4().hex[:8]}"
         platform = msg.get("platform", "linux")
 
         permanent_token = await auth.register_node(node_id, display_name, platform)

@@ -14,6 +14,7 @@ class ConnectMsg:
     """Node sends this to authenticate on connection."""
     token: str
     node_id: str
+    display_name: str = ""
     platform: str = "linux"
     cwd: str = ""
     type: str = field(default="connect", init=False)

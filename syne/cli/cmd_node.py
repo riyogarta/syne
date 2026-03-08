@@ -41,6 +41,12 @@ async def _node_init_async():
     if not gateway_url.startswith("ws"):
         gateway_url = f"wss://{gateway_url}"
 
+    if gateway_url.startswith("ws://"):
+        console.print("[yellow]WARNING: Using unencrypted ws://. Tokens will be sent in plain text.[/yellow]")
+        console.print("[yellow]Use wss:// in production for security.[/yellow]")
+        if not click.confirm("Continue anyway?", default=False):
+            return
+
     console.print(f"\n[dim]Connecting to {gateway_url}...[/dim]")
 
     try:
@@ -91,6 +97,9 @@ async def _node_cli_async(debug: bool):
     client._on_response = on_response
     client._on_tool_request = execute_tool
 
+    if config['gateway'].startswith("ws://"):
+        console.print("[yellow]WARNING: Unencrypted connection (ws://). Use wss:// in production.[/yellow]")
+
     try:
         console.print(f"[dim]Connecting to {config['gateway']}...[/dim]")
         await client.connect()
@@ -100,7 +109,7 @@ async def _node_cli_async(debug: bool):
         listen_task = asyncio.create_task(client.listen())
 
         # REPL loop — input() must run in executor to not block asyncio
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         cwd = os.getcwd()
         prompt = f"{os.path.basename(cwd)} > "
 
@@ -158,12 +167,17 @@ def gateway():
 
 
 @gateway.command(name="token")
-def gateway_token():
-    """Generate a one-time pairing token for a new node."""
-    asyncio.run(_gateway_token_async())
+@click.argument("name")
+def gateway_token(name):
+    """Generate a one-time pairing token for a new node.
+
+    NAME is the alias for the node (e.g. 'mypc', 'laptop').
+    This name is used to target the node from Telegram or other channels.
+    """
+    asyncio.run(_gateway_token_async(name))
 
 
-async def _gateway_token_async():
+async def _gateway_token_async(name: str):
     from ..db.connection import init_db
     from ..gateway.auth import generate_pairing_token, ensure_paired_nodes_table
 
@@ -172,10 +186,18 @@ async def _gateway_token_async():
     await init_db(db_url)
     await ensure_paired_nodes_table()
 
-    token = await generate_pairing_token()
-    console.print(f"\n[bold]Pairing Token[/bold] (expires in 10 minutes):\n")
+    try:
+        token = await generate_pairing_token(node_name=name)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        from ..db.connection import close_db
+        await close_db()
+        return
+
+    console.print(f"\n[bold]Pairing Token for '{name}'[/bold] (expires in 10 minutes):\n")
     console.print(f"  [bold green]{token}[/bold green]\n")
-    console.print("[dim]Use this token with 'syne node init' on the remote machine.[/dim]")
+    console.print(f"[dim]Use this token with 'syne node init' on the remote machine.[/dim]")
+    console.print(f"[dim]The node will be accessible as '{name}' from Telegram.[/dim]")
 
     from ..db.connection import close_db
     await close_db()

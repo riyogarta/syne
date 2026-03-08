@@ -648,6 +648,7 @@ CREATE TABLE IF NOT EXISTS paired_nodes (
 CREATE TABLE IF NOT EXISTS pairing_tokens (
     id SERIAL PRIMARY KEY,
     token_hash VARCHAR(128) UNIQUE NOT NULL,  -- SHA-256 hash of one-time token
+    node_name VARCHAR(100) NOT NULL DEFAULT '',  -- alias set by admin (e.g. 'mypc')
     created_at TIMESTAMPTZ DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
     used BOOLEAN DEFAULT false

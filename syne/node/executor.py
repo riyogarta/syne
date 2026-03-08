@@ -63,11 +63,6 @@ async def _exec(args: dict) -> tuple[str, bool]:
 
         output = "\n".join(output_parts) if output_parts else "(no output)"
 
-        # Truncate if too long
-        max_chars = int(args.get("max_chars", 4000))
-        if len(output) > max_chars:
-            output = output[:max_chars] + f"\n... (truncated, {len(output)} total chars)"
-
         if proc.returncode != 0:
             output += f"\n[exit code: {proc.returncode}]"
 
@@ -93,10 +88,6 @@ async def _file_read(args: dict) -> tuple[str, bool]:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
-
-        max_chars = int(args.get("max_chars", 10000))
-        if len(content) > max_chars:
-            content = content[:max_chars] + f"\n... (truncated, {len(content)} total chars)"
 
         return content, True
     except Exception as e:
@@ -135,7 +126,7 @@ async def _read_source(args: dict) -> tuple[str, bool]:
     if action == "tree":
         return await _source_tree(path, args)
     elif action == "read":
-        return await _file_read({"path": path, "max_chars": args.get("max_chars", 10000)})
+        return await _file_read({"path": path})
     elif action == "search":
         return await _source_search(path, args)
     else:
@@ -152,11 +143,7 @@ async def _source_tree(path: str, args: dict) -> tuple[str, bool]:
     lines = []
     _walk_tree(path, lines, prefix="", depth=0, max_depth=max_depth)
 
-    result = "\n".join(lines)
-    if len(result) > 8000:
-        result = result[:8000] + "\n... (truncated)"
-
-    return result, True
+    return "\n".join(lines), True
 
 
 def _walk_tree(path: str, lines: list, prefix: str, depth: int, max_depth: int):

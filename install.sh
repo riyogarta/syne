@@ -110,8 +110,10 @@ echo ""
 echo "✓ Syne installed successfully!"
 echo ""
 
-# Run syne init if interactive terminal
-if [ -t 0 ]; then
+# Existing node: just update, no need for syne init
+if [ "$INSTALL_MODE" = "node" ]; then
+    echo "Node updated. Run: source .venv/bin/activate && syne node cli"
+elif [ -t 0 ]; then
     source .venv/bin/activate
     exec syne init
 else

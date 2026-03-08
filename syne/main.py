@@ -198,6 +198,7 @@ async def run():
                 gw_port = await get_config("gateway.port", DEFAULT_PORT)
                 gateway = Gateway(agent, port=int(gw_port))
                 await gateway.start()
+                agent.gateway = gateway
                 logger.info(f"Gateway active on port {gw_port}.")
         except ImportError:
             logger.debug("Gateway module not available.")

@@ -36,10 +36,18 @@ async def ensure_paired_nodes_table():
             CREATE TABLE IF NOT EXISTS pairing_tokens (
                 id SERIAL PRIMARY KEY,
                 token_hash VARCHAR(128) UNIQUE NOT NULL,
+                node_name VARCHAR(100) NOT NULL DEFAULT '',
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 expires_at TIMESTAMPTZ NOT NULL,
                 used BOOLEAN DEFAULT false
             )
+        """)
+        # Add node_name if upgrading from older schema
+        await conn.execute("""
+            DO $$ BEGIN
+                ALTER TABLE pairing_tokens ADD COLUMN node_name VARCHAR(100) NOT NULL DEFAULT '';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
         """)
 
 
@@ -48,8 +56,11 @@ def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-async def generate_pairing_token() -> str:
-    """Generate a one-time pairing token (5 min TTL).
+async def generate_pairing_token(node_name: str = "") -> str:
+    """Generate a one-time pairing token (10 min TTL).
+
+    Args:
+        node_name: Human-friendly alias for the node (e.g. 'mypc', 'laptop').
 
     Returns the raw token string (display to user).
     Only the hash is stored in DB.
@@ -59,20 +70,33 @@ async def generate_pairing_token() -> str:
     expires_at = datetime.now(timezone.utc) + PAIRING_TOKEN_TTL
 
     async with get_connection() as conn:
+        # Check if name is already taken by an active node
+        if node_name:
+            existing = await conn.fetchrow(
+                "SELECT id FROM paired_nodes WHERE display_name = $1 AND active = true",
+                node_name,
+            )
+            if existing:
+                raise ValueError(f"Node name '{node_name}' is already in use. Choose a different name.")
+
         # Clean up expired tokens first
         await conn.execute(
             "DELETE FROM pairing_tokens WHERE expires_at < NOW() OR used = true"
         )
         await conn.execute(
-            "INSERT INTO pairing_tokens (token_hash, expires_at) VALUES ($1, $2)",
-            token_hash, expires_at,
+            "INSERT INTO pairing_tokens (token_hash, node_name, expires_at) VALUES ($1, $2, $3)",
+            token_hash, node_name, expires_at,
         )
 
     return token
 
 
-async def verify_pairing_token(token: str) -> bool:
-    """Verify and consume a pairing token. Returns True if valid."""
+async def verify_pairing_token(token: str) -> tuple[bool, str]:
+    """Verify and consume a pairing token.
+
+    Returns:
+        (valid, node_name) — node_name is the alias set at token generation.
+    """
     token_hash = _hash_token(token)
 
     async with get_connection() as conn:
@@ -81,11 +105,13 @@ async def verify_pairing_token(token: str) -> bool:
             UPDATE pairing_tokens
             SET used = true
             WHERE token_hash = $1 AND expires_at > NOW() AND used = false
-            RETURNING id
+            RETURNING id, node_name
             """,
             token_hash,
         )
-        return row is not None
+        if not row:
+            return False, ""
+        return True, row["node_name"] or ""
 
 
 async def register_node(node_id: str, display_name: str, platform: str = "linux") -> str:

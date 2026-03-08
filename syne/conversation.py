@@ -32,7 +32,11 @@ from .security import (
 logger = logging.getLogger("syne.conversation")
 
 # Node-side tools — these execute on the remote node, not the server
-_NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
+# Canonical definition is in gateway/protocol.py; import to avoid divergence.
+try:
+    from .gateway.protocol import NODE_TOOLS as _NODE_TOOLS
+except ImportError:
+    _NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
 
 # ── Time context helpers (module-level, not recreated per call) ──
 
@@ -670,17 +674,28 @@ class Conversation:
             injected.add(guide_key)
         return guide_text
 
-    def _get_node_connection(self):
-        """Get the remote node connection for this conversation, if any.
+    def _get_node_connection(self, node_id: str = ""):
+        """Get a remote node connection.
 
-        Returns None for non-node sessions (Telegram, CLI, WhatsApp).
-        Only returns a connection if this is a node platform session
-        and the node is currently connected via the gateway.
+        Args:
+            node_id: Specific node to target (for multi-node from Telegram etc.)
+                     If empty, falls back to current session's node connection.
+
+        Returns:
+            NodeConnection or None.
         """
-        if not self._mgr or not hasattr(self._mgr, '_node_connections'):
+        if not self._mgr:
             return None
-        key = f"node:{self.chat_id}"
-        return self._mgr._node_connections.get(key)
+
+        # Explicit node_id — look up from gateway's connected nodes
+        if node_id:
+            agent = getattr(self._mgr, '_agent', None)
+            if agent and agent.gateway:
+                return agent.gateway.get_node(node_id)
+            return None
+
+        # Implicit — this session is a node session
+        return self._mgr._node_connections.get(self.chat_id)
 
     async def _execute_tool_on_node(self, node_conn, tool_name: str, args: dict):
         """Execute a tool on the remote node via WebSocket.
@@ -820,8 +835,19 @@ class Conversation:
                 if t_name == "send_reaction" and not t_args.get("chat_id") and self.chat_id:
                     t_args["chat_id"] = str(self.chat_id)
 
-                # Remote node tool routing: if this is a node session and the tool
-                # should execute on the node, send it over WebSocket instead.
+                # Remote node tool routing:
+                # 1. Explicit: LLM passes `node` param → route to that specific node
+                # 2. Implicit: this is a node CLI session → route to connected node
+                target_node_id = t_args.pop("node", "") if t_name in _NODE_TOOLS else ""
+                if target_node_id:
+                    node_conn = self._get_node_connection(target_node_id)
+                    if not node_conn:
+                        return ToolResult(
+                            f"Error: Node '{target_node_id}' is not connected. "
+                            f"Use node_status to check online nodes.",
+                            ok=False, error_type="node_offline",
+                        )
+                    return await self._execute_tool_on_node(node_conn, t_name, t_args)
                 node_conn = self._get_node_connection()
                 if node_conn and t_name in _NODE_TOOLS:
                     return await self._execute_tool_on_node(node_conn, t_name, t_args)
@@ -1128,6 +1154,7 @@ class ConversationManager:
         self._tool_callback = None  # Single-slot (CLI only, per-cycle)
         self._stream_callbacks: Optional[StreamCallbacks] = None  # CLI streaming
         self._tool_detail_callback = None  # async (name, args, result_preview) — CLI tool display
+        self._node_connections: dict[str, object] = {}  # chat_id → NodeConnection (remote nodes)
 
         # Wire up sub-agent completion callback
         if self.subagents:
