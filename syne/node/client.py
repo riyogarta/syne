@@ -114,6 +114,7 @@ class NodeClient:
         )
 
         # Send connect message
+        from ..gateway.protocol import PROTOCOL_VERSION
         await self._ws.send(json.dumps({
             "type": "connect",
             "node_id": self.node_id,
@@ -121,6 +122,7 @@ class NodeClient:
             "display_name": self.display_name,
             "platform": platform.system().lower(),
             "cwd": os.getcwd(),
+            "protocol_version": PROTOCOL_VERSION,
         }))
 
         # Wait for connected ack

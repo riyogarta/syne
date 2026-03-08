@@ -19,6 +19,7 @@ from websockets.asyncio.server import ServerConnection
 from . import auth
 from .protocol import (
     NODE_TOOLS,
+    PROTOCOL_VERSION,
     ConnectedMsg,
     ErrorMsg,
     ResponseChunkMsg,
@@ -161,6 +162,14 @@ class Gateway:
             if not await auth.verify_node_token(node_id, token):
                 await ws.send(encode(ErrorMsg(message="Invalid credentials", code="auth_failed")))
                 return
+
+            # Check protocol version
+            client_version = msg.get("protocol_version", 0)
+            if client_version != PROTOCOL_VERSION:
+                logger.warning(
+                    f"Protocol version mismatch: server={PROTOCOL_VERSION}, "
+                    f"node={client_version} ({node_id}). Node may need updating."
+                )
 
             # Authenticated — register connection
             node = NodeConnection(

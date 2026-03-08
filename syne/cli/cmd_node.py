@@ -100,6 +100,20 @@ async def _node_cli_async(debug: bool):
     if config['gateway'].startswith("ws://"):
         console.print("[yellow]WARNING: Unencrypted connection (ws://). Use wss:// in production.[/yellow]")
 
+    async def _connect_with_backoff():
+        """Connect with exponential backoff on failure."""
+        delay = 5
+        max_delay = 60
+        while True:
+            try:
+                await client.connect()
+                return True
+            except Exception as e:
+                console.print(f"[red]Connection failed: {e}[/red]")
+                console.print(f"[dim]Retrying in {delay}s...[/dim]")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, max_delay)
+
     try:
         console.print(f"[dim]Connecting to {config['gateway']}...[/dim]")
         await client.connect()
@@ -126,6 +140,14 @@ async def _node_cli_async(debug: bool):
             if user_input in ("/exit", "/quit", "/q"):
                 console.print("[dim]Goodbye![/dim]")
                 break
+
+            # Auto-reconnect if connection lost
+            if not client._connected.is_set():
+                console.print("[yellow]Connection lost. Reconnecting...[/yellow]")
+                listen_task.cancel()
+                await _connect_with_backoff()
+                listen_task = asyncio.create_task(client.listen())
+                console.print("[green]Reconnected.[/green]")
 
             try:
                 await client.send_message(user_input, cwd=cwd)

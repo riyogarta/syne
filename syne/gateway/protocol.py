@@ -6,6 +6,9 @@ import json
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+# Protocol version — increment when breaking changes are made
+PROTOCOL_VERSION = 1
+
 
 # --- Node → Gateway messages ---
 
@@ -17,6 +20,7 @@ class ConnectMsg:
     display_name: str = ""
     platform: str = "linux"
     cwd: str = ""
+    protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="connect", init=False)
 
 
@@ -44,6 +48,7 @@ class ConnectedMsg:
     """Acknowledge successful connection."""
     session_id: int
     display_name: str = ""
+    protocol_version: int = PROTOCOL_VERSION
     type: str = field(default="connected", init=False)
 
 
