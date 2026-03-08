@@ -9,19 +9,30 @@ REPO_URL="https://github.com/riyogarta/syne.git"
 echo "🧠 Syne Installer"
 echo ""
 
-# ── 0. Pre-cache sudo credentials ─────────────────────────
-# Some system packages need sudo. Ask for password upfront
-# so it doesn't surprise the user mid-install.
-if command -v sudo &>/dev/null; then
-    echo "Some system packages may need to be installed."
-    echo "Please enter your sudo password if prompted:"
+# ── Mode detection ─────────────────────────────────────────
+# If ~/.syne/node.json exists, we're updating an existing node.
+# Otherwise ask the user (syne init will ask again for detailed setup).
+INSTALL_MODE="server"
+if [ -f "$HOME/.syne/node.json" ]; then
+    INSTALL_MODE="node"
+    echo "Detected existing node configuration — installing in node mode."
     echo ""
-    sudo -v || { echo "sudo failed. Run as a user with sudo access."; exit 1; }
-    echo ""
-    # Keep sudo alive in background
-    ( while true; do sudo -n true; sleep 50; done 2>/dev/null ) &
-    SUDO_KEEPALIVE_PID=$!
-    trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
+fi
+
+# ── 0. Pre-cache sudo credentials (server only) ───────────
+# Node mode doesn't need Docker, Ollama, or system packages.
+if [ "$INSTALL_MODE" = "server" ]; then
+    if command -v sudo &>/dev/null; then
+        echo "Some system packages may need to be installed."
+        echo "Please enter your sudo password if prompted:"
+        echo ""
+        sudo -v || { echo "sudo failed. Run as a user with sudo access."; exit 1; }
+        echo ""
+        # Keep sudo alive in background
+        ( while true; do sudo -n true; sleep 50; done 2>/dev/null ) &
+        SUDO_KEEPALIVE_PID=$!
+        trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
+    fi
 fi
 
 # ── 1. Ensure git ──────────────────────────────────────────

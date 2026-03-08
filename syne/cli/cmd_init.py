@@ -42,6 +42,21 @@ def init():
     console.print(Panel("[bold]Welcome to Syne[/bold]\nAI Agent Framework with Unlimited Memory", style="blue"))
     console.print()
 
+    # Mode selection: Server or Remote Node
+    console.print("[bold]How do you want to use Syne on this machine?[/bold]")
+    console.print()
+    console.print("  1. Server [green](full install — LLM, memory, Telegram, everything)[/green]")
+    console.print("  2. Remote Node [dim](connect to an existing Syne server via CLI)[/dim]")
+    console.print()
+
+    mode = click.prompt("Select mode", type=click.IntRange(1, 2), default=1)
+
+    if mode == 2:
+        _init_node()
+        return
+
+    # --- Server mode (existing flow) ---
+
     # Pre-check: system dependencies (pip, venv)
     _ensure_system_deps()
 
@@ -766,3 +781,46 @@ def init():
     console.print()
     console.print("[dim]Run [bold]syne --help[/bold] to see all available commands.[/dim]")
     console.print()
+
+
+def _init_node():
+    """Initialize Syne as a remote node — pair with a server."""
+    console.print("\n[bold]Remote Node Setup[/bold]")
+    console.print("  Connect this machine to your Syne server.")
+    console.print("  You need a pairing token from the server (run [bold]syne gateway token[/bold] there).")
+    console.print()
+
+    from ..node.client import load_node_config, pair_with_server
+
+    existing = load_node_config()
+    if existing:
+        console.print(f"[yellow]Already paired as '{existing.get('display_name', '?')}'[/yellow]")
+        console.print(f"  Gateway: {existing.get('gateway', '?')}")
+        if not click.confirm("Re-pair with a different server?", default=False):
+            console.print()
+            console.print("[dim]Run [bold]syne node cli[/bold] to start chatting.[/dim]")
+            return
+
+    gateway_url = click.prompt("Gateway URL (e.g. wss://syne.example.com:8765)")
+    pairing_token = click.prompt("Pairing token")
+    display_name = click.prompt("Display name for this node", default="")
+
+    # Normalize URL
+    if not gateway_url.startswith("ws"):
+        gateway_url = f"wss://{gateway_url}"
+
+    console.print(f"\n[dim]Connecting to {gateway_url}...[/dim]")
+
+    try:
+        config = asyncio.run(pair_with_server(gateway_url, pairing_token, display_name))
+        console.print(f"\n[green]Paired successfully![/green]")
+        console.print(f"  Node ID: {config['node_id']}")
+        console.print(f"  Display name: {config['display_name']}")
+        console.print()
+        console.print(Panel(
+            "Run [bold]syne node cli[/bold] to start chatting with your Syne server.",
+            style="green",
+        ))
+    except Exception as e:
+        console.print(f"\n[red]Pairing failed: {e}[/red]")
+        console.print("[dim]Check that the gateway is running and the token hasn't expired.[/dim]")
