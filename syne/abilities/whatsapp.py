@@ -743,8 +743,9 @@ class WhatsAppAbility(Ability):
 
         logger.info(f'[whatsapp] inbound: from_me={from_me} chat={chat_jid} media={media_type} text={text[:60]}')
 
-        # Allow through if there's text OR an image
-        if not text and not is_image:
+        # Allow through if there's text OR media (image/video/audio/document)
+        has_media = media_type in ('image', 'video', 'audio', 'document')
+        if not text and not has_media:
             return
 
         # from_me handling:
@@ -782,26 +783,24 @@ class WhatsAppAbility(Ability):
 
         # Trigger word check
         # - Text messages: always require trigger
-        # - Image with caption containing trigger: process (strip trigger from caption)
-        # - Image in DM without trigger: still process (images don't need trigger in DMs)
-        # - Image in group without trigger in caption: skip (groups always need trigger)
+        # - Media (image/video/audio/document) with caption containing trigger: process
+        # - Media in self-chat (owner): no trigger needed
+        # - Media in DM from others or group: always require trigger
         trigger = await self._get_trigger_name()
 
-        if is_image:
+        is_media = media_type in ('image', 'video', 'audio', 'document')
+        if is_media:
             caption = (msg.get("MediaCaption") or "").strip()
             if caption and trigger and self._has_trigger_word(caption, trigger):
                 # Caption has trigger — use stripped caption as text
                 text = self._strip_trigger_word(caption, trigger)
-            elif caption and not is_group:
-                # DM image with caption (no trigger needed)
-                text = caption
-            elif not caption and not is_group:
-                # DM image without caption — use default prompt
-                text = ""
-            elif is_group:
-                # Group: require trigger in caption
+            elif not is_group and from_me:
+                # Self-chat (owner) media: no trigger needed
+                text = caption or ""
+            elif is_group or (not is_group and not from_me):
+                # Group or DM from others: always require trigger
                 if not caption or not trigger or not self._has_trigger_word(caption, trigger):
-                    logger.info(f'[whatsapp] image in group without trigger, skipping')
+                    logger.info(f'[whatsapp] {media_type} without trigger, skipping (group={is_group})')
                     return
                 text = self._strip_trigger_word(caption, trigger)
         else:
