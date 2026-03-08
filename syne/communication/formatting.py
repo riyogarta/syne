@@ -76,10 +76,9 @@ def markdown_to_telegram_html(text: str) -> str:
                     continue
                 table_lines.append(lines[i])
                 i += 1
-            # Render table as <pre> for monospace alignment
+            # Render table as aligned <pre> monospace
             if table_lines:
-                table_text = _escape('\n'.join(table_lines))
-                result.append(f'<pre>{table_text}</pre>')
+                result.append(_render_table(table_lines))
             continue
         
         # Regular line — apply inline formatting
@@ -93,6 +92,57 @@ def markdown_to_telegram_html(text: str) -> str:
     output = _wrap_stray_tables(output)
     
     return output
+
+
+def _strip_md(text: str) -> str:
+    """Strip markdown formatting from text (for monospace display)."""
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'(?<!\w)\*([^*]+?)\*(?!\w)', r'\1', text)
+    text = re.sub(r'(?<!\w)_([^_]+?)_(?!\w)', r'\1', text)
+    text = re.sub(r'~~(.+?)~~', r'\1', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    return text
+
+
+def _render_table(table_lines: list[str]) -> str:
+    """Render markdown table rows as padded monospace <pre> block."""
+    rows = []
+    for line in table_lines:
+        stripped = line.strip()
+        # Remove leading/trailing pipes and split
+        if stripped.startswith('|'):
+            stripped = stripped[1:]
+        if stripped.endswith('|'):
+            stripped = stripped[:-1]
+        cells = [_strip_md(c.strip()) for c in stripped.split('|')]
+        rows.append(cells)
+
+    if not rows:
+        return ''
+
+    # Calculate column widths
+    col_count = max(len(r) for r in rows)
+    widths = [0] * col_count
+    for row in rows:
+        for j, cell in enumerate(row):
+            if j < col_count and len(cell) > widths[j]:
+                widths[j] = len(cell)
+
+    # Build padded output
+    out = []
+    for idx, row in enumerate(rows):
+        parts = []
+        for j in range(col_count):
+            cell = row[j] if j < len(row) else ''
+            parts.append(cell + ' ' * (widths[j] - len(cell)))
+        out.append('| ' + ' | '.join(parts) + ' |')
+        # Add separator after header row
+        if idx == 0:
+            sep_parts = ['-' * max(3, w) for w in widths]
+            out.append('|-' + '-|-'.join(sep_parts) + '-|')
+
+    return '<pre>' + _escape('\n'.join(out)) + '</pre>'
 
 
 def _wrap_stray_tables(html: str) -> str:
@@ -119,23 +169,20 @@ def _wrap_stray_tables(html: str) -> str:
             stripped = line.strip()
             # Detect table-like lines (2+ pipes, not a code element)
             if stripped.count('|') >= 2 and not stripped.startswith('<code>'):
-                table_chunk = []
+                raw_lines = []
                 while j < len(lines):
                     s = lines[j].strip()
-                    if not s and table_chunk:
+                    if not s and raw_lines:
                         break
                     if s.count('|') >= 2 or re.match(r'^[\s\-:|]+$', s):
-                        # Skip separator lines from display
+                        # Skip separator lines
                         if not re.match(r'^[\s|]*[\-:]+[\s\-:|]*$', s):
-                            table_chunk.append(_html.escape(
-                                _html.unescape(lines[j]),  # unescape first to avoid double-escape
-                                quote=False
-                            ))
+                            raw_lines.append(_html.unescape(lines[j]))
                         j += 1
                         continue
                     break
-                if table_chunk:
-                    out_lines.append('<pre>' + '\n'.join(table_chunk) + '</pre>')
+                if raw_lines:
+                    out_lines.append(_render_table(raw_lines))
                     continue
             out_lines.append(line)
             j += 1
