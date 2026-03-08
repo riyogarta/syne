@@ -31,6 +31,9 @@ from .security import (
 
 logger = logging.getLogger("syne.conversation")
 
+# Node-side tools — these execute on the remote node, not the server
+_NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
+
 # ── Time context helpers (module-level, not recreated per call) ──
 
 _TIME_CFG_KEYS = ['system.timezone', 'time.locale', 'time.format.full']
@@ -667,6 +670,44 @@ class Conversation:
             injected.add(guide_key)
         return guide_text
 
+    def _get_node_connection(self):
+        """Get the remote node connection for this conversation, if any.
+
+        Returns None for non-node sessions (Telegram, CLI, WhatsApp).
+        Only returns a connection if this is a node platform session
+        and the node is currently connected via the gateway.
+        """
+        if not self._mgr or not hasattr(self._mgr, '_node_connections'):
+            return None
+        key = f"node:{self.chat_id}"
+        return self._mgr._node_connections.get(key)
+
+    async def _execute_tool_on_node(self, node_conn, tool_name: str, args: dict):
+        """Execute a tool on the remote node via WebSocket.
+
+        Sends a tool_request to the node and waits for tool_result.
+        Returns a ToolResult.
+        """
+        try:
+            result = await node_conn.request_tool(tool_name, args, timeout=120)
+            if result.get("success"):
+                return ToolResult(str(result.get("result", "")), ok=True)
+            else:
+                return ToolResult(
+                    f"Error (node): {result.get('result', 'Unknown error')}",
+                    ok=False, error_type="node_error",
+                )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                f"Error: Tool '{tool_name}' timed out on remote node",
+                ok=False, error_type="timeout",
+            )
+        except ConnectionError:
+            return ToolResult(
+                f"Error: Remote node disconnected while executing '{tool_name}'",
+                ok=False, error_type="disconnected",
+            )
+
     async def _handle_tool_calls(
         self,
         response: ChatResponse,
@@ -778,6 +819,12 @@ class Conversation:
                 # Auto-inject chat_id for send_reaction if not provided by LLM
                 if t_name == "send_reaction" and not t_args.get("chat_id") and self.chat_id:
                     t_args["chat_id"] = str(self.chat_id)
+
+                # Remote node tool routing: if this is a node session and the tool
+                # should execute on the node, send it over WebSocket instead.
+                node_conn = self._get_node_connection()
+                if node_conn and t_name in _NODE_TOOLS:
+                    return await self._execute_tool_on_node(node_conn, t_name, t_args)
 
                 if self.tools.get(t_name):
                     return await self.tools.execute(

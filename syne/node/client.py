@@ -1,0 +1,232 @@
+"""Syne Node — WebSocket client for connecting to Syne gateway."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import platform
+import uuid
+from typing import Callable, Optional
+
+import websockets
+
+logger = logging.getLogger("syne.node")
+
+# Node config file location
+NODE_CONFIG_PATH = os.path.expanduser("~/.syne/node.json")
+
+
+def load_node_config() -> Optional[dict]:
+    """Load node configuration from ~/.syne/node.json."""
+    if not os.path.exists(NODE_CONFIG_PATH):
+        return None
+    with open(NODE_CONFIG_PATH, "r") as f:
+        return json.load(f)
+
+
+def save_node_config(config: dict) -> None:
+    """Save node configuration to ~/.syne/node.json."""
+    os.makedirs(os.path.dirname(NODE_CONFIG_PATH), exist_ok=True)
+    with open(NODE_CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=2)
+    # Restrict permissions (token inside)
+    os.chmod(NODE_CONFIG_PATH, 0o600)
+
+
+def is_node_mode() -> bool:
+    """Check if this machine is configured as a remote node."""
+    return os.path.exists(NODE_CONFIG_PATH)
+
+
+async def pair_with_server(gateway_url: str, pairing_token: str, display_name: str = "") -> dict:
+    """Pair this node with a Syne gateway server.
+
+    Args:
+        gateway_url: WebSocket URL (e.g. wss://syne.example.com:8765)
+        pairing_token: One-time pairing token from server
+        display_name: Human-readable name for this node
+
+    Returns:
+        dict with node_id, token, display_name
+
+    Raises:
+        ConnectionError: If pairing fails
+    """
+    if not display_name:
+        display_name = platform.node() or "node"
+
+    node_id = f"{display_name}-{uuid.uuid4().hex[:6]}"
+
+    async with websockets.connect(gateway_url, open_timeout=15) as ws:
+        await ws.send(json.dumps({
+            "type": "pair",
+            "token": pairing_token,
+            "node_id": node_id,
+            "display_name": display_name,
+            "platform": platform.system().lower(),
+        }))
+
+        raw = await asyncio.wait_for(ws.recv(), timeout=15)
+        msg = json.loads(raw)
+
+        if msg.get("type") == "error":
+            raise ConnectionError(f"Pairing failed: {msg.get('message', 'Unknown error')}")
+
+        if msg.get("type") != "paired":
+            raise ConnectionError(f"Unexpected response: {msg.get('type')}")
+
+        config = {
+            "node_id": msg["node_id"],
+            "token": msg["token"],
+            "gateway": gateway_url,
+            "display_name": msg.get("display_name", display_name),
+        }
+        save_node_config(config)
+        return config
+
+
+class NodeClient:
+    """WebSocket client that connects to the Syne gateway."""
+
+    def __init__(self, config: Optional[dict] = None):
+        self.config = config or load_node_config()
+        if not self.config:
+            raise RuntimeError("Node not configured. Run 'syne node init' first.")
+
+        self.node_id = self.config["node_id"]
+        self.token = self.config["token"]
+        self.gateway_url = self.config["gateway"]
+        self.display_name = self.config.get("display_name", self.node_id)
+        self._ws = None
+        self._on_response: Optional[Callable] = None  # callback(text, done)
+        self._on_tool_request: Optional[Callable] = None  # callback(request_id, tool, args) -> (result, success)
+        self._connected = asyncio.Event()
+        self._response_done = asyncio.Event()
+        self._last_response = ""
+
+    async def connect(self) -> None:
+        """Connect to the gateway and authenticate."""
+        self._ws = await websockets.connect(
+            self.gateway_url,
+            open_timeout=15,
+            ping_interval=20,
+            ping_timeout=10,
+        )
+
+        # Send connect message
+        await self._ws.send(json.dumps({
+            "type": "connect",
+            "node_id": self.node_id,
+            "token": self.token,
+            "display_name": self.display_name,
+            "platform": platform.system().lower(),
+            "cwd": os.getcwd(),
+        }))
+
+        # Wait for connected ack
+        raw = await asyncio.wait_for(self._ws.recv(), timeout=15)
+        msg = json.loads(raw)
+
+        if msg.get("type") == "error":
+            raise ConnectionError(f"Auth failed: {msg.get('message')}")
+
+        if msg.get("type") != "connected":
+            raise ConnectionError(f"Unexpected response: {msg.get('type')}")
+
+        self._connected.set()
+        logger.info(f"Connected to gateway as {self.display_name}")
+
+    async def disconnect(self) -> None:
+        """Disconnect from the gateway."""
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+            self._connected.clear()
+
+    async def send_message(self, text: str, cwd: str = "") -> str:
+        """Send a chat message and wait for the complete response.
+
+        Args:
+            text: Message text
+            cwd: Current working directory
+
+        Returns:
+            Complete response text
+        """
+        if not self._ws:
+            raise ConnectionError("Not connected")
+
+        self._last_response = ""
+        self._response_done.clear()
+
+        await self._ws.send(json.dumps({
+            "type": "message",
+            "text": text,
+            "cwd": cwd or os.getcwd(),
+        }))
+
+        # Process messages until response is done
+        await self._response_done.wait()
+        return self._last_response
+
+    async def listen(self) -> None:
+        """Listen for messages from the gateway. Runs until disconnected.
+
+        Handles:
+        - response_chunk: Streaming text from LLM
+        - tool_request: Tool execution request from server
+        - error: Error messages
+        """
+        if not self._ws:
+            return
+
+        try:
+            async for raw in self._ws:
+                msg = json.loads(raw)
+                msg_type = msg.get("type", "")
+
+                if msg_type == "response_chunk":
+                    text = msg.get("text", "")
+                    done = msg.get("done", False)
+                    self._last_response += text
+                    if self._on_response:
+                        self._on_response(text, done)
+                    if done:
+                        self._response_done.set()
+
+                elif msg_type == "tool_request":
+                    # Execute tool locally and send result back
+                    request_id = msg.get("request_id", "")
+                    tool = msg.get("tool", "")
+                    args = msg.get("args", {})
+
+                    if self._on_tool_request:
+                        try:
+                            result, success = await self._on_tool_request(request_id, tool, args)
+                        except Exception as e:
+                            result = f"Error executing {tool}: {e}"
+                            success = False
+                    else:
+                        result = f"No tool executor registered for '{tool}'"
+                        success = False
+
+                    await self._ws.send(json.dumps({
+                        "type": "tool_result",
+                        "request_id": request_id,
+                        "result": str(result),
+                        "success": success,
+                    }))
+
+                elif msg_type == "error":
+                    error_msg = msg.get("message", "Unknown error")
+                    logger.error(f"Gateway error: {error_msg}")
+                    if self._on_response:
+                        self._on_response(f"\nError: {error_msg}\n", True)
+                    self._response_done.set()
+
+        except websockets.exceptions.ConnectionClosed:
+            logger.info("Disconnected from gateway")
+            self._connected.clear()
+            self._response_done.set()  # Unblock any waiting send_message

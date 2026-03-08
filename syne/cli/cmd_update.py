@@ -14,6 +14,11 @@ from .helpers import (
 )
 
 
+def _is_node_mode() -> bool:
+    """Check if running on a remote node (has ~/.syne/node.json)."""
+    return os.path.exists(os.path.expanduser("~/.syne/node.json"))
+
+
 def _do_update(syne_dir: str):
     """Shared update logic: venv + pip install + symlink + PATH + restart service."""
     venv_dir = os.path.join(syne_dir, ".venv")
@@ -51,6 +56,11 @@ def _do_update(syne_dir: str):
                 f.write(f"\n# Syne CLI\n{path_line}\n")
     except Exception:
         pass
+
+    # Node mode: skip DB migration, evaluator check, and service restart
+    if _is_node_mode():
+        console.print("[dim]Node mode — skipping DB migration and service restart.[/dim]")
+        return True
 
     # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
     _run_schema_migration(syne_dir)

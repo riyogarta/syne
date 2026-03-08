@@ -43,6 +43,12 @@ def _show_help():
             ("backup", "Backup database to .sql.gz file"),
             ("restore", "Restore database from backup file"),
         ],
+        "Remote Node": [
+            ("node init", "Pair this machine with a Syne server"),
+            ("node cli", "Start remote CLI (connected to server)"),
+            ("gateway token", "Generate pairing token (run on server)"),
+            ("gateway list", "List paired nodes (run on server)"),
+        ],
         "Service": [
             ("autostart", "Configure systemd autostart (--enable/--disable)"),
             ("stop", "Stop running Syne process"),
@@ -71,6 +77,10 @@ from . import cmd_service  # noqa: E402, F401
 from . import cmd_update  # noqa: E402, F401
 from . import cmd_uninstall  # noqa: E402, F401
 from . import cmd_backup  # noqa: E402, F401
+try:
+    from . import cmd_node  # noqa: E402, F401
+except ImportError:
+    pass  # node/gateway commands not available
 
 
 @cli.command(name="help", hidden=True)

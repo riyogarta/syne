@@ -630,9 +630,38 @@ UPDATE config SET description = 'Web search API key — Tavily (tvly-...) or Bra
 -- Abilities now default to enabled=false in schema, which only affects new installs.
 
 
+-- ============================================================
+-- PAIRED NODES: Remote node connections for gateway
+-- ============================================================
+CREATE TABLE IF NOT EXISTS paired_nodes (
+    id SERIAL PRIMARY KEY,
+    node_id VARCHAR(100) UNIQUE NOT NULL,    -- unique identifier for the node
+    display_name VARCHAR(100) NOT NULL,       -- human-readable name (e.g. 'riyo-laptop')
+    token_hash VARCHAR(128) NOT NULL,         -- SHA-256 hash of permanent token
+    platform VARCHAR(30) DEFAULT 'linux',     -- node platform
+    active BOOLEAN DEFAULT true,
+    last_seen TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pairing_tokens (
+    id SERIAL PRIMARY KEY,
+    token_hash VARCHAR(128) UNIQUE NOT NULL,  -- SHA-256 hash of one-time token
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used BOOLEAN DEFAULT false
+);
+
 -- Default scheduler output policy
 INSERT INTO config (key, value, description) VALUES (
   'scheduler.echo_response_to_creator',
   'false'::jsonb,
   'If true, scheduled task execution will echo the final LLM response back to the creator DM. Default false.'
 ) ON CONFLICT (key) DO NOTHING;
+
+-- Gateway config (remote node support)
+INSERT INTO config (key, value, description) VALUES
+    ('gateway.enabled', 'false', 'Enable WebSocket gateway for remote node connections'),
+    ('gateway.port', '8765', 'Gateway WebSocket server port')
+ON CONFLICT (key) DO NOTHING;

@@ -188,6 +188,22 @@ async def run():
         else:
             logger.debug("WhatsApp ability not registered.")
 
+        # Start Gateway (WebSocket server for remote nodes) if enabled
+        gateway = None
+        try:
+            from .db.models import get_config
+            gw_enabled = await get_config("gateway.enabled", False)
+            if gw_enabled:
+                from .gateway.server import Gateway, DEFAULT_PORT
+                gw_port = await get_config("gateway.port", DEFAULT_PORT)
+                gateway = Gateway(agent, port=int(gw_port))
+                await gateway.start()
+                logger.info(f"Gateway active on port {gw_port}.")
+        except ImportError:
+            logger.debug("Gateway module not available.")
+        except Exception as e:
+            logger.warning(f"Gateway failed to start: {e}")
+
         # Start scheduler
         scheduler = Scheduler(on_task_execute=_scheduler_callback)
         await scheduler.start()
@@ -203,6 +219,9 @@ async def run():
     except Exception as e:
         logger.critical(f"Fatal error: {type(e).__name__}: {e}", exc_info=True)
     finally:
+        # Stop gateway
+        if gateway:
+            await gateway.stop()
         # Stop scheduler
         if scheduler:
             await scheduler.stop()
