@@ -175,7 +175,7 @@ async def _gateway_token_async():
     await ensure_paired_nodes_table()
 
     token = await generate_pairing_token()
-    console.print(f"\n[bold]Pairing Token[/bold] (expires in 5 minutes):\n")
+    console.print(f"\n[bold]Pairing Token[/bold] (expires in 10 minutes):\n")
     console.print(f"  [bold green]{token}[/bold green]\n")
     console.print("[dim]Use this token with 'syne node init' on the remote machine.[/dim]")
 

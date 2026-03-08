@@ -13,7 +13,7 @@ from syne.db.connection import get_connection
 logger = logging.getLogger("syne.gateway.auth")
 
 # Pairing token TTL
-PAIRING_TOKEN_TTL = timedelta(minutes=5)
+PAIRING_TOKEN_TTL = timedelta(minutes=10)
 
 
 async def ensure_paired_nodes_table():
