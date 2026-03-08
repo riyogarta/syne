@@ -164,13 +164,11 @@ def gateway_token():
 
 
 async def _gateway_token_async():
-    from ..config import load_settings
     from ..db.connection import init_db
     from ..gateway.auth import generate_pairing_token, ensure_paired_nodes_table
 
-    settings = load_settings()
     from .shared import _get_db_url
-    db_url = _get_db_url(settings)
+    db_url = _get_db_url()
     await init_db(db_url)
     await ensure_paired_nodes_table()
 
@@ -190,13 +188,11 @@ def gateway_list():
 
 
 async def _gateway_list_async():
-    from ..config import load_settings
     from ..db.connection import init_db, close_db
     from ..gateway.auth import list_nodes, ensure_paired_nodes_table
 
-    settings = load_settings()
     from .shared import _get_db_url
-    db_url = _get_db_url(settings)
+    db_url = _get_db_url()
     await init_db(db_url)
     await ensure_paired_nodes_table()
 
@@ -225,13 +221,11 @@ def gateway_revoke(node_id):
 
 
 async def _gateway_revoke_async(node_id: str):
-    from ..config import load_settings
     from ..db.connection import init_db, close_db
     from ..gateway.auth import revoke_node, ensure_paired_nodes_table
 
-    settings = load_settings()
     from .shared import _get_db_url
-    db_url = _get_db_url(settings)
+    db_url = _get_db_url()
     await init_db(db_url)
     await ensure_paired_nodes_table()
 
@@ -256,13 +250,11 @@ def gateway_disable():
 
 
 async def _gateway_toggle_async(enable: bool):
-    from ..config import load_settings
     from ..db.connection import init_db, close_db
     from ..db.models import set_config
 
-    settings = load_settings()
     from .shared import _get_db_url
-    db_url = _get_db_url(settings)
+    db_url = _get_db_url()
     await init_db(db_url)
 
     await set_config("gateway.enabled", enable)
