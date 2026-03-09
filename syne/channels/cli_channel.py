@@ -1,4 +1,8 @@
-"""Syne CLI — Interactive terminal chat with full tool access."""
+"""Syne CLI — Interactive terminal chat with full tool access.
+
+Inspired by Pi's TUI approach: output goes directly to stdout (terminal handles
+scrollback), prompt rendered with ─ borders at bottom, no full-screen mode.
+"""
 
 import asyncio
 import getpass
@@ -6,26 +10,20 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
+import time
 
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.data_structures import Point
-from prompt_toolkit.document import Document
-from prompt_toolkit.formatted_text import ANSI, to_formatted_text
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, D
-from prompt_toolkit.layout.controls import UIControl, UIContent, BufferControl
-from prompt_toolkit.layout.margins import Margin
-from prompt_toolkit.layout.processors import BeforeInput
-from prompt_toolkit.styles import Style
 
 # Register Shift+Enter as a distinct key (prompt_toolkit maps it to Enter by default)
 ANSI_SEQUENCES["\x1b[27;2;13~"] = "<shift-enter>"  # xterm modifyOtherKeys
 ANSI_SEQUENCES["\x1b[13;2u"] = "<shift-enter>"      # kitty keyboard protocol
-from rich.console import Console
 
 from ..agent import SyneAgent
 from ..config import load_settings
@@ -33,9 +31,8 @@ from ..db.models import get_or_create_user, get_identity
 from ..llm.provider import StreamCallbacks
 
 logger = logging.getLogger("syne.cli_channel")
-console = Console()
 
-# ── ANSI helpers for raw streaming output ──
+# ── ANSI helpers ──
 _DIM = "\033[2m"
 _DIM_ITALIC = "\033[2;3m"
 _ITALIC = "\033[3m"
@@ -48,17 +45,21 @@ _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
 _DIM_CYAN = "\033[2;36m"
 
-# ── Module-level screen reference ──
-_cli_screen = None
-
 
 def _write(text: str):
-    """Write to the CLI screen's output area (or stdout as fallback)."""
-    if _cli_screen:
-        _cli_screen.write(text)
-    else:
-        sys.stdout.write(text)
-        sys.stdout.flush()
+    """Write directly to stdout."""
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
+def _term_width() -> int:
+    return shutil.get_terminal_size((80, 24)).columns
+
+
+def _separator():
+    """Print a full-width ─ separator line."""
+    w = _term_width()
+    _write(f"{_DIM}{'─' * w}{_RESET}\n")
 
 
 # ── Markdown stream ──
@@ -97,16 +98,16 @@ class _MarkdownStream:
             if self._in_code_block:
                 lang = line.strip()[3:].strip()
                 if lang:
-                    _write(f"{_DIM}  [{lang}]{_RESET}")
+                    _write(f"  {_DIM}[{lang}]{_RESET}")
             return
 
         if self._in_code_block:
-            _write(f"{_DIM_CYAN}{line}{_RESET}")
+            _write(f"  {_DIM_CYAN}{line}{_RESET}")
             return
 
         m = _MD_HEADING.match(line)
         if m:
-            _write(f"{_BOLD}{m.group(2)}{_RESET}")
+            _write(f"  {_BOLD}{m.group(2)}{_RESET}")
             return
 
         if line.strip() in ("---", "***", "___"):
@@ -115,7 +116,7 @@ class _MarkdownStream:
         line = _MD_BOLD.sub(f'{_BOLD}\\1{_RESET}', line)
         line = _MD_CODE.sub(f'{_DIM_CYAN}\\1{_RESET}', line)
         line = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', line)
-        _write(line)
+        _write(f"  {line}")
 
 
 # ── Slash command completer ──
@@ -131,6 +132,8 @@ _SLASH_COMMANDS = [
     ("/exit", "Exit CLI"),
 ]
 
+from prompt_toolkit.completion import Completer, Completion
+
 
 class _SlashCompleter(Completer):
     def get_completions(self, document, complete_event):
@@ -145,59 +148,6 @@ class _SlashCompleter(Completer):
         for cmd, desc in _SLASH_COMMANDS:
             if cmd.startswith(stripped):
                 yield Completion(cmd, start_position=-len(stripped), display_meta=desc)
-
-
-# ── Arrow-key selector (for model switch, approval, etc.) ──
-async def cli_select(options: list[str], default: int = 0) -> int:
-    """Arrow-key selector for CLI choices."""
-    import termios
-    import tty
-
-    selected = default
-    total = len(options)
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-
-    def _draw(first: bool = False):
-        if not first:
-            sys.stdout.write(f"\033[{total}A")
-        for i, label in enumerate(options):
-            sys.stdout.write(f"\033[2K\r")
-            if i == selected:
-                sys.stdout.write(f"  \033[1;36m> {label}\033[0m")
-            else:
-                sys.stdout.write(f"    {label}")
-            sys.stdout.write("\n")
-        sys.stdout.flush()
-
-    def _read_selection() -> int:
-        nonlocal selected
-        _draw(first=True)
-        try:
-            tty.setraw(fd)
-            while True:
-                ch = sys.stdin.read(1)
-                if ch == "\r" or ch == "\n":
-                    return selected
-                elif ch == "\x03":
-                    return default
-                elif ch == "\x1b":
-                    seq = sys.stdin.read(2)
-                    if seq == "[A":
-                        selected = (selected - 1) % total
-                    elif seq == "[B":
-                        selected = (selected + 1) % total
-                    else:
-                        continue
-                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-                    _draw(first=False)
-                    tty.setraw(fd)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, _read_selection)
-    return result
 
 
 # ── Session token usage tracker ──
@@ -246,16 +196,16 @@ _TOOL_LABELS = {
     "memory_add": "MemAdd",
 }
 
+_last_tool_key = ""
 
-_last_tool_activity = {"key": ""}
 
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
-    """Display a tool call as a bullet point line (Claude Code style)."""
-    # Dedup: skip if identical to last call
+    """Display a tool call as a bullet point line."""
+    global _last_tool_key
     dedup_key = f"{name}:{list(args.values())[:1]}"
-    if dedup_key == _last_tool_activity["key"]:
+    if dedup_key == _last_tool_key:
         return
-    _last_tool_activity["key"] = dedup_key
+    _last_tool_key = dedup_key
 
     label = _TOOL_LABELS.get(name, name)
 
@@ -288,239 +238,35 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
         _write(f"    {_DIM}⎿{_RESET}  {color}{preview}{_RESET}\n")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Full-screen CLI layout: output scrolls above, prompt fixed at bottom
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Build prompt session with keybindings ──
 
-class _ANSIOutputControl(UIControl):
-    """Scrollable output area that renders ANSI-colored text.
+def _build_prompt_session(history: InMemoryHistory | None = None) -> PromptSession:
+    """Create a PromptSession with Pi-style keybindings."""
+    kb = KeyBindings()
 
-    Caches formatted lines for performance. The cursor is always positioned
-    at the last line so the Window auto-scrolls to show the bottom.
-    """
+    @kb.add(Keys.Enter, eager=True)
+    def _submit(event):
+        buf = event.current_buffer
+        # Backslash at end = line continuation
+        if buf.text.endswith("\\"):
+            buf.text = buf.text[:-1]
+            buf.insert_text("\n")
+            return
+        buf.validate_and_handle()
 
-    def __init__(self):
-        self._raw_lines: list[str] = [""]
-        self._formatted_cache: list = []
-        self._cache_valid_to: int = 0
-        self._scroll_offset: int = 0  # 0 = at bottom (auto-scroll)
+    @kb.add("<shift-enter>")
+    def _newline_shift(event):
+        event.current_buffer.insert_text("\n")
 
-    def append(self, text: str):
-        for ch in text:
-            if ch == '\n':
-                self._raw_lines.append("")
-            else:
-                self._raw_lines[-1] += ch
-        # If user is at bottom, stay at bottom (auto-scroll)
-        # If scrolled up, don't move
-
-    def clear(self):
-        self._raw_lines = [""]
-        self._formatted_cache = []
-        self._cache_valid_to = 0
-        self._scroll_offset = 0
-
-    def scroll_up(self, lines: int = 5):
-        total = len(self._raw_lines)
-        self._scroll_offset = min(self._scroll_offset + lines, max(0, total - 1))
-
-    def scroll_down(self, lines: int = 5):
-        self._scroll_offset = max(0, self._scroll_offset - lines)
-
-    def scroll_to_bottom(self):
-        self._scroll_offset = 0
-
-    def create_content(self, width: int, height: int) -> UIContent:
-        complete_count = len(self._raw_lines) - 1
-
-        # Cache complete (immutable) lines
-        if self._cache_valid_to < complete_count:
-            for i in range(self._cache_valid_to, complete_count):
-                line = self._raw_lines[i]
-                fmt = to_formatted_text(ANSI(line)) if line else [("", " ")]
-                self._formatted_cache.append(fmt)
-            self._cache_valid_to = complete_count
-
-        # Format the last (partial) line fresh each time
-        last = self._raw_lines[-1]
-        last_fmt = to_formatted_text(ANSI(last)) if last else [("", " ")]
-        all_lines = self._formatted_cache + [last_fmt]
-
-        total = len(all_lines)
-
-        # Viewport approach: only give Window the visible slice
-        if total <= height:
-            visible = all_lines
-        else:
-            end = total - self._scroll_offset
-            start = max(0, end - height)
-            end = max(start, end)
-            visible = all_lines[start:end]
-
-        vcount = len(visible)
-
-        def get_line(i: int):
-            return visible[i] if i < vcount else [("", " ")]
-
-        return UIContent(
-            get_line=get_line,
-            line_count=vcount,
-            cursor_position=Point(x=0, y=max(0, vcount - 1)),
-        )
-
-    def is_focusable(self) -> bool:
-        return False
-
-
-class _CLIScreen:
-    """Full-screen split layout: scrollable output above, prompt fixed below."""
-
-    def __init__(self):
-        self._input_queue: asyncio.Queue = asyncio.Queue()
-        self._output = _ANSIOutputControl()
-        self._input_buffer = Buffer(multiline=True, name="input")
-        self._status_text = ""
-        self._exit_pending = False
-        self._processing = False
-
-        # Status line control (between output and separator)
-        self._status_control = lambda: [
-            ("class:status", f"  {self._status_text}") if self._status_text else ("", "")
-        ]
-
-        kb = KeyBindings()
-
-        @kb.add(Keys.Enter, eager=True)
-        def _submit(event):
-            self._exit_pending = False
-            self._output.scroll_to_bottom()
-            buf = event.current_buffer
-            # Backslash at end of line = line continuation
-            if buf.text.endswith("\\"):
-                buf.text = buf.text[:-1]
-                buf.insert_text("\n")
-                return
-            text = buf.text.strip()
-            if text:
-                self._input_queue.put_nowait(text)
-                buf.reset()
-
-        @kb.add("<shift-enter>")
-        def _newline_shift(event):
-            event.current_buffer.insert_text("\n")
-
-        @kb.add(Keys.BracketedPaste)
-        def _paste(event):
-            data = event.data.replace("\r\n", "\n").replace("\r", "\n")
-            event.current_buffer.insert_text(data)
-
-        @kb.add("c-c")
-        def _ctrl_c(event):
-            if self._processing:
-                # Cancel running process
-                self._input_queue.put_nowait("__cancel__")
-            elif self._exit_pending:
-                self._input_queue.put_nowait(None)
-            else:
-                self._exit_pending = True
-                self._output.append(f"\n  {_DIM}Press Ctrl+C again to exit.{_RESET}\n")
-                event.app.invalidate()
-
-        @kb.add("c-l")
-        def _clear(event):
-            self._output.clear()
-            event.app.invalidate()
-
-        @kb.add(Keys.PageUp)
-        def _page_up(event):
-            self._output.scroll_up(20)
-            event.app.invalidate()
-
-        @kb.add(Keys.PageDown)
-        def _page_down(event):
-            self._output.scroll_down(20)
-            event.app.invalidate()
-
-        # Shift+Up/Down for smaller scroll steps
-        @kb.add(Keys.ShiftUp)
-        def _scroll_up_line(event):
-            self._output.scroll_up(3)
-            event.app.invalidate()
-
-        @kb.add(Keys.ShiftDown)
-        def _scroll_down_line(event):
-            self._output.scroll_down(3)
-            event.app.invalidate()
-
-        from prompt_toolkit import Application
-        from prompt_toolkit.layout.controls import FormattedTextControl
-
-        _MARGIN = 2  # left margin spaces
-
-        class _PadMargin(Margin):
-            def get_width(self, get_ui_content):
-                return _MARGIN
-            def create_margin(self, window_render_info, width, height):
-                return [("", " " * _MARGIN)] * height
-
-        self._output_window = Window(
-            content=self._output,
-            wrap_lines=True,
-            always_hide_cursor=True,
-            left_margins=[_PadMargin()],
-            right_margins=[_PadMargin()],
-        )
-
-        self._app = Application(
-            layout=Layout(HSplit([
-                # Output area (scrollable, takes all remaining space)
-                self._output_window,
-                # Top separator
-                Window(height=1, char="─", style="class:separator"),
-                # Input area (dynamic height: 1 line to max 10)
-                Window(
-                    content=BufferControl(
-                        buffer=self._input_buffer,
-                        input_processors=[BeforeInput("  > ")],
-                        focus_on_click=True,
-                    ),
-                    height=D(min=1, max=10, preferred=1),
-                    dont_extend_height=True,
-                    wrap_lines=True,
-                ),
-                # Bottom separator
-                Window(height=1, char="─", style="class:separator"),
-            ])),
-            key_bindings=kb,
-            full_screen=True,
-            style=Style.from_dict({
-                "separator": "fg:ansibrightblack",
-            }),
-            mouse_support=False,
-        )
-
-        # Set focus to input buffer
-        self._app.layout.focus(self._input_buffer)
-
-    def write(self, text: str):
-        """Append text to the output area."""
-        self._output.append(text)
-        if self._app.is_running:
-            self._app.invalidate()
-
-    def set_status(self, text: str):
-        """Update the status text (shown in bottom separator area)."""
-        self._status_text = text
-
-    async def get_input(self) -> str | None:
-        return await self._input_queue.get()
-
-    async def run(self):
-        await self._app.run_async()
-
-    def exit(self):
-        if self._app.is_running:
-            self._app.exit()
+    return PromptSession(
+        message="> ",
+        multiline=True,
+        key_bindings=kb,
+        completer=_SlashCompleter(),
+        history=history,
+        bottom_toolbar=lambda: HTML(f'<style fg="ansibrightblack">{"─" * _term_width()}</style>'),
+        enable_open_in_editor=False,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -529,8 +275,6 @@ class _CLIScreen:
 
 async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, node_client=None):
     """Run Syne in interactive CLI mode."""
-    global _cli_screen
-
     remote_mode = node_client is not None
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
@@ -544,10 +288,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
     if not remote_mode:
         settings = load_settings()
         agent = SyneAgent(settings)
-
-    # Create the full-screen CLI
-    screen = _CLIScreen()
-    _cli_screen = screen
 
     try:
         # ── Remote mode setup ──
@@ -606,42 +346,39 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                             new_lines = content.splitlines(keepends=True)
                             diff = list(difflib.unified_diff(old_lines, new_lines, fromfile=file_path, tofile=file_path, lineterm=""))
                             if diff:
-                                _write(f"\n{_BOLD}Edit file{_RESET} {file_path}\n")
+                                _write(f"\n  {_BOLD}Edit file{_RESET} {file_path}\n")
                                 shown = 0
                                 for dline in diff:
                                     if dline.startswith("@@"):
-                                        _write(f"{_DIM_CYAN}{dline.rstrip()}{_RESET}\n")
+                                        _write(f"  {_DIM_CYAN}{dline.rstrip()}{_RESET}\n")
                                     elif dline.startswith("-") and not dline.startswith("---"):
-                                        _write(f"{_DIM_RED}{dline.rstrip()}{_RESET}\n")
+                                        _write(f"  {_DIM_RED}{dline.rstrip()}{_RESET}\n")
                                     elif dline.startswith("+") and not dline.startswith("+++"):
-                                        _write(f"{_DIM_GREEN}{dline.rstrip()}{_RESET}\n")
+                                        _write(f"  {_DIM_GREEN}{dline.rstrip()}{_RESET}\n")
                                     else:
-                                        _write(f"{_DIM}{dline.rstrip()}{_RESET}\n")
+                                        _write(f"  {_DIM}{dline.rstrip()}{_RESET}\n")
                                     shown += 1
                                     if shown >= 30:
                                         remaining = len(diff) - shown
                                         if remaining > 0:
-                                            _write(f"{_DIM}  ... {remaining} more lines{_RESET}\n")
+                                            _write(f"  {_DIM}  ... {remaining} more lines{_RESET}\n")
                                         break
                             else:
-                                _write(f"\n{_BOLD}Write to{_RESET} {file_path} {_DIM}(no changes){_RESET}\n")
+                                _write(f"\n  {_BOLD}Write to{_RESET} {file_path} {_DIM}(no changes){_RESET}\n")
                         except Exception:
-                            _write(f"\n{_BOLD}Write to{_RESET} {file_path} ({lines_count} lines, {size:,} bytes)\n")
+                            _write(f"\n  {_BOLD}Write to{_RESET} {file_path} ({lines_count} lines, {size:,} bytes)\n")
                     else:
-                        _write(f"\n{_BOLD}New file{_RESET} {file_path} ({lines_count} lines, {size:,} bytes)\n")
+                        _write(f"\n  {_BOLD}New file{_RESET} {file_path} ({lines_count} lines, {size:,} bytes)\n")
                         preview_lines = content.split("\n")[:10]
                         for pline in preview_lines:
-                            _write(f"{_DIM_GREEN}+ {pline}{_RESET}\n")
+                            _write(f"  {_DIM_GREEN}+ {pline}{_RESET}\n")
                         if lines_count > 10:
-                            _write(f"{_DIM}  ... {lines_count - 10} more lines{_RESET}\n")
+                            _write(f"  {_DIM}  ... {lines_count - 10} more lines{_RESET}\n")
 
-                    _write(f"\n{_BOLD}Allow edit to {os.path.basename(file_path)}?{_RESET} Type y/yes/a(lways)/n: \n")
-
-                    # Wait for user response via input queue
-                    resp = await screen.get_input()
-                    if resp is None:
-                        return False, "User cancelled."
-                    resp = resp.strip().lower()
+                    _write(f"\n  {_BOLD}Allow edit to {os.path.basename(file_path)}?{_RESET} (y/a/n): ")
+                    # Simple blocking input for approval during tool execution
+                    loop = asyncio.get_running_loop()
+                    resp = await loop.run_in_executor(None, lambda: input().strip().lower())
                     if resp in ("y", "yes"):
                         return True, ""
                     elif resp in ("a", "always"):
@@ -653,35 +390,36 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 agent.tools.set_approval_callback(_approval_callback)
 
         # ── Display header ──
+        _write("\n")
         if remote_mode:
             meta = node_client.server_meta
             agent_name = meta.get("agent_name", "Syne")
             motto = meta.get("motto", "")
             model_short = _short_model_name(meta.get("model", "unknown"))
             tool_count = meta.get("tool_count", 0)
-            screen.write(f"\n  {_BOLD}{agent_name}{_RESET}\n")
+            _write(f"  {_BOLD}{agent_name}{_RESET}\n")
             if motto:
-                screen.write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
-            screen.write(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n\n")
+                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
+            _write(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n\n")
         else:
             identity = await get_identity()
             agent_name = identity.get("name", "Syne")
             motto = identity.get("motto", "")
             model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
             tool_count = len(agent.tools.list_tools('owner'))
-            screen.write(f"\n  {_BOLD}{agent_name}{_RESET}\n")
+            _write(f"  {_BOLD}{agent_name}{_RESET}\n")
             if motto:
-                screen.write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
-            screen.write(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n")
+                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
+            _write(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n")
 
             try:
                 from ..update_checker import get_pending_update_notice
                 update_notice = await get_pending_update_notice()
                 if update_notice:
-                    screen.write(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}\n")
+                    _write(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}\n")
             except Exception:
                 pass
-            screen.write("\n")
+            _write("\n")
 
         # ── REPL setup ──
         cwd = os.getcwd()
@@ -769,15 +507,13 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             key = f"cli:{chat_id}"
             if key in agent.conversations._active:
                 del agent.conversations._active[key]
-            screen.write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
+            _write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
 
         # Load conversation history from DB
+        _history = InMemoryHistory()
         try:
             from ..db.connection import get_connection
-            from prompt_toolkit.history import InMemoryHistory
-            _history = InMemoryHistory()
             async with get_connection() as conn:
-                # Load recent messages for display in output area
                 rows = await conn.fetch("""
                     SELECT m.role, m.content FROM messages m
                     JOIN sessions s ON m.session_id = s.id
@@ -786,23 +522,21 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     ORDER BY m.created_at ASC
                 """, chat_id)
             if rows:
-                screen.write(f"  {_DIM}── conversation resumed ──{_RESET}\n")
-                # Show last N messages to avoid flooding
+                _write(f"  {_DIM}── conversation resumed ──{_RESET}\n")
                 display_rows = rows[-20:]
                 if len(rows) > 20:
-                    screen.write(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}\n")
+                    _write(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}\n")
                 for row in display_rows:
                     content = row["content"].strip()
                     if not content:
                         continue
                     if row["role"] == "user":
                         _history.append_string(content)
-                        screen.write(f"\n{_DIM}> {content}{_RESET}\n")
+                        _write(f"\n  {_DIM}> {content}{_RESET}\n")
                     else:
-                        screen.write(f"{content}\n")
-                screen.write(f"\n  {_DIM}── end of history ──{_RESET}\n\n")
+                        _write(f"  {content}\n")
+                _write(f"\n  {_DIM}── end of history ──{_RESET}\n\n")
             else:
-                # Also load input history for arrow-up recall
                 async with get_connection() as conn:
                     user_rows = await conn.fetch("""
                         SELECT m.content FROM messages m
@@ -814,205 +548,197 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     content = row["content"].strip()
                     if content and not content.startswith("/"):
                         _history.append_string(content)
-            screen._input_buffer.history = _history
         except Exception:
             pass
 
-        # ── Start the Application ──
-        app_task = asyncio.create_task(screen.run())
+        # Build prompt session
+        session = _build_prompt_session(_history)
 
         # ── REPL loop ──
-        try:
-            while True:
-                user_input = await screen.get_input()
-                if user_input is None:
-                    screen.write(f"\n  {_DIM}Goodbye!{_RESET}\n")
+        _last_ctrl_c = 0.0
+
+        while True:
+            try:
+                _separator()
+                user_input = await session.prompt_async()
+            except KeyboardInterrupt:
+                now = time.time()
+                if now - _last_ctrl_c < 0.5:
+                    _write(f"\n  {_DIM}Goodbye!{_RESET}\n")
+                    break
+                _last_ctrl_c = now
+                _write(f"\n  {_DIM}Press Ctrl+C again to exit.{_RESET}\n")
+                continue
+            except EOFError:
+                _write(f"\n  {_DIM}Goodbye!{_RESET}\n")
+                break
+
+            user_input = user_input.strip()
+            if not user_input:
+                continue
+
+            _last_ctrl_c = 0.0
+            global _last_tool_key
+            _last_tool_key = ""
+
+            # ── Slash commands ──
+            if user_input.startswith("/"):
+                cmd_word = user_input.split()[0].lower()
+                if cmd_word in ("/exit", "/quit", "/q"):
+                    _write(f"  {_DIM}Goodbye!{_RESET}\n")
                     break
 
-                if user_input == "__cancel__":
-                    continue
-
-                user_input = user_input.strip()
-                if not user_input:
-                    continue
-
-                screen._exit_pending = False
-
-                # Echo user input to output area
-                _last_tool_activity["key"] = ""
-                screen.write(f"\n{_DIM}> {user_input}{_RESET}\n\n")
-
-                # ── Slash commands ──
-                if user_input.startswith("/"):
-                    cmd_word = user_input.split()[0].lower()
-                    if cmd_word in ("/exit", "/quit", "/q"):
-                        screen.write(f"  {_DIM}Goodbye!{_RESET}\n")
-                        break
-
-                    if remote_mode:
-                        if cmd_word == "/help":
-                            _write(f"  {_BOLD}CLI Commands{_RESET}\n\n"
-                                   f"  /help   — Show this help\n"
-                                   f"  /cost   — Show session token usage\n"
-                                   f"  /exit   — Exit CLI\n\n"
-                                   f"  {_DIM}All other /commands and messages are sent to the server.{_RESET}\n"
-                                   f"  {_DIM}Shift+Enter or Esc+Enter for new line. Ctrl+L to clear.{_RESET}\n")
-                            continue
-                        elif cmd_word == "/cost":
-                            _write(f"  {_BOLD}Session token usage{_RESET}\n"
-                                   f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
-                                   f"  Output: {_format_tokens(_session_usage.total_out)}\n"
-                                   f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}\n")
-                            continue
-                        # Other commands: forward to server
-                    else:
-                        handled = await _handle_cli_command(user_input, agent, user, chat_id)
-                        if handled == "exit":
-                            break
-                        if handled:
-                            continue
-
-                # ── Process message ──
-                screen._processing = True
                 if remote_mode:
-                    _r_streamed_text = False
-                    _r_streamed_thinking = False
-                    _r_in_thinking = False
-                    _r_thinking_done = False
-
-                    try:
-                        if not node_client._connected.is_set():
-                            _write(f"  {_DIM_YELLOW}Reconnecting...{_RESET}\n")
-                            await node_client.connect()
-                            listen_task = asyncio.create_task(node_client.listen())
-                            _write(f"  {_DIM_GREEN}Reconnected.{_RESET}\n")
-
-                        await node_client.send_message(user_input, cwd=cwd)
-
-                        _r_md.flush()
-                        _r_md.reset()
-                        _write(_RESET)
-
-                        if _r_streamed_text:
-                            _write("\n")
-                    except (KeyboardInterrupt, asyncio.CancelledError):
-                        _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
+                    if cmd_word == "/help":
+                        _write(f"\n  {_BOLD}CLI Commands{_RESET}\n\n"
+                               f"  /help   — Show this help\n"
+                               f"  /cost   — Show session token usage\n"
+                               f"  /exit   — Exit CLI\n\n"
+                               f"  {_DIM}All other /commands and messages are sent to the server.{_RESET}\n"
+                               f"  {_DIM}Shift+Enter or \\+Enter for new line.{_RESET}\n\n")
                         continue
-                    finally:
-                        screen._processing = False
-
+                    elif cmd_word == "/cost":
+                        _write(f"\n  {_BOLD}Session token usage{_RESET}\n"
+                               f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
+                               f"  Output: {_format_tokens(_session_usage.total_out)}\n"
+                               f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}\n\n")
+                        continue
                 else:
-                    # ── Local mode message handling ──
-                    _streamed_any_text = False
-                    _streamed_any_thinking = False
-                    _in_thinking = False
-                    _thinking_done = False
-                    _md = _MarkdownStream()
+                    handled = await _handle_cli_command(user_input, agent, user, chat_id)
+                    if handled == "exit":
+                        break
+                    if handled:
+                        continue
 
-                    _reasoning_visible = False
-                    _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
-                    if _active_conv:
-                        _reasoning_visible = _active_conv.reasoning_visible
+            # ── Process message ──
+            _write("\n")
+            if remote_mode:
+                _r_streamed_text = False
+                _r_streamed_thinking = False
+                _r_in_thinking = False
+                _r_thinking_done = False
 
-                    def _on_text(chunk: str):
-                        nonlocal _streamed_any_text, _in_thinking, _thinking_done
-                        if not _streamed_any_text:
-                            _streamed_any_text = True
-                            if _streamed_any_thinking and not _thinking_done:
-                                _thinking_done = True
-                                _write(f"{_RESET}\n")
-                            _in_thinking = False
-                        _md.feed(chunk)
+                try:
+                    if not node_client._connected.is_set():
+                        _write(f"  {_DIM_YELLOW}Reconnecting...{_RESET}\n")
+                        await node_client.connect()
+                        listen_task = asyncio.create_task(node_client.listen())
+                        _write(f"  {_DIM_GREEN}Reconnected.{_RESET}\n")
 
-                    def _on_thinking(chunk: str):
-                        nonlocal _streamed_any_thinking, _in_thinking
-                        if not _reasoning_visible:
-                            return
-                        if not _streamed_any_thinking:
-                            _streamed_any_thinking = True
-                            _in_thinking = True
-                            _write(_DIM_ITALIC)
-                        if not _in_thinking:
-                            _in_thinking = True
-                            _write(_DIM_ITALIC)
-                        _write(chunk)
+                    await node_client.send_message(user_input, cwd=cwd)
 
-                    try:
-                        msg = user_input
+                    _r_md.flush()
+                    _r_md.reset()
+                    _write(_RESET)
 
-                        stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
-                        agent.conversations.set_stream_callbacks(stream_cbs)
+                    if _r_streamed_text:
+                        _write("\n")
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
+                    continue
 
-                        async def _on_tool_detail(name: str, args: dict, result_preview: str):
-                            nonlocal _streamed_any_text
-                            if _streamed_any_text:
-                                _write("\n")
-                                _streamed_any_text = False
-                            _format_tool_activity(name, args, result_preview)
+            else:
+                # ── Local mode message handling ──
+                _streamed_any_text = False
+                _streamed_any_thinking = False
+                _in_thinking = False
+                _thinking_done = False
+                _md = _MarkdownStream()
 
-                        agent.conversations.set_tool_detail_callback(_on_tool_detail)
+                _reasoning_visible = False
+                _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
+                if _active_conv:
+                    _reasoning_visible = _active_conv.reasoning_visible
 
-                        async def _on_tool(name: str):
-                            pass  # Status updates not needed in full-screen mode
+                def _on_text(chunk: str):
+                    nonlocal _streamed_any_text, _in_thinking, _thinking_done
+                    if not _streamed_any_text:
+                        _streamed_any_text = True
+                        if _streamed_any_thinking and not _thinking_done:
+                            _thinking_done = True
+                            _write(f"{_RESET}\n")
+                        _in_thinking = False
+                    _md.feed(chunk)
 
-                        agent.conversations.set_tool_callback(_on_tool)
+                def _on_thinking(chunk: str):
+                    nonlocal _streamed_any_thinking, _in_thinking
+                    if not _reasoning_visible:
+                        return
+                    if not _streamed_any_thinking:
+                        _streamed_any_thinking = True
+                        _in_thinking = True
+                        _write(f"  {_DIM_ITALIC}")
+                    if not _in_thinking:
+                        _in_thinking = True
+                        _write(f"  {_DIM_ITALIC}")
+                    _write(chunk)
 
-                        from ..communication.inbound import InboundContext
-                        cli_inbound = InboundContext(
-                            channel="cli", platform="cli", chat_type="direct",
-                            conversation_label=user.get("display_name") or user.get("name", "user"),
-                            chat_id=chat_id,
-                        )
-                        response = await agent.conversations.handle_message(
-                            platform="cli", chat_id=chat_id, user=user,
-                            message=msg,
-                            message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
-                        )
+                try:
+                    stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
+                    agent.conversations.set_stream_callbacks(stream_cbs)
 
-                        _md.flush()
-                        _md.reset()
-                        _write(_RESET)
-
+                    async def _on_tool_detail(name: str, args: dict, result_preview: str):
+                        nonlocal _streamed_any_text
                         if _streamed_any_text:
                             _write("\n")
-                        elif response:
-                            _write(response + "\n")
+                            _streamed_any_text = False
+                        _format_tool_activity(name, args, result_preview)
 
-                        _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
-                        in_tok = 0
-                        out_tok = 0
-                        if _active_conv_final:
-                            last_resp = getattr(_active_conv_final, '_last_chat_response', None)
-                            if last_resp:
-                                in_tok = last_resp.input_tokens
-                                out_tok = last_resp.output_tokens
+                    agent.conversations.set_tool_detail_callback(_on_tool_detail)
 
-                        if in_tok or out_tok:
-                            _session_usage.total_in += in_tok
-                            _session_usage.total_out += out_tok
-                            _write(f"\n  {_DIM}[{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out]{_RESET}\n")
+                    async def _on_tool(name: str):
+                        pass
 
-                    except (KeyboardInterrupt, asyncio.CancelledError):
-                        _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
-                        continue
-                    finally:
-                        screen._processing = False
+                    agent.conversations.set_tool_callback(_on_tool)
 
-        except Exception as e:
-            _write(f"\n  {_DIM_RED}Error: {e}{_RESET}\n")
-            if debug:
-                import traceback
-                _write(traceback.format_exc() + "\n")
+                    from ..communication.inbound import InboundContext
+                    cli_inbound = InboundContext(
+                        channel="cli", platform="cli", chat_type="direct",
+                        conversation_label=user.get("display_name") or user.get("name", "user"),
+                        chat_id=chat_id,
+                    )
+                    response = await agent.conversations.handle_message(
+                        platform="cli", chat_id=chat_id, user=user,
+                        message=user_input,
+                        message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
+                    )
+
+                    _md.flush()
+                    _md.reset()
+                    _write(_RESET)
+
+                    if _streamed_any_text:
+                        _write("\n")
+                    elif response:
+                        _write(f"  {response}\n")
+
+                    _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
+                    in_tok = 0
+                    out_tok = 0
+                    if _active_conv_final:
+                        last_resp = getattr(_active_conv_final, '_last_chat_response', None)
+                        if last_resp:
+                            in_tok = last_resp.input_tokens
+                            out_tok = last_resp.output_tokens
+
+                    if in_tok or out_tok:
+                        _session_usage.total_in += in_tok
+                        _session_usage.total_out += out_tok
+                        _write(f"\n  {_DIM}[{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out]{_RESET}\n")
+
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
+                    continue
+
+            _write("\n")
+
+    except Exception as e:
+        _write(f"\n  {_DIM_RED}Error: {e}{_RESET}\n")
+        if debug:
+            import traceback
+            _write(traceback.format_exc() + "\n")
 
     finally:
-        screen.exit()
-        _cli_screen = None
-        try:
-            await app_task
-        except Exception:
-            pass
-
-        # Cleanup
         if remote_mode:
             listen_task.cancel()
             await node_client.disconnect()
@@ -1021,7 +747,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
 
 async def _cli_status_callback(session_id: int, message: str):
-    """Display status messages (compaction, etc.) in output area."""
+    """Display status messages (compaction, etc.)."""
     _write(f"\n  {_DIM_ITALIC}{message}{_RESET}\n")
 
 
@@ -1034,7 +760,7 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         return "exit"
 
     elif cmd == "/help":
-        _write(f"  {_BOLD}CLI Commands{_RESET}\n\n"
+        _write(f"\n  {_BOLD}CLI Commands{_RESET}\n\n"
                f"  /help     — Show this help\n"
                f"  /status   — Show agent status\n"
                f"  /models   — Switch model\n"
@@ -1044,15 +770,14 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                f"  /cost     — Show session token usage\n"
                f"  /context  — Show context usage\n"
                f"  /exit     — Exit CLI\n\n"
-               f"  {_DIM}All other messages are sent to the agent.{_RESET}\n"
-               f"  {_DIM}Shift+Enter or Esc+Enter for new line. Ctrl+L to clear screen.{_RESET}\n")
+               f"  {_DIM}Shift+Enter or \\+Enter for new line.{_RESET}\n\n")
         return True
 
     elif cmd == "/cost":
-        _write(f"  {_BOLD}Session token usage{_RESET}\n"
+        _write(f"\n  {_BOLD}Session token usage{_RESET}\n"
                f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
                f"  Output: {_format_tokens(_session_usage.total_out)}\n"
-               f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}\n")
+               f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}\n\n")
         return True
 
     elif cmd == "/context":
@@ -1063,13 +788,13 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             est_tokens = estimate_messages_tokens(conv._message_cache)
             ctx_window = conv.provider.context_window
             pct = min(100, int(est_tokens / ctx_window * 100)) if ctx_window else 0
-            _write(f"  {_BOLD}Context usage{_RESET}\n"
+            _write(f"\n  {_BOLD}Context usage{_RESET}\n"
                    f"  Messages: {msg_count}\n"
                    f"  Estimated tokens: ~{_format_tokens(est_tokens)}\n"
                    f"  Context window: {_format_tokens(ctx_window)}\n"
-                   f"  Usage: ~{pct}%\n")
+                   f"  Usage: ~{pct}%\n\n")
         else:
-            _write(f"  {_DIM}No active conversation.{_RESET}\n")
+            _write(f"  {_DIM}No active conversation.{_RESET}\n\n")
         return True
 
     elif cmd == "/status":
@@ -1096,14 +821,14 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         thinking = _model_params.get("thinking_budget", "default")
         from .. import __version__ as syne_version
 
-        _write(f"  {_BOLD}{identity.get('name', 'Syne')}{_RESET} · Syne v{syne_version}\n"
+        _write(f"\n  {_BOLD}{identity.get('name', 'Syne')}{_RESET} · Syne v{syne_version}\n"
                f"  Model: {model_name} ({provider_name})\n"
                f"  Memories: {mem_count}\n"
                f"  Users: {user_count} | Groups: {group_count}\n"
                f"  Sessions: {session_count} active · {total_messages} messages\n"
                f"  Tools: {tool_count} | Abilities: {ability_count}\n"
                f"  Thinking: {thinking}\n"
-               f"  Auto-capture: {'ON' if auto_capture else 'OFF'}\n")
+               f"  Auto-capture: {'ON' if auto_capture else 'OFF'}\n\n")
         return True
 
     elif cmd == "/clear":
@@ -1114,28 +839,28 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             async with get_connection() as conn:
                 await conn.execute("DELETE FROM messages WHERE session_id = $1", conv.session_id)
             conv._message_cache.clear()
-            _write(f"  {_DIM_GREEN}Conversation cleared.{_RESET}\n")
+            _write(f"  {_DIM_GREEN}Conversation cleared.{_RESET}\n\n")
         else:
-            _write(f"  {_DIM}No active conversation.{_RESET}\n")
+            _write(f"  {_DIM}No active conversation.{_RESET}\n\n")
         return True
 
     elif cmd == "/compact":
         conv = agent.conversations._active.get(f"cli:{chat_id}")
         if not conv:
-            _write(f"  {_DIM}No active conversation.{_RESET}\n")
+            _write(f"  {_DIM}No active conversation.{_RESET}\n\n")
             return True
         msg_count = len(conv._message_cache)
         if msg_count < 4:
-            _write(f"  {_DIM}Conversation too short to compact.{_RESET}\n")
+            _write(f"  {_DIM}Conversation too short to compact.{_RESET}\n\n")
             return True
         _write(f"  {_DIM}Compacting conversation...{_RESET}\n")
         from ..compaction import compact_session
         result = await compact_session(session_id=conv.session_id, provider=conv.provider)
         if result:
             await conv.load_history()
-            _write(f"  {_DIM_GREEN}Compacted: {result['messages_before']} -> {result['messages_after']} messages{_RESET}\n")
+            _write(f"  {_DIM_GREEN}Compacted: {result['messages_before']} -> {result['messages_after']} messages{_RESET}\n\n")
         else:
-            _write(f"  {_DIM}Nothing to compact.{_RESET}\n")
+            _write(f"  {_DIM}Nothing to compact.{_RESET}\n\n")
         return True
 
     elif cmd == "/models":
@@ -1143,7 +868,7 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         models = await get_config("provider.models", [])
         active_key = await get_config("provider.active_model", "")
         if not models:
-            _write(f"  {_DIM}No models registered.{_RESET}\n")
+            _write(f"  {_DIM}No models registered.{_RESET}\n\n")
             return True
 
         _write(f"\n  {_BOLD}Select model:{_RESET}\n")
@@ -1153,11 +878,12 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             model_id = m.get("model_id", "")
             active = " (active)" if key == active_key else ""
             _write(f"  {i+1}. {label} [{model_id}]{active}\n")
-        _write(f"\n  {_DIM}Type number to select, or press Enter to cancel:{_RESET}\n")
+        _write(f"\n  {_DIM}Type number to select, or press Enter to cancel:{_RESET} ")
 
-        resp = await _cli_screen.get_input()
-        if resp and resp.strip().isdigit():
-            idx = int(resp.strip()) - 1
+        loop = asyncio.get_running_loop()
+        resp = await loop.run_in_executor(None, lambda: input().strip())
+        if resp and resp.isdigit():
+            idx = int(resp) - 1
             if 0 <= idx < len(models):
                 new_key = models[idx].get("key", "")
                 if new_key != active_key:
@@ -1169,11 +895,65 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                         conv_key = f"cli:{chat_id}"
                         if conv_key in agent.conversations._active:
                             del agent.conversations._active[conv_key]
-                        _write(f"  {_DIM_GREEN}Switched to {models[idx].get('label', new_key)}{_RESET}\n")
+                        _write(f"  {_DIM_GREEN}Switched to {models[idx].get('label', new_key)}{_RESET}\n\n")
                     else:
-                        _write(f"  {_DIM_RED}Failed to create provider for {new_key}{_RESET}\n")
+                        _write(f"  {_DIM_RED}Failed to create provider for {new_key}{_RESET}\n\n")
                 else:
-                    _write(f"  {_DIM}Already using {models[idx].get('label', new_key)}.{_RESET}\n")
+                    _write(f"  {_DIM}Already using {models[idx].get('label', new_key)}.{_RESET}\n\n")
+        _write("\n")
         return True
 
     return False
+
+
+# ── Arrow-key selector (kept for compatibility) ──
+async def cli_select(options: list[str], default: int = 0) -> int:
+    """Arrow-key selector for CLI choices."""
+    import termios
+    import tty
+
+    selected = default
+    total = len(options)
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    def _draw(first: bool = False):
+        if not first:
+            sys.stdout.write(f"\033[{total}A")
+        for i, label in enumerate(options):
+            sys.stdout.write(f"\033[2K\r")
+            if i == selected:
+                sys.stdout.write(f"  \033[1;36m> {label}\033[0m")
+            else:
+                sys.stdout.write(f"    {label}")
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def _read_selection() -> int:
+        nonlocal selected
+        _draw(first=True)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == "\r" or ch == "\n":
+                    return selected
+                elif ch == "\x03":
+                    return default
+                elif ch == "\x1b":
+                    seq = sys.stdin.read(2)
+                    if seq == "[A":
+                        selected = (selected - 1) % total
+                    elif seq == "[B":
+                        selected = (selected + 1) % total
+                    else:
+                        continue
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _draw(first=False)
+                    tty.setraw(fd)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, _read_selection)
+    return result
