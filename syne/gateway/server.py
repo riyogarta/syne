@@ -9,6 +9,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import ssl
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
@@ -104,16 +106,39 @@ class Gateway:
         self._nodes: dict[str, NodeConnection] = {}  # node_id → NodeConnection
 
     async def start(self) -> None:
-        """Start the WebSocket server."""
+        """Start the WebSocket server (with TLS if certs are available)."""
         await auth.ensure_paired_nodes_table()
+
+        ssl_context = self._load_ssl_context()
         self._server = await websockets.serve(
             self._handle_connection,
             self.host,
             self.port,
+            ssl=ssl_context,
             ping_interval=20,
             ping_timeout=10,
         )
-        logger.info(f"Gateway WebSocket server started on ws://{self.host}:{self.port}")
+        proto = "wss" if ssl_context else "ws"
+        logger.info(f"Gateway WebSocket server started on {proto}://{self.host}:{self.port}")
+
+    @staticmethod
+    def _load_ssl_context() -> Optional[ssl.SSLContext]:
+        """Load TLS certificates if available. Returns None for plain WS."""
+        # Check common cert locations
+        cert_paths = [
+            ("/etc/ssl/cf-origin.pem", "/etc/ssl/cf-origin-key.pem"),
+            (os.path.expanduser("~/.syne/gateway-cert.pem"), os.path.expanduser("~/.syne/gateway-key.pem")),
+        ]
+        for cert_file, key_file in cert_paths:
+            if os.path.exists(cert_file) and os.path.exists(key_file):
+                try:
+                    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    ctx.load_cert_chain(cert_file, key_file)
+                    logger.info(f"TLS enabled: {cert_file}")
+                    return ctx
+                except Exception as e:
+                    logger.warning(f"Failed to load TLS cert {cert_file}: {e}")
+        return None
 
     async def stop(self) -> None:
         """Stop the WebSocket server."""
