@@ -694,6 +694,14 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             except Exception:
                 pass
 
+        # Push prompt to bottom of screen
+        try:
+            rows = os.get_terminal_size().lines
+        except OSError:
+            rows = 24
+        sys.stdout.write("\n" * (rows - 2))
+        sys.stdout.flush()
+
         # ── REPL loop ──
         import time as _time
         _last_ctrl_c = 0.0
