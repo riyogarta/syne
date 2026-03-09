@@ -984,12 +984,15 @@ def _make_separator() -> str:
 
 async def _get_input(model_name: str = "") -> str | None:
     """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
-    from prompt_toolkit.formatted_text import HTML
-
     sep = _make_separator()
 
-    # Top border
-    sys.stdout.write(f"{_DIM}{sep}{_RESET}\n")
+    # Print both lines with a blank line between, then move cursor up
+    # ─────────────
+    # > _              ← cursor here
+    # ─────────────
+    sys.stdout.write(f"{_DIM}{sep}{_RESET}\n\n{_DIM}{sep}{_RESET}")
+    # Move cursor up 1 line (to the blank line between separators)
+    sys.stdout.write("\033[1A\r")
     sys.stdout.flush()
 
     prompt_str = "> "
@@ -998,7 +1001,6 @@ async def _get_input(model_name: str = "") -> str | None:
             prompt_str,
             multiline=True,
             prompt_continuation="  ",
-            bottom_toolbar=HTML(f'<style bg="" fg="ansibrightblack">{sep}</style>'),
         )
         return result
     except EOFError:
