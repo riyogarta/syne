@@ -169,6 +169,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
+        self.app.add_handler(CommandHandler("nodes", self._cmd_nodes))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
@@ -1567,6 +1568,7 @@ class TelegramChannel:
 /evaluator — Manage evaluator model
 /groups — Manage groups & members
 /members — Manage global user access
+/nodes — Manage remote nodes
 /clear — Clear conversation history
 /identity — Show agent identity
 /browse — Browse directories (share session with CLI)
@@ -3566,6 +3568,277 @@ Or just send me a message!"""
         else:
             await update.message.reply_text("Nothing to cancel.")
 
+    # ── /nodes — Remote node management ──
+
+    async def _cmd_nodes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /nodes command — manage remote nodes (owner only)."""
+        user = update.effective_user
+        db_user = await get_user("telegram", str(user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await update.message.reply_text("Only the owner can manage nodes.")
+            return
+        if update.effective_chat.type != "private":
+            await update.message.reply_text("Use /nodes in DM only.")
+            return
+
+        args = context.args or []
+        if args and args[0].lower() == "token":
+            # Quick token generation: /nodes token <name>
+            name = args[1] if len(args) > 1 else ""
+            if not name:
+                await update.message.reply_text("Usage: /nodes token <name>")
+                return
+            try:
+                from ..gateway.auth import generate_pairing_token, ensure_paired_nodes_table
+                await ensure_paired_nodes_table()
+                token = await generate_pairing_token(node_name=name)
+                await update.message.reply_text(
+                    f"<b>Pairing token for '{name}'</b> (10 min)\n\n"
+                    f"<code>{token}</code>\n\n"
+                    f"Use with <code>syne node init</code> on the remote machine.",
+                    parse_mode="HTML",
+                )
+            except ValueError as e:
+                await update.message.reply_text(f"{e}")
+            return
+
+        await self._nodes_menu_main(update)
+
+    async def _nodes_menu_main(self, update_or_query):
+        """Show node list menu."""
+        from ..gateway.auth import list_nodes, ensure_paired_nodes_table
+        await ensure_paired_nodes_table()
+
+        nodes = await list_nodes()
+        active_nodes = [n for n in nodes if n["active"]]
+        revoked_nodes = [n for n in nodes if not n["active"]]
+
+        # Check which nodes are currently connected
+        connected_ids = set()
+        if self.agent.gateway:
+            connected_ids = set(self.agent.gateway._nodes.keys())
+
+        buttons = []
+        for n in active_nodes:
+            node_id = n["node_id"]
+            name = n["display_name"]
+            online = node_id in connected_ids
+            status_icon = "🟢" if online else "⚪"
+            buttons.append([InlineKeyboardButton(
+                f"{status_icon} {name}",
+                callback_data=f"nodes:detail:{node_id}",
+            )])
+
+        if revoked_nodes:
+            for n in revoked_nodes:
+                buttons.append([InlineKeyboardButton(
+                    f"🔴 {n['display_name']} (revoked)",
+                    callback_data=f"nodes:detail:{n['node_id']}",
+                )])
+
+        buttons.append([InlineKeyboardButton("🔑 Generate Pairing Token", callback_data="nodes:token_prompt")])
+
+        text = f"<b>Remote Nodes</b> — {len(active_nodes)} active"
+        if not nodes:
+            text += "\n\nNo nodes paired yet. Generate a token to pair one."
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _nodes_menu_detail(self, query, node_id: str):
+        """Show node detail with actions."""
+        from ..gateway.auth import get_node
+        node = await get_node(node_id)
+        if not node:
+            await query.edit_message_text("Node not found.")
+            return
+
+        name = node["display_name"]
+        platform = node.get("platform", "?")
+        active = node["active"]
+        last_seen = node["last_seen"]
+        created = node["created_at"]
+
+        # Check if online
+        online = False
+        if self.agent.gateway:
+            online = node_id in self.agent.gateway._nodes
+
+        status = "🟢 Online" if online else ("⚪ Offline" if active else "🔴 Revoked")
+        last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M") if last_seen else "never"
+        created_str = created.strftime("%Y-%m-%d %H:%M") if created else "?"
+
+        text = (
+            f"<b>{name}</b>\n\n"
+            f"Status: {status}\n"
+            f"Platform: {platform}\n"
+            f"Node ID: <code>{node_id}</code>\n"
+            f"Last seen: {last_seen_str}\n"
+            f"Paired: {created_str}"
+        )
+
+        buttons = []
+        buttons.append([InlineKeyboardButton("✏️ Rename", callback_data=f"nodes:rename_prompt:{node_id}")])
+        if active:
+            buttons.append([InlineKeyboardButton("🚫 Revoke", callback_data=f"nodes:revoke_confirm:{node_id}")])
+        else:
+            buttons.append([InlineKeyboardButton("✅ Reactivate", callback_data=f"nodes:reactivate:{node_id}")])
+            buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"nodes:delete_confirm:{node_id}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="nodes:main")])
+
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _handle_nodes_callback(self, query, data: str):
+        """Handle nodes:* callback routing."""
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+
+        if action == "main":
+            await self._nodes_menu_main(query)
+
+        elif action == "detail" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])  # node_id may contain colons
+            await self._nodes_menu_detail(query, node_id)
+
+        elif action == "token_prompt":
+            # Prompt for node name via text input
+            self._auth_state[query.from_user.id] = {
+                "type": "node_token",
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                "<b>Generate Pairing Token</b>\n\n"
+                "Send the name/alias for the new node (e.g. <code>laptop</code>, <code>gcp</code>).\n\n"
+                "Send /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif action == "rename_prompt" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            self._auth_state[query.from_user.id] = {
+                "type": "node_rename",
+                "node_id": node_id,
+                "chat_id": query.message.chat_id,
+            }
+            from ..gateway.auth import get_node
+            node = await get_node(node_id)
+            current_name = node["display_name"] if node else "?"
+            await query.edit_message_text(
+                f"<b>Rename Node</b>\n\n"
+                f"Current name: <b>{current_name}</b>\n\n"
+                f"Send the new name, or /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif action == "revoke_confirm" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..gateway.auth import get_node
+            node = await get_node(node_id)
+            name = node["display_name"] if node else node_id
+            buttons = [
+                [InlineKeyboardButton("Yes, revoke", callback_data=f"nodes:revoke:{node_id}")],
+                [InlineKeyboardButton("⬅️ Cancel", callback_data=f"nodes:detail:{node_id}")],
+            ]
+            await query.edit_message_text(
+                f"Revoke access for <b>{name}</b>?\n\nThe node will not be able to connect.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "revoke" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..gateway.auth import revoke_node
+            if await revoke_node(node_id):
+                # Disconnect if online
+                if self.agent.gateway:
+                    conn = self.agent.gateway.get_node(node_id)
+                    if conn:
+                        await conn.ws.close()
+                await query.answer("Node revoked")
+            else:
+                await query.answer("Failed to revoke", show_alert=True)
+            await self._nodes_menu_main(query)
+
+        elif action == "reactivate" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE paired_nodes SET active = true, updated_at = NOW() WHERE node_id = $1",
+                    node_id,
+                )
+            await query.answer("Node reactivated")
+            await self._nodes_menu_detail(query, node_id)
+
+        elif action == "delete_confirm" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..gateway.auth import get_node
+            node = await get_node(node_id)
+            name = node["display_name"] if node else node_id
+            buttons = [
+                [InlineKeyboardButton("Yes, delete permanently", callback_data=f"nodes:delete:{node_id}")],
+                [InlineKeyboardButton("⬅️ Cancel", callback_data=f"nodes:detail:{node_id}")],
+            ]
+            await query.edit_message_text(
+                f"Permanently delete <b>{name}</b>?\n\nThis cannot be undone.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "delete" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..gateway.auth import delete_node
+            if await delete_node(node_id):
+                await query.answer("Node deleted")
+            else:
+                await query.answer("Failed to delete", show_alert=True)
+            await self._nodes_menu_main(query)
+
+    async def _process_node_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Process text input for node management flows."""
+        bot = context.bot if context else self.app.bot
+        auth_type = state.get("type")
+        text = text.strip()
+
+        if auth_type == "node_token":
+            # Generate pairing token
+            from ..gateway.auth import generate_pairing_token, ensure_paired_nodes_table
+            await ensure_paired_nodes_table()
+            try:
+                token = await generate_pairing_token(node_name=text)
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        f"<b>Pairing token for '{text}'</b> (10 min)\n\n"
+                        f"<code>{token}</code>\n\n"
+                        f"Use with <code>syne node init</code> on the remote machine."
+                    ),
+                    parse_mode="HTML",
+                )
+            except ValueError as e:
+                await bot.send_message(chat_id=chat_id, text=f"{e}")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        elif auth_type == "node_rename":
+            node_id = state.get("node_id", "")
+            from ..gateway.auth import update_node_display_name
+            if await update_node_display_name(node_id, text):
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Node renamed to <b>{text}</b>.",
+                    parse_mode="HTML",
+                )
+            else:
+                await bot.send_message(chat_id=chat_id, text="Failed to rename node.")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        return False
+
     async def _cmd_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /groups command — manage group members, aliases, access levels.
 
@@ -5248,6 +5521,8 @@ Or just send me a message!"""
             return await self._process_group_alias_input(user_id, chat_id, text, state, context)
         elif auth_type == "wa_edit_name":
             return await self._process_wamembers_input(user_id, chat_id, text, state, context)
+        elif auth_type in ("node_token", "node_rename"):
+            return await self._process_node_input(user_id, chat_id, text, state, context)
 
         return False
 
@@ -6524,6 +6799,9 @@ Or just send me a message!"""
                 pending_key = f"pending_notify:{target_user_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
+
+        elif data.startswith("nodes:"):
+            await self._handle_nodes_callback(query, data)
 
         elif data.startswith("wa:"):
             # Interactive WA allowlist menu

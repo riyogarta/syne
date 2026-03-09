@@ -191,3 +191,23 @@ async def delete_node(node_id: str) -> bool:
             node_id,
         )
         return result != "DELETE 0"
+
+
+async def update_node_display_name(node_id: str, new_name: str) -> bool:
+    """Update a node's display name (alias)."""
+    async with get_connection() as conn:
+        result = await conn.execute(
+            "UPDATE paired_nodes SET display_name = $1, updated_at = NOW() WHERE node_id = $2",
+            new_name, node_id,
+        )
+        return result != "UPDATE 0"
+
+
+async def get_node(node_id: str) -> Optional[dict]:
+    """Get a single node by node_id."""
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT node_id, display_name, platform, active, last_seen, created_at FROM paired_nodes WHERE node_id = $1",
+            node_id,
+        )
+        return dict(row) if row else None
