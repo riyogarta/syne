@@ -339,6 +339,7 @@ class _CLIScreen:
         self._output = _ANSIOutputControl()
         self._input_buffer = Buffer(multiline=True, name="input")
         self._status_text = ""
+        self._exit_pending = False
 
         # Status line control (between output and separator)
         self._status_control = lambda: [
@@ -349,6 +350,7 @@ class _CLIScreen:
 
         @kb.add(Keys.Enter, eager=True)
         def _submit(event):
+            self._exit_pending = False
             text = self._input_buffer.text.strip()
             if text:
                 self._input_queue.put_nowait(text)
@@ -372,17 +374,13 @@ class _CLIScreen:
 
         @kb.add("c-c")
         def _ctrl_c(event):
-            buf = event.current_buffer
-            if buf.text.strip():
-                # First Ctrl+C: clear input
-                buf.reset()
-            else:
-                # Second Ctrl+C (empty input): exit
+            if self._exit_pending:
                 self._input_queue.put_nowait(None)
-
-        @kb.add("c-d")
-        def _ctrl_d(event):
-            self._input_queue.put_nowait(None)
+            else:
+                self._exit_pending = True
+                event.current_buffer.reset()
+                self._output.append(f"\n  {_DIM}Press Ctrl+C again to exit.{_RESET}\n")
+                event.app.invalidate()
 
         @kb.add("c-l")
         def _clear(event):
