@@ -67,35 +67,46 @@ def _vertex_endpoint(region: str, model: str) -> str:
 
 
 async def detect_vertex_region(api_key: str, model: str = "gemini-2.5-flash") -> str:
-    """Auto-detect the best Vertex AI region by testing common regions.
+    """Auto-detect the best Vertex AI region by racing all regions.
 
-    Tests each region with a lightweight request and returns the first
-    that responds with 200 or 400 (meaning the endpoint is alive).
-    Falls back to us-central1.
+    Sends a lightweight request to each region concurrently and returns
+    the first region that responds with HTTP 200 (actual success).
+    Falls back to us-central1 if none succeed.
     """
-    async def _test_region(region: str) -> Optional[str]:
+    async def _test_region(region: str) -> str:
         url = f"{_vertex_endpoint(region, model)}:generateContent"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     url,
-                    json={"contents": [{"parts": [{"text": "test"}]}]},
+                    json={"contents": [{"parts": [{"text": "hi"}]}]},
                     params={"key": api_key},
                 )
-                # 200 or 400 means the endpoint exists and responds
-                if resp.status_code in (200, 400):
+                if resp.status_code == 200:
                     return region
         except Exception:
             pass
-        return None
+        return ""
 
-    # Test regions concurrently
-    tasks = [_test_region(r) for r in _VERTEX_REGIONS]
-    results = await asyncio.gather(*tasks)
-    for r in results:
-        if r:
-            logger.info(f"Vertex AI auto-detected region: {r}")
-            return r
+    # Race all regions — first 200 wins
+    tasks = {asyncio.create_task(_test_region(r)): r for r in _VERTEX_REGIONS}
+    try:
+        while tasks:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=15)
+            if not done:
+                break
+            for task in done:
+                result = task.result()
+                if result:
+                    # Cancel remaining tasks
+                    for t in tasks:
+                        if t not in done:
+                            t.cancel()
+                    logger.info(f"Vertex AI auto-detected region: {result}")
+                    return result
+                del tasks[task]
+    except Exception as e:
+        logger.warning(f"Vertex AI region detection error: {e}")
 
     logger.warning("Vertex AI region auto-detection failed, using us-central1")
     return "us-central1"
