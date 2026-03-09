@@ -340,6 +340,7 @@ class _CLIScreen:
         self._input_buffer = Buffer(multiline=True, name="input")
         self._status_text = ""
         self._exit_pending = False
+        self._processing = False
 
         # Status line control (between output and separator)
         self._status_control = lambda: [
@@ -374,11 +375,13 @@ class _CLIScreen:
 
         @kb.add("c-c")
         def _ctrl_c(event):
-            if self._exit_pending:
+            if self._processing:
+                # Cancel running process
+                self._input_queue.put_nowait("__cancel__")
+            elif self._exit_pending:
                 self._input_queue.put_nowait(None)
             else:
                 self._exit_pending = True
-                event.current_buffer.reset()
                 self._output.append(f"\n  {_DIM}Press Ctrl+C again to exit.{_RESET}\n")
                 event.app.invalidate()
 
@@ -725,9 +728,14 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     screen.write(f"\n  {_DIM}Goodbye!{_RESET}\n")
                     break
 
+                if user_input == "__cancel__":
+                    continue
+
                 user_input = user_input.strip()
                 if not user_input:
                     continue
+
+                screen._exit_pending = False
 
                 # Echo user input to output area
                 screen.write(f"\n{_DIM}> {user_input}{_RESET}\n\n")
@@ -763,6 +771,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                             continue
 
                 # ── Process message ──
+                screen._processing = True
                 if remote_mode:
                     _r_streamed_text = False
                     _r_streamed_thinking = False
@@ -787,6 +796,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
                         continue
+                    finally:
+                        screen._processing = False
 
                 else:
                     # ── Local mode message handling ──
@@ -882,6 +893,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     except (KeyboardInterrupt, asyncio.CancelledError):
                         _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
                         continue
+                    finally:
+                        screen._processing = False
 
         except Exception as e:
             _write(f"\n  {_DIM_RED}Error: {e}{_RESET}\n")
