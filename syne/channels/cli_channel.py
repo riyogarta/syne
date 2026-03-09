@@ -358,6 +358,10 @@ class _CLIScreen:
         def _newline_esc(event):
             event.current_buffer.insert_text("\n")
 
+        @kb.add("c-enter")
+        def _newline_ctrl(event):
+            event.current_buffer.insert_text("\n")
+
         try:
             @kb.add("s-enter")
             def _newline_shift(event):
@@ -405,6 +409,7 @@ class _CLIScreen:
                     ),
                     height=D(min=1, max=10, preferred=1),
                     dont_extend_height=True,
+                    wrap_lines=True,
                 ),
                 # Bottom separator
                 Window(height=1, char="─", style="class:separator"),
