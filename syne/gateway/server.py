@@ -296,14 +296,22 @@ class Gateway:
         logger.info(f"Node paired: {node_id} ({display_name})")
 
     async def _handle_node_message(self, node: NodeConnection, msg: dict) -> None:
-        """Route an incoming message from a connected node."""
+        """Route an incoming message from a connected node.
+
+        IMPORTANT: 'message' (chat) is dispatched as a background task so the
+        message loop stays free to receive 'tool_result' messages.  Without
+        this, chat processing that invokes node-side tools would deadlock:
+        the server awaits the tool result, but the result can't be received
+        because the message loop is blocked waiting for chat to finish.
+        """
         msg_type = msg.get("type", "")
 
         if msg_type == "disconnect":
             logger.info(f"Node {node.node_id} sent graceful disconnect")
             await node.ws.close()
         elif msg_type == "message":
-            await self._handle_chat(node, msg)
+            # Run in background so message loop can still receive tool_result
+            asyncio.create_task(self._handle_chat(node, msg))
         elif msg_type == "tool_result":
             node.resolve_tool(
                 msg.get("request_id", ""),
