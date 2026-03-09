@@ -167,8 +167,11 @@ class NodeClient:
             "cwd": cwd or os.getcwd(),
         }))
 
-        # Process messages until response is done
-        await self._response_done.wait()
+        # Process messages until response is done (5 min timeout)
+        try:
+            await asyncio.wait_for(self._response_done.wait(), timeout=300)
+        except asyncio.TimeoutError:
+            return self._last_response or "Error: Response timed out (5 minutes)"
         return self._last_response
 
     async def listen(self) -> None:
