@@ -15,11 +15,16 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, D
 from prompt_toolkit.layout.controls import UIControl, UIContent, BufferControl
 from prompt_toolkit.layout.margins import Margin
 from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.styles import Style
+
+# Register Shift+Enter as a distinct key (prompt_toolkit maps it to Enter by default)
+ANSI_SEQUENCES["\x1b[27;2;13~"] = "<shift-enter>"  # xterm modifyOtherKeys
+ANSI_SEQUENCES["\x1b[13;2u"] = "<shift-enter>"      # kitty keyboard protocol
 from rich.console import Console
 
 from ..agent import SyneAgent
@@ -400,12 +405,9 @@ class _CLIScreen:
                 self._input_queue.put_nowait(text)
                 buf.reset()
 
-        try:
-            @kb.add("s-enter")
-            def _newline_shift(event):
-                event.current_buffer.insert_text("\n")
-        except Exception:
-            pass
+        @kb.add("<shift-enter>")
+        def _newline_shift(event):
+            event.current_buffer.insert_text("\n")
 
         @kb.add(Keys.BracketedPaste)
         def _paste(event):
