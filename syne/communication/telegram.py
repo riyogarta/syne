@@ -3635,7 +3635,7 @@ Or just send me a message!"""
                 entry = next((m for m in models if m.get("key") == node_model), None)
                 mlabel = entry.get("label", node_model) if entry else node_model
             else:
-                mlabel = default_label
+                mlabel = f"{default_label} (default)" if default_label else "default"
             buttons.append([InlineKeyboardButton(
                 f"{status_icon} {name} — {mlabel}",
                 callback_data=f"nodes:detail:{node_id}",
