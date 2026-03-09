@@ -27,6 +27,7 @@ console = Console()
 # ── ANSI helpers for raw streaming output ──
 _DIM = "\033[2m"
 _DIM_ITALIC = "\033[2;3m"
+_ITALIC = "\033[3m"
 _RESET = "\033[0m"
 _CYAN = "\033[36m"
 _BOLD = "\033[1m"
@@ -34,6 +35,87 @@ _BOLD_CYAN = "\033[1;36m"
 _DIM_GREEN = "\033[2;32m"
 _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
+_DIM_CYAN = "\033[2;36m"
+
+
+import re
+
+# Regex patterns for inline markdown → ANSI conversion
+_MD_BOLD = re.compile(r'\*\*(.+?)\*\*')
+_MD_ITALIC = re.compile(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)')
+_MD_CODE = re.compile(r'`([^`]+)`')
+_MD_HEADING = re.compile(r'^(#{1,3})\s+(.+)$')
+
+
+class _MarkdownStream:
+    """Line-buffered markdown-to-ANSI converter for streaming output.
+
+    Accumulates text chunks, converts complete lines from markdown to ANSI,
+    and writes to stdout. Handles code blocks and inline formatting.
+    """
+
+    def __init__(self):
+        self._buf = ""
+        self._in_code_block = False
+
+    def feed(self, chunk: str) -> None:
+        """Feed a text chunk — process and output complete lines."""
+        self._buf += chunk
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._emit_line(line)
+            sys.stdout.write("\n")
+        # Partial line — hold in buffer
+        sys.stdout.flush()
+
+    def flush(self) -> None:
+        """Flush remaining buffer (partial last line)."""
+        if self._buf:
+            self._emit_line(self._buf)
+            self._buf = ""
+        sys.stdout.flush()
+
+    def reset(self) -> None:
+        """Reset state for next message."""
+        self._buf = ""
+        self._in_code_block = False
+
+    def _emit_line(self, line: str) -> None:
+        """Convert a single line and write to stdout."""
+        # Code block toggle
+        if line.strip().startswith("```"):
+            self._in_code_block = not self._in_code_block
+            if self._in_code_block:
+                # Opening — show language hint dimly if present
+                lang = line.strip()[3:].strip()
+                if lang:
+                    sys.stdout.write(f"{_DIM}  [{lang}]{_RESET}")
+            else:
+                # Closing — just skip
+                pass
+            return
+
+        # Inside code block — dim, no markdown processing
+        if self._in_code_block:
+            sys.stdout.write(f"{_DIM_CYAN}{line}{_RESET}")
+            return
+
+        # Heading
+        m = _MD_HEADING.match(line)
+        if m:
+            sys.stdout.write(f"{_BOLD}{m.group(2)}{_RESET}")
+            return
+
+        # Horizontal rule
+        if line.strip() in ("---", "***", "___"):
+            return
+
+        # Inline: bold, italic, code
+        line = _MD_BOLD.sub(f'{_BOLD}\\1{_RESET}', line)
+        line = _MD_CODE.sub(f'{_DIM_CYAN}\\1{_RESET}', line)
+        line = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', line)
+
+        sys.stdout.write(line)
 
 
 _SLASH_COMMANDS = [
@@ -453,6 +535,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _r_thinking_done = False
             _r_status = [None]  # mutable container for closure access
             _r_reasoning_visible = node_client.server_meta.get("reasoning_visible", False)
+            _r_md = _MarkdownStream()
 
             def _remote_on_response(text: str, done: bool):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
@@ -468,8 +551,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         sys.stdout.write(f"{_RESET}\n")
                         sys.stdout.flush()
                     _r_in_thinking = False
-                sys.stdout.write(text)
-                sys.stdout.flush()
+                _r_md.feed(text)
 
             def _remote_on_thinking(text: str):
                 nonlocal _r_streamed_thinking, _r_in_thinking
@@ -663,6 +745,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     await node_client.send_message(user_input, cwd=cwd)
 
                     # Cleanup
+                    _r_md.flush()
+                    _r_md.reset()
                     if _r_status[0]:
                         _r_status[0].stop()
                         _r_status[0] = None
@@ -690,6 +774,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 _in_thinking = False
                 _thinking_done = False
                 status = None
+                _md = _MarkdownStream()
 
                 _reasoning_visible = False
                 _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
@@ -708,8 +793,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                             sys.stdout.write(f"{_RESET}\n")
                             sys.stdout.flush()
                         _in_thinking = False
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
+                    _md.feed(chunk)
 
                 def _on_thinking(chunk: str):
                     nonlocal _streamed_any_thinking, _in_thinking, status
@@ -775,6 +859,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
                     )
 
+                    _md.flush()
+                    _md.reset()
                     _stop_status(status, agent)
                     status = None
 
