@@ -15,8 +15,9 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import ANSI, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import Layout, HSplit, Window, D
+from prompt_toolkit.layout import Layout, HSplit, VSplit, Window, D
 from prompt_toolkit.layout.controls import UIControl, UIContent, BufferControl
+from prompt_toolkit.layout.margins import Margin
 from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.styles import Style
 from rich.console import Console
@@ -241,8 +242,16 @@ _TOOL_LABELS = {
 }
 
 
+_last_tool_activity = {"key": ""}
+
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
     """Display a tool call as a bullet point line (Claude Code style)."""
+    # Dedup: skip if identical to last call
+    dedup_key = f"{name}:{list(args.values())[:1]}"
+    if dedup_key == _last_tool_activity["key"]:
+        return
+    _last_tool_activity["key"] = dedup_key
+
     label = _TOOL_LABELS.get(name, name)
 
     arg_hint = ""
@@ -334,16 +343,24 @@ class _ANSIOutputControl(UIControl):
 
         total = len(all_lines)
 
-        def get_line(i: int):
-            return all_lines[i] if i < total else [("", " ")]
+        # Viewport approach: only give Window the visible slice
+        if total <= height:
+            visible = all_lines
+        else:
+            end = total - self._scroll_offset
+            start = max(0, end - height)
+            end = max(start, end)
+            visible = all_lines[start:end]
 
-        # Cursor position determines scroll: place cursor at target line
-        target_y = max(0, total - 1 - self._scroll_offset)
+        vcount = len(visible)
+
+        def get_line(i: int):
+            return visible[i] if i < vcount else [("", " ")]
 
         return UIContent(
             get_line=get_line,
-            line_count=total,
-            cursor_position=Point(x=0, y=target_y),
+            line_count=vcount,
+            cursor_position=Point(x=0, y=max(0, vcount - 1)),
         )
 
     def is_focusable(self) -> bool:
@@ -382,11 +399,6 @@ class _CLIScreen:
             if text:
                 self._input_queue.put_nowait(text)
                 buf.reset()
-
-        @kb.add(Keys.Escape)
-        def _escape(event):
-            if self._processing:
-                self._input_queue.put_nowait("__cancel__")
 
         try:
             @kb.add("s-enter")
@@ -441,10 +453,20 @@ class _CLIScreen:
         from prompt_toolkit import Application
         from prompt_toolkit.layout.controls import FormattedTextControl
 
+        _MARGIN = 2  # left margin spaces
+
+        class _PadMargin(Margin):
+            def get_width(self, get_ui_content):
+                return _MARGIN
+            def create_margin(self, window_render_info, width, height):
+                return [("", " " * _MARGIN)] * height
+
         self._output_window = Window(
             content=self._output,
             wrap_lines=True,
             always_hide_cursor=True,
+            left_margins=[_PadMargin()],
+            right_margins=[_PadMargin()],
         )
 
         self._app = Application(
@@ -457,7 +479,7 @@ class _CLIScreen:
                 Window(
                     content=BufferControl(
                         buffer=self._input_buffer,
-                        input_processors=[BeforeInput("> ")],
+                        input_processors=[BeforeInput("  > ")],
                         focus_on_click=True,
                     ),
                     height=D(min=1, max=10, preferred=1),
@@ -815,6 +837,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 screen._exit_pending = False
 
                 # Echo user input to output area
+                _last_tool_activity["key"] = ""
                 screen.write(f"\n{_DIM}> {user_input}{_RESET}\n\n")
 
                 # ── Slash commands ──
