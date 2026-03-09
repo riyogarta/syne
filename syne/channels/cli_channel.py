@@ -694,12 +694,13 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             except Exception:
                 pass
 
-        # Push prompt to bottom of screen
+        # Clear screen and move cursor to bottom
         try:
             rows = os.get_terminal_size().lines
         except OSError:
             rows = 24
-        sys.stdout.write("\n" * (rows - 2))
+        sys.stdout.write("\033[2J")  # clear screen
+        sys.stdout.write(f"\033[{rows};1H")  # move cursor to last row
         sys.stdout.flush()
 
         # ── REPL loop ──
@@ -991,16 +992,27 @@ def _make_separator() -> str:
 
 
 async def _get_input(model_name: str = "") -> str | None:
-    """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
-    sep = _make_separator()
+    """Get user input using prompt_toolkit (supports Shift+Enter for newlines).
 
-    # Print both lines with a blank line between, then move cursor up
-    # ─────────────
-    # > _              ← cursor here
-    # ─────────────
-    sys.stdout.write(f"{_DIM}{sep}{_RESET}\n\n{_DIM}{sep}{_RESET}")
-    # Move cursor up 1 line (to the blank line between separators)
-    sys.stdout.write("\033[1A\r")
+    Renders:
+        ────────────────
+        > _
+        ────────────────
+
+    After Enter, the bottom separator is erased so output flows
+    directly below the user's input.
+    """
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    sep = "─" * cols
+
+    # Print top separator, blank line (for prompt), bottom separator
+    # Then move cursor up to the blank line
+    sys.stdout.write(f"{_DIM}{sep}{_RESET}\n")
+    sys.stdout.write(f"\n{_DIM}{sep}{_RESET}")
+    sys.stdout.write("\033[1A\r")  # cursor up 1 to blank line
     sys.stdout.flush()
 
     prompt_str = "> "
@@ -1010,6 +1022,12 @@ async def _get_input(model_name: str = "") -> str | None:
             multiline=True,
             prompt_continuation="  ",
         )
+        # Erase the bottom separator: move down, clear line, move back
+        sys.stdout.write("\033[1B")  # down 1 to bottom separator
+        sys.stdout.write(f"\r{' ' * cols}\r")  # clear it
+        sys.stdout.write("\033[1A")  # back up
+        sys.stdout.write("\n")  # new line after input
+        sys.stdout.flush()
         return result
     except EOFError:
         return None
