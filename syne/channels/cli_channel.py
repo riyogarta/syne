@@ -262,24 +262,42 @@ def _format_tokens(n: int) -> str:
 
 
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
-    """Display a tool call with colored output (shared by local + remote mode)."""
-    args_str = ""
+    """Display a tool call as a single overwriting status line.
+
+    Each call overwrites the previous line so tool activity looks like
+    a live ticker instead of a growing log.
+    """
+    # Build compact arg summary
+    arg_hint = ""
     if args:
-        parts = []
-        for k, v in list(args.items())[:3]:
-            vs = str(v)
-            if len(vs) > 40:
-                vs = vs[:37] + "..."
-            parts.append(f'{_DIM}{k}={_RESET}{_DIM_YELLOW}"{vs}"{_RESET}')
-        args_str = f"{_DIM}, {_RESET}".join(parts)
-    sys.stdout.write(f"  {_BOLD_CYAN}> {name}{_RESET}{_DIM}({_RESET}{args_str}{_DIM}){_RESET}\n")
+        # Pick the most informative arg value
+        for key in ("path", "file_path", "file", "query", "command", "action", "url", "name", "key"):
+            if key in args:
+                v = str(args[key])
+                if len(v) > 50:
+                    v = v[:47] + "..."
+                arg_hint = f" {_DIM_YELLOW}{v}{_RESET}"
+                break
+        if not arg_hint:
+            v = str(list(args.values())[0])
+            if len(v) > 50:
+                v = v[:47] + "..."
+            arg_hint = f" {_DIM_YELLOW}{v}{_RESET}"
+
+    # Result indicator
     preview = result_preview.strip().replace("\n", " ")
-    if len(preview) > 80:
-        preview = preview[:77] + "..."
-    if preview:
-        is_error = preview.lower().startswith("error")
-        color = _DIM_RED if is_error else _DIM_GREEN
-        sys.stdout.write(f"    {color}{preview}{_RESET}\n")
+    is_error = preview.lower().startswith("error") if preview else False
+    indicator = f" {_DIM_RED}✗{_RESET}" if is_error else f" {_DIM_GREEN}✓{_RESET}"
+
+    # Get terminal width for proper clearing
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+
+    line = f"  {_DIM_CYAN}{name}{_RESET}{arg_hint}{indicator}"
+    # \r + clear line, write, no newline
+    sys.stdout.write(f"\r{' ' * cols}\r{line}")
     sys.stdout.flush()
 
 
@@ -534,8 +552,18 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _r_in_thinking = False
             _r_thinking_done = False
             _r_status = [None]  # mutable container for closure access
+            _r_tool_shown = [False]
             _r_reasoning_visible = node_client.server_meta.get("reasoning_visible", False)
             _r_md = _MarkdownStream()
+
+            def _r_clear_tool_line():
+                if _r_tool_shown[0]:
+                    try:
+                        cols = os.get_terminal_size().columns
+                    except OSError:
+                        cols = 80
+                    sys.stdout.write(f"\r{' ' * cols}\r")
+                    _r_tool_shown[0] = False
 
             def _remote_on_response(text: str, done: bool):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
@@ -543,6 +571,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     return
                 if not _r_streamed_text:
                     _r_streamed_text = True
+                    _r_clear_tool_line()
                     if _r_status[0]:
                         _r_status[0].stop()
                         _r_status[0] = None
@@ -559,6 +588,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     return
                 if not _r_streamed_thinking:
                     _r_streamed_thinking = True
+                    _r_clear_tool_line()
                     if _r_status[0]:
                         _r_status[0].stop()
                         _r_status[0] = None
@@ -579,8 +609,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     _r_status[0].stop()
                     _r_status[0] = None
                 _format_tool_activity(name, args, result_preview)
-                _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
-                _r_status[0].start()
+                _r_tool_shown[0] = True
 
             def _remote_on_status(message: str):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
@@ -594,6 +623,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     sys.stdout.write(f"{_RESET}\n")
                     sys.stdout.flush()
                     _r_in_thinking = False
+                _r_clear_tool_line()
                 # Show as spinner
                 if _r_status[0]:
                     _r_status[0].stop()
@@ -781,10 +811,22 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 if _active_conv:
                     _reasoning_visible = _active_conv.reasoning_visible
 
+                def _clear_tool_line():
+                    """Clear the single-line tool activity display."""
+                    nonlocal _tool_activity_shown
+                    if _tool_activity_shown:
+                        try:
+                            cols = os.get_terminal_size().columns
+                        except OSError:
+                            cols = 80
+                        sys.stdout.write(f"\r{' ' * cols}\r")
+                        _tool_activity_shown = False
+
                 def _on_text(chunk: str):
                     nonlocal _streamed_any_text, _in_thinking, _thinking_done, status
                     if not _streamed_any_text:
                         _streamed_any_text = True
+                        _clear_tool_line()
                         if status:
                             status.stop()
                             status = None
@@ -801,6 +843,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         return
                     if not _streamed_any_thinking:
                         _streamed_any_thinking = True
+                        _clear_tool_line()
                         if status:
                             status.stop()
                             status = None
@@ -822,8 +865,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
                     agent.conversations.set_stream_callbacks(stream_cbs)
 
+                    _tool_activity_shown = False
+
                     async def _on_tool_detail(name: str, args: dict, result_preview: str):
-                        nonlocal status, _streamed_any_text
+                        nonlocal status, _streamed_any_text, _tool_activity_shown
                         if _streamed_any_text:
                             sys.stdout.write("\n")
                             _streamed_any_text = False
@@ -831,14 +876,26 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                             status.stop()
                             status = None
                         _format_tool_activity(name, args, result_preview)
-                        status = console.status("[bold blue]Thinking...", spinner="dots")
-                        status.start()
-                        agent.conversations._active_status = status
+                        _tool_activity_shown = True
 
                     agent.conversations.set_tool_detail_callback(_on_tool_detail)
 
                     async def _on_tool(name: str):
-                        if status:
+                        nonlocal status, _tool_activity_shown
+                        # Clear previous tool activity line, show spinner for new tool
+                        if _tool_activity_shown:
+                            try:
+                                cols = os.get_terminal_size().columns
+                            except OSError:
+                                cols = 80
+                            sys.stdout.write(f"\r{' ' * cols}\r")
+                            sys.stdout.flush()
+                            _tool_activity_shown = False
+                        if not status:
+                            status = console.status(f"[bold blue]Running {name}...", spinner="dots")
+                            status.start()
+                            agent.conversations._active_status = status
+                        else:
                             status.update(f"[bold blue]Running {name}...")
 
                     agent.conversations.set_tool_callback(_on_tool)
