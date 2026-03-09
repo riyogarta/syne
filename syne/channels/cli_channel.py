@@ -44,6 +44,11 @@ _DIM_GREEN = "\033[2;32m"
 _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
 _DIM_CYAN = "\033[2;36m"
+_BG_DIM = "\033[48;5;236m"  # subtle dark background for user messages
+
+# ── Spinner ──
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_spinner_task: asyncio.Task | None = None
 
 
 def _write(text: str):
@@ -60,6 +65,33 @@ def _separator():
     """Print a full-width ─ separator line."""
     w = _term_width()
     _write(f"{_DIM}{'─' * w}{_RESET}\n")
+
+
+async def _start_spinner(message: str = "Working..."):
+    """Start an animated spinner on the current line."""
+    global _spinner_task
+    _stop_spinner()  # cancel any existing
+
+    async def _spin():
+        i = 0
+        try:
+            while True:
+                frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
+                _write(f"\r  {_DIM_CYAN}{frame}{_RESET} {_DIM}{message}{_RESET}\033[K")
+                i += 1
+                await asyncio.sleep(0.08)
+        except asyncio.CancelledError:
+            _write(f"\r\033[2K")  # clear spinner line
+
+    _spinner_task = asyncio.create_task(_spin())
+
+
+def _stop_spinner():
+    """Stop the spinner if running."""
+    global _spinner_task
+    if _spinner_task and not _spinner_task.done():
+        _spinner_task.cancel()
+    _spinner_task = None
 
 
 # ── Markdown stream ──
@@ -202,6 +234,8 @@ _last_tool_key = ""
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
     """Display a tool call as a bullet point line."""
     global _last_tool_key
+    _stop_spinner()
+
     dedup_key = f"{name}:{list(args.values())[:1]}"
     if dedup_key == _last_tool_key:
         return
@@ -439,27 +473,32 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
             def _remote_on_response(text: str, done: bool):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
+                _stop_spinner()
                 if not text and done:
                     return
                 if not _r_streamed_text:
                     _r_streamed_text = True
                     if _r_streamed_thinking and not _r_thinking_done:
                         _r_thinking_done = True
-                        _write(f"{_RESET}\n")
+                        _write(f"{_RESET}\n\n")
                     _r_in_thinking = False
                 _r_md.feed(text)
 
             def _remote_on_thinking(text: str):
                 nonlocal _r_streamed_thinking, _r_in_thinking
+                _stop_spinner()
                 if not _r_reasoning_visible:
+                    if not _r_streamed_thinking:
+                        _r_streamed_thinking = True
+                        _write(f"  {_DIM_ITALIC}Thinking...{_RESET}")
                     return
                 if not _r_streamed_thinking:
                     _r_streamed_thinking = True
                     _r_in_thinking = True
-                    _write(_DIM_ITALIC)
+                    _write(f"  {_DIM_ITALIC}")
                 if not _r_in_thinking:
                     _r_in_thinking = True
-                    _write(_DIM_ITALIC)
+                    _write(f"  {_DIM_ITALIC}")
                 _write(text)
 
             def _remote_on_tool_activity(name: str, args: dict, result_preview: str):
@@ -612,6 +651,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
             # ── Process message ──
             _write("\n")
+            await _start_spinner()
+
             if remote_mode:
                 _r_streamed_text = False
                 _r_streamed_thinking = False
@@ -620,13 +661,16 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                 try:
                     if not node_client._connected.is_set():
+                        _stop_spinner()
                         _write(f"  {_DIM_YELLOW}Reconnecting...{_RESET}\n")
                         await node_client.connect()
                         listen_task = asyncio.create_task(node_client.listen())
                         _write(f"  {_DIM_GREEN}Reconnected.{_RESET}\n")
+                        await _start_spinner()
 
                     await node_client.send_message(user_input, cwd=cwd)
 
+                    _stop_spinner()
                     _r_md.flush()
                     _r_md.reset()
                     _write(_RESET)
@@ -634,6 +678,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     if _r_streamed_text:
                         _write("\n")
                 except (KeyboardInterrupt, asyncio.CancelledError):
+                    _stop_spinner()
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
                     continue
 
@@ -652,17 +697,22 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                 def _on_text(chunk: str):
                     nonlocal _streamed_any_text, _in_thinking, _thinking_done
+                    _stop_spinner()
                     if not _streamed_any_text:
                         _streamed_any_text = True
                         if _streamed_any_thinking and not _thinking_done:
                             _thinking_done = True
-                            _write(f"{_RESET}\n")
+                            _write(f"{_RESET}\n\n")
                         _in_thinking = False
                     _md.feed(chunk)
 
                 def _on_thinking(chunk: str):
                     nonlocal _streamed_any_thinking, _in_thinking
+                    _stop_spinner()
                     if not _reasoning_visible:
+                        if not _streamed_any_thinking:
+                            _streamed_any_thinking = True
+                            _write(f"  {_DIM_ITALIC}Thinking...{_RESET}")
                         return
                     if not _streamed_any_thinking:
                         _streamed_any_thinking = True
@@ -703,6 +753,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
                     )
 
+                    _stop_spinner()
                     _md.flush()
                     _md.reset()
                     _write(_RESET)
@@ -724,9 +775,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     if in_tok or out_tok:
                         _session_usage.total_in += in_tok
                         _session_usage.total_out += out_tok
-                        _write(f"\n  {_DIM}[{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out]{_RESET}\n")
+                        _write(f"\n  {_DIM}↑{_format_tokens(in_tok)} ↓{_format_tokens(out_tok)}{_RESET}\n")
 
                 except (KeyboardInterrupt, asyncio.CancelledError):
+                    _stop_spinner()
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
                     continue
 
