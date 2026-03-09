@@ -261,15 +261,38 @@ def _format_tokens(n: int) -> str:
     return f"{n:,}"
 
 
+# Friendly display names for tools
+_TOOL_LABELS = {
+    "read_source": "Read",
+    "file_read": "Read",
+    "file_write": "Write",
+    "exec": "Run",
+    "db_query": "Query",
+    "web_fetch": "Fetch",
+    "web_search": "Search",
+    "send_message": "Send",
+    "send_file": "SendFile",
+    "send_voice": "Voice",
+    "send_reaction": "React",
+    "manage_schedule": "Schedule",
+    "update_config": "Config",
+    "update_ability": "Ability",
+    "memory_search": "MemSearch",
+    "memory_add": "MemAdd",
+}
+
+
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
     """Display a tool call as a bullet point line (Claude Code style).
 
     Examples:
-        ● read_source(syne/boot.py)
+        ● Read(syne/boot.py)
           ⎿  1,245 chars
-        ● exec(pip install -e .)
-          ⎿  OK
+        ● Run(pip install -e .)
+          ⎿  Installed successfully
     """
+    label = _TOOL_LABELS.get(name, name)
+
     # Build compact arg hint
     arg_hint = ""
     if args:
@@ -288,9 +311,9 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
 
     # Tool line
     if arg_hint:
-        sys.stdout.write(f"  {_DIM_CYAN}●{_RESET} {name}({_DIM_YELLOW}{arg_hint}{_RESET})\n")
+        sys.stdout.write(f"\n  {_DIM_CYAN}●{_RESET} {label}({_DIM_YELLOW}{arg_hint}{_RESET})\n")
     else:
-        sys.stdout.write(f"  {_DIM_CYAN}●{_RESET} {name}\n")
+        sys.stdout.write(f"\n  {_DIM_CYAN}●{_RESET} {label}\n")
 
     # Result preview
     preview = result_preview.strip().replace("\n", " ")
