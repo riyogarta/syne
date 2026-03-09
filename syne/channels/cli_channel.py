@@ -576,7 +576,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _r_streamed_thinking = False
             _r_in_thinking = False
             _r_thinking_done = False
-            _r_status = [None]  # mutable container for closure access
             _r_reasoning_visible = node_client.server_meta.get("reasoning_visible", False)
             _r_md = _MarkdownStream()
 
@@ -586,9 +585,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     return
                 if not _r_streamed_text:
                     _r_streamed_text = True
-                    if _r_status[0]:
-                        _r_status[0].stop()
-                        _r_status[0] = None
+                    _update_status_bar("Responding...")
                     if _r_streamed_thinking and not _r_thinking_done:
                         _r_thinking_done = True
                         sys.stdout.write(f"{_RESET}\n")
@@ -602,9 +599,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     return
                 if not _r_streamed_thinking:
                     _r_streamed_thinking = True
-                    if _r_status[0]:
-                        _r_status[0].stop()
-                        _r_status[0] = None
+                    _update_status_bar("Thinking...")
                     _r_in_thinking = True
                     sys.stdout.write(_DIM_ITALIC)
                 if not _r_in_thinking:
@@ -618,12 +613,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 if _r_streamed_text:
                     sys.stdout.write("\n")
                     _r_streamed_text = False
-                if _r_status[0]:
-                    _r_status[0].stop()
-                    _r_status[0] = None
                 _format_tool_activity(name, args, result_preview)
-                _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
-                _r_status[0].start()
+                _update_status_bar("Thinking...")
 
             def _remote_on_status(message: str):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
@@ -636,11 +627,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     sys.stdout.write(f"{_RESET}\n")
                     sys.stdout.flush()
                     _r_in_thinking = False
-                # Show as spinner
-                if _r_status[0]:
-                    _r_status[0].stop()
-                _r_status[0] = console.status(f"[bold blue]{message}", spinner="dots")
-                _r_status[0].start()
+                _update_status_bar(message)
 
             node_client._on_response = _remote_on_response
             node_client._on_thinking = _remote_on_thinking
@@ -762,36 +749,28 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         continue
 
             # Phase 2: Process message
-            console.print()
-
             if remote_mode:
                 # Reset streaming state for this message
                 _r_streamed_text = False
                 _r_streamed_thinking = False
                 _r_in_thinking = False
                 _r_thinking_done = False
-                _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
-                _r_status[0].start()
+                _enter_scroll_mode("Thinking...")
 
                 try:
                     # Auto-reconnect if connection lost
                     if not node_client._connected.is_set():
-                        _r_status[0].stop()
-                        console.print("[yellow]Connection lost. Reconnecting...[/yellow]")
+                        _update_status_bar("Reconnecting...")
                         await node_client.connect()
                         listen_task = asyncio.create_task(node_client.listen())
-                        console.print("[green]Reconnected.[/green]")
-                        _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
-                        _r_status[0].start()
+                        sys.stdout.write(f"  {_DIM_GREEN}Reconnected.{_RESET}\n")
+                        sys.stdout.flush()
 
                     await node_client.send_message(user_input, cwd=cwd)
 
                     # Cleanup
                     _r_md.flush()
                     _r_md.reset()
-                    if _r_status[0]:
-                        _r_status[0].stop()
-                        _r_status[0] = None
                     sys.stdout.write(_RESET)
                     sys.stdout.flush()
 
@@ -799,14 +778,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         sys.stdout.write("\n")
                         sys.stdout.flush()
 
-                    console.print()
+                    _exit_scroll_mode()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     sys.stdout.write(_RESET)
                     sys.stdout.flush()
-                    if _r_status[0]:
-                        _r_status[0].stop()
-                        _r_status[0] = None
-                    console.print("\n[yellow]Cancelled[/yellow]\n")
+                    _exit_scroll_mode()
+                    sys.stdout.write(f"\n  {_DIM_YELLOW}Cancelled{_RESET}\n\n")
+                    sys.stdout.flush()
                     continue
 
             else:
@@ -815,7 +795,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 _streamed_any_thinking = False
                 _in_thinking = False
                 _thinking_done = False
-                status = None
                 _md = _MarkdownStream()
 
                 _reasoning_visible = False
@@ -824,12 +803,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     _reasoning_visible = _active_conv.reasoning_visible
 
                 def _on_text(chunk: str):
-                    nonlocal _streamed_any_text, _in_thinking, _thinking_done, status
+                    nonlocal _streamed_any_text, _in_thinking, _thinking_done
                     if not _streamed_any_text:
                         _streamed_any_text = True
-                        if status:
-                            status.stop()
-                            status = None
+                        _update_status_bar("Responding...")
                         if _streamed_any_thinking and not _thinking_done:
                             _thinking_done = True
                             sys.stdout.write(f"{_RESET}\n")
@@ -838,14 +815,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     _md.feed(chunk)
 
                 def _on_thinking(chunk: str):
-                    nonlocal _streamed_any_thinking, _in_thinking, status
+                    nonlocal _streamed_any_thinking, _in_thinking
                     if not _reasoning_visible:
                         return
                     if not _streamed_any_thinking:
                         _streamed_any_thinking = True
-                        if status:
-                            status.stop()
-                            status = None
+                        _update_status_bar("Thinking...")
                         _in_thinking = True
                         sys.stdout.write(_DIM_ITALIC)
                     if not _in_thinking:
@@ -856,33 +831,24 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                 try:
                     msg = user_input
-                    status = console.status("[bold blue]Thinking...", spinner="dots")
-                    status.start()
-                    agent.conversations._active_status = status
-                    _cli_status_callback._active_status = status
+                    # Enter scroll mode: output scrolls above, status bar fixed at bottom
+                    _enter_scroll_mode("Thinking...")
 
                     stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
                     agent.conversations.set_stream_callbacks(stream_cbs)
 
                     async def _on_tool_detail(name: str, args: dict, result_preview: str):
-                        nonlocal status, _streamed_any_text
+                        nonlocal _streamed_any_text
                         if _streamed_any_text:
                             sys.stdout.write("\n")
                             _streamed_any_text = False
-                        if status:
-                            status.stop()
-                            status = None
                         _format_tool_activity(name, args, result_preview)
-                        status = console.status("[bold blue]Thinking...", spinner="dots")
-                        status.start()
-                        agent.conversations._active_status = status
+                        _update_status_bar("Thinking...")
 
                     agent.conversations.set_tool_detail_callback(_on_tool_detail)
 
                     async def _on_tool(name: str):
-                        nonlocal status
-                        if status:
-                            status.update(f"[bold blue]Running {name}...")
+                        _update_status_bar(f"Running {name}...")
 
                     agent.conversations.set_tool_callback(_on_tool)
 
@@ -904,9 +870,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                     _md.flush()
                     _md.reset()
-                    _stop_status(status, agent)
-                    status = None
-
                     sys.stdout.write(_RESET)
                     sys.stdout.flush()
 
@@ -917,16 +880,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         _display_response(response)
 
                     _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
-                    if _active_conv_final and hasattr(_active_conv_final, '_last_response_usage'):
-                        in_tok = _active_conv_final._last_response_usage.get("input_tokens", 0)
-                        out_tok = _active_conv_final._last_response_usage.get("output_tokens", 0)
-                    elif response:
-                        in_tok = 0
-                        out_tok = 0
-                    else:
-                        in_tok = 0
-                        out_tok = 0
-
+                    in_tok = 0
+                    out_tok = 0
                     if _active_conv_final:
                         last_resp = getattr(_active_conv_final, '_last_chat_response', None)
                         if last_resp:
@@ -936,15 +891,19 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     if in_tok or out_tok:
                         _session_usage.total_in += in_tok
                         _session_usage.total_out += out_tok
-                        console.print(f"[dim][{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out][/dim]")
+                        sys.stdout.write(f"  {_DIM}[{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out]{_RESET}\n")
+                        sys.stdout.flush()
 
-                    console.print()
+                    # Exit scroll mode before showing next prompt
+                    _exit_scroll_mode()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     sys.stdout.write(_RESET)
                     sys.stdout.flush()
-                    _stop_status(status, agent)
-                    status = None
-                    console.print("\n[yellow]Cancelled[/yellow]\n")
+                    _exit_scroll_mode()
+                    sys.stdout.write(f"\n  {_DIM_YELLOW}Cancelled{_RESET}\n\n")
+                    sys.stdout.flush()
                     continue
 
     except Exception as e:
@@ -983,50 +942,82 @@ def _stop_status(status, agent):
         pass
 
 
-def _make_separator() -> str:
+def _term_size():
     try:
-        cols = os.get_terminal_size().columns
+        return os.get_terminal_size()
     except OSError:
-        cols = 80
-    return "─" * cols
+        return os.terminal_size((80, 24))
 
 
-async def _get_input(model_name: str = "") -> str | None:
+def _enter_scroll_mode(status_text: str = "Thinking..."):
+    """Set ANSI scrolling region, reserving bottom 2 rows for status bar.
+
+    Layout:
+        rows 1..(rows-2)  — scrolling output area
+        row  (rows-1)     — separator ─────
+        row  rows         — status text
+    """
+    sz = _term_size()
+    rows, cols = sz.lines, sz.columns
+    sep = "─" * cols
+
+    # Set scrolling region (top rows only)
+    sys.stdout.write(f"\033[1;{rows - 2}r")
+    # Draw fixed bottom bar
+    sys.stdout.write(f"\033[{rows - 1};1H\033[2K{_DIM}{sep}{_RESET}")
+    sys.stdout.write(f"\033[{rows};1H\033[2K  {_DIM_CYAN}{status_text}{_RESET}")
+    # Move cursor back into scrolling region
+    sys.stdout.write(f"\033[{rows - 2};1H")
+    sys.stdout.flush()
+
+
+def _update_status_bar(text: str):
+    """Update the fixed status text at the bottom without moving output cursor."""
+    sz = _term_size()
+    rows, cols = sz.lines, sz.columns
+    sys.stdout.write("\033[s")  # save cursor
+    sys.stdout.write(f"\033[{rows};1H\033[2K  {_DIM_CYAN}{text}{_RESET}")
+    sys.stdout.write("\033[u")  # restore cursor
+    sys.stdout.flush()
+
+
+def _exit_scroll_mode():
+    """Reset scrolling region to full screen and clear the status bar."""
+    sz = _term_size()
+    rows, cols = sz.lines, sz.columns
+    sys.stdout.write("\033[r")  # reset scrolling region
+    # Clear the status bar rows
+    sys.stdout.write(f"\033[{rows - 1};1H\033[2K")
+    sys.stdout.write(f"\033[{rows};1H\033[2K")
+    sys.stdout.flush()
+
+
+async def _get_input() -> str | None:
     """Get user input using prompt_toolkit (supports Shift+Enter for newlines).
 
-    Renders:
+    Renders prompt between two separator lines:
         ────────────────
         > _
         ────────────────
-
-    After Enter, the bottom separator is erased so output flows
-    directly below the user's input.
     """
-    try:
-        cols = os.get_terminal_size().columns
-    except OSError:
-        cols = 80
+    sz = _term_size()
+    cols = sz.columns
     sep = "─" * cols
 
-    # Print top separator, blank line (for prompt), bottom separator
-    # Then move cursor up to the blank line
+    # Top separator, blank (for prompt), bottom separator
     sys.stdout.write(f"{_DIM}{sep}{_RESET}\n")
     sys.stdout.write(f"\n{_DIM}{sep}{_RESET}")
-    sys.stdout.write("\033[1A\r")  # cursor up 1 to blank line
+    sys.stdout.write("\033[1A\r")  # cursor up to blank line
     sys.stdout.flush()
 
-    prompt_str = "> "
     try:
         result = await _prompt_session.prompt_async(
-            prompt_str,
+            "> ",
             multiline=True,
             prompt_continuation="  ",
         )
-        # Erase the bottom separator: move down, clear line, move back
-        sys.stdout.write("\033[1B")  # down 1 to bottom separator
-        sys.stdout.write(f"\r{' ' * cols}\r")  # clear it
-        sys.stdout.write("\033[1A")  # back up
-        sys.stdout.write("\n")  # new line after input
+        # Clear the bottom separator (will be replaced by scroll mode bar)
+        sys.stdout.write("\033[1B\033[2K\033[1A\n")
         sys.stdout.flush()
         return result
     except EOFError:
@@ -1049,13 +1040,7 @@ def _display_response(response: str):
 
 async def _cli_status_callback(session_id: int, message: str):
     """Display status messages (compaction, etc.) in terminal."""
-    # Pause spinner if active so message is visible
-    _status = getattr(_cli_status_callback, '_active_status', None)
-    if _status:
-        _status.stop()
-    console.print(f"\n[dim italic]{message}[/dim italic]")
-    if _status:
-        _status.start()
+    _update_status_bar(message)
 
 
 async def _handle_cli_command(
