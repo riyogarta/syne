@@ -167,9 +167,14 @@ class Gateway:
             identity = await get_identity()
             models = await get_config("provider.models", [])
             active_key = await get_config("provider.active_model", "")
-            active_entry = next((m for m in models if m.get("key") == active_key), {})
-            model_id = active_entry.get("model_id", active_key)
             tool_count = len(self.agent.tools.list_tools("owner")) if self.agent.tools else 0
+
+            # Check for per-node model override
+            node_record = await auth.get_node(node.node_id)
+            node_model_key = (node_record or {}).get("model", "")
+            effective_key = node_model_key or active_key
+            active_entry = next((m for m in models if m.get("key") == effective_key), {})
+            model_id = active_entry.get("model_id", effective_key)
             reasoning_visible = active_entry.get("reasoning_visible", False)
 
             await node.send(MetaMsg(

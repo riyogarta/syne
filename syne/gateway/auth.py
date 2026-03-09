@@ -49,6 +49,13 @@ async def ensure_paired_nodes_table():
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$;
         """)
+        # Add model column for per-node model override
+        await conn.execute("""
+            DO $$ BEGIN
+                ALTER TABLE paired_nodes ADD COLUMN model VARCHAR(100) DEFAULT '';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$;
+        """)
 
 
 def _hash_token(token: str) -> str:
@@ -165,7 +172,8 @@ async def list_nodes() -> list[dict]:
     async with get_connection() as conn:
         rows = await conn.fetch(
             """
-            SELECT node_id, display_name, platform, active, last_seen, created_at
+            SELECT node_id, display_name, platform, active, last_seen, created_at,
+                   COALESCE(model, '') as model
             FROM paired_nodes
             ORDER BY created_at
             """
@@ -207,7 +215,17 @@ async def get_node(node_id: str) -> Optional[dict]:
     """Get a single node by node_id."""
     async with get_connection() as conn:
         row = await conn.fetchrow(
-            "SELECT node_id, display_name, platform, active, last_seen, created_at FROM paired_nodes WHERE node_id = $1",
+            "SELECT node_id, display_name, platform, active, last_seen, created_at, COALESCE(model, '') as model FROM paired_nodes WHERE node_id = $1",
             node_id,
         )
         return dict(row) if row else None
+
+
+async def update_node_model(node_id: str, model_key: str) -> bool:
+    """Update a node's model override. Empty string = use default."""
+    async with get_connection() as conn:
+        result = await conn.execute(
+            "UPDATE paired_nodes SET model = $1, updated_at = NOW() WHERE node_id = $2",
+            model_key, node_id,
+        )
+        return result != "UPDATE 0"

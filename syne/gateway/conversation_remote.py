@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..db.models import get_or_create_user
+from .auth import get_node
 from ..communication.inbound import InboundContext
 from ..llm.provider import StreamCallbacks
 from .protocol import NODE_TOOLS, ResponseChunkMsg, StatusMsg, ThinkingChunkMsg, ToolActivityMsg
@@ -83,6 +84,10 @@ async def handle_remote_message(
     user = await _get_node_user(node.node_id, node.display_name)
     chat_id = _make_chat_id(node.node_id, cwd)
 
+    # Look up per-node model override
+    node_record = await get_node(node.node_id)
+    node_model = (node_record or {}).get("model", "") if node_record else ""
+
     # Build inbound context
     inbound = InboundContext(
         channel="node",
@@ -137,7 +142,11 @@ async def handle_remote_message(
             chat_id=chat_id,
             user=user,
             message=message,
-            message_metadata={"cwd": cwd, "inbound": inbound},
+            message_metadata={
+                "cwd": cwd,
+                "inbound": inbound,
+                **({"node_model_override": node_model} if node_model else {}),
+            },
         )
         # Response was already streamed via callbacks — return None
         return None

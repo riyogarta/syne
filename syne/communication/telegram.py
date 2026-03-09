@@ -3652,6 +3652,7 @@ Or just send me a message!"""
         platform = node.get("platform", "?")
         last_seen = node["last_seen"]
         created = node["created_at"]
+        node_model = node.get("model", "")
 
         online = False
         if self.agent.gateway:
@@ -3661,18 +3662,28 @@ Or just send me a message!"""
         last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M") if last_seen else "never"
         created_str = created.strftime("%Y-%m-%d %H:%M") if created else "?"
 
+        # Resolve model label
+        models = await get_config("provider.models", [])
+        if node_model:
+            model_entry = next((m for m in models if m.get("key") == node_model), None)
+            model_label = model_entry.get("label", node_model) if model_entry else node_model
+        else:
+            model_label = "default"
+
         text = (
             f"<b>{name}</b>\n\n"
             f"Status: {status}\n"
             f"Platform: {platform}\n"
+            f"Model: {model_label}\n"
             f"Node ID: <code>{node_id}</code>\n"
             f"Last seen: {last_seen_str}\n"
             f"Paired: {created_str}"
         )
 
         buttons = [
+            [InlineKeyboardButton(f"🤖 Model: {model_label}", callback_data=f"nodes:model_list:{node_id}")],
             [InlineKeyboardButton("✏️ Rename", callback_data=f"nodes:rename_prompt:{node_id}")],
-            [InlineKeyboardButton("🗑 Remove", callback_data=f"nodes:remove_confirm:{node_id}")],
+            [InlineKeyboardButton("🚫 Revoke", callback_data=f"nodes:revoke_confirm:{node_id}")],
             [InlineKeyboardButton("⬅️ Back", callback_data="nodes:main")],
         ]
 
@@ -3720,34 +3731,89 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-        elif action == "remove_confirm" and len(parts) >= 3:
+        elif action == "revoke_confirm" and len(parts) >= 3:
             node_id = ":".join(parts[2:])
             from ..gateway.auth import get_node
             node = await get_node(node_id)
             name = node["display_name"] if node else node_id
             buttons = [
-                [InlineKeyboardButton("Yes, remove", callback_data=f"nodes:remove:{node_id}")],
+                [InlineKeyboardButton("Yes, revoke", callback_data=f"nodes:revoke:{node_id}")],
                 [InlineKeyboardButton("⬅️ Cancel", callback_data=f"nodes:detail:{node_id}")],
             ]
             await query.edit_message_text(
-                f"Remove <b>{name}</b>?\n\nThe node will be disconnected and deleted.",
+                f"Revoke <b>{name}</b>?\n\nThe node will be disconnected and deleted.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
 
-        elif action == "remove" and len(parts) >= 3:
+        elif action == "revoke" and len(parts) >= 3:
             node_id = ":".join(parts[2:])
             # Disconnect if online
             if self.agent.gateway:
-                conn = self.agent.gateway.get_node(node_id)
-                if conn:
-                    await conn.ws.close()
+                gw_conn = self.agent.gateway.get_node(node_id)
+                if gw_conn:
+                    await gw_conn.ws.close()
             from ..gateway.auth import delete_node
             if await delete_node(node_id):
-                await query.answer("Node removed")
+                await query.answer("Node revoked")
             else:
-                await query.answer("Failed to remove", show_alert=True)
+                await query.answer("Failed to revoke", show_alert=True)
             await self._nodes_menu_main(query)
+
+        elif action == "model_list" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            from ..gateway.auth import get_node
+            node = await get_node(node_id)
+            if not node:
+                await query.answer("Node not found", show_alert=True)
+                return
+            current_model = node.get("model", "")
+            models = await get_config("provider.models", [])
+
+            buttons = []
+            # Default option
+            check = " ✓" if not current_model else ""
+            buttons.append([InlineKeyboardButton(
+                f"Default{check}",
+                callback_data=f"nodes:model_set:{node_id}:",
+            )])
+            for m in models:
+                key = m.get("key", "")
+                label = m.get("label", key)
+                check = " ✓" if key == current_model else ""
+                buttons.append([InlineKeyboardButton(
+                    f"{label}{check}",
+                    callback_data=f"nodes:model_set:{node_id}:{key}",
+                )])
+            buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"nodes:detail:{node_id}")])
+
+            await query.edit_message_text(
+                f"<b>Model for {node['display_name']}</b>\n\nSelect the model this node will use:",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "model_set" and len(parts) >= 3:
+            # nodes:model_set:<node_id>:<model_key>
+            # node_id could contain colons, model_key is the last part (could be empty for default)
+            rest = ":".join(parts[2:])
+            # Last segment is model_key (can be empty)
+            if ":" in rest:
+                node_id, model_key = rest.rsplit(":", 1)
+            else:
+                node_id = rest
+                model_key = ""
+            from ..gateway.auth import update_node_model, get_node
+            if await update_node_model(node_id, model_key):
+                label = "default" if not model_key else model_key
+                models = await get_config("provider.models", [])
+                entry = next((m for m in models if m.get("key") == model_key), None)
+                if entry:
+                    label = entry.get("label", model_key)
+                await query.answer(f"Model → {label}")
+            else:
+                await query.answer("Failed to update", show_alert=True)
+            await self._nodes_menu_detail(query, node_id)
 
     async def _process_node_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
         """Process text input for node management flows."""

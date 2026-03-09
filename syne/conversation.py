@@ -1455,6 +1455,19 @@ class ConversationManager:
                 conv.reasoning_visible = bool(_wa_entry.get("reasoning_visible", False))
                 logger.info(f"WA model override for {chat_id}: {wa_override}")
 
+        # Per-node model override (remote node with custom model)
+        node_override = (message_metadata or {}).get("node_model_override")
+        if node_override and hasattr(self, '_agent') and self._agent:
+            override_provider = await self._agent.create_provider_for_model(node_override)
+            if override_provider:
+                conv.provider = override_provider
+                from .db.models import get_config as _gc_node
+                _node_models = await _gc_node("provider.models", [])
+                _node_entry = next((m for m in _node_models if m.get("key") == node_override), {})
+                conv.model_params = _node_entry.get("params") or conv.model_params
+                conv.reasoning_visible = bool(_node_entry.get("reasoning_visible", False))
+                logger.info(f"Node model override for {chat_id}: {node_override}")
+
         # Apply streaming callbacks (CLI only — None for Telegram/WA)
         conv.stream_callbacks = self._stream_callbacks
 
