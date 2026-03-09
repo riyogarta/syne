@@ -747,22 +747,53 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 del agent.conversations._active[key]
             screen.write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
 
-        # Load input history
+        # Load conversation history from DB
         try:
+            from ..db.connection import get_connection
             from prompt_toolkit.history import InMemoryHistory
             _history = InMemoryHistory()
-            from ..db.connection import get_connection
             async with get_connection() as conn:
+                # Load recent messages for display in output area
                 rows = await conn.fetch("""
-                    SELECT m.content FROM messages m
+                    SELECT m.role, m.content FROM messages m
                     JOIN sessions s ON m.session_id = s.id
-                    WHERE s.platform = 'cli' AND s.platform_chat_id = $1 AND m.role = 'user'
+                    WHERE s.platform = 'cli' AND s.platform_chat_id = $1 AND s.status = 'active'
+                      AND m.role IN ('user', 'assistant')
                     ORDER BY m.created_at ASC
                 """, chat_id)
-            for row in rows:
-                content = row["content"].strip()
-                if content and not content.startswith("/"):
-                    _history.append_string(content)
+            if rows:
+                screen.write(f"  {_DIM}── conversation resumed ──{_RESET}\n")
+                # Show last N messages to avoid flooding
+                display_rows = rows[-20:]
+                if len(rows) > 20:
+                    screen.write(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}\n")
+                for row in display_rows:
+                    content = row["content"].strip()
+                    if not content:
+                        continue
+                    if row["role"] == "user":
+                        _history.append_string(content)
+                        # Truncate long user messages
+                        preview = content if len(content) <= 200 else content[:200] + "..."
+                        screen.write(f"\n{_DIM}> {preview}{_RESET}\n")
+                    else:
+                        # Truncate long assistant messages
+                        preview = content if len(content) <= 500 else content[:500] + "..."
+                        screen.write(f"{preview}\n")
+                screen.write(f"\n  {_DIM}── end of history ──{_RESET}\n\n")
+            else:
+                # Also load input history for arrow-up recall
+                async with get_connection() as conn:
+                    user_rows = await conn.fetch("""
+                        SELECT m.content FROM messages m
+                        JOIN sessions s ON m.session_id = s.id
+                        WHERE s.platform = 'cli' AND s.platform_chat_id = $1 AND m.role = 'user'
+                        ORDER BY m.created_at ASC
+                    """, chat_id)
+                for row in user_rows:
+                    content = row["content"].strip()
+                    if content and not content.startswith("/"):
+                        _history.append_string(content)
             screen._input_buffer.history = _history
         except Exception:
             pass
