@@ -246,6 +246,7 @@ class TelegramChannel:
             BotCommand("restore", "Restore database from backup (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("restart", "Restart Syne (owner only)"),
+            BotCommand("nodes", "Manage remote nodes (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
         ]
@@ -3668,7 +3669,10 @@ Or just send me a message!"""
             model_entry = next((m for m in models if m.get("key") == node_model), None)
             model_label = model_entry.get("label", node_model) if model_entry else node_model
         else:
-            model_label = "default"
+            active_key = await get_config("provider.active_model", "")
+            default_entry = next((m for m in models if m.get("key") == active_key), None)
+            default_name = default_entry.get("label", active_key) if default_entry else active_key
+            model_label = f"default ({default_name})" if default_name else "default"
 
         text = (
             f"<b>{name}</b>\n\n"
@@ -3771,10 +3775,13 @@ Or just send me a message!"""
             models = await get_config("provider.models", [])
 
             buttons = []
-            # Default option
+            # Default option — show actual default model name
+            active_key = await get_config("provider.active_model", "")
+            default_entry = next((m for m in models if m.get("key") == active_key), None)
+            default_name = default_entry.get("label", active_key) if default_entry else active_key
             check = " ✓" if not current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"Default{check}",
+                f"Default ({default_name}){check}" if default_name else f"Default{check}",
                 callback_data=f"nodes:model_set:{node_id}:",
             )])
             for m in models:
