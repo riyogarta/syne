@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from ..db.models import get_or_create_user
 from ..communication.inbound import InboundContext
 from ..llm.provider import StreamCallbacks
-from .protocol import NODE_TOOLS, ResponseChunkMsg, ThinkingChunkMsg, ToolActivityMsg
+from .protocol import NODE_TOOLS, ResponseChunkMsg, StatusMsg, ThinkingChunkMsg, ToolActivityMsg
 
 if TYPE_CHECKING:
     from ..agent import SyneAgent
@@ -116,14 +116,20 @@ async def handle_remote_message(
     async def _on_tool_detail(name: str, args: dict, result_preview: str) -> None:
         await node.send(ToolActivityMsg(name=name, args=args, result_preview=result_preview))
 
+    async def _on_tool_start(name: str) -> None:
+        """Notify node that a tool is about to run (shows spinner)."""
+        await node.send(StatusMsg(message=f"Running {name}..."))
+
     stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
 
     # Save previous callbacks so we can restore them after (manager is shared)
     prev_stream = agent.conversations._stream_callbacks
     prev_tool_detail = agent.conversations._tool_detail_callback
+    prev_tool = agent.conversations._tool_callback
 
     agent.conversations.set_stream_callbacks(stream_cbs)
     agent.conversations.set_tool_detail_callback(_on_tool_detail)
+    agent.conversations.set_tool_callback(_on_tool_start)
 
     try:
         await agent.conversations.handle_message(
@@ -139,4 +145,5 @@ async def handle_remote_message(
         # Restore previous callbacks and clean up node connection
         agent.conversations.set_stream_callbacks(prev_stream)
         agent.conversations.set_tool_detail_callback(prev_tool_detail)
+        agent.conversations.set_tool_callback(prev_tool)
         agent.conversations._node_connections.pop(chat_id, None)

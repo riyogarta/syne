@@ -490,11 +490,22 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 _r_status[0].start()
 
             def _remote_on_status(message: str):
+                nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
+                # End any in-progress text/thinking output
+                if _r_streamed_text:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    _r_streamed_text = False
+                if _r_in_thinking and not _r_thinking_done:
+                    _r_thinking_done = True
+                    sys.stdout.write(f"{_RESET}\n")
+                    sys.stdout.flush()
+                    _r_in_thinking = False
+                # Show as spinner
                 if _r_status[0]:
                     _r_status[0].stop()
-                console.print(f"\n[dim italic]{message}[/dim italic]")
-                if _r_status[0]:
-                    _r_status[0].start()
+                _r_status[0] = console.status(f"[bold blue]{message}", spinner="dots")
+                _r_status[0].start()
 
             node_client._on_response = _remote_on_response
             node_client._on_thinking = _remote_on_thinking
