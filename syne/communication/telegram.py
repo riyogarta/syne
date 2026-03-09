@@ -3618,14 +3618,26 @@ Or just send me a message!"""
         if self.agent.gateway:
             connected_ids = set(self.agent.gateway._nodes.keys())
 
+        # Resolve model labels
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "")
+        default_entry = next((m for m in models if m.get("key") == active_key), None)
+        default_label = default_entry.get("label", active_key) if default_entry else active_key
+
         buttons = []
         for n in nodes:
             node_id = n["node_id"]
             name = n["display_name"]
+            node_model = n.get("model", "")
             online = node_id in connected_ids
             status_icon = "🟢" if online else "⚪"
+            if node_model:
+                entry = next((m for m in models if m.get("key") == node_model), None)
+                mlabel = entry.get("label", node_model) if entry else node_model
+            else:
+                mlabel = default_label
             buttons.append([InlineKeyboardButton(
-                f"{status_icon} {name}",
+                f"{status_icon} {name} — {mlabel}",
                 callback_data=f"nodes:detail:{node_id}",
             )])
 
