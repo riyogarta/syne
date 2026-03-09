@@ -7,7 +7,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
 # Protocol version — increment when breaking changes are made
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 
 # --- Node → Gateway messages ---
@@ -75,6 +75,39 @@ class ErrorMsg:
     message: str
     code: str = ""
     type: str = field(default="error", init=False)
+
+@dataclass
+class ThinkingChunkMsg:
+    """Streaming thinking/reasoning text from LLM."""
+    text: str
+    type: str = field(default="thinking_chunk", init=False)
+
+
+@dataclass
+class ToolActivityMsg:
+    """Tool execution detail (name, args, result preview)."""
+    name: str
+    args: dict = field(default_factory=dict)
+    result_preview: str = ""
+    type: str = field(default="tool_activity", init=False)
+
+
+@dataclass
+class StatusMsg:
+    """Status update (e.g. 'Compacting...', 'Searching memories...')."""
+    message: str
+    type: str = field(default="status", init=False)
+
+
+@dataclass
+class MetaMsg:
+    """Server metadata sent on connection (agent name, model, etc.)."""
+    agent_name: str = ""
+    motto: str = ""
+    model: str = ""
+    tool_count: int = 0
+    reasoning_visible: bool = False
+    type: str = field(default="meta", init=False)
 
 
 # --- Serialization helpers ---

@@ -3,18 +3,21 @@
 This module does NOT modify conversation.py. Instead, it:
 1. Creates a user/session for the node (platform='node')
 2. Injects a tool execution interceptor that routes node-side tools over WebSocket
-3. Uses the existing ConversationManager.handle_message() for everything else
+3. Wires streaming callbacks so LLM output is sent to the node in real time
+4. Uses the existing ConversationManager.handle_message() for everything else
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from typing import TYPE_CHECKING
 
 from ..db.models import get_or_create_user
 from ..communication.inbound import InboundContext
-from .protocol import NODE_TOOLS
+from ..llm.provider import StreamCallbacks
+from .protocol import NODE_TOOLS, ResponseChunkMsg, ThinkingChunkMsg, ToolActivityMsg
 
 if TYPE_CHECKING:
     from ..agent import SyneAgent
@@ -94,15 +97,46 @@ async def handle_remote_message(
     # We store it on the manager keyed by chat_id so concurrent nodes don't clash.
     agent.conversations._node_connections[chat_id] = node
 
+    # --- Wire streaming callbacks so LLM output reaches the node in real time ---
+    loop = asyncio.get_running_loop()
+
+    def _on_text(delta: str) -> None:
+        """Sync callback — schedule async send on the running loop."""
+        loop.call_soon_threadsafe(
+            loop.create_task,
+            node.send(ResponseChunkMsg(text=delta, done=False)),
+        )
+
+    def _on_thinking(delta: str) -> None:
+        loop.call_soon_threadsafe(
+            loop.create_task,
+            node.send(ThinkingChunkMsg(text=delta)),
+        )
+
+    async def _on_tool_detail(name: str, args: dict, result_preview: str) -> None:
+        await node.send(ToolActivityMsg(name=name, args=args, result_preview=result_preview))
+
+    stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
+
+    # Save previous callbacks so we can restore them after (manager is shared)
+    prev_stream = agent.conversations._stream_callbacks
+    prev_tool_detail = agent.conversations._tool_detail_callback
+
+    agent.conversations.set_stream_callbacks(stream_cbs)
+    agent.conversations.set_tool_detail_callback(_on_tool_detail)
+
     try:
-        response = await agent.conversations.handle_message(
+        await agent.conversations.handle_message(
             platform="node",
             chat_id=chat_id,
             user=user,
             message=message,
             message_metadata={"cwd": cwd, "inbound": inbound},
         )
-        return response or ""
+        # Response was already streamed via callbacks — return None
+        return None
     finally:
-        # Clean up node connection reference (don't leak)
+        # Restore previous callbacks and clean up node connection
+        agent.conversations.set_stream_callbacks(prev_stream)
+        agent.conversations.set_tool_detail_callback(prev_tool_detail)
         agent.conversations._node_connections.pop(chat_id, None)

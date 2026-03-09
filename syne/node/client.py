@@ -100,9 +100,15 @@ class NodeClient:
         self._ws = None
         self._on_response: Optional[Callable] = None  # callback(text, done)
         self._on_tool_request: Optional[Callable] = None  # callback(request_id, tool, args) -> (result, success)
+        self._on_thinking: Optional[Callable] = None  # callback(text)
+        self._on_tool_activity: Optional[Callable] = None  # callback(name, args, result_preview)
+        self._on_status: Optional[Callable] = None  # callback(message)
+        self._on_meta: Optional[Callable] = None  # callback(info_dict)
         self._connected = asyncio.Event()
         self._response_done = asyncio.Event()
         self._last_response = ""
+        self.server_meta: dict = {}  # stores meta info from server
+        self._pending_msg: Optional[dict] = None  # message consumed during connect()
 
     async def connect(self) -> None:
         """Connect to the gateway and authenticate."""
@@ -137,6 +143,21 @@ class NodeClient:
 
         self._connected.set()
         logger.info(f"Connected to gateway as {self.display_name}")
+
+        # Check if server sent a meta message right after connect ack
+        # (non-blocking — the listen loop will catch it if it arrives later)
+        try:
+            raw_meta = await asyncio.wait_for(self._ws.recv(), timeout=1)
+            meta_msg = json.loads(raw_meta)
+            if meta_msg.get("type") == "meta":
+                self.server_meta = meta_msg
+                if self._on_meta:
+                    self._on_meta(meta_msg)
+            else:
+                # Not a meta message — put it back by storing for listen()
+                self._pending_msg = meta_msg
+        except asyncio.TimeoutError:
+            pass
 
     async def disconnect(self) -> None:
         """Gracefully disconnect from the gateway."""
@@ -178,61 +199,96 @@ class NodeClient:
             return self._last_response or "Error: Response timed out (5 minutes)"
         return self._last_response
 
+    async def _dispatch(self, msg: dict) -> None:
+        """Dispatch a single incoming message by type."""
+        msg_type = msg.get("type", "")
+
+        if msg_type == "response_chunk":
+            text = msg.get("text", "")
+            done = msg.get("done", False)
+            self._last_response += text
+            if self._on_response:
+                self._on_response(text, done)
+            if done:
+                self._response_done.set()
+
+        elif msg_type == "tool_request":
+            # Execute tool locally and send result back
+            request_id = msg.get("request_id", "")
+            tool = msg.get("tool", "")
+            args = msg.get("args", {})
+
+            if self._on_tool_request:
+                try:
+                    result, success = await self._on_tool_request(request_id, tool, args)
+                except Exception as e:
+                    result = f"Error executing {tool}: {e}"
+                    success = False
+            else:
+                result = f"No tool executor registered for '{tool}'"
+                success = False
+
+            await self._ws.send(json.dumps({
+                "type": "tool_result",
+                "request_id": request_id,
+                "result": str(result),
+                "success": success,
+            }))
+
+        elif msg_type == "thinking_chunk":
+            if self._on_thinking:
+                self._on_thinking(msg.get("text", ""))
+
+        elif msg_type == "tool_activity":
+            if self._on_tool_activity:
+                self._on_tool_activity(
+                    msg.get("name", ""),
+                    msg.get("args", {}),
+                    msg.get("result_preview", ""),
+                )
+
+        elif msg_type == "status":
+            if self._on_status:
+                self._on_status(msg.get("message", ""))
+
+        elif msg_type == "meta":
+            self.server_meta = msg
+            if self._on_meta:
+                self._on_meta(msg)
+
+        elif msg_type == "error":
+            error_msg = msg.get("message", "Unknown error")
+            logger.error(f"Gateway error: {error_msg}")
+            self._last_response += f"\nError: {error_msg}\n"
+            if self._on_response:
+                self._on_response(f"\nError: {error_msg}\n", True)
+            self._response_done.set()
+
     async def listen(self) -> None:
         """Listen for messages from the gateway. Runs until disconnected.
 
         Handles:
         - response_chunk: Streaming text from LLM
         - tool_request: Tool execution request from server
+        - thinking_chunk: Reasoning/thinking text from LLM
+        - tool_activity: Tool invocation updates (name, args, result preview)
+        - status: Status messages from server
+        - meta: Server metadata
         - error: Error messages
         """
         if not self._ws:
             return
 
         try:
+            # Process any message that was consumed during connect()
+            if self._pending_msg:
+                pending = self._pending_msg
+                self._pending_msg = None
+                await self._dispatch(pending)
+
             async for raw in self._ws:
                 msg = json.loads(raw)
-                msg_type = msg.get("type", "")
-
-                if msg_type == "response_chunk":
-                    text = msg.get("text", "")
-                    done = msg.get("done", False)
-                    self._last_response += text
-                    if self._on_response:
-                        self._on_response(text, done)
-                    if done:
-                        self._response_done.set()
-
-                elif msg_type == "tool_request":
-                    # Execute tool locally and send result back
-                    request_id = msg.get("request_id", "")
-                    tool = msg.get("tool", "")
-                    args = msg.get("args", {})
-
-                    if self._on_tool_request:
-                        try:
-                            result, success = await self._on_tool_request(request_id, tool, args)
-                        except Exception as e:
-                            result = f"Error executing {tool}: {e}"
-                            success = False
-                    else:
-                        result = f"No tool executor registered for '{tool}'"
-                        success = False
-
-                    await self._ws.send(json.dumps({
-                        "type": "tool_result",
-                        "request_id": request_id,
-                        "result": str(result),
-                        "success": success,
-                    }))
-
-                elif msg_type == "error":
-                    error_msg = msg.get("message", "Unknown error")
-                    logger.error(f"Gateway error: {error_msg}")
-                    self._last_response += f"\nError: {error_msg}\n"
-                    if self._on_response:
-                        self._on_response(f"\nError: {error_msg}\n", True)
-                    self._response_done.set()
+                await self._dispatch(msg)
 
         except websockets.exceptions.ConnectionClosed:
             logger.info("Disconnected from gateway")

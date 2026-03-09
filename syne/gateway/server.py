@@ -24,6 +24,7 @@ from .protocol import (
     PROTOCOL_VERSION,
     ConnectedMsg,
     ErrorMsg,
+    MetaMsg,
     ResponseChunkMsg,
     ToolRequestMsg,
     decode,
@@ -159,6 +160,28 @@ class Gateway:
                 return conn
         return None
 
+    async def _send_meta(self, node: NodeConnection) -> None:
+        """Send server metadata to a node (for CLI header display)."""
+        try:
+            from ..db.models import get_identity, get_config
+            identity = await get_identity()
+            models = await get_config("provider.models", [])
+            active_key = await get_config("provider.active_model", "")
+            active_entry = next((m for m in models if m.get("key") == active_key), {})
+            model_id = active_entry.get("model_id", active_key)
+            tool_count = len(self.agent.tools.list_tools("owner")) if self.agent.tools else 0
+            reasoning_visible = active_entry.get("reasoning_visible", False)
+
+            await node.send(MetaMsg(
+                agent_name=identity.get("name", "Syne"),
+                motto=identity.get("motto", ""),
+                model=model_id,
+                tool_count=tool_count,
+                reasoning_visible=reasoning_visible,
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to send meta to {node.node_id}: {e}")
+
     async def _handle_connection(self, ws: ServerConnection) -> None:
         """Handle a new WebSocket connection."""
         node: Optional[NodeConnection] = None
@@ -209,6 +232,9 @@ class Gateway:
 
             # Send connected acknowledgement
             await node.send(ConnectedMsg(session_id=0, display_name=node.display_name))
+
+            # Send server metadata for CLI header
+            await self._send_meta(node)
 
             # Message loop
             async for raw_msg in ws:
@@ -298,15 +324,15 @@ class Gateway:
 
         try:
             from .conversation_remote import handle_remote_message
-            response = await handle_remote_message(
+            await handle_remote_message(
                 agent=self.agent,
                 node=node,
                 message=text,
                 cwd=cwd,
             )
 
-            if response:
-                await node.send(ResponseChunkMsg(text=response, done=True))
+            # Content was already streamed via callbacks; send completion signal
+            await node.send(ResponseChunkMsg(text="", done=True))
         except Exception as e:
             logger.error(f"Chat error for node {node.node_id}: {e}", exc_info=True)
             await node.send(ErrorMsg(message=f"Chat error: {e}", code="chat_error"))

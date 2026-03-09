@@ -66,106 +66,20 @@ async def _node_init_async():
 @node.command(name="cli")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def node_cli(debug):
-    """Start interactive CLI connected to the Syne server."""
-    asyncio.run(_node_cli_async(debug))
+    """Start interactive CLI connected to the Syne server.
 
-
-async def _node_cli_async(debug: bool):
-    import logging
-    import os
-    import sys
-
-    if debug:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.WARNING)
-
+    This is an alias for 'syne cli' in remote mode.
+    """
     from ..node.client import NodeClient, load_node_config
-    from ..node.executor import execute_tool
 
     config = load_node_config()
     if not config:
         console.print("[red]Node not configured. Run 'syne node init' first.[/red]")
         return
 
+    from ..channels.cli_channel import run_cli
     client = NodeClient(config)
-
-    # Set up response display
-    def on_response(text: str, done: bool):
-        sys.stdout.write(text)
-        sys.stdout.flush()
-        if done:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-
-    client._on_response = on_response
-    client._on_tool_request = execute_tool
-
-    if config['gateway'].startswith("ws://"):
-        console.print("[yellow]WARNING: Unencrypted connection (ws://). Use wss:// in production.[/yellow]")
-
-    async def _connect_with_backoff():
-        """Connect with exponential backoff on failure."""
-        delay = 5
-        max_delay = 60
-        while True:
-            try:
-                await client.connect()
-                return True
-            except Exception as e:
-                console.print(f"[red]Connection failed: {e}[/red]")
-                console.print(f"[dim]Retrying in {delay}s...[/dim]")
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, max_delay)
-
-    try:
-        console.print(f"[dim]Connecting to {config['gateway']}...[/dim]")
-        await client.connect()
-        console.print(f"[green]Connected as {client.display_name}[/green]\n")
-
-        # Start listener in background
-        listen_task = asyncio.create_task(client.listen())
-
-        # REPL loop — input() must run in executor to not block asyncio
-        loop = asyncio.get_running_loop()
-        cwd = os.getcwd()
-        prompt = f"{os.path.basename(cwd)} > "
-
-        while True:
-            try:
-                user_input = await loop.run_in_executor(None, lambda: input(prompt))
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[dim]Goodbye![/dim]")
-                break
-
-            user_input = user_input.strip()
-            if not user_input:
-                continue
-            if user_input in ("/exit", "/quit", "/q"):
-                console.print("[dim]Goodbye![/dim]")
-                break
-
-            # Auto-reconnect if connection lost
-            if not client._connected.is_set():
-                console.print("[yellow]Connection lost. Reconnecting...[/yellow]")
-                listen_task.cancel()
-                await _connect_with_backoff()
-                listen_task = asyncio.create_task(client.listen())
-                console.print("[green]Reconnected.[/green]")
-
-            try:
-                await client.send_message(user_input, cwd=cwd)
-            except Exception as e:
-                console.print(f"[red]Error: {e}[/red]")
-
-        listen_task.cancel()
-
-    except ConnectionError as e:
-        console.print(f"[red]Connection failed: {e}[/red]")
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-    finally:
-        await client.disconnect()
+    asyncio.run(run_cli(debug=debug, node_client=client))
 
 
 @node.command(name="status")

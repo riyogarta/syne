@@ -175,8 +175,14 @@ def _format_tokens(n: int) -> str:
     return f"{n:,}"
 
 
-async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
-    """Run Syne in interactive CLI mode (resumes previous session by default)."""
+async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, node_client=None):
+    """Run Syne in interactive CLI mode (resumes previous session by default).
+
+    Args:
+        node_client: Optional NodeClient for remote mode. When provided, messages
+            are sent via WebSocket to the gateway instead of local SyneAgent.
+    """
+    remote_mode = node_client is not None
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
     else:
@@ -186,8 +192,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("asyncpg").setLevel(logging.WARNING)
 
-    settings = load_settings()
-    agent = SyneAgent(settings)
+    agent = None
+    if not remote_mode:
+        settings = load_settings()
+        agent = SyneAgent(settings)
 
     global _prompt_session
 
@@ -236,219 +244,326 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
     )
 
     try:
-        await agent.start()
+        # ── Remote mode setup ──
+        if remote_mode:
+            await node_client.connect()
+            listen_task = asyncio.create_task(node_client.listen())
 
-        # Set CLI working directory to where user launched `syne cli`
-        agent._cli_cwd = os.getcwd()
+        # ── Local mode setup ──
+        else:
+            await agent.start()
 
-        # Override workspace for file_write — CLI uses caller's directory
-        from ..tools.file_ops import set_workspace
-        set_workspace(os.getcwd())
+            # Set CLI working directory to where user launched `syne cli`
+            agent._cli_cwd = os.getcwd()
 
-        # Auto-migrate Google OAuth if needed
-        from ..main import _auto_migrate_google_oauth
-        await _auto_migrate_google_oauth()
+            # Override workspace for file_write — CLI uses caller's directory
+            from ..tools.file_ops import set_workspace
+            set_workspace(os.getcwd())
 
-        # Get or create CLI user (always owner)
-        username = getpass.getuser()
-        user = await get_or_create_user(
-            name=username,
-            platform="cli",
-            platform_id=f"cli:{username}",
-            display_name=username,
-            is_dm=True,  # CLI is always direct interaction
-        )
+            # Auto-migrate Google OAuth if needed
+            from ..main import _auto_migrate_google_oauth
+            await _auto_migrate_google_oauth()
 
-        # Ensure CLI user is owner
-        if user.get("access_level") != "owner":
-            from ..db.models import update_user
-            await update_user("cli", f"cli:{username}", access_level="owner")
-            user = dict(user)
-            user["access_level"] = "owner"
+            # Get or create CLI user (always owner)
+            username = getpass.getuser()
+            user = await get_or_create_user(
+                name=username,
+                platform="cli",
+                platform_id=f"cli:{username}",
+                display_name=username,
+                is_dm=True,  # CLI is always direct interaction
+            )
 
-        # Set up callbacks
-        if agent.conversations:
-            agent.conversations.add_status_callback(_cli_status_callback)
-            # Tool activity indicator — will be wired to status spinner in REPL
-            agent.conversations._tool_status = None  # Rich Status object, set during processing
+            # Ensure CLI user is owner
+            if user.get("access_level") != "owner":
+                from ..db.models import update_user
+                await update_user("cli", f"cli:{username}", access_level="owner")
+                user = dict(user)
+                user["access_level"] = "owner"
 
-        # File write approval (unless --yolo)
-        if not yolo:
-            _always_allowed: set[str] = set()  # paths auto-approved for this session
+        # ── Local mode: callbacks & approval ──
+        if not remote_mode:
+            if agent.conversations:
+                agent.conversations.add_status_callback(_cli_status_callback)
+                agent.conversations._tool_status = None
 
-            async def _approval_callback(tool_name: str, args: dict) -> tuple[bool, str]:
-                """Ask user for approval before file writes. Returns (approved, reason)."""
-                if tool_name != "file_write":
-                    return True, ""
+            if not yolo:
+                _always_allowed: set[str] = set()
 
-                file_path = args.get("path", "?")
-                resolved = os.path.abspath(file_path)
+                async def _approval_callback(tool_name: str, args: dict) -> tuple[bool, str]:
+                    """Ask user for approval before file writes."""
+                    if tool_name != "file_write":
+                        return True, ""
 
-                if resolved in _always_allowed:
-                    return True, ""
+                    file_path = args.get("path", "?")
+                    resolved = os.path.abspath(file_path)
 
-                # Pause spinner if active
-                _status_ref = getattr(agent.conversations, '_active_status', None)
-                if _status_ref:
-                    _status_ref.stop()
+                    if resolved in _always_allowed:
+                        return True, ""
 
-                content = args.get("content", "")
-                lines = content.count("\n") + 1
-                size = len(content.encode("utf-8"))
+                    _status_ref = getattr(agent.conversations, '_active_status', None)
+                    if _status_ref:
+                        _status_ref.stop()
 
-                # Show diff if file exists, otherwise show snippet of new content
-                console.print()
-                if os.path.isfile(resolved):
+                    content = args.get("content", "")
+                    lines = content.count("\n") + 1
+                    size = len(content.encode("utf-8"))
+
+                    console.print()
+                    if os.path.isfile(resolved):
+                        try:
+                            import difflib
+                            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                                old_lines = f.readlines()
+                            new_lines = content.splitlines(keepends=True)
+                            diff = list(difflib.unified_diff(
+                                old_lines, new_lines,
+                                fromfile=file_path, tofile=file_path,
+                                lineterm=""
+                            ))
+                            if diff:
+                                console.print(f"[bold]Edit file[/bold] {file_path}")
+                                shown = 0
+                                for line in diff:
+                                    if line.startswith("@@"):
+                                        console.print(f"[cyan]{line.rstrip()}[/cyan]")
+                                    elif line.startswith("-") and not line.startswith("---"):
+                                        console.print(f"[red]{line.rstrip()}[/red]")
+                                    elif line.startswith("+") and not line.startswith("+++"):
+                                        console.print(f"[green]{line.rstrip()}[/green]")
+                                    else:
+                                        console.print(f"[dim]{line.rstrip()}[/dim]")
+                                    shown += 1
+                                    if shown >= 30:
+                                        remaining = len(diff) - shown
+                                        if remaining > 0:
+                                            console.print(f"[dim]  ... {remaining} more lines[/dim]")
+                                        break
+                            else:
+                                console.print(f"[bold]Write to[/bold] {file_path} [dim](no changes)[/dim]")
+                        except Exception:
+                            console.print(f"[bold]Write to[/bold] {file_path} ({lines} lines, {size:,} bytes)")
+                    else:
+                        console.print(f"[bold]New file[/bold] {file_path} ({lines} lines, {size:,} bytes)")
+                        preview = content.split("\n")[:10]
+                        for pline in preview:
+                            console.print(f"[green]+ {pline}[/green]")
+                        if lines > 10:
+                            console.print(f"[dim]  ... {lines - 10} more lines[/dim]")
+
+                    console.print()
+                    console.print(f"[bold]Do you want to make this edit to {os.path.basename(file_path)}?[/bold]")
+
+                    choices = ["Yes", "Yes, always allow this file", "No"]
                     try:
-                        import difflib
-                        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-                            old_lines = f.readlines()
-                        new_lines = content.splitlines(keepends=True)
-                        diff = list(difflib.unified_diff(
-                            old_lines, new_lines,
-                            fromfile=file_path, tofile=file_path,
-                            lineterm=""
-                        ))
-                        if diff:
-                            console.print(f"[bold]Edit file[/bold] {file_path}")
-                            # Show max 30 diff lines to avoid flooding
-                            shown = 0
-                            for line in diff:
-                                if line.startswith("@@"):
-                                    console.print(f"[cyan]{line.rstrip()}[/cyan]")
-                                elif line.startswith("-") and not line.startswith("---"):
-                                    console.print(f"[red]{line.rstrip()}[/red]")
-                                elif line.startswith("+") and not line.startswith("+++"):
-                                    console.print(f"[green]{line.rstrip()}[/green]")
-                                else:
-                                    console.print(f"[dim]{line.rstrip()}[/dim]")
-                                shown += 1
-                                if shown >= 30:
-                                    remaining = len(diff) - shown
-                                    if remaining > 0:
-                                        console.print(f"[dim]  ... {remaining} more lines[/dim]")
-                                    break
-                        else:
-                            console.print(f"[bold]Write to[/bold] {file_path} [dim](no changes)[/dim]")
-                    except Exception:
-                        console.print(f"[bold]Write to[/bold] {file_path} ({lines} lines, {size:,} bytes)")
-                else:
-                    console.print(f"[bold]New file[/bold] {file_path} ({lines} lines, {size:,} bytes)")
-                    # Show first few lines of new file
-                    preview = content.split("\n")[:10]
-                    for pline in preview:
-                        console.print(f"[green]+ {pline}[/green]")
-                    if lines > 10:
-                        console.print(f"[dim]  ... {lines - 10} more lines[/dim]")
+                        chosen = await cli_select(choices, default=0)
+                    except (EOFError, KeyboardInterrupt):
+                        chosen = 1
 
-                console.print()
-                console.print(f"[bold]Do you want to make this edit to {os.path.basename(file_path)}?[/bold]")
+                    if _status_ref:
+                        _status_ref.start()
 
-                choices = ["Yes", "Yes, always allow this file", "No"]
-                try:
-                    chosen = await cli_select(choices, default=0)
-                except (EOFError, KeyboardInterrupt):
-                    chosen = 1  # No
+                    if chosen == 0:
+                        return True, ""
+                    elif chosen == 1:
+                        _always_allowed.add(resolved)
+                        return True, ""
+                    else:
+                        return False, "User declined file write."
 
-                # Resume spinner
-                if _status_ref:
-                    _status_ref.start()
+                agent.tools.set_approval_callback(_approval_callback)
 
-                if chosen == 0:  # Yes
-                    return True, ""
-                elif chosen == 1:  # Always allow
-                    _always_allowed.add(resolved)
-                    return True, ""
-                else:  # No
-                    return False, "User declined file write."
+        # ── Display header ──
+        if remote_mode:
+            meta = node_client.server_meta
+            agent_name = meta.get("agent_name", "Syne")
+            motto = meta.get("motto", "")
+            model_short = _short_model_name(meta.get("model", "unknown"))
+            tool_count = meta.get("tool_count", 0)
 
-            agent.tools.set_approval_callback(_approval_callback)
+            console.print()
+            console.print(Panel(
+                f"[bold]{agent_name}[/bold]" + (f"\n[dim italic]{motto}[/dim italic]" if motto else ""),
+                style="blue",
+                subtitle=f"Remote | Model: {model_short} | Tools: {tool_count} | Type /help for commands",
+            ))
+            console.print()
+        else:
+            identity = await get_identity()
+            agent_name = identity.get("name", "Syne")
+            motto = identity.get("motto", "")
+            model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
 
-        # Display header
-        identity = await get_identity()
-        agent_name = identity.get("name", "Syne")
-        motto = identity.get("motto", "")
-        model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
+            console.print()
+            console.print(Panel(
+                f"[bold]{agent_name}[/bold]" + (f"\n[dim italic]{motto}[/dim italic]" if motto else ""),
+                style="blue",
+                subtitle=f"Model: {model_short} | Tools: {len(agent.tools.list_tools('owner'))} | Type /help for commands",
+            ))
 
-        console.print()
-        console.print(Panel(
-            f"[bold]{agent_name}[/bold]" + (f"\n[dim italic]{motto}[/dim italic]" if motto else ""),
-            style="blue",
-            subtitle=f"Model: {model_short} | Tools: {len(agent.tools.list_tools('owner'))} | Type /help for commands",
-        ))
+            try:
+                from ..update_checker import get_pending_update_notice
+                update_notice = await get_pending_update_notice()
+                if update_notice:
+                    console.print(f"[bold yellow]{update_notice}[/bold yellow]")
+            except Exception:
+                pass
 
-        # Check for pending update notice
-        try:
-            from ..update_checker import get_pending_update_notice
-            update_notice = await get_pending_update_notice()
-            if update_notice:
-                console.print(f"[bold yellow]{update_notice}[/bold yellow]")
-        except Exception:
-            pass
+            console.print()
 
-        console.print()
+        # ── REPL setup ──
+        cwd = os.getcwd()
+        chat_id = ""
+        username = ""
 
-        # REPL loop — session is per-directory
-        cwd = agent._cli_cwd or os.getcwd()
-        chat_id = f"cli:{username}:{cwd}"
+        if remote_mode:
+            chat_id = f"node:{node_client.node_id}:{cwd}"
 
-        # Fresh start: close old session and clear history
-        if fresh:
-            from ..db.connection import get_connection
-            async with get_connection() as conn:
-                # Close old sessions and delete messages for this chat_id
-                result = await conn.fetch("""
-                    UPDATE sessions SET status = 'closed'
-                    WHERE platform = 'cli' AND platform_chat_id = $1 AND status = 'active'
-                    RETURNING id
-                """, chat_id)
-                if result:
-                    session_ids = [r["id"] for r in result]
-                    await conn.execute(
-                        "DELETE FROM messages WHERE session_id = ANY($1::int[])",
-                        session_ids,
-                    )
-            # Also clear in-memory cache
-            key = f"cli:{chat_id}"
-            if key in agent.conversations._active:
-                del agent.conversations._active[key]
-            console.print("[dim]Starting fresh conversation...[/dim]")
+            # Wire NodeClient callbacks for streaming display
+            from ..node.executor import execute_tool
+            _r_streamed_text = False
+            _r_streamed_thinking = False
+            _r_in_thinking = False
+            _r_thinking_done = False
+            _r_status = [None]  # mutable container for closure access
+            _r_reasoning_visible = node_client.server_meta.get("reasoning_visible", False)
 
-        # Load input history from DB (user messages for this directory)
-        try:
-            from prompt_toolkit.history import InMemoryHistory
-            _history = InMemoryHistory()
-            from ..db.connection import get_connection
-            async with get_connection() as conn:
-                rows = await conn.fetch("""
-                    SELECT m.content FROM messages m
-                    JOIN sessions s ON m.session_id = s.id
-                    WHERE s.platform = 'cli' AND s.platform_chat_id = $1
-                      AND m.role = 'user'
-                    ORDER BY m.created_at ASC
-                """, chat_id)
-            for row in rows:
-                content = row["content"].strip()
-                if content and not content.startswith("/"):
-                    _history.append_string(content)
-            _prompt_session.history = _history
-        except Exception:
-            pass
+            def _remote_on_response(text: str, done: bool):
+                nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
+                if not text and done:
+                    return
+                if not _r_streamed_text:
+                    _r_streamed_text = True
+                    if _r_status[0]:
+                        _r_status[0].stop()
+                        _r_status[0] = None
+                    if _r_streamed_thinking and not _r_thinking_done:
+                        _r_thinking_done = True
+                        sys.stdout.write(f"{_RESET}\n")
+                        sys.stdout.flush()
+                    _r_in_thinking = False
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
+            def _remote_on_thinking(text: str):
+                nonlocal _r_streamed_thinking, _r_in_thinking
+                if not _r_reasoning_visible:
+                    return
+                if not _r_streamed_thinking:
+                    _r_streamed_thinking = True
+                    if _r_status[0]:
+                        _r_status[0].stop()
+                        _r_status[0] = None
+                    _r_in_thinking = True
+                    sys.stdout.write(_DIM_ITALIC)
+                if not _r_in_thinking:
+                    _r_in_thinking = True
+                    sys.stdout.write(_DIM_ITALIC)
+                sys.stdout.write(text)
+                sys.stdout.flush()
+
+            def _remote_on_tool_activity(name: str, args: dict, result_preview: str):
+                nonlocal _r_streamed_text
+                if _r_streamed_text:
+                    sys.stdout.write("\n")
+                    _r_streamed_text = False
+                if _r_status[0]:
+                    _r_status[0].stop()
+                    _r_status[0] = None
+                args_str = ""
+                if args:
+                    parts = []
+                    for k, v in list(args.items())[:3]:
+                        vs = str(v)
+                        if len(vs) > 40:
+                            vs = vs[:37] + "..."
+                        parts.append(f'{k}="{vs}"')
+                    args_str = ", ".join(parts)
+                sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
+                preview = result_preview.strip().replace("\n", " ")
+                if len(preview) > 80:
+                    preview = preview[:77] + "..."
+                if preview:
+                    sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
+                sys.stdout.flush()
+                _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
+                _r_status[0].start()
+
+            def _remote_on_status(message: str):
+                if _r_status[0]:
+                    _r_status[0].stop()
+                console.print(f"\n[dim italic]{message}[/dim italic]")
+                if _r_status[0]:
+                    _r_status[0].start()
+
+            node_client._on_response = _remote_on_response
+            node_client._on_thinking = _remote_on_thinking
+            node_client._on_tool_activity = _remote_on_tool_activity
+            node_client._on_status = _remote_on_status
+            node_client._on_tool_request = execute_tool
+
+        else:
+            cwd = agent._cli_cwd or os.getcwd()
+            username = user.get("name", getpass.getuser())
+            chat_id = f"cli:{username}:{cwd}"
+
+            # Fresh start: close old session and clear history
+            if fresh:
+                from ..db.connection import get_connection
+                async with get_connection() as conn:
+                    result = await conn.fetch("""
+                        UPDATE sessions SET status = 'closed'
+                        WHERE platform = 'cli' AND platform_chat_id = $1 AND status = 'active'
+                        RETURNING id
+                    """, chat_id)
+                    if result:
+                        session_ids = [r["id"] for r in result]
+                        await conn.execute(
+                            "DELETE FROM messages WHERE session_id = ANY($1::int[])",
+                            session_ids,
+                        )
+                key = f"cli:{chat_id}"
+                if key in agent.conversations._active:
+                    del agent.conversations._active[key]
+                console.print("[dim]Starting fresh conversation...[/dim]")
+
+            # Load input history from DB
+            try:
+                from prompt_toolkit.history import InMemoryHistory
+                _history = InMemoryHistory()
+                from ..db.connection import get_connection
+                async with get_connection() as conn:
+                    rows = await conn.fetch("""
+                        SELECT m.content FROM messages m
+                        JOIN sessions s ON m.session_id = s.id
+                        WHERE s.platform = 'cli' AND s.platform_chat_id = $1
+                          AND m.role = 'user'
+                        ORDER BY m.created_at ASC
+                    """, chat_id)
+                for row in rows:
+                    content = row["content"].strip()
+                    if content and not content.startswith("/"):
+                        _history.append_string(content)
+                _prompt_session.history = _history
+            except Exception:
+                pass
+
+        # ── REPL loop ──
         import time as _time
         _last_ctrl_c = 0.0
         while True:
-            # Phase 1: Get input (idle)
-            # Resolve model name for prompt (may change mid-session via /models)
-            _prompt_model = _short_model_name(getattr(agent.provider, 'chat_model', ''))
-            # Check if active conversation has a different provider (per-session override)
-            _conv_active = agent.conversations._active.get(f"cli:{chat_id}")
-            if _conv_active and hasattr(_conv_active, 'provider'):
-                _prompt_model = _short_model_name(getattr(_conv_active.provider, 'chat_model', _prompt_model))
+            # Resolve model name for prompt
+            if remote_mode:
+                _prompt_model = _short_model_name(node_client.server_meta.get("model", ""))
+            else:
+                _prompt_model = _short_model_name(getattr(agent.provider, 'chat_model', ''))
+                _conv_active = agent.conversations._active.get(f"cli:{chat_id}")
+                if _conv_active and hasattr(_conv_active, 'provider'):
+                    _prompt_model = _short_model_name(getattr(_conv_active.provider, 'chat_model', _prompt_model))
 
             try:
                 user_input = await _get_input(_prompt_model)
             except (KeyboardInterrupt, asyncio.CancelledError):
-                # Ctrl+C at prompt -> double-tap to exit
                 now = _time.time()
                 if now - _last_ctrl_c < 2.0:
                     console.print("\n[dim]Goodbye![/dim]")
@@ -458,7 +573,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
                 continue
 
             if user_input is None:
-                # EOF (Ctrl+D)
                 console.print("\n[dim]Goodbye![/dim]")
                 break
 
@@ -468,181 +582,234 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
 
             # Built-in CLI commands
             if user_input.startswith("/"):
-                handled = await _handle_cli_command(user_input, agent, user, chat_id)
-                if handled == "exit":
+                cmd_word = user_input.split()[0].lower()
+                if cmd_word in ("/exit", "/quit", "/q"):
+                    console.print("[dim]Goodbye![/dim]")
                     break
-                if handled:
-                    continue
+                if remote_mode:
+                    # Remote mode: only /exit, /help, /cost handled locally
+                    if cmd_word == "/help":
+                        console.print(Panel(
+                            "[bold]CLI Commands[/bold]\n\n"
+                            "/help          \u2014 Show this help\n"
+                            "/cost          \u2014 Show session token usage\n"
+                            "/exit          \u2014 Exit CLI\n"
+                            "\n[dim]All other /commands and messages are sent to the server.[/dim]\n"
+                            "[dim]Shift+Enter or Esc+Enter for new line. Ctrl+L to clear screen.[/dim]",
+                            style="blue",
+                        ))
+                        continue
+                    elif cmd_word == "/cost":
+                        console.print(
+                            f"[bold]Session token usage[/bold]\n"
+                            f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
+                            f"  Output: {_format_tokens(_session_usage.total_out)}\n"
+                            f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}"
+                        )
+                        continue
+                    # All other slash commands: fall through and send to server
+                else:
+                    handled = await _handle_cli_command(user_input, agent, user, chat_id)
+                    if handled == "exit":
+                        break
+                    if handled:
+                        continue
 
-            # Phase 2: Process (Ctrl+C or Esc = cancel this request)
+            # Phase 2: Process message
             console.print()
 
-            # ── Streaming state ──
-            _streamed_any_text = False
-            _streamed_any_thinking = False
-            _in_thinking = False
-            _thinking_done = False
-            status = None
+            if remote_mode:
+                # Reset streaming state for this message
+                _r_streamed_text = False
+                _r_streamed_thinking = False
+                _r_in_thinking = False
+                _r_thinking_done = False
+                _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
+                _r_status[0].start()
 
-            # Get reasoning_visible from active conversation (or False)
-            _reasoning_visible = False
-            _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
-            if _active_conv:
-                _reasoning_visible = _active_conv.reasoning_visible
+                try:
+                    # Auto-reconnect if connection lost
+                    if not node_client._connected.is_set():
+                        _r_status[0].stop()
+                        console.print("[yellow]Connection lost. Reconnecting...[/yellow]")
+                        await node_client.connect()
+                        listen_task = asyncio.create_task(node_client.listen())
+                        console.print("[green]Reconnected.[/green]")
+                        _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
+                        _r_status[0].start()
 
-            def _on_text(chunk: str):
-                nonlocal _streamed_any_text, _in_thinking, _thinking_done, status
-                # First text token: stop spinner, print separator after thinking
-                if not _streamed_any_text:
-                    _streamed_any_text = True
-                    if status:
-                        status.stop()
-                        status = None
-                    if _streamed_any_thinking and not _thinking_done:
-                        _thinking_done = True
-                        sys.stdout.write(f"{_RESET}\n")
-                        sys.stdout.flush()
-                    _in_thinking = False
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
+                    await node_client.send_message(user_input, cwd=cwd)
 
-            def _on_thinking(chunk: str):
-                nonlocal _streamed_any_thinking, _in_thinking, status
-                if not _reasoning_visible:
-                    return
-                if not _streamed_any_thinking:
-                    _streamed_any_thinking = True
-                    if status:
-                        status.stop()
-                        status = None
-                    _in_thinking = True
-                    sys.stdout.write(_DIM_ITALIC)
-                if not _in_thinking:
-                    _in_thinking = True
-                    sys.stdout.write(_DIM_ITALIC)
-                sys.stdout.write(chunk)
-                sys.stdout.flush()
-
-            try:
-                msg = user_input
-                status = console.status("[bold blue]Thinking...", spinner="dots")
-                status.start()
-                agent.conversations._active_status = status
-                _cli_status_callback._active_status = status
-
-                # Wire streaming callbacks
-                stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
-                agent.conversations.set_stream_callbacks(stream_cbs)
-
-                # Wire tool detail callback (replaces simple spinner labels)
-                async def _on_tool_detail(name: str, args: dict, result_preview: str):
-                    nonlocal status, _streamed_any_text
-                    # Ensure we're on a clean line
-                    if _streamed_any_text:
-                        sys.stdout.write("\n")
-                        _streamed_any_text = False
-                    if status:
-                        status.stop()
-                        status = None
-                    # Format args concisely
-                    args_str = ""
-                    if args:
-                        parts = []
-                        for k, v in list(args.items())[:3]:
-                            vs = str(v)
-                            if len(vs) > 40:
-                                vs = vs[:37] + "..."
-                            parts.append(f'{k}="{vs}"')
-                        args_str = ", ".join(parts)
-                    sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
-                    # Show result preview
-                    preview = result_preview.strip().replace("\n", " ")
-                    if len(preview) > 80:
-                        preview = preview[:77] + "..."
-                    if preview:
-                        sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
+                    # Cleanup
+                    if _r_status[0]:
+                        _r_status[0].stop()
+                        _r_status[0] = None
+                    sys.stdout.write(_RESET)
                     sys.stdout.flush()
-                    # Restart spinner for next LLM call
+
+                    if _r_streamed_text:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+
+                    console.print()
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    sys.stdout.write(_RESET)
+                    sys.stdout.flush()
+                    if _r_status[0]:
+                        _r_status[0].stop()
+                        _r_status[0] = None
+                    console.print("\n[yellow]Cancelled[/yellow]\n")
+                    continue
+
+            else:
+                # ── Local mode message handling ──
+                _streamed_any_text = False
+                _streamed_any_thinking = False
+                _in_thinking = False
+                _thinking_done = False
+                status = None
+
+                _reasoning_visible = False
+                _active_conv = agent.conversations._active.get(f"cli:{chat_id}")
+                if _active_conv:
+                    _reasoning_visible = _active_conv.reasoning_visible
+
+                def _on_text(chunk: str):
+                    nonlocal _streamed_any_text, _in_thinking, _thinking_done, status
+                    if not _streamed_any_text:
+                        _streamed_any_text = True
+                        if status:
+                            status.stop()
+                            status = None
+                        if _streamed_any_thinking and not _thinking_done:
+                            _thinking_done = True
+                            sys.stdout.write(f"{_RESET}\n")
+                            sys.stdout.flush()
+                        _in_thinking = False
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+
+                def _on_thinking(chunk: str):
+                    nonlocal _streamed_any_thinking, _in_thinking, status
+                    if not _reasoning_visible:
+                        return
+                    if not _streamed_any_thinking:
+                        _streamed_any_thinking = True
+                        if status:
+                            status.stop()
+                            status = None
+                        _in_thinking = True
+                        sys.stdout.write(_DIM_ITALIC)
+                    if not _in_thinking:
+                        _in_thinking = True
+                        sys.stdout.write(_DIM_ITALIC)
+                    sys.stdout.write(chunk)
+                    sys.stdout.flush()
+
+                try:
+                    msg = user_input
                     status = console.status("[bold blue]Thinking...", spinner="dots")
                     status.start()
                     agent.conversations._active_status = status
+                    _cli_status_callback._active_status = status
 
-                agent.conversations.set_tool_detail_callback(_on_tool_detail)
+                    stream_cbs = StreamCallbacks(on_text=_on_text, on_thinking=_on_thinking)
+                    agent.conversations.set_stream_callbacks(stream_cbs)
 
-                # Wire simple tool callback for spinner updates (fallback)
-                async def _on_tool(name: str):
-                    if status:
-                        status.update(f"[bold blue]Running {name}...")
+                    async def _on_tool_detail(name: str, args: dict, result_preview: str):
+                        nonlocal status, _streamed_any_text
+                        if _streamed_any_text:
+                            sys.stdout.write("\n")
+                            _streamed_any_text = False
+                        if status:
+                            status.stop()
+                            status = None
+                        args_str = ""
+                        if args:
+                            parts = []
+                            for k, v in list(args.items())[:3]:
+                                vs = str(v)
+                                if len(vs) > 40:
+                                    vs = vs[:37] + "..."
+                                parts.append(f'{k}="{vs}"')
+                            args_str = ", ".join(parts)
+                        sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
+                        preview = result_preview.strip().replace("\n", " ")
+                        if len(preview) > 80:
+                            preview = preview[:77] + "..."
+                        if preview:
+                            sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
+                        sys.stdout.flush()
+                        status = console.status("[bold blue]Thinking...", spinner="dots")
+                        status.start()
+                        agent.conversations._active_status = status
 
-                agent.conversations.set_tool_callback(_on_tool)
+                    agent.conversations.set_tool_detail_callback(_on_tool_detail)
 
-                from ..communication.inbound import InboundContext
-                cli_inbound = InboundContext(
-                    channel="cli",
-                    platform="cli",
-                    chat_type="direct",
-                    conversation_label=user.get("display_name") or user.get("name", "user"),
-                    chat_id=chat_id,
-                )
-                response = await agent.conversations.handle_message(
-                    platform="cli",
-                    chat_id=chat_id,
-                    user=user,
-                    message=msg,
-                    message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
-                )
+                    async def _on_tool(name: str):
+                        if status:
+                            status.update(f"[bold blue]Running {name}...")
 
-                # Cleanup spinner + callbacks
-                _stop_status(status, agent)
-                status = None
+                    agent.conversations.set_tool_callback(_on_tool)
 
-                # Reset ANSI state
-                sys.stdout.write(_RESET)
-                sys.stdout.flush()
+                    from ..communication.inbound import InboundContext
+                    cli_inbound = InboundContext(
+                        channel="cli",
+                        platform="cli",
+                        chat_type="direct",
+                        conversation_label=user.get("display_name") or user.get("name", "user"),
+                        chat_id=chat_id,
+                    )
+                    response = await agent.conversations.handle_message(
+                        platform="cli",
+                        chat_id=chat_id,
+                        user=user,
+                        message=msg,
+                        message_metadata={"cwd": agent._cli_cwd, "inbound": cli_inbound},
+                    )
 
-                # Display response — skip if already streamed
-                if _streamed_any_text:
-                    # Already streamed; just ensure newline
-                    sys.stdout.write("\n")
+                    _stop_status(status, agent)
+                    status = None
+
+                    sys.stdout.write(_RESET)
                     sys.stdout.flush()
-                elif response:
-                    _display_response(response)
 
-                # Token usage line
-                _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
-                if _active_conv_final and hasattr(_active_conv_final, '_last_response_usage'):
-                    in_tok = _active_conv_final._last_response_usage.get("input_tokens", 0)
-                    out_tok = _active_conv_final._last_response_usage.get("output_tokens", 0)
-                elif response:
-                    # Parse from conversation's last chat response
-                    in_tok = 0
-                    out_tok = 0
-                else:
-                    in_tok = 0
-                    out_tok = 0
+                    if _streamed_any_text:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    elif response:
+                        _display_response(response)
 
-                # Update session totals from the conversation's last response
-                if _active_conv_final:
-                    # The response object isn't directly available, but we stored it
-                    last_resp = getattr(_active_conv_final, '_last_chat_response', None)
-                    if last_resp:
-                        in_tok = last_resp.input_tokens
-                        out_tok = last_resp.output_tokens
+                    _active_conv_final = agent.conversations._active.get(f"cli:{chat_id}")
+                    if _active_conv_final and hasattr(_active_conv_final, '_last_response_usage'):
+                        in_tok = _active_conv_final._last_response_usage.get("input_tokens", 0)
+                        out_tok = _active_conv_final._last_response_usage.get("output_tokens", 0)
+                    elif response:
+                        in_tok = 0
+                        out_tok = 0
+                    else:
+                        in_tok = 0
+                        out_tok = 0
 
-                if in_tok or out_tok:
-                    _session_usage.total_in += in_tok
-                    _session_usage.total_out += out_tok
-                    console.print(f"[dim][{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out][/dim]")
+                    if _active_conv_final:
+                        last_resp = getattr(_active_conv_final, '_last_chat_response', None)
+                        if last_resp:
+                            in_tok = last_resp.input_tokens
+                            out_tok = last_resp.output_tokens
 
-                console.print()
-            except (KeyboardInterrupt, asyncio.CancelledError):
-                # Ctrl+C during processing -> cancel, back to prompt
-                sys.stdout.write(_RESET)
-                sys.stdout.flush()
-                _stop_status(status, agent)
-                status = None
-                console.print("\n[yellow]Cancelled[/yellow]\n")
-                continue
+                    if in_tok or out_tok:
+                        _session_usage.total_in += in_tok
+                        _session_usage.total_out += out_tok
+                        console.print(f"[dim][{_format_tokens(in_tok)} in | {_format_tokens(out_tok)} out][/dim]")
+
+                    console.print()
+                except (KeyboardInterrupt, asyncio.CancelledError):
+                    sys.stdout.write(_RESET)
+                    sys.stdout.flush()
+                    _stop_status(status, agent)
+                    status = None
+                    console.print("\n[yellow]Cancelled[/yellow]\n")
+                    continue
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -651,13 +818,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False):
             traceback.print_exc()
 
     # Cleanup
-    await agent.stop()
-    # Restore terminal state — prompt_toolkit/executor can leave it corrupted
+    if remote_mode:
+        listen_task.cancel()
+        await node_client.disconnect()
+    else:
+        await agent.stop()
     try:
         os.system("stty sane 2>/dev/null")
     except Exception:
         pass
-    # Force exit to avoid threading cleanup error from executor thread
     os._exit(0)
 
 
