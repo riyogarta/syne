@@ -3610,16 +3610,15 @@ Or just send me a message!"""
         await ensure_paired_nodes_table()
 
         nodes = await list_nodes()
-        active_nodes = [n for n in nodes if n["active"]]
-        revoked_nodes = [n for n in nodes if not n["active"]]
+        # Only show active nodes (removed nodes are deleted)
+        nodes = [n for n in nodes if n["active"]]
 
-        # Check which nodes are currently connected
         connected_ids = set()
         if self.agent.gateway:
             connected_ids = set(self.agent.gateway._nodes.keys())
 
         buttons = []
-        for n in active_nodes:
+        for n in nodes:
             node_id = n["node_id"]
             name = n["display_name"]
             online = node_id in connected_ids
@@ -3629,16 +3628,9 @@ Or just send me a message!"""
                 callback_data=f"nodes:detail:{node_id}",
             )])
 
-        if revoked_nodes:
-            for n in revoked_nodes:
-                buttons.append([InlineKeyboardButton(
-                    f"🔴 {n['display_name']} (revoked)",
-                    callback_data=f"nodes:detail:{n['node_id']}",
-                )])
+        buttons.append([InlineKeyboardButton("🔑 New Token", callback_data="nodes:token_prompt")])
 
-        buttons.append([InlineKeyboardButton("🔑 Generate Pairing Token", callback_data="nodes:token_prompt")])
-
-        text = f"<b>Remote Nodes</b> — {len(active_nodes)} active"
+        text = f"<b>Remote Nodes</b> — {len(nodes)} paired"
         if not nodes:
             text += "\n\nNo nodes paired yet. Generate a token to pair one."
         markup = InlineKeyboardMarkup(buttons)
@@ -3658,16 +3650,14 @@ Or just send me a message!"""
 
         name = node["display_name"]
         platform = node.get("platform", "?")
-        active = node["active"]
         last_seen = node["last_seen"]
         created = node["created_at"]
 
-        # Check if online
         online = False
         if self.agent.gateway:
             online = node_id in self.agent.gateway._nodes
 
-        status = "🟢 Online" if online else ("⚪ Offline" if active else "🔴 Revoked")
+        status = "🟢 Online" if online else "⚪ Offline"
         last_seen_str = last_seen.strftime("%Y-%m-%d %H:%M") if last_seen else "never"
         created_str = created.strftime("%Y-%m-%d %H:%M") if created else "?"
 
@@ -3680,14 +3670,11 @@ Or just send me a message!"""
             f"Paired: {created_str}"
         )
 
-        buttons = []
-        buttons.append([InlineKeyboardButton("✏️ Rename", callback_data=f"nodes:rename_prompt:{node_id}")])
-        if active:
-            buttons.append([InlineKeyboardButton("🚫 Revoke", callback_data=f"nodes:revoke_confirm:{node_id}")])
-        else:
-            buttons.append([InlineKeyboardButton("✅ Reactivate", callback_data=f"nodes:reactivate:{node_id}")])
-            buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"nodes:delete_confirm:{node_id}")])
-        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="nodes:main")])
+        buttons = [
+            [InlineKeyboardButton("✏️ Rename", callback_data=f"nodes:rename_prompt:{node_id}")],
+            [InlineKeyboardButton("🗑 Remove", callback_data=f"nodes:remove_confirm:{node_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="nodes:main")],
+        ]
 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -3733,68 +3720,33 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-        elif action == "revoke_confirm" and len(parts) >= 3:
+        elif action == "remove_confirm" and len(parts) >= 3:
             node_id = ":".join(parts[2:])
             from ..gateway.auth import get_node
             node = await get_node(node_id)
             name = node["display_name"] if node else node_id
             buttons = [
-                [InlineKeyboardButton("Yes, revoke", callback_data=f"nodes:revoke:{node_id}")],
+                [InlineKeyboardButton("Yes, remove", callback_data=f"nodes:remove:{node_id}")],
                 [InlineKeyboardButton("⬅️ Cancel", callback_data=f"nodes:detail:{node_id}")],
             ]
             await query.edit_message_text(
-                f"Revoke access for <b>{name}</b>?\n\nThe node will not be able to connect.",
+                f"Remove <b>{name}</b>?\n\nThe node will be disconnected and deleted.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
 
-        elif action == "revoke" and len(parts) >= 3:
+        elif action == "remove" and len(parts) >= 3:
             node_id = ":".join(parts[2:])
-            from ..gateway.auth import revoke_node
-            if await revoke_node(node_id):
-                # Disconnect if online
-                if self.agent.gateway:
-                    conn = self.agent.gateway.get_node(node_id)
-                    if conn:
-                        await conn.ws.close()
-                await query.answer("Node revoked")
-            else:
-                await query.answer("Failed to revoke", show_alert=True)
-            await self._nodes_menu_main(query)
-
-        elif action == "reactivate" and len(parts) >= 3:
-            node_id = ":".join(parts[2:])
-            from ..db.connection import get_connection
-            async with get_connection() as conn:
-                await conn.execute(
-                    "UPDATE paired_nodes SET active = true, updated_at = NOW() WHERE node_id = $1",
-                    node_id,
-                )
-            await query.answer("Node reactivated")
-            await self._nodes_menu_detail(query, node_id)
-
-        elif action == "delete_confirm" and len(parts) >= 3:
-            node_id = ":".join(parts[2:])
-            from ..gateway.auth import get_node
-            node = await get_node(node_id)
-            name = node["display_name"] if node else node_id
-            buttons = [
-                [InlineKeyboardButton("Yes, delete permanently", callback_data=f"nodes:delete:{node_id}")],
-                [InlineKeyboardButton("⬅️ Cancel", callback_data=f"nodes:detail:{node_id}")],
-            ]
-            await query.edit_message_text(
-                f"Permanently delete <b>{name}</b>?\n\nThis cannot be undone.",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-
-        elif action == "delete" and len(parts) >= 3:
-            node_id = ":".join(parts[2:])
+            # Disconnect if online
+            if self.agent.gateway:
+                conn = self.agent.gateway.get_node(node_id)
+                if conn:
+                    await conn.ws.close()
             from ..gateway.auth import delete_node
             if await delete_node(node_id):
-                await query.answer("Node deleted")
+                await query.answer("Node removed")
             else:
-                await query.answer("Failed to delete", show_alert=True)
+                await query.answer("Failed to remove", show_alert=True)
             await self._nodes_menu_main(query)
 
     async def _process_node_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
