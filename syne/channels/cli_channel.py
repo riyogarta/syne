@@ -383,9 +383,10 @@ class _CLIScreen:
                 self._input_queue.put_nowait(text)
                 buf.reset()
 
-        @kb.add(Keys.Escape, Keys.Enter)
-        def _newline_esc(event):
-            event.current_buffer.insert_text("\n")
+        @kb.add(Keys.Escape)
+        def _escape(event):
+            if self._processing:
+                self._input_queue.put_nowait("__cancel__")
 
         try:
             @kb.add("s-enter")
