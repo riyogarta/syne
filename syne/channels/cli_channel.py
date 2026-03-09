@@ -358,10 +358,6 @@ class _CLIScreen:
         def _newline_esc(event):
             event.current_buffer.insert_text("\n")
 
-        @kb.add("c-enter")
-        def _newline_ctrl(event):
-            event.current_buffer.insert_text("\n")
-
         try:
             @kb.add("s-enter")
             def _newline_shift(event):
