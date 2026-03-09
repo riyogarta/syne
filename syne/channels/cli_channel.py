@@ -372,7 +372,13 @@ class _CLIScreen:
 
         @kb.add("c-c")
         def _ctrl_c(event):
-            self._input_queue.put_nowait(None)
+            buf = event.current_buffer
+            if buf.text.strip():
+                # First Ctrl+C: clear input
+                buf.reset()
+            else:
+                # Second Ctrl+C (empty input): exit
+                self._input_queue.put_nowait(None)
 
         @kb.add("c-d")
         def _ctrl_d(event):
