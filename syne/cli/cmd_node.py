@@ -308,7 +308,9 @@ async def _gateway_toggle_async(enable: bool):
     await set_config("gateway.enabled", enable)
     state = "enabled" if enable else "disabled"
     console.print(f"[green]Gateway {state}.[/green]")
-    if enable:
-        console.print("[dim]Restart Syne for the gateway to start: syne restart[/dim]")
 
     await close_db()
+
+    from .helpers import _restart_service
+    console.print("[dim]Restarting Syne...[/dim]")
+    _restart_service()
