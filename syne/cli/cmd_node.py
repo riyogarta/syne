@@ -32,10 +32,11 @@ async def _node_init_async():
         if not click.confirm("Re-pair with a different server?", default=False):
             return
 
-    console.print("[bold]Pair with Syne Server[/bold]\n")
-    gateway_url = click.prompt("Gateway URL (e.g. wss://syne.example.com:8765)")
-    pairing_token = click.prompt("Pairing token (from 'syne gateway token' on server)")
-    display_name = click.prompt("Display name for this node", default="")
+    console.print("[bold]Remote Node Setup[/bold]")
+    console.print("[dim]Connect this machine to your Syne server.[/dim]")
+    console.print("[dim]You need a pairing token from the server (run syne gateway token there).[/dim]\n")
+    gateway_url = click.prompt("Gateway URL (e.g. wss://syne.example.com:8443)")
+    pairing_token = click.prompt("Pairing token")
 
     # Normalize URL
     if not gateway_url.startswith("ws"):
@@ -50,11 +51,14 @@ async def _node_init_async():
     console.print(f"\n[dim]Connecting to {gateway_url}...[/dim]")
 
     try:
-        config = await pair_with_server(gateway_url, pairing_token, display_name)
+        config = await pair_with_server(gateway_url, pairing_token)
         console.print(f"\n[green]Paired successfully![/green]")
         console.print(f"  Node ID: {config['node_id']}")
-        console.print(f"  Display name: {config['display_name']}")
+        console.print(f"  Name: {config['display_name']}")
         console.print(f"\nRun [bold]syne node cli[/bold] to start chatting.")
+    except ConnectionError as e:
+        console.print(f"\n[red]Pairing failed: {e}[/red]")
+        console.print("[dim]Check that the gateway is running and the token hasn't expired.[/dim]")
     except Exception as e:
         console.print(f"\n[red]Pairing failed: {e}[/red]")
 
