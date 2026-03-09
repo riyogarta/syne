@@ -33,8 +33,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("syne.gateway")
 
-# Default port — can be overridden via config
-DEFAULT_PORT = 8765
+# Default port — 8443 is Cloudflare-compatible for proxied WSS
+DEFAULT_PORT = 8443
 
 
 @dataclass
