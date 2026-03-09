@@ -3677,14 +3677,14 @@ Or just send me a message!"""
 
         # Resolve model label
         models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "")
+        default_entry = next((m for m in models if m.get("key") == active_key), None)
+        default_label = default_entry.get("label", active_key) if default_entry else active_key
         if node_model:
             model_entry = next((m for m in models if m.get("key") == node_model), None)
             model_label = model_entry.get("label", node_model) if model_entry else node_model
         else:
-            active_key = await get_config("provider.active_model", "")
-            default_entry = next((m for m in models if m.get("key") == active_key), None)
-            default_name = default_entry.get("label", active_key) if default_entry else active_key
-            model_label = f"default ({default_name})" if default_name else "default"
+            model_label = f"{default_label} (default)" if default_label else "default"
 
         text = (
             f"<b>{name}</b>\n\n"
@@ -3787,13 +3787,14 @@ Or just send me a message!"""
             models = await get_config("provider.models", [])
 
             buttons = []
-            # Default option — show actual default model name
+            # Default option — format: "Model Name (default)"
             active_key = await get_config("provider.active_model", "")
             default_entry = next((m for m in models if m.get("key") == active_key), None)
             default_name = default_entry.get("label", active_key) if default_entry else active_key
             check = " ✓" if not current_model else ""
+            default_btn = f"{default_name} (default){check}" if default_name else f"default{check}"
             buttons.append([InlineKeyboardButton(
-                f"Default ({default_name}){check}" if default_name else f"Default{check}",
+                default_btn,
                 callback_data=f"nodes:model_set:{node_id}:",
             )])
             for m in models:
