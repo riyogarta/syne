@@ -289,6 +289,7 @@ class _ANSIOutputControl(UIControl):
         self._raw_lines: list[str] = [""]
         self._formatted_cache: list = []
         self._cache_valid_to: int = 0
+        self._scroll_offset: int = 0  # 0 = at bottom (auto-scroll)
 
     def append(self, text: str):
         for ch in text:
@@ -296,11 +297,24 @@ class _ANSIOutputControl(UIControl):
                 self._raw_lines.append("")
             else:
                 self._raw_lines[-1] += ch
+        # If user is at bottom, stay at bottom (auto-scroll)
+        # If scrolled up, don't move
 
     def clear(self):
         self._raw_lines = [""]
         self._formatted_cache = []
         self._cache_valid_to = 0
+        self._scroll_offset = 0
+
+    def scroll_up(self, lines: int = 5):
+        total = len(self._raw_lines)
+        self._scroll_offset = min(self._scroll_offset + lines, max(0, total - 1))
+
+    def scroll_down(self, lines: int = 5):
+        self._scroll_offset = max(0, self._scroll_offset - lines)
+
+    def scroll_to_bottom(self):
+        self._scroll_offset = 0
 
     def create_content(self, width: int, height: int) -> UIContent:
         complete_count = len(self._raw_lines) - 1
@@ -318,13 +332,18 @@ class _ANSIOutputControl(UIControl):
         last_fmt = to_formatted_text(ANSI(last)) if last else [("", " ")]
         all_lines = self._formatted_cache + [last_fmt]
 
+        total = len(all_lines)
+
         def get_line(i: int):
-            return all_lines[i] if i < len(all_lines) else [("", " ")]
+            return all_lines[i] if i < total else [("", " ")]
+
+        # Cursor position determines scroll: place cursor at target line
+        target_y = max(0, total - 1 - self._scroll_offset)
 
         return UIContent(
             get_line=get_line,
-            line_count=len(all_lines),
-            cursor_position=Point(x=0, y=max(0, len(all_lines) - 1)),
+            line_count=total,
+            cursor_position=Point(x=0, y=target_y),
         )
 
     def is_focusable(self) -> bool:
@@ -352,6 +371,7 @@ class _CLIScreen:
         @kb.add(Keys.Enter, eager=True)
         def _submit(event):
             self._exit_pending = False
+            self._output.scroll_to_bottom()
             text = self._input_buffer.text.strip()
             if text:
                 self._input_queue.put_nowait(text)
@@ -390,6 +410,26 @@ class _CLIScreen:
             self._output.clear()
             event.app.invalidate()
 
+        @kb.add(Keys.PageUp)
+        def _page_up(event):
+            self._output.scroll_up(15)
+            event.app.invalidate()
+
+        @kb.add(Keys.PageDown)
+        def _page_down(event):
+            self._output.scroll_down(15)
+            event.app.invalidate()
+
+        @kb.add(Keys.ScrollUp)
+        def _scroll_up(event):
+            self._output.scroll_up(3)
+            event.app.invalidate()
+
+        @kb.add(Keys.ScrollDown)
+        def _scroll_down(event):
+            self._output.scroll_down(3)
+            event.app.invalidate()
+
         from prompt_toolkit import Application
         from prompt_toolkit.layout.controls import FormattedTextControl
 
@@ -422,7 +462,7 @@ class _CLIScreen:
             style=Style.from_dict({
                 "separator": "fg:ansibrightblack",
             }),
-            mouse_support=False,
+            mouse_support=True,
         )
 
         # Set focus to input buffer
