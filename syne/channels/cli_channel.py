@@ -686,17 +686,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         import time as _time
         _last_ctrl_c = 0.0
         while True:
-            # Resolve model name for prompt
-            if remote_mode:
-                _prompt_model = _short_model_name(node_client.server_meta.get("model", ""))
-            else:
-                _prompt_model = _short_model_name(getattr(agent.provider, 'chat_model', ''))
-                _conv_active = agent.conversations._active.get(f"cli:{chat_id}")
-                if _conv_active and hasattr(_conv_active, 'provider'):
-                    _prompt_model = _short_model_name(getattr(_conv_active.provider, 'chat_model', _prompt_model))
-
             try:
-                user_input = await _get_input(_prompt_model)
+                user_input = await _get_input()
             except (KeyboardInterrupt, asyncio.CancelledError):
                 now = _time.time()
                 if now - _last_ctrl_c < 2.0:
@@ -999,7 +990,15 @@ def _stop_status(status, agent):
 
 async def _get_input(model_name: str = "") -> str | None:
     """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
-    prompt_str = f"{model_name} > " if model_name else "> "
+    # Separator line (like Claude Code)
+    try:
+        cols = os.get_terminal_size().columns
+    except OSError:
+        cols = 80
+    sys.stdout.write(f"{_DIM}{'─' * cols}{_RESET}\n")
+    sys.stdout.flush()
+
+    prompt_str = f"{_BOLD}>{_RESET} "
     try:
         result = await _prompt_session.prompt_async(
             prompt_str,
