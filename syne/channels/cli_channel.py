@@ -419,35 +419,38 @@ class _CLIScreen:
 
         @kb.add(Keys.PageUp)
         def _page_up(event):
-            self._output.scroll_up(15)
+            self._output.scroll_up(20)
             event.app.invalidate()
 
         @kb.add(Keys.PageDown)
         def _page_down(event):
-            self._output.scroll_down(15)
+            self._output.scroll_down(20)
             event.app.invalidate()
 
-        @kb.add(Keys.ScrollUp)
-        def _scroll_up(event):
+        # Shift+Up/Down for smaller scroll steps
+        @kb.add(Keys.ShiftUp)
+        def _scroll_up_line(event):
             self._output.scroll_up(3)
             event.app.invalidate()
 
-        @kb.add(Keys.ScrollDown)
-        def _scroll_down(event):
+        @kb.add(Keys.ShiftDown)
+        def _scroll_down_line(event):
             self._output.scroll_down(3)
             event.app.invalidate()
 
         from prompt_toolkit import Application
         from prompt_toolkit.layout.controls import FormattedTextControl
 
+        self._output_window = Window(
+            content=self._output,
+            wrap_lines=True,
+            always_hide_cursor=True,
+        )
+
         self._app = Application(
             layout=Layout(HSplit([
                 # Output area (scrollable, takes all remaining space)
-                Window(
-                    content=self._output,
-                    wrap_lines=True,
-                    always_hide_cursor=True,
-                ),
+                self._output_window,
                 # Top separator
                 Window(height=1, char="─", style="class:separator"),
                 # Input area (dynamic height: 1 line to max 10)
@@ -469,7 +472,7 @@ class _CLIScreen:
             style=Style.from_dict({
                 "separator": "fg:ansibrightblack",
             }),
-            mouse_support=True,
+            mouse_support=False,
         )
 
         # Set focus to input buffer
