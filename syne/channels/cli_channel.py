@@ -6,7 +6,6 @@ scrollback), prompt rendered with ─ borders at bottom, no full-screen mode.
 
 import asyncio
 import getpass
-import json
 import logging
 import os
 import re
@@ -37,14 +36,11 @@ _DIM = "\033[2m"
 _DIM_ITALIC = "\033[2;3m"
 _ITALIC = "\033[3m"
 _RESET = "\033[0m"
-_CYAN = "\033[36m"
 _BOLD = "\033[1m"
-_BOLD_CYAN = "\033[1;36m"
 _DIM_GREEN = "\033[2;32m"
 _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
 _DIM_CYAN = "\033[2;36m"
-_BG_DIM = "\033[48;5;236m"  # subtle dark background for user messages
 
 # ── Spinner ──
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -81,16 +77,17 @@ async def _start_spinner(message: str = "Working..."):
                 i += 1
                 await asyncio.sleep(0.08)
         except asyncio.CancelledError:
-            _write(f"\r\033[2K")  # clear spinner line
+            pass  # cleanup done by _stop_spinner
 
     _spinner_task = asyncio.create_task(_spin())
 
 
 def _stop_spinner():
-    """Stop the spinner if running."""
+    """Stop the spinner if running. Clears line immediately (no race)."""
     global _spinner_task
     if _spinner_task and not _spinner_task.done():
         _spinner_task.cancel()
+        _write("\r\033[2K")  # clear spinner line immediately before any output
     _spinner_task = None
 
 
@@ -323,6 +320,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         settings = load_settings()
         agent = SyneAgent(settings)
 
+    listen_task = None
+
     try:
         # ── Remote mode setup ──
         if remote_mode:
@@ -510,6 +509,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
             def _remote_on_status(message: str):
                 nonlocal _r_streamed_text, _r_in_thinking, _r_thinking_done
+                _stop_spinner()
                 if _r_streamed_text:
                     _write("\n")
                     _r_streamed_text = False
@@ -594,6 +594,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         session = _build_prompt_session(_history)
 
         # ── REPL loop ──
+        global _last_tool_key
         _last_ctrl_c = 0.0
 
         while True:
@@ -617,7 +618,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 continue
 
             _last_ctrl_c = 0.0
-            global _last_tool_key
             _last_tool_key = ""
 
             # ── Slash commands ──
@@ -791,8 +791,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _write(traceback.format_exc() + "\n")
 
     finally:
+        _stop_spinner()
         if remote_mode:
-            listen_task.cancel()
+            if listen_task:
+                listen_task.cancel()
             await node_client.disconnect()
         elif agent:
             await agent.stop()
@@ -894,6 +896,42 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             _write(f"  {_DIM_GREEN}Conversation cleared.{_RESET}\n\n")
         else:
             _write(f"  {_DIM}No active conversation.{_RESET}\n\n")
+        return True
+
+    elif cmd == "/memory":
+        parts = command.split(maxsplit=1)
+        query = parts[1].strip() if len(parts) > 1 else ""
+        if not query:
+            _write(f"  {_DIM}Usage: /memory <search query>{_RESET}\n\n")
+            return True
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            rows = await conn.fetch("""
+                SELECT content, metadata, created_at FROM memory
+                ORDER BY embedding <=> (
+                    SELECT embedding FROM memory
+                    WHERE content ILIKE '%' || $1 || '%'
+                    LIMIT 1
+                )
+                LIMIT 5
+            """, query)
+        if not rows:
+            # Fallback to text search
+            async with get_connection() as conn:
+                rows = await conn.fetch("""
+                    SELECT content, metadata, created_at FROM memory
+                    WHERE content ILIKE '%' || $1 || '%'
+                    ORDER BY created_at DESC LIMIT 5
+                """, query)
+        if rows:
+            _write(f"\n  {_BOLD}Memory search: {query}{_RESET}\n\n")
+            for row in rows:
+                content = row["content"]
+                date = row["created_at"].strftime("%Y-%m-%d") if row["created_at"] else ""
+                _write(f"  {_DIM}{date}{_RESET} {content}\n")
+            _write("\n")
+        else:
+            _write(f"  {_DIM}No memories found for '{query}'.{_RESET}\n\n")
         return True
 
     elif cmd == "/compact":
