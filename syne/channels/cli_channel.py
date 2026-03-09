@@ -30,6 +30,10 @@ _DIM_ITALIC = "\033[2;3m"
 _RESET = "\033[0m"
 _CYAN = "\033[36m"
 _BOLD = "\033[1m"
+_BOLD_CYAN = "\033[1;36m"
+_DIM_GREEN = "\033[2;32m"
+_DIM_RED = "\033[2;31m"
+_DIM_YELLOW = "\033[2;33m"
 
 
 _SLASH_COMMANDS = [
@@ -173,6 +177,28 @@ def _format_tokens(n: int) -> str:
     if n >= 10_000:
         return f"{n / 1_000:.1f}K"
     return f"{n:,}"
+
+
+def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
+    """Display a tool call with colored output (shared by local + remote mode)."""
+    args_str = ""
+    if args:
+        parts = []
+        for k, v in list(args.items())[:3]:
+            vs = str(v)
+            if len(vs) > 40:
+                vs = vs[:37] + "..."
+            parts.append(f'{_DIM}{k}={_RESET}{_DIM_YELLOW}"{vs}"{_RESET}')
+        args_str = f"{_DIM}, {_RESET}".join(parts)
+    sys.stdout.write(f"  {_BOLD_CYAN}> {name}{_RESET}{_DIM}({_RESET}{args_str}{_DIM}){_RESET}\n")
+    preview = result_preview.strip().replace("\n", " ")
+    if len(preview) > 80:
+        preview = preview[:77] + "..."
+    if preview:
+        is_error = preview.lower().startswith("error")
+        color = _DIM_RED if is_error else _DIM_GREEN
+        sys.stdout.write(f"    {color}{preview}{_RESET}\n")
+    sys.stdout.flush()
 
 
 async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, node_client=None):
@@ -470,22 +496,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 if _r_status[0]:
                     _r_status[0].stop()
                     _r_status[0] = None
-                args_str = ""
-                if args:
-                    parts = []
-                    for k, v in list(args.items())[:3]:
-                        vs = str(v)
-                        if len(vs) > 40:
-                            vs = vs[:37] + "..."
-                        parts.append(f'{k}="{vs}"')
-                    args_str = ", ".join(parts)
-                sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
-                preview = result_preview.strip().replace("\n", " ")
-                if len(preview) > 80:
-                    preview = preview[:77] + "..."
-                if preview:
-                    sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
-                sys.stdout.flush()
+                _format_tool_activity(name, args, result_preview)
                 _r_status[0] = console.status("[bold blue]Thinking...", spinner="dots")
                 _r_status[0].start()
 
@@ -735,22 +746,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         if status:
                             status.stop()
                             status = None
-                        args_str = ""
-                        if args:
-                            parts = []
-                            for k, v in list(args.items())[:3]:
-                                vs = str(v)
-                                if len(vs) > 40:
-                                    vs = vs[:37] + "..."
-                                parts.append(f'{k}="{vs}"')
-                            args_str = ", ".join(parts)
-                        sys.stdout.write(f"  {_DIM}{_CYAN}> {name}({args_str}){_RESET}\n")
-                        preview = result_preview.strip().replace("\n", " ")
-                        if len(preview) > 80:
-                            preview = preview[:77] + "..."
-                        if preview:
-                            sys.stdout.write(f"    {_DIM}{preview}{_RESET}\n")
-                        sys.stdout.flush()
+                        _format_tool_activity(name, args, result_preview)
                         status = console.status("[bold blue]Thinking...", spinner="dots")
                         status.start()
                         agent.conversations._active_status = status
