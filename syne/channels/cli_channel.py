@@ -372,10 +372,16 @@ class _CLIScreen:
         def _submit(event):
             self._exit_pending = False
             self._output.scroll_to_bottom()
-            text = self._input_buffer.text.strip()
+            buf = event.current_buffer
+            # Backslash at end of line = line continuation
+            if buf.text.endswith("\\"):
+                buf.text = buf.text[:-1]
+                buf.insert_text("\n")
+                return
+            text = buf.text.strip()
             if text:
                 self._input_queue.put_nowait(text)
-                self._input_buffer.reset()
+                buf.reset()
 
         @kb.add(Keys.Escape, Keys.Enter)
         def _newline_esc(event):
