@@ -207,16 +207,11 @@ class VertexProvider(LLMProvider):
             if gemini_tools:
                 body["tools"] = gemini_tools
 
-        url = f"{_vertex_endpoint(self.region, model)}:streamGenerateContent?alt=sse"
+        url = f"{_vertex_endpoint(self.region, model)}:streamGenerateContent"
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-        params = {"key": self.api_key}
+        params = {"alt": "sse", "key": self.api_key}
 
         body_json = json.dumps(body)
-
-        # Debug: log request details
-        logger.info(f"Vertex request: url={url} region={self.region} model={model} contents_count={len(contents)} body_size={len(body_json)}")
-        if len(body_json) < 5000:
-            logger.debug(f"Vertex request body: {body_json}")
 
         text_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -242,16 +237,11 @@ class VertexProvider(LLMProvider):
                 async with client.stream(
                     "POST", url, content=body_json, headers=headers, params=params,
                 ) as resp:
-                    logger.info(f"Vertex stream response: status={resp.status_code}")
                     if resp.status_code >= 400:
                         await resp.aread()
                         resp.raise_for_status()
 
-                    line_count = 0
                     async for line in resp.aiter_lines():
-                        line_count += 1
-                        if line_count <= 3:
-                            logger.info(f"Vertex SSE line {line_count}: {line[:500]}")
                         if time.monotonic() > stream_deadline:
                             logger.warning(f"Vertex stream exceeded {_STREAM_OVERALL_TIMEOUT}s — aborting")
                             break
