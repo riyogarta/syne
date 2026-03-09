@@ -424,6 +424,7 @@ def _create_symlink():
             with open(shell_rc, "a") as f:
                 f.write(f"\n# Syne CLI\n{path_line}\n")
             console.print(f"[green]✓[/green] Added ~/.local/bin to PATH in {os.path.basename(shell_rc)}")
+            console.print(f"[dim]  Run 'source ~/{os.path.basename(shell_rc)}' or open a new terminal for PATH to take effect.[/dim]")
     except Exception:
         console.print(f"[yellow]⚠ Add to your shell rc: {path_line}[/yellow]")
 
