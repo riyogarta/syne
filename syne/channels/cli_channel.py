@@ -974,16 +974,22 @@ def _stop_status(status, agent):
         pass
 
 
-async def _get_input(model_name: str = "") -> str | None:
-    """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
+def _make_separator() -> str:
     try:
         cols = os.get_terminal_size().columns
     except OSError:
         cols = 80
-    sep = f"{_DIM}{'─' * cols}{_RESET}"
+    return "─" * cols
+
+
+async def _get_input(model_name: str = "") -> str | None:
+    """Get user input using prompt_toolkit (supports Shift+Enter for newlines)."""
+    from prompt_toolkit.formatted_text import HTML
+
+    sep = _make_separator()
 
     # Top border
-    sys.stdout.write(f"{sep}\n")
+    sys.stdout.write(f"{_DIM}{sep}{_RESET}\n")
     sys.stdout.flush()
 
     prompt_str = "> "
@@ -992,10 +998,8 @@ async def _get_input(model_name: str = "") -> str | None:
             prompt_str,
             multiline=True,
             prompt_continuation="  ",
+            bottom_toolbar=HTML(f'<style bg="" fg="ansibrightblack">{sep}</style>'),
         )
-        # Bottom border
-        sys.stdout.write(f"{sep}\n")
-        sys.stdout.flush()
         return result
     except EOFError:
         return None
