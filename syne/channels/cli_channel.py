@@ -773,13 +773,9 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         continue
                     if row["role"] == "user":
                         _history.append_string(content)
-                        # Truncate long user messages
-                        preview = content if len(content) <= 200 else content[:200] + "..."
-                        screen.write(f"\n{_DIM}> {preview}{_RESET}\n")
+                        screen.write(f"\n{_DIM}> {content}{_RESET}\n")
                     else:
-                        # Truncate long assistant messages
-                        preview = content if len(content) <= 500 else content[:500] + "..."
-                        screen.write(f"{preview}\n")
+                        screen.write(f"{content}\n")
                 screen.write(f"\n  {_DIM}── end of history ──{_RESET}\n\n")
             else:
                 # Also load input history for arrow-up recall
