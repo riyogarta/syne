@@ -139,8 +139,12 @@ class NodeClient:
         logger.info(f"Connected to gateway as {self.display_name}")
 
     async def disconnect(self) -> None:
-        """Disconnect from the gateway."""
+        """Gracefully disconnect from the gateway."""
         if self._ws:
+            try:
+                await self._ws.send(json.dumps({"type": "disconnect"}))
+            except Exception:
+                pass
             await self._ws.close()
             self._ws = None
             self._connected.clear()

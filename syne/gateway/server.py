@@ -248,7 +248,10 @@ class Gateway:
         """Route an incoming message from a connected node."""
         msg_type = msg.get("type", "")
 
-        if msg_type == "message":
+        if msg_type == "disconnect":
+            logger.info(f"Node {node.node_id} sent graceful disconnect")
+            await node.ws.close()
+        elif msg_type == "message":
             await self._handle_chat(node, msg)
         elif msg_type == "tool_result":
             node.resolve_tool(
