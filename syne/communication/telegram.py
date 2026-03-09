@@ -5347,6 +5347,23 @@ Or just send me a message!"""
 
         try:
             await set_config(credential_key, text, f"{label} API key")
+
+            # Re-detect Vertex AI region when API key changes
+            driver = state.get("provider", "")
+            if driver == "vertex":
+                try:
+                    from syne.llm.vertex import detect_vertex_region
+                    models = await get_config("provider.models", [])
+                    vertex_models = [m for m in models if m.get("driver") == "vertex"]
+                    if vertex_models:
+                        region = await detect_vertex_region(text, vertex_models[0].get("model_id", "gemini-2.5-flash"))
+                        for m in vertex_models:
+                            m["region"] = region
+                        await set_config("provider.models", models)
+                        await bot.send_message(chat_id=chat_id, text=f"🌍 Vertex AI region: <b>{region}</b>", parse_mode="HTML")
+                except Exception as e:
+                    logger.warning(f"Vertex region re-detection failed: {e}")
+
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"✅ {label} API key saved.\n\n⚠️ Use /restart to apply.",

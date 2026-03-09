@@ -582,9 +582,8 @@ def init():
                 # Auto-detect region
                 api_key = provider_config.get("_api_key", "")
                 try:
-                    import asyncio as _aio
                     from syne.llm.vertex import detect_vertex_region
-                    region = _aio.get_event_loop().run_until_complete(detect_vertex_region(api_key))
+                    region = asyncio.run(detect_vertex_region(api_key))
                     console.print(f"  [green]Auto-detected region: {region}[/green]")
                 except Exception:
                     region = "us-central1"

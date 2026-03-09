@@ -13,7 +13,7 @@ from typing import Optional, Type
 
 from .provider import LLMProvider, ChatMessage, ChatResponse
 from .google import GoogleProvider
-from .vertex import VertexProvider
+from .vertex import VertexProvider, detect_vertex_region
 from .codex import CodexProvider
 from .openai import OpenAIProvider
 from .together import TogetherProvider
@@ -22,6 +22,9 @@ from .anthropic import AnthropicProvider
 from .ollama import OllamaProvider
 
 logger = logging.getLogger("syne.llm.drivers")
+
+# Cache for auto-detected Vertex AI region (keyed by API key)
+_vertex_region_cache: dict[str, str] = {}
 
 # Driver name → Provider class mapping
 _DRIVER_MAP: dict[str, Type[LLMProvider]] = {
@@ -117,7 +120,10 @@ async def create_provider(model_entry: dict) -> LLMProvider:
                 f"No API key found for {model_entry.get('label', model_id)}. "
                 f"Set {credential_key} in config."
             )
-        region = model_entry.get("region", "us-central1")
+        region = model_entry.get("region", "") or _vertex_region_cache.get(api_key, "")
+        if not region:
+            region = await detect_vertex_region(api_key, model_id)
+            _vertex_region_cache[api_key] = region
         return VertexProvider(
             api_key=api_key,
             region=region,
