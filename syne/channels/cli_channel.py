@@ -998,7 +998,7 @@ async def _get_input(model_name: str = "") -> str | None:
     sys.stdout.write(f"{_DIM}{'─' * cols}{_RESET}\n")
     sys.stdout.flush()
 
-    prompt_str = f"{_BOLD}>{_RESET} "
+    prompt_str = "> "
     try:
         result = await _prompt_session.prompt_async(
             prompt_str,
