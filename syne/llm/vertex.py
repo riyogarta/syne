@@ -79,7 +79,7 @@ async def detect_vertex_region(api_key: str, model: str = "gemini-2.5-flash") ->
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
                     url,
-                    json={"contents": [{"parts": [{"text": "hi"}]}]},
+                    json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
                     params={"key": api_key},
                 )
                 if resp.status_code == 200:
