@@ -632,15 +632,19 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         except Exception:
             pass
 
-        # ── Position content at the bottom of terminal ──
-        # Clear screen, then move cursor to the row where header should
-        # start so that separator + prompt land on the last rows.
-        # +2 = separator + prompt (bottom_toolbar handled by prompt_toolkit)
+        # ── DEBUG: test ANSI positioning ──
         term_h = _term_height()
+        _write("\033[2J")                    # clear screen
+        _write("\033[1;1H")                  # row 1
+        _write(f"ROW 1 (top)")
+        _write(f"\033[{term_h};1H")          # last row
+        _write(f"ROW {term_h} (bottom)")
+        _write(f"\033[{term_h // 2};1H")     # middle
+        _write(f"ROW {term_h // 2} (middle)")
+        # Now position header near bottom
         content_lines = len(_startup_buf) + 2
         start_row = max(1, term_h - content_lines)
-        _write("\033[2J")               # clear screen
-        _write(f"\033[{start_row};1H")  # move cursor to target row
+        _write(f"\033[{start_row};1H")
         for line in _startup_buf:
             _write(line + "\n")
 
