@@ -610,7 +610,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         # Force terminal to scroll so cursor is at the very bottom,
         # then move up to make room for content. This anchors the
         # header + prompt to the bottom of the screen like Pi's TUI.
-        content_height = len(_startup_buf) + 2  # +2 for separator + prompt
+        content_height = len(_startup_buf) + 3  # separator + prompt + bottom_toolbar
         term_h = _term_height()
         if content_height < term_h:
             # Print enough newlines to force-scroll cursor to the bottom
