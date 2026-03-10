@@ -395,11 +395,19 @@ class Gateway:
             return True
 
         if cmd_name == "/new":
+            # Close session in DB + clear cache (same as local CLI fresh start)
+            from ..db.connection import get_connection
             conv = self.agent.conversations._active.pop(session_key, None)
-            if conv:
-                await node.send(ResponseChunkMsg(text="Session cleared. Starting fresh.", done=False))
-            else:
-                await node.send(ResponseChunkMsg(text="Starting new session.", done=False))
+            async with get_connection() as conn:
+                result = await conn.fetch("""
+                    UPDATE sessions SET status = 'closed'
+                    WHERE platform = 'node' AND platform_chat_id = $1 AND status = 'active'
+                    RETURNING id
+                """, chat_id)
+                if result:
+                    session_ids = [r["id"] for r in result]
+                    await conn.execute("DELETE FROM messages WHERE session_id = ANY($1::int[])", session_ids)
+            await node.send(ResponseChunkMsg(text="Session cleared. Starting fresh.", done=False))
             await node.send(ResponseChunkMsg(text="", done=True))
             return True
 
