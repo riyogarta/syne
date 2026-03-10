@@ -456,13 +456,22 @@ def _read_key(fd: int) -> tuple[str, str]:
             if s == "\x1b[H": return ("home", "")
             if s == "\x1b[F": return ("end", "")
             if s == "\x1b[3~": return ("delete", "")
+            # Shift+Enter — all formats (Pi keys.ts):
+            # Kitty CSI u: \x1b[13;2u
+            # Kitty functional: \x1b[13;2~
+            # xterm modifyOtherKeys: \x1b[27;2;13~
+            # Kitty custom map: \x1b\r (ESC + CR)
             if s == "\x1b[13;2u": return ("shift-enter", "")
+            if s == "\x1b[13;2~": return ("shift-enter", "")
             if s == "\x1b[27;2;13~": return ("shift-enter", "")
+            if s == "\x1b\r": return ("shift-enter", "")
             return ("esc-seq", s)
         return ("escape", "")
 
-    if b == 0x0d or b == 0x0a:  # Enter
+    if b == 0x0d:  # Enter (CR)
         return ("enter", "")
+    if b == 0x0a:  # LF — Ghostty shift+enter mapping
+        return ("shift-enter", "")
     if b == 0x7f or b == 0x08:  # Backspace
         return ("backspace", "")
     if b == 0x03:  # Ctrl+C
