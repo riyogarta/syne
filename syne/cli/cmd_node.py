@@ -197,34 +197,3 @@ async def _gateway_revoke_async(node_id: str):
         console.print(f"[red]Node '{node_id}' not found.[/red]")
 
     await close_db()
-
-
-@gateway.command(name="enable")
-def gateway_enable():
-    """Enable the gateway WebSocket server."""
-    asyncio.run(_gateway_toggle_async(True))
-
-
-@gateway.command(name="disable")
-def gateway_disable():
-    """Disable the gateway WebSocket server."""
-    asyncio.run(_gateway_toggle_async(False))
-
-
-async def _gateway_toggle_async(enable: bool):
-    from ..db.connection import init_db, close_db
-    from ..db.models import set_config
-
-    from .shared import _get_db_url
-    db_url = _get_db_url()
-    await init_db(db_url)
-
-    await set_config("gateway.enabled", enable)
-    state = "enabled" if enable else "disabled"
-    console.print(f"[green]Gateway {state}.[/green]")
-
-    await close_db()
-
-    from .helpers import _restart_service
-    console.print("[dim]Restarting Syne...[/dim]")
-    _restart_service()

@@ -663,6 +663,5 @@ INSERT INTO config (key, value, description) VALUES (
 
 -- Gateway config (remote node support)
 INSERT INTO config (key, value, description) VALUES
-    ('gateway.enabled', 'false', 'Enable WebSocket gateway for remote node connections'),
     ('gateway.port', '8765', 'Gateway WebSocket server port')
 ON CONFLICT (key) DO NOTHING;

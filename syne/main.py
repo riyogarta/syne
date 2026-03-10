@@ -188,18 +188,16 @@ async def run():
         else:
             logger.debug("WhatsApp ability not registered.")
 
-        # Start Gateway (WebSocket server for remote nodes) if enabled
+        # Start Gateway (WebSocket server for remote nodes) — always on
         gateway = None
         try:
+            from .gateway.server import Gateway, DEFAULT_PORT
             from .db.models import get_config
-            gw_enabled = await get_config("gateway.enabled", False)
-            if gw_enabled:
-                from .gateway.server import Gateway, DEFAULT_PORT
-                gw_port = await get_config("gateway.port", DEFAULT_PORT)
-                gateway = Gateway(agent, port=int(gw_port))
-                await gateway.start()
-                agent.gateway = gateway
-                logger.info(f"Gateway active on port {gw_port}.")
+            gw_port = await get_config("gateway.port", DEFAULT_PORT)
+            gateway = Gateway(agent, port=int(gw_port))
+            await gateway.start()
+            agent.gateway = gateway
+            logger.info(f"Gateway active on port {gw_port}.")
         except ImportError:
             logger.debug("Gateway module not available.")
         except Exception as e:
