@@ -330,6 +330,7 @@ def _build_prompt_session(history: InMemoryHistory | None = None) -> PromptSessi
         history=history,
         bottom_toolbar=lambda: HTML(f'<style fg="ansibrightblack">{"─" * _term_width()}</style>'),
         enable_open_in_editor=False,
+        reserve_space_for_menu=0,
     )
 
 
