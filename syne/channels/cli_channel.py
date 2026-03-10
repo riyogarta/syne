@@ -615,6 +615,8 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         content_lines = len(_startup_buf) + 3
         term_h = _term_height()
         pad_count = max(0, term_h - content_lines)
+        # DEBUG: show detected terminal size (remove after fixing)
+        _write(f"  {_DIM}[debug] term_h={term_h} content={content_lines} pad={pad_count} buf={len(_startup_buf)}{_RESET}\n")
         _startup_buf = [""] * pad_count + _startup_buf
         for line in _startup_buf:
             _write(line + "\n")
