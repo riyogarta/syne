@@ -1,7 +1,8 @@
-"""Syne CLI — Interactive terminal chat with full tool access.
+"""Syne CLI — Interactive terminal chat, Pi-style fixed prompt at bottom.
 
-Inspired by Pi's TUI approach: output goes directly to stdout (terminal handles
-scrollback), prompt rendered with ─ borders at bottom, no full-screen mode.
+Uses ANSI scroll regions: content scrolls in the upper area, prompt is
+fixed at the bottom. Modeled after Pi's TUI (../pi) component ordering
+where the editor always renders last and stays at the bottom.
 """
 
 import asyncio
@@ -9,23 +10,12 @@ import getpass
 import logging
 import os
 import re
+import select
 import shutil
 import sys
 import time
-
-from prompt_toolkit import PromptSession
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import InMemoryHistory
-from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
-
-# Map Shift+Enter to a recognizable Keys value so we can bind it.
-# prompt_toolkit maps Shift+Enter to ControlM (=Enter) by default.
-# We remap to ControlDown which is unused in our input context.
-_SHIFT_ENTER_KEY = Keys.ControlDown
-ANSI_SEQUENCES["\x1b[27;2;13~"] = _SHIFT_ENTER_KEY  # xterm modifyOtherKeys
-ANSI_SEQUENCES["\x1b[13;2u"] = _SHIFT_ENTER_KEY      # kitty keyboard protocol
+import termios
+import tty
 
 from ..agent import SyneAgent
 from ..config import load_settings
@@ -45,13 +35,19 @@ _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
 _DIM_CYAN = "\033[2;36m"
 
+# ── Terminal state ──
+_term_rows = 38
+_term_cols = 125
+_sr_end = 36      # last row of scroll region
+_sep_row = 37     # separator ────
+_input_row = 38   # > prompt
+
 # ── Spinner ──
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _spinner_task: asyncio.Task | None = None
 
 
 def _write(text: str):
-    """Write directly to stdout."""
     sys.stdout.write(text)
     sys.stdout.flush()
 
@@ -61,66 +57,82 @@ def _term_width() -> int:
 
 
 def _term_height() -> int:
-    # Try multiple methods — SSH sessions often report wrong size
-    # 1. ioctl on stdin (most reliable for interactive terminal)
     try:
-        import fcntl, termios, struct
+        import fcntl, struct
         result = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b'\x00' * 8)
         rows = struct.unpack('HHHH', result)[0]
         if rows > 0:
             return rows
     except Exception:
         pass
-    # 2. os.get_terminal_size on stdin
-    try:
-        return os.get_terminal_size(sys.stdin.fileno()).lines
-    except Exception:
-        pass
-    # 3. stty size
-    try:
-        import subprocess
-        r = subprocess.run(['stty', 'size'], capture_output=True, text=True, timeout=2)
-        if r.returncode == 0:
-            rows = int(r.stdout.strip().split()[0])
-            if rows > 0:
-                return rows
-    except Exception:
-        pass
-    # 4. fallback
     return shutil.get_terminal_size((80, 24)).lines
 
 
-def _separator():
-    """Print a full-width ─ separator line."""
-    w = _term_width()
-    _write(f"{_DIM}{'─' * w}{_RESET}\n")
+def _setup_screen():
+    """Clear screen and set up scroll region with fixed prompt at bottom."""
+    global _term_rows, _term_cols, _sr_end, _sep_row, _input_row
+    _term_rows = _term_height()
+    _term_cols = _term_width()
+    _sr_end = _term_rows - 2     # scroll region: rows 1.._sr_end
+    _sep_row = _term_rows - 1    # separator line
+    _input_row = _term_rows      # prompt "> " line
+    _write("\033[2J\033[H")                  # clear screen + home
+    _write(f"\033[1;{_sr_end}r")             # set scroll region
+    _write(f"\033[{_sr_end};1H")             # cursor at bottom of scroll region
 
+
+def _draw_prompt(buf="", cursor_col=0):
+    """Draw the fixed prompt area (separator + input line)."""
+    w = _term_cols
+    _write("\0337")  # save cursor
+    _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+    _write(f"\033[{_input_row};1H\033[2K> {buf}")
+    # Position cursor in input line
+    _write(f"\033[{_input_row};{cursor_col + 3}H")
+    _write("\0338")  # restore cursor
+
+
+def _move_to_input(buf="", cursor_col=0):
+    """Move cursor to the input line for typing."""
+    _write(f"\033[{_input_row};{cursor_col + 3}H")
+
+
+def _scroll_print(text: str):
+    """Print text in the scroll region (auto-scrolls when full)."""
+    _write("\0337")                          # save cursor
+    _write(f"\033[{_sr_end};1H")             # move to bottom of scroll region
+    _write("\n")                             # scroll up one line
+    _write(f"\033[{_sr_end};1H")             # back to bottom
+    _write(text)
+    _write("\0338")                          # restore cursor
+
+
+# ── Spinner (in scroll region) ──
 
 async def _start_spinner(message: str = "Working..."):
-    """Start an animated spinner on the current line."""
     global _spinner_task
-    _stop_spinner()  # cancel any existing
+    _stop_spinner()
 
     async def _spin():
         i = 0
         try:
             while True:
                 frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
-                _write(f"\r  {_DIM_CYAN}{frame}{_RESET} {_DIM}{message}{_RESET}\033[K")
+                # Write spinner at bottom of scroll region
+                _write(f"\033[{_sr_end};1H\033[2K  {_DIM_CYAN}{frame}{_RESET} {_DIM}{message}{_RESET}")
                 i += 1
                 await asyncio.sleep(0.08)
         except asyncio.CancelledError:
-            pass  # cleanup done by _stop_spinner
+            pass
 
     _spinner_task = asyncio.create_task(_spin())
 
 
 def _stop_spinner():
-    """Stop the spinner if running. Clears line immediately (no race)."""
     global _spinner_task
     if _spinner_task and not _spinner_task.done():
         _spinner_task.cancel()
-        _write("\r\033[2K")  # clear spinner line immediately before any output
+        _write(f"\033[{_sr_end};1H\033[2K")  # clear spinner line
     _spinner_task = None
 
 
@@ -132,8 +144,6 @@ _MD_HEADING = re.compile(r'^(#{1,3})\s+(.+)$')
 
 
 class _MarkdownStream:
-    """Line-buffered markdown-to-ANSI converter for streaming output."""
-
     def __init__(self):
         self._buf = ""
         self._in_code_block = False
@@ -162,57 +172,28 @@ class _MarkdownStream:
                 if lang:
                     _write(f"  {_DIM}[{lang}]{_RESET}")
             return
-
         if self._in_code_block:
             _write(f"  {_DIM_CYAN}{line}{_RESET}")
             return
-
         m = _MD_HEADING.match(line)
         if m:
             _write(f"  {_BOLD}{m.group(2)}{_RESET}")
             return
-
         if line.strip() in ("---", "***", "___"):
             return
-
         line = _MD_BOLD.sub(f'{_BOLD}\\1{_RESET}', line)
         line = _MD_CODE.sub(f'{_DIM_CYAN}\\1{_RESET}', line)
         line = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', line)
         _write(f"  {line}")
 
 
-# ── Slash command completer ──
+# ── Slash commands ──
 _SLASH_COMMANDS = [
-    ("/help", "Show available commands"),
-    ("/models", "Switch model"),
-    ("/status", "Show agent status"),
-    ("/memory", "Search memories"),
-    ("/compact", "Compact conversation now"),
-    ("/clear", "Clear conversation history"),
-    ("/cost", "Show session token usage"),
-    ("/context", "Show context usage"),
-    ("/exit", "Exit CLI"),
+    "/help", "/models", "/status", "/memory", "/compact",
+    "/clear", "/cost", "/context", "/exit",
 ]
 
-from prompt_toolkit.completion import Completer, Completion
-
-
-class _SlashCompleter(Completer):
-    def get_completions(self, document, complete_event):
-        text = document.text_before_cursor
-        if "\n" in text:
-            return
-        stripped = text.lstrip()
-        if not stripped.startswith("/"):
-            return
-        if " " in stripped:
-            return
-        for cmd, desc in _SLASH_COMMANDS:
-            if cmd.startswith(stripped):
-                yield Completion(cmd, start_position=-len(stripped), display_meta=desc)
-
-
-# ── Session token usage tracker ──
+# ── Token usage ──
 class _SessionUsage:
     __slots__ = ("total_in", "total_out")
     def __init__(self):
@@ -240,21 +221,12 @@ def _format_tokens(n: int) -> str:
 
 # ── Tool activity labels ──
 _TOOL_LABELS = {
-    "read_source": "Read",
-    "file_read": "Read",
-    "file_write": "Write",
-    "exec": "Run",
-    "db_query": "Query",
-    "web_fetch": "Fetch",
-    "web_search": "Search",
-    "send_message": "Send",
-    "send_file": "SendFile",
-    "send_voice": "Voice",
-    "send_reaction": "React",
-    "manage_schedule": "Schedule",
-    "update_config": "Config",
-    "update_ability": "Ability",
-    "memory_search": "MemSearch",
+    "read_source": "Read", "file_read": "Read", "file_write": "Write",
+    "exec": "Run", "db_query": "Query", "web_fetch": "Fetch",
+    "web_search": "Search", "send_message": "Send", "send_file": "SendFile",
+    "send_voice": "Voice", "send_reaction": "React",
+    "manage_schedule": "Schedule", "update_config": "Config",
+    "update_ability": "Ability", "memory_search": "MemSearch",
     "memory_add": "MemAdd",
 }
 
@@ -262,7 +234,6 @@ _last_tool_key = ""
 
 
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
-    """Display a tool call as a bullet point line."""
     global _last_tool_key
     _stop_spinner()
 
@@ -272,7 +243,6 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
     _last_tool_key = dedup_key
 
     label = _TOOL_LABELS.get(name, name)
-
     arg_hint = ""
     if args:
         for key in ("path", "file_path", "file", "command", "query", "action", "url", "name", "key"):
@@ -302,36 +272,232 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
         _write(f"    {_DIM}⎿{_RESET}  {color}{preview}{_RESET}\n")
 
 
-# ── Build prompt session with keybindings ──
+# ══════════════════════════════════════════════════════════════════════════════
+# Raw terminal input — reads keys in the fixed prompt area
+# ══════════════════════════════════════════════════════════════════════════════
 
-def _build_prompt_session(history: InMemoryHistory | None = None) -> PromptSession:
-    """Create a PromptSession with Pi-style keybindings."""
-    kb = KeyBindings()
+def _read_key(fd: int) -> tuple[str, str]:
+    """Read one key press from raw fd. Returns (key_name, char_data)."""
+    ch = os.read(fd, 1)
+    if not ch:
+        return ("eof", "")
+    b = ch[0]
 
-    @kb.add(Keys.Enter, eager=True)
-    def _submit(event):
-        buf = event.current_buffer
-        # Backslash at end = line continuation
-        if buf.text.endswith("\\"):
-            buf.text = buf.text[:-1]
-            buf.insert_text("\n")
-            return
-        buf.validate_and_handle()
+    if b == 0x1b:  # ESC — start of escape sequence
+        # Check for more bytes (timeout 50ms)
+        if select.select([fd], [], [], 0.05)[0]:
+            seq = ch
+            while select.select([fd], [], [], 0.01)[0]:
+                seq += os.read(fd, 1)
+            s = seq.decode("utf-8", errors="ignore")
+            if s == "\x1b[A": return ("up", "")
+            if s == "\x1b[B": return ("down", "")
+            if s == "\x1b[C": return ("right", "")
+            if s == "\x1b[D": return ("left", "")
+            if s == "\x1b[H": return ("home", "")
+            if s == "\x1b[F": return ("end", "")
+            if s == "\x1b[3~": return ("delete", "")
+            if s == "\x1b[13;2u": return ("shift-enter", "")
+            if s == "\x1b[27;2;13~": return ("shift-enter", "")
+            return ("esc-seq", s)
+        return ("escape", "")
 
-    @kb.add(_SHIFT_ENTER_KEY)
-    def _newline_shift(event):
-        event.current_buffer.insert_text("\n")
+    if b == 0x0d or b == 0x0a:  # Enter
+        return ("enter", "")
+    if b == 0x7f or b == 0x08:  # Backspace
+        return ("backspace", "")
+    if b == 0x03:  # Ctrl+C
+        return ("ctrl-c", "")
+    if b == 0x04:  # Ctrl+D
+        return ("ctrl-d", "")
+    if b == 0x09:  # Tab
+        return ("tab", "")
+    if b == 0x01:  # Ctrl+A (home)
+        return ("home", "")
+    if b == 0x05:  # Ctrl+E (end)
+        return ("end", "")
+    if b == 0x0b:  # Ctrl+K (kill to end)
+        return ("ctrl-k", "")
+    if b == 0x15:  # Ctrl+U (kill line)
+        return ("ctrl-u", "")
 
-    return PromptSession(
-        message="> ",
-        multiline=True,
-        key_bindings=kb,
-        completer=_SlashCompleter(),
-        history=history,
-        bottom_toolbar=lambda: HTML(f'<style fg="ansibrightblack">{"─" * _term_width()}</style>'),
-        enable_open_in_editor=False,
-        reserve_space_for_menu=0,
-    )
+    # Multi-byte UTF-8
+    if b >= 0x80:
+        needed = 1 if b < 0xe0 else (2 if b < 0xf0 else 3)
+        more = os.read(fd, needed)
+        return ("char", (ch + more).decode("utf-8", errors="ignore"))
+
+    if b >= 0x20:
+        return ("char", chr(b))
+
+    return ("unknown", "")
+
+
+def _redraw_input(buf: str, cursor: int):
+    """Redraw the input line in the fixed prompt area."""
+    # For multiline, show line count + current line
+    lines = buf.split("\n")
+    if len(lines) > 1:
+        # Find which line the cursor is on
+        pos = 0
+        cur_line_idx = 0
+        for i, ln in enumerate(lines):
+            if pos + len(ln) >= cursor:
+                cur_line_idx = i
+                break
+            pos += len(ln) + 1  # +1 for \n
+        cur_line = lines[cur_line_idx]
+        col_in_line = cursor - sum(len(lines[j]) + 1 for j in range(cur_line_idx))
+        prefix = f"({len(lines)}L) > "
+        _write(f"\033[{_input_row};1H\033[2K{prefix}{cur_line}")
+        _write(f"\033[{_input_row};{len(prefix) + col_in_line + 1}H")
+    else:
+        _write(f"\033[{_input_row};1H\033[2K> {buf}")
+        _write(f"\033[{_input_row};{cursor + 3}H")
+
+
+def _blocking_read_line(history: list[str]) -> str | None:
+    """Read a line with editing in the fixed prompt area. Blocking."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    buf = ""
+    cursor = 0
+    hist_idx = -1
+    hist_save = ""
+
+    # Draw clean prompt
+    _write(f"\033[{_input_row};1H\033[2K> ")
+
+    try:
+        tty.setraw(fd)
+        while True:
+            key, data = _read_key(fd)
+
+            if key == "enter":
+                if buf.endswith("\\"):
+                    buf = buf[:-1] + "\n"
+                    cursor = len(buf)
+                    # Temporarily exit raw to redraw
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+                    continue
+                return buf
+
+            elif key == "shift-enter":
+                buf = buf[:cursor] + "\n" + buf[cursor:]
+                cursor += 1
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+            elif key == "ctrl-c":
+                raise KeyboardInterrupt
+
+            elif key == "ctrl-d":
+                if not buf:
+                    return None  # EOF
+
+            elif key == "backspace":
+                if cursor > 0:
+                    buf = buf[:cursor - 1] + buf[cursor:]
+                    cursor -= 1
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "delete":
+                if cursor < len(buf):
+                    buf = buf[:cursor] + buf[cursor + 1:]
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "left":
+                if cursor > 0:
+                    cursor -= 1
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "right":
+                if cursor < len(buf):
+                    cursor += 1
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "home":
+                cursor = 0
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+            elif key == "end":
+                cursor = len(buf)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+            elif key == "ctrl-u":
+                buf = buf[cursor:]
+                cursor = 0
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+            elif key == "ctrl-k":
+                buf = buf[:cursor]
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+            elif key == "up":
+                if history:
+                    if hist_idx == -1:
+                        hist_save = buf
+                        hist_idx = len(history) - 1
+                    elif hist_idx > 0:
+                        hist_idx -= 1
+                    buf = history[hist_idx]
+                    cursor = len(buf)
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "down":
+                if hist_idx >= 0:
+                    hist_idx += 1
+                    if hist_idx >= len(history):
+                        hist_idx = -1
+                        buf = hist_save
+                    else:
+                        buf = history[hist_idx]
+                    cursor = len(buf)
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+
+            elif key == "tab":
+                # Simple slash command completion
+                if buf.startswith("/") and "\n" not in buf:
+                    matches = [c for c in _SLASH_COMMANDS if c.startswith(buf)]
+                    if len(matches) == 1:
+                        buf = matches[0]
+                        cursor = len(buf)
+                        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                        _redraw_input(buf, cursor)
+                        tty.setraw(fd)
+
+            elif key == "char":
+                buf = buf[:cursor] + data + buf[cursor:]
+                cursor += len(data)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _redraw_input(buf, cursor)
+                tty.setraw(fd)
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -339,7 +505,6 @@ def _build_prompt_session(history: InMemoryHistory | None = None) -> PromptSessi
 # ══════════════════════════════════════════════════════════════════════════════
 
 async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, node_client=None):
-    """Run Syne in interactive CLI mode."""
     remote_mode = node_client is not None
     if debug:
         logging.getLogger("syne").setLevel(logging.DEBUG)
@@ -361,15 +526,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         if remote_mode:
             await node_client.connect()
             listen_task = asyncio.create_task(node_client.listen())
-
         # ── Local mode setup ──
         else:
             await agent.start()
             agent._cli_cwd = os.getcwd()
-
             from ..tools.file_ops import set_workspace
             set_workspace(os.getcwd())
-
             from ..main import _auto_migrate_google_oauth
             await _auto_migrate_google_oauth()
 
@@ -443,7 +605,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                             _write(f"  {_DIM}  ... {lines_count - 10} more lines{_RESET}\n")
 
                     _write(f"\n  {_BOLD}Allow edit to {os.path.basename(file_path)}?{_RESET} (y/a/n): ")
-                    # Simple blocking input for approval during tool execution
                     loop = asyncio.get_running_loop()
                     resp = await loop.run_in_executor(None, lambda: input().strip().lower())
                     if resp in ("y", "yes"):
@@ -456,43 +617,37 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                 agent.tools.set_approval_callback(_approval_callback)
 
-        # ── Collect startup content into buffer, then push to bottom ──
-        # Buffer all startup lines (header + history), then pad with blank
-        # lines so content appears anchored to the bottom like Pi's TUI.
-        _startup_buf: list[str] = []
+        # ── Set up screen with scroll region ──
+        _setup_screen()
 
-        # ── Build header ──
-        _startup_buf.append("")
+        # ── Print header in scroll region ──
         if remote_mode:
             meta = node_client.server_meta
             agent_name = meta.get("agent_name", "Syne")
             motto = meta.get("motto", "")
             model_short = _short_model_name(meta.get("model", "unknown"))
             tool_count = meta.get("tool_count", 0)
-            _startup_buf.append(f"  {_BOLD}{agent_name}{_RESET}")
+            _write(f"\n  {_BOLD}{agent_name}{_RESET}\n")
             if motto:
-                _startup_buf.append(f"  {_DIM_ITALIC}{motto}{_RESET}")
-            _startup_buf.append(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}")
-            _startup_buf.append("")
+                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
+            _write(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n")
         else:
             identity = await get_identity()
             agent_name = identity.get("name", "Syne")
             motto = identity.get("motto", "")
             model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
             tool_count = len(agent.tools.list_tools('owner'))
-            _startup_buf.append(f"  {_BOLD}{agent_name}{_RESET}")
+            _write(f"\n  {_BOLD}{agent_name}{_RESET}\n")
             if motto:
-                _startup_buf.append(f"  {_DIM_ITALIC}{motto}{_RESET}")
-            _startup_buf.append(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}")
-
+                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
+            _write(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n")
             try:
                 from ..update_checker import get_pending_update_notice
                 update_notice = await get_pending_update_notice()
                 if update_notice:
-                    _startup_buf.append(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}")
+                    _write(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}\n")
             except Exception:
                 pass
-            _startup_buf.append("")
 
         # ── REPL setup ──
         cwd = os.getcwd()
@@ -500,8 +655,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
         if remote_mode:
             chat_id = f"node:{node_client.node_id}:{cwd}"
-
-            # Wire remote mode callbacks
             from ..node.executor import execute_tool
             _r_streamed_text = False
             _r_streamed_thinking = False
@@ -563,7 +716,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             node_client._on_tool_activity = _remote_on_tool_activity
             node_client._on_status = _remote_on_status
             node_client._on_tool_request = execute_tool
-
         else:
             cwd = agent._cli_cwd or os.getcwd()
             username = user.get("name", getpass.getuser())
@@ -586,10 +738,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             key = f"cli:{chat_id}"
             if key in agent.conversations._active:
                 del agent.conversations._active[key]
-            _startup_buf.append(f"  {_DIM}Starting fresh conversation...{_RESET}")
+            _write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
 
-        # Load conversation history from DB
-        _history = InMemoryHistory()
+        # Load conversation history
+        _history: list[str] = []
         try:
             from ..db.connection import get_connection
             async with get_connection() as conn:
@@ -601,23 +753,20 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     ORDER BY m.created_at ASC
                 """, chat_id)
             if rows:
-                _startup_buf.append(f"  {_DIM}── conversation resumed ──{_RESET}")
+                _write(f"\n  {_DIM}── conversation resumed ──{_RESET}\n")
                 display_rows = rows[-20:]
                 if len(rows) > 20:
-                    _startup_buf.append(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}")
+                    _write(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}\n")
                 for row in display_rows:
                     content = row["content"].strip()
                     if not content:
                         continue
                     if row["role"] == "user":
-                        _history.append_string(content)
-                        _startup_buf.append("")
-                        _startup_buf.append(f"  {_DIM}> {content}{_RESET}")
+                        _history.append(content)
+                        _write(f"\n  {_DIM}> {content}{_RESET}\n")
                     else:
-                        _startup_buf.append(f"  {content}")
-                _startup_buf.append("")
-                _startup_buf.append(f"  {_DIM}── end of history ──{_RESET}")
-                _startup_buf.append("")
+                        _write(f"  {content}\n")
+                _write(f"\n  {_DIM}── end of history ──{_RESET}\n")
             else:
                 async with get_connection() as conn:
                     user_rows = await conn.fetch("""
@@ -629,57 +778,57 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 for row in user_rows:
                     content = row["content"].strip()
                     if content and not content.startswith("/"):
-                        _history.append_string(content)
+                        _history.append(content)
         except Exception:
             pass
 
-        # ── Position header at bottom of terminal ──
-        # ANSI positioning confirmed working (ROW 1-38 test passed).
-        # Clear screen, move cursor near bottom, print header from there.
-        # +2 = separator + prompt line that follow
-        term_h = _term_height()
-        content_lines = len(_startup_buf) + 2
-        start_row = max(1, term_h - content_lines)
-        _write("\033[2J\033[H")              # clear screen + home
-        _write(f"\033[{start_row};1H")       # move to target row
-        for line in _startup_buf:
-            _write(line + "\n")
-
-        # Build prompt session
-        session = _build_prompt_session(_history)
+        # ── Draw initial prompt area ──
+        _draw_prompt()
 
         # ── REPL loop ──
         global _last_tool_key
         _last_ctrl_c = 0.0
+        loop = asyncio.get_running_loop()
 
         while True:
             try:
-                _separator()
-                user_input = await session.prompt_async()
+                # Move cursor to input area and read
+                _move_to_input()
+                user_input = await loop.run_in_executor(None, _blocking_read_line, _history)
             except KeyboardInterrupt:
                 now = time.time()
                 if now - _last_ctrl_c < 0.5:
-                    _write(f"\n  {_DIM}Goodbye!{_RESET}\n")
                     break
                 _last_ctrl_c = now
-                _write(f"\n  {_DIM}Press Ctrl+C again to exit.{_RESET}\n")
+                # Show warning in scroll region
+                _write(f"\033[{_sr_end};1H\033[2K")
+                _write(f"  {_DIM}Press Ctrl+C again to exit.{_RESET}")
+                _draw_prompt()
                 continue
-            except EOFError:
-                _write(f"\n  {_DIM}Goodbye!{_RESET}\n")
+
+            if user_input is None:  # EOF
                 break
 
             user_input = user_input.strip()
             if not user_input:
+                _draw_prompt()
                 continue
 
             _last_ctrl_c = 0.0
             _last_tool_key = ""
+            _history.append(user_input)
+
+            # Echo user message in scroll region
+            _write(f"\033[{_sr_end};1H\033[2K")
+            _write(f"\n  {_DIM}>{_RESET} {user_input}\n")
+
+            # Clear input line
+            _write(f"\033[{_input_row};1H\033[2K> ")
 
             # ── Slash commands ──
             if user_input.startswith("/"):
                 cmd_word = user_input.split()[0].lower()
                 if cmd_word in ("/exit", "/quit", "/q"):
-                    _write(f"  {_DIM}Goodbye!{_RESET}\n")
                     break
 
                 if remote_mode:
@@ -690,22 +839,24 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                                f"  /exit   — Exit CLI\n\n"
                                f"  {_DIM}All other /commands and messages are sent to the server.{_RESET}\n"
                                f"  {_DIM}Shift+Enter or \\+Enter for new line.{_RESET}\n\n")
+                        _draw_prompt()
                         continue
                     elif cmd_word == "/cost":
                         _write(f"\n  {_BOLD}Session token usage{_RESET}\n"
                                f"  Input:  {_format_tokens(_session_usage.total_in)}\n"
                                f"  Output: {_format_tokens(_session_usage.total_out)}\n"
                                f"  Total:  {_format_tokens(_session_usage.total_in + _session_usage.total_out)}\n\n")
+                        _draw_prompt()
                         continue
                 else:
                     handled = await _handle_cli_command(user_input, agent, user, chat_id)
                     if handled == "exit":
                         break
                     if handled:
+                        _draw_prompt()
                         continue
 
             # ── Process message ──
-            _write("\n")
             await _start_spinner()
 
             if remote_mode:
@@ -724,18 +875,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         await _start_spinner()
 
                     await node_client.send_message(user_input, cwd=cwd)
-
                     _stop_spinner()
                     _r_md.flush()
                     _r_md.reset()
                     _write(_RESET)
-
                     if _r_streamed_text:
                         _write("\n")
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     _stop_spinner()
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
-                    continue
 
             else:
                 # ── Local mode message handling ──
@@ -835,9 +983,9 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     _stop_spinner()
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
-                    continue
 
-            _write("\n")
+            # Redraw prompt after response
+            _draw_prompt()
 
     except Exception as e:
         _write(f"\n  {_DIM_RED}Error: {e}{_RESET}\n")
@@ -847,6 +995,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
     finally:
         _stop_spinner()
+        # Reset scroll region and clean up
+        _write("\033[r")  # reset scroll region to full screen
+        _write(f"\033[{_term_rows};1H\n")  # move to bottom
+        _write(f"  {_DIM}Goodbye!{_RESET}\n")
         if remote_mode:
             if listen_task:
                 listen_task.cancel()
@@ -856,16 +1008,13 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
 
 async def _cli_status_callback(session_id: int, message: str):
-    """Display status messages (compaction, etc.)."""
     _write(f"\n  {_DIM_ITALIC}{message}{_RESET}\n")
 
 
 async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_id: str) -> str | bool:
-    """Handle CLI-specific slash commands. Returns 'exit', True (handled), or False."""
     cmd = command.split()[0].lower()
 
     if cmd in ("/exit", "/quit", "/q"):
-        _write(f"  {_DIM}Goodbye!{_RESET}\n")
         return "exit"
 
     elif cmd == "/help":
@@ -907,11 +1056,10 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         return True
 
     elif cmd == "/status":
-        from ..db.models import get_config, list_users
+        from ..db.models import get_config
         identity = await get_identity()
         model_name = getattr(agent.provider, 'chat_model', 'unknown')
         provider_name = agent.provider.name
-
         from ..db.connection import get_connection
         async with get_connection() as conn:
             mem_count = await conn.fetchval("SELECT COUNT(*) FROM memory")
@@ -919,7 +1067,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             group_count = await conn.fetchval("SELECT COUNT(*) FROM groups WHERE enabled = true")
             session_count = await conn.fetchval("SELECT COUNT(*) FROM sessions WHERE status = 'active'")
             total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
-
         tool_count = len(agent.tools.list_tools("owner"))
         ability_count = len(agent.abilities.list_all()) if agent.abilities else 0
         auto_capture = await get_config("memory.auto_capture", False)
@@ -929,7 +1076,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         _model_params = _active_entry.get("params") or {}
         thinking = _model_params.get("thinking_budget", "default")
         from .. import __version__ as syne_version
-
         _write(f"\n  {_BOLD}{identity.get('name', 'Syne')}{_RESET} · Syne v{syne_version}\n"
                f"  Model: {model_name} ({provider_name})\n"
                f"  Memories: {mem_count}\n"
@@ -971,7 +1117,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                 LIMIT 5
             """, query)
         if not rows:
-            # Fallback to text search
             async with get_connection() as conn:
                 rows = await conn.fetch("""
                     SELECT content, metadata, created_at FROM memory
@@ -1015,7 +1160,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         if not models:
             _write(f"  {_DIM}No models registered.{_RESET}\n\n")
             return True
-
         _write(f"\n  {_BOLD}Select model:{_RESET}\n")
         for i, m in enumerate(models):
             key = m.get("key", "")
@@ -1024,7 +1168,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             active = " (active)" if key == active_key else ""
             _write(f"  {i+1}. {label} [{model_id}]{active}\n")
         _write(f"\n  {_DIM}Type number to select, or press Enter to cancel:{_RESET} ")
-
         loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(None, lambda: input().strip())
         if resp and resp.isdigit():
@@ -1045,18 +1188,13 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                         _write(f"  {_DIM_RED}Failed to create provider for {new_key}{_RESET}\n\n")
                 else:
                     _write(f"  {_DIM}Already using {models[idx].get('label', new_key)}.{_RESET}\n\n")
-        _write("\n")
         return True
 
     return False
 
 
-# ── Arrow-key selector (kept for compatibility) ──
+# ── Arrow-key selector ──
 async def cli_select(options: list[str], default: int = 0) -> int:
-    """Arrow-key selector for CLI choices."""
-    import termios
-    import tty
-
     selected = default
     total = len(options)
     fd = sys.stdin.fileno()
