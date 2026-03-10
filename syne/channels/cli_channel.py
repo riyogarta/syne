@@ -632,20 +632,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         except Exception:
             pass
 
-        # ── Output startup content, pushed to bottom of terminal ──
-        # Like Pi's TUI: fill the entire terminal height with output so
-        # the header + prompt naturally end up at the bottom. Pi achieves
-        # this because its editor takes ~30% of terminal height. We pad
-        # with empty lines at the top of the buffer instead.
-        # +3 = separator line + prompt "> " + bottom_toolbar
-        content_lines = len(_startup_buf) + 3
+        # ── Position content at the bottom of terminal ──
+        # Clear screen, then move cursor to the row where header should
+        # start so that separator + prompt land on the last rows.
+        # +2 = separator + prompt (bottom_toolbar handled by prompt_toolkit)
         term_h = _term_height()
-        pad_count = max(0, term_h - content_lines)
-        # DEBUG: show all detection methods
-        _shutil_h = shutil.get_terminal_size((80, 24)).lines
-        _write(f"  {_DIM}[debug] ioctl/stty={term_h} shutil={_shutil_h} content={content_lines} pad={pad_count}{_RESET}\n")
-        for _ in range(pad_count):
-            _write("\n")
+        content_lines = len(_startup_buf) + 2
+        start_row = max(1, term_h - content_lines)
+        _write("\033[2J")               # clear screen
+        _write(f"\033[{start_row};1H")  # move cursor to target row
         for line in _startup_buf:
             _write(line + "\n")
 
