@@ -60,6 +60,10 @@ def _term_width() -> int:
     return shutil.get_terminal_size((80, 24)).columns
 
 
+def _term_height() -> int:
+    return shutil.get_terminal_size((80, 24)).lines
+
+
 def _separator():
     """Print a full-width ─ separator line."""
     w = _term_width()
@@ -425,37 +429,43 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
                 agent.tools.set_approval_callback(_approval_callback)
 
-        # ── Display header ──
-        _write("\n")
+        # ── Collect startup content into buffer, then push to bottom ──
+        # Buffer all startup lines (header + history), then pad with blank
+        # lines so content appears anchored to the bottom like Pi's TUI.
+        _startup_buf: list[str] = []
+
+        # ── Build header ──
+        _startup_buf.append("")
         if remote_mode:
             meta = node_client.server_meta
             agent_name = meta.get("agent_name", "Syne")
             motto = meta.get("motto", "")
             model_short = _short_model_name(meta.get("model", "unknown"))
             tool_count = meta.get("tool_count", 0)
-            _write(f"  {_BOLD}{agent_name}{_RESET}\n")
+            _startup_buf.append(f"  {_BOLD}{agent_name}{_RESET}")
             if motto:
-                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
-            _write(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n\n")
+                _startup_buf.append(f"  {_DIM_ITALIC}{motto}{_RESET}")
+            _startup_buf.append(f"  {_DIM}Remote | Model: {model_short} | Tools: {tool_count} | /help{_RESET}")
+            _startup_buf.append("")
         else:
             identity = await get_identity()
             agent_name = identity.get("name", "Syne")
             motto = identity.get("motto", "")
             model_short = _short_model_name(getattr(agent.provider, 'chat_model', 'unknown'))
             tool_count = len(agent.tools.list_tools('owner'))
-            _write(f"  {_BOLD}{agent_name}{_RESET}\n")
+            _startup_buf.append(f"  {_BOLD}{agent_name}{_RESET}")
             if motto:
-                _write(f"  {_DIM_ITALIC}{motto}{_RESET}\n")
-            _write(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}\n")
+                _startup_buf.append(f"  {_DIM_ITALIC}{motto}{_RESET}")
+            _startup_buf.append(f"  {_DIM}Model: {model_short} | Tools: {tool_count} | /help{_RESET}")
 
             try:
                 from ..update_checker import get_pending_update_notice
                 update_notice = await get_pending_update_notice()
                 if update_notice:
-                    _write(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}\n")
+                    _startup_buf.append(f"  {_BOLD}{_DIM_YELLOW}{update_notice}{_RESET}")
             except Exception:
                 pass
-            _write("\n")
+            _startup_buf.append("")
 
         # ── REPL setup ──
         cwd = os.getcwd()
@@ -549,7 +559,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             key = f"cli:{chat_id}"
             if key in agent.conversations._active:
                 del agent.conversations._active[key]
-            _write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
+            _startup_buf.append(f"  {_DIM}Starting fresh conversation...{_RESET}")
 
         # Load conversation history from DB
         _history = InMemoryHistory()
@@ -564,20 +574,23 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     ORDER BY m.created_at ASC
                 """, chat_id)
             if rows:
-                _write(f"  {_DIM}── conversation resumed ──{_RESET}\n")
+                _startup_buf.append(f"  {_DIM}── conversation resumed ──{_RESET}")
                 display_rows = rows[-20:]
                 if len(rows) > 20:
-                    _write(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}\n")
+                    _startup_buf.append(f"  {_DIM}... {len(rows) - 20} earlier messages ...{_RESET}")
                 for row in display_rows:
                     content = row["content"].strip()
                     if not content:
                         continue
                     if row["role"] == "user":
                         _history.append_string(content)
-                        _write(f"\n  {_DIM}> {content}{_RESET}\n")
+                        _startup_buf.append("")
+                        _startup_buf.append(f"  {_DIM}> {content}{_RESET}")
                     else:
-                        _write(f"  {content}\n")
-                _write(f"\n  {_DIM}── end of history ──{_RESET}\n\n")
+                        _startup_buf.append(f"  {content}")
+                _startup_buf.append("")
+                _startup_buf.append(f"  {_DIM}── end of history ──{_RESET}")
+                _startup_buf.append("")
             else:
                 async with get_connection() as conn:
                     user_rows = await conn.fetch("""
@@ -592,6 +605,16 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         _history.append_string(content)
         except Exception:
             pass
+
+        # ── Output startup content, padded to push prompt to bottom ──
+        # +2 accounts for the separator line and prompt line that follow
+        content_height = len(_startup_buf) + 2
+        term_h = _term_height()
+        pad_lines = max(0, term_h - content_height)
+        if pad_lines > 0:
+            _write("\n" * pad_lines)
+        for line in _startup_buf:
+            _write(line + "\n")
 
         # Build prompt session
         session = _build_prompt_session(_history)
