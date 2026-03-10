@@ -632,16 +632,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         except Exception:
             pass
 
-        # ── DEBUG: print row 1-38 to verify ANSI positioning ──
+        # ── Position header at bottom of terminal ──
+        # ANSI positioning confirmed working (ROW 1-38 test passed).
+        # Clear screen, move cursor near bottom, print header from there.
+        # +2 = separator + prompt line that follow
         term_h = _term_height()
-        _write("\033[2J\033[H")  # clear screen + home
-        for r in range(1, term_h + 1):
-            _write(f"\033[{r};1H")
-            _write(f"ROW {r}")
-        # pause so user can see before prompt takes over
-        import time as _t; _t.sleep(5)
-        # now print header normally after the test
-        _write("\033[2J\033[H")
+        content_lines = len(_startup_buf) + 2
+        start_row = max(1, term_h - content_lines)
+        _write("\033[2J\033[H")              # clear screen + home
+        _write(f"\033[{start_row};1H")       # move to target row
         for line in _startup_buf:
             _write(line + "\n")
 
