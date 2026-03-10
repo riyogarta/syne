@@ -1328,9 +1328,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
 
             # Redraw prompt with Pi-style footer stats
-            stat_left = f"↑{_format_tokens(_session_usage.total_in)} ↓{_format_tokens(_session_usage.total_out)}"
-
-            # Context usage % with Pi color coding (red >90%, yellow >70%)
+            # Left: context %, Right: token usage + model name
             ctx_pct = ""
             if remote_mode:
                 _model_name = _short_model_name(node_client.server_meta.get("model", ""))
@@ -1348,9 +1346,9 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     else:
                         ctx_pct = f"{_pct}%"
 
-            if ctx_pct:
-                stat_left += f" {ctx_pct}"
-            stat_right = _model_name
+            stat_left = ctx_pct
+            _tokens = f"↑{_format_tokens(_session_usage.total_in)} ↓{_format_tokens(_session_usage.total_out)}"
+            stat_right = f"{_tokens}  {_model_name}"
             _draw_prompt(status_left=stat_left, status_right=stat_right)
 
     except Exception as e:
