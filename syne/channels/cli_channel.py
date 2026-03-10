@@ -20,9 +20,12 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 
-# Register Shift+Enter as a distinct key (prompt_toolkit maps it to Enter by default)
-ANSI_SEQUENCES["\x1b[27;2;13~"] = "<shift-enter>"  # xterm modifyOtherKeys
-ANSI_SEQUENCES["\x1b[13;2u"] = "<shift-enter>"      # kitty keyboard protocol
+# Map Shift+Enter to a recognizable Keys value so we can bind it.
+# prompt_toolkit maps Shift+Enter to ControlM (=Enter) by default.
+# We remap to ControlDown which is unused in our input context.
+_SHIFT_ENTER_KEY = Keys.ControlDown
+ANSI_SEQUENCES["\x1b[27;2;13~"] = _SHIFT_ENTER_KEY  # xterm modifyOtherKeys
+ANSI_SEQUENCES["\x1b[13;2u"] = _SHIFT_ENTER_KEY      # kitty keyboard protocol
 
 from ..agent import SyneAgent
 from ..config import load_settings
@@ -285,7 +288,7 @@ def _build_prompt_session(history: InMemoryHistory | None = None) -> PromptSessi
             return
         buf.validate_and_handle()
 
-    @kb.add("<shift-enter>")
+    @kb.add(_SHIFT_ENTER_KEY)
     def _newline_shift(event):
         event.current_buffer.insert_text("\n")
 
