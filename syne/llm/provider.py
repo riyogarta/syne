@@ -26,6 +26,10 @@ class LLMBadRequestError(LLMError):
     """400 — bad request (malformed prompt, tool schema, etc.)."""
     pass
 
+class LLMContextWindowError(LLMError):
+    """Input tokens exceed the model's context window limit."""
+    pass
+
 class LLMEmptyResponseError(LLMError):
     """LLM returned empty content after retries."""
     pass

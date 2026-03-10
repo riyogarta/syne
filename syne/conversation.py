@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 from .db.connection import get_connection
-from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks
+from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens
@@ -559,12 +559,50 @@ class Conversation:
         response = None
         max_attempts = 1 if self.provider.name in ("google", "vertex") else 2
         for attempt in range(max_attempts):
-            response = await self.provider.chat(
-                messages=context,
-                tools=tool_schemas if tool_schemas else None,
-                stream_callbacks=self.stream_callbacks,
-                **chat_kwargs,
-            )
+            try:
+                response = await self.provider.chat(
+                    messages=context,
+                    tools=tool_schemas if tool_schemas else None,
+                    stream_callbacks=self.stream_callbacks,
+                    **chat_kwargs,
+                )
+            except LLMContextWindowError:
+                # Input tokens exceeded model limit — emergency compact and retry once
+                logger.warning(f"Context window exceeded for session {self.session_id}, triggering emergency compaction")
+                if self._mgr and self._mgr._status_callbacks:
+                    for cb in self._mgr._status_callbacks:
+                        try:
+                            await cb(self.session_id, "Context limit hit — compacting memory...")
+                        except Exception:
+                            pass
+                _keep = max(20, min(200, self.context_mgr.available // 5000))
+                _recent = self._message_cache[-_keep:] if self._message_cache else []
+                _preservation = _build_preservation_context(_recent)
+                result = await compact_session(
+                    session_id=self.session_id,
+                    provider=self.provider,
+                    keep_recent=_keep,
+                    recent_context=_preservation,
+                )
+                if result:
+                    logger.info(f"Emergency compaction: {result['messages_before']} → {result['messages_after']} messages")
+                    await self.load_history()
+                    # Rebuild context after compaction
+                    context = await self.build_context(user_message, recall_query=recall_query)
+                    tool_schemas = self.tools.to_openai_schema(effective_access_level)
+                    if self.abilities:
+                        tool_schemas = tool_schemas + self.abilities.to_openai_schema(effective_access_level)
+                    if self.is_group and should_filter_tools_for_group(self.is_group):
+                        tool_schemas = filter_tools_for_group(tool_schemas)
+                    # Retry the chat call (no further catch — let it fail if still too big)
+                    response = await self.provider.chat(
+                        messages=context,
+                        tools=tool_schemas if tool_schemas else None,
+                        stream_callbacks=self.stream_callbacks,
+                        **chat_kwargs,
+                    )
+                else:
+                    raise
 
             # Check for auth failures (expired OAuth tokens etc.)
             auth_failure = getattr(self.provider, '_auth_failure', None)

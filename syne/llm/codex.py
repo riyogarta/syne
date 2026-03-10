@@ -9,7 +9,7 @@ import httpx
 from typing import Optional
 from .provider import (
     LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
-    LLMRateLimitError, LLMAuthError, LLMBadRequestError, StreamCallbacks,
+    LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, StreamCallbacks,
 )
 from .openai_common import (
     _MAX_RETRIES, _BASE_DELAY_MS, _STREAM_IDLE_TIMEOUT,
@@ -456,7 +456,7 @@ class CodexProvider(LLMProvider):
 
                             if err_code in _TERMINAL_CODES:
                                 if err_code == "context_length_exceeded":
-                                    raise LLMBadRequestError(err_message or "Context length exceeded")
+                                    raise LLMContextWindowError(err_message or "Context length exceeded")
                                 raise LLMRateLimitError(err_message or f"Terminal error: {err_code}")
 
                             if err_code in _RETRYABLE_CODES and not last_attempt:

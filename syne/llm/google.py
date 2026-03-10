@@ -26,7 +26,7 @@ import time
 import random
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError, StreamCallbacks
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, LLMEmptyResponseError, StreamCallbacks
 from ..auth.google_oauth import GoogleCredentials
 from .gemini_common import (
     _sanitize_surrogates,
@@ -390,6 +390,8 @@ class GoogleProvider(LLMProvider):
 
                 if status == 400:
                     logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
+                    if "exceeds the maximum number of tokens" in error_text or "token count" in error_text.lower():
+                        raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}") from e
                     raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
 
                 # Retryable — backoff with jitter
@@ -550,6 +552,8 @@ class GoogleProvider(LLMProvider):
 
                 if resp.status_code == 429:
                     raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.")
+                if resp.status_code == 400 and ("exceeds the maximum number of tokens" in error_text or "token count" in error_text.lower()):
+                    raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}")
                 resp.raise_for_status()
 
         if data is None:

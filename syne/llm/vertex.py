@@ -23,6 +23,7 @@ from .provider import (
     LLMRateLimitError,
     LLMAuthError,
     LLMBadRequestError,
+    LLMContextWindowError,
     LLMEmptyResponseError,
     StreamCallbacks,
 )
@@ -319,6 +320,8 @@ class VertexProvider(LLMProvider):
 
                 if status == 400:
                     logger.error(f"Vertex 400 Bad Request: {error_text[:2000]}")
+                    if "exceeds the maximum number of tokens" in error_text or "token count" in error_text.lower():
+                        raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}") from e
                     raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
 
                 if status in (401, 403):

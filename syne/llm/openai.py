@@ -8,7 +8,7 @@ import httpx
 from typing import Optional
 from .provider import (
     LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
-    LLMRateLimitError, LLMAuthError, LLMBadRequestError, StreamCallbacks,
+    LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, StreamCallbacks,
 )
 from .openai_common import (
     _MAX_RETRIES, _BASE_DELAY_MS, _STREAM_IDLE_TIMEOUT,
@@ -249,7 +249,7 @@ class OpenAIProvider(LLMProvider):
 
                         if classification.is_terminal:
                             if "context_length" in (classification.reason or ""):
-                                raise LLMBadRequestError(classification.reason)
+                                raise LLMContextWindowError(classification.reason)
                             raise LLMRateLimitError(classification.reason)
 
                         if resp.status_code in (401, 403):
