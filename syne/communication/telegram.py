@@ -172,6 +172,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("nodes", self._cmd_nodes))
+        self.app.add_handler(CommandHandler("quit", self._cmd_quit))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
@@ -1809,11 +1810,17 @@ Or just send me a message!"""
 
     async def _cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /compact command — summarize old messages to free context."""
+        # Route to remote session if in remote mode
+        user = update.effective_user
+        if user.id in self._remote_node:
+            node_id = self._remote_node[user.id]
+            await self._remote_slash_command(update, context, "/compact", node_id)
+            return
+
         from ..compaction import compact_session, get_session_stats
         from ..db.connection import get_connection
 
         chat_id = str(update.effective_chat.id)
-        user = update.effective_user
 
         # Only owner can compact
         existing_user = await get_user("telegram", str(user.id))
@@ -1878,6 +1885,13 @@ Or just send me a message!"""
 
     async def _cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /clear command — archive current session and start fresh."""
+        # Route to remote session if in remote mode
+        user = update.effective_user
+        if user.id in self._remote_node:
+            node_id = self._remote_node[user.id]
+            await self._remote_slash_command(update, context, "/new", node_id)
+            return
+
         from ..db.connection import get_connection
 
         chat_id = str(update.effective_chat.id)
@@ -3904,6 +3918,15 @@ Or just send me a message!"""
             return True
 
         return False
+
+    async def _cmd_quit(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /quit command — exit remote node mode."""
+        user = update.effective_user
+        if user.id in self._remote_node:
+            self._remote_node.pop(user.id, None)
+            await update.message.reply_text("Exited remote mode.")
+        else:
+            await update.message.reply_text("Not in remote mode.")
 
     async def _handle_remote_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
         """Handle a message while in remote node mode.
