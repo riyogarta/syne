@@ -335,6 +335,12 @@ class Gateway:
         cwd = msg.get("cwd", node.cwd) or ""
         node.cwd = cwd
 
+        # Handle slash commands server-side (same as local CLI)
+        if text.startswith("/"):
+            handled = await self._handle_slash_command(node, text, cwd)
+            if handled:
+                return
+
         try:
             from .conversation_remote import handle_remote_message
             await handle_remote_message(
@@ -350,3 +356,51 @@ class Gateway:
             logger.error(f"Chat error for node {node.node_id}: {e}", exc_info=True)
             from ..communication.errors import classify_error
             await node.send(ErrorMsg(message=classify_error(e), code="chat_error"))
+
+    async def _handle_slash_command(self, node: NodeConnection, cmd: str, cwd: str) -> bool:
+        """Handle slash commands from the node. Returns True if handled."""
+        from .conversation_remote import _make_chat_id
+
+        cmd_name = cmd.split()[0].lower()
+        chat_id = _make_chat_id(node.node_id, cwd)
+        session_key = f"node:{chat_id}"
+
+        if cmd_name == "/compact":
+            conv = self.agent.conversations._active.get(session_key)
+            if not conv:
+                await node.send(ResponseChunkMsg(text="No active conversation.", done=False))
+                await node.send(ResponseChunkMsg(text="", done=True))
+                return True
+            msg_count = len(conv._message_cache) if conv._message_cache else 0
+            if msg_count < 4:
+                await node.send(ResponseChunkMsg(text="Conversation too short to compact.", done=False))
+                await node.send(ResponseChunkMsg(text="", done=True))
+                return True
+            await node.send(ResponseChunkMsg(text="Compacting conversation...", done=False))
+            try:
+                from ..compaction import compact_session
+                result = await compact_session(session_id=conv.session_id, provider=conv.provider)
+                if result:
+                    await conv.load_history()
+                    await node.send(ResponseChunkMsg(
+                        text=f"Compacted: {result['messages_before']} → {result['messages_after']} messages",
+                        done=False,
+                    ))
+                else:
+                    await node.send(ResponseChunkMsg(text="Nothing to compact.", done=False))
+            except Exception as e:
+                logger.error(f"Compact error for node {node.node_id}: {e}", exc_info=True)
+                await node.send(ResponseChunkMsg(text=f"Compact failed: {e}", done=False))
+            await node.send(ResponseChunkMsg(text="", done=True))
+            return True
+
+        if cmd_name == "/new":
+            conv = self.agent.conversations._active.pop(session_key, None)
+            if conv:
+                await node.send(ResponseChunkMsg(text="Session cleared. Starting fresh.", done=False))
+            else:
+                await node.send(ResponseChunkMsg(text="Starting new session.", done=False))
+            await node.send(ResponseChunkMsg(text="", done=True))
+            return True
+
+        return False
