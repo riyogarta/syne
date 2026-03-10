@@ -34,6 +34,16 @@ _DIM_GREEN = "\033[2;32m"
 _DIM_RED = "\033[2;31m"
 _DIM_YELLOW = "\033[2;33m"
 _DIM_CYAN = "\033[2;36m"
+# Pi dark theme tool backgrounds
+_BG_TOOL_PENDING = "\033[48;2;40;40;50m"   # #282832
+_BG_TOOL_SUCCESS = "\033[48;2;40;50;40m"   # #283228
+_BG_TOOL_ERROR = "\033[48;2;60;40;40m"     # #3c2828
+_BG_RESET = "\033[49m"
+# Pi accent color for paths
+_ACCENT = "\033[38;2;138;190;183m"         # #8abeb7
+_FG_ERROR = "\033[38;2;204;102;102m"       # #cc6666
+_FG_WARNING = "\033[38;2;255;255;0m"       # #ffff00
+_FG_SUCCESS = "\033[38;2;181;189;104m"     # #b5bd68
 
 # ── Terminal state ──
 _term_rows = 38
@@ -91,10 +101,12 @@ def _draw_prompt(buf="", cursor_col=0, status_left="", status_right=""):
     # Separator line with optional status (like Pi footer)
     if status_left or status_right:
         # ── status_left ──────────── status_right ──
-        mid = w - len(status_left) - len(status_right) - 4
+        left_vis = _visible_len(status_left) if status_left else 0
+        right_vis = _visible_len(status_right) if status_right else 0
+        mid = w - left_vis - right_vis - 4
         if mid < 4:
             mid = 4
-        sep = f"{_DIM}──{_RESET} {_DIM}{status_left}{_RESET} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
+        sep = f"{_DIM}──{_RESET} {status_left} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
         _write(f"\033[{_sep_row};1H\033[2K{sep}")
     else:
         _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
@@ -365,7 +377,7 @@ _last_tool_key = ""
 
 
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
-    """Display tool call in Pi style: bold title, accent path, muted output."""
+    """Display tool call in Pi style: bold title, accent path, background tint."""
     global _last_tool_key
     _stop_spinner()
 
@@ -391,26 +403,32 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
                 v = v[:77] + "..."
             arg_hint = v
 
-    # Pi style: exec → "$ command", read → "read path", write → "write path"
-    if name == "exec" and arg_hint:
-        header = f"  {_BOLD}$ {arg_hint}{_RESET}"
-    elif arg_hint:
-        header = f"  {_BOLD}{label.lower()}{_RESET} {_DIM_CYAN}{arg_hint}{_RESET}"
-    else:
-        header = f"  {_BOLD}{label.lower()}{_RESET}"
-
-    w = _term_width()
-    _write(f"\n  {_DIM}{'─' * (w - 4)}{_RESET}\n")  # top border
-    _write(f"{header}\n")
-
+    # Determine result state and background (Pi: pending/success/error)
     preview = result_preview.strip().replace("\n", " ")
     if len(preview) > 100:
         preview = preview[:97] + "..."
+    is_error = preview.lower().startswith("error") if preview else False
+    bg = _BG_TOOL_ERROR if is_error else _BG_TOOL_SUCCESS
+
+    w = _term_width()
+    pad = w - 4  # content area width
+
+    # Pi style: exec → "$ command", read → "read path"
+    if name == "exec" and arg_hint:
+        header_text = f" {_BOLD}$ {arg_hint}{_RESET}"
+    elif arg_hint:
+        header_text = f" {_BOLD}{label.lower()}{_RESET} {_ACCENT}{arg_hint}{_RESET}"
+    else:
+        header_text = f" {_BOLD}{label.lower()}{_RESET}"
+
+    # Render with background tint (Pi: toolSuccessBg / toolErrorBg)
+    _write(f"\n  {bg}{' ' * pad}{_BG_RESET}\n")  # top padding line
+    _write(f"  {bg}{header_text}{' ' * max(0, pad - _visible_len(header_text))}{_BG_RESET}\n")
     if preview:
-        is_error = preview.lower().startswith("error")
-        color = _DIM_RED if is_error else _DIM
-        _write(f"  {color}{preview}{_RESET}\n")
-    _write(f"  {_DIM}{'─' * (w - 4)}{_RESET}\n")  # bottom border
+        preview_color = _FG_ERROR if is_error else _DIM
+        preview_text = f" {preview_color}{preview}{_RESET}"
+        _write(f"  {bg}{preview_text}{' ' * max(0, pad - _visible_len(preview_text))}{_BG_RESET}\n")
+    _write(f"  {bg}{' ' * pad}{_BG_RESET}\n")  # bottom padding line
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1130,9 +1148,28 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
             # Redraw prompt with Pi-style footer stats
             stat_left = f"↑{_format_tokens(_session_usage.total_in)} ↓{_format_tokens(_session_usage.total_out)}"
-            stat_right = ""
-            if not remote_mode:
-                stat_right = _short_model_name(getattr(agent.provider, 'chat_model', ''))
+
+            # Context usage % with Pi color coding (red >90%, yellow >70%)
+            ctx_pct = ""
+            if remote_mode:
+                _model_name = _short_model_name(node_client.server_meta.get("model", ""))
+            else:
+                _model_name = _short_model_name(getattr(agent.provider, 'chat_model', ''))
+                _conv_key = f"cli:{chat_id}"
+                _conv = agent.conversations._active.get(_conv_key)
+                if _conv and _conv.context_mgr and _conv._message_cache:
+                    _usage = _conv.context_mgr.get_usage(_conv._message_cache)
+                    _pct = _usage.get("usage_percent", 0)
+                    if _pct > 90:
+                        ctx_pct = f"{_FG_ERROR}{_pct}%{_RESET}"
+                    elif _pct > 70:
+                        ctx_pct = f"{_FG_WARNING}{_pct}%{_RESET}"
+                    else:
+                        ctx_pct = f"{_pct}%"
+
+            if ctx_pct:
+                stat_left += f" {ctx_pct}"
+            stat_right = _model_name
             _draw_prompt(status_left=stat_left, status_right=stat_right)
 
     except Exception as e:
