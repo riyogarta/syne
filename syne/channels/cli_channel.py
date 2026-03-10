@@ -61,6 +61,32 @@ def _term_width() -> int:
 
 
 def _term_height() -> int:
+    # Try multiple methods — SSH sessions often report wrong size
+    # 1. ioctl on stdin (most reliable for interactive terminal)
+    try:
+        import fcntl, termios, struct
+        result = fcntl.ioctl(sys.stdin.fileno(), termios.TIOCGWINSZ, b'\x00' * 8)
+        rows = struct.unpack('HHHH', result)[0]
+        if rows > 0:
+            return rows
+    except Exception:
+        pass
+    # 2. os.get_terminal_size on stdin
+    try:
+        return os.get_terminal_size(sys.stdin.fileno()).lines
+    except Exception:
+        pass
+    # 3. stty size
+    try:
+        import subprocess
+        r = subprocess.run(['stty', 'size'], capture_output=True, text=True, timeout=2)
+        if r.returncode == 0:
+            rows = int(r.stdout.strip().split()[0])
+            if rows > 0:
+                return rows
+    except Exception:
+        pass
+    # 4. fallback
     return shutil.get_terminal_size((80, 24)).lines
 
 
@@ -615,9 +641,11 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         content_lines = len(_startup_buf) + 3
         term_h = _term_height()
         pad_count = max(0, term_h - content_lines)
-        # DEBUG: visible padding to verify lines are printed
-        for i in range(pad_count):
-            _write(f"{_DIM}.{_RESET}\n")
+        # DEBUG: show all detection methods
+        _shutil_h = shutil.get_terminal_size((80, 24)).lines
+        _write(f"  {_DIM}[debug] ioctl/stty={term_h} shutil={_shutil_h} content={content_lines} pad={pad_count}{_RESET}\n")
+        for _ in range(pad_count):
+            _write("\n")
         for line in _startup_buf:
             _write(line + "\n")
 
