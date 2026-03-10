@@ -51,6 +51,8 @@ _term_cols = 125
 _sr_end = 36      # last row of scroll region
 _sep_row = 37     # separator ────
 _input_row = 38   # > prompt
+_footer_left = ""   # last footer stats (left side)
+_footer_right = ""  # last footer stats (right side)
 
 # ── Spinner ──
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -104,7 +106,11 @@ def _draw_prompt(buf="", cursor_col=0, status_left="", status_right="", buf_line
         buf_lines: All input lines (multiline). If None, uses buf as single line.
         cursor_line: Which line the cursor is on (0-based)
     """
-    global _sr_end, _sep_row, _input_row
+    global _sr_end, _sep_row, _input_row, _footer_left, _footer_right
+
+    if status_left or status_right:
+        _footer_left = status_left
+        _footer_right = status_right
 
     w = _term_cols
     h = _term_rows
@@ -599,8 +605,19 @@ def _redraw_input(buf: str, cursor: int):
         _input_row = new_input_start
         _write(f"\033[1;{_sr_end}r")
 
-    # Separator line (keep existing)
-    _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+    # Separator line with footer stats
+    if _footer_left or _footer_right:
+        _fl = _footer_left or ""
+        _fr = _footer_right or ""
+        _fl_vis = _visible_len(_fl) if _fl else 0
+        _fr_vis = _visible_len(_fr) if _fr else 0
+        _mid = w - _fl_vis - _fr_vis - 4
+        if _mid < 4:
+            _mid = 4
+        _sep = f"{_DIM}──{_RESET} {_fl} {_DIM}{'─' * _mid}{_RESET} {_DIM}{_fr}{_RESET}"
+        _write(f"\033[{_sep_row};1H\033[2K{_sep}")
+    else:
+        _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
 
     if len(lines) > 1:
         max_vis = max(5, h * 3 // 10)
