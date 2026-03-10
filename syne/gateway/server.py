@@ -348,4 +348,5 @@ class Gateway:
             await node.send(ResponseChunkMsg(text="", done=True))
         except Exception as e:
             logger.error(f"Chat error for node {node.node_id}: {e}", exc_info=True)
-            await node.send(ErrorMsg(message=f"Chat error: {e}", code="chat_error"))
+            from ..communication.errors import classify_error
+            await node.send(ErrorMsg(message=classify_error(e), code="chat_error"))

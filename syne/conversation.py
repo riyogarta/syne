@@ -1491,7 +1491,11 @@ class ConversationManager:
                 _wa_entry = next((m for m in _wa_models if m.get("key") == wa_override), {})
                 conv.model_params = _wa_entry.get("params") or conv.model_params
                 conv.reasoning_visible = bool(_wa_entry.get("reasoning_visible", False))
-                logger.info(f"WA model override for {chat_id}: {wa_override}")
+                # Update context_mgr to match override model's context_window
+                _ctx = int(_wa_entry.get("context_window", 0)) or override_provider.context_window
+                _reserved = override_provider.reserved_output_tokens
+                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved)
+                logger.info(f"WA model override for {chat_id}: {wa_override} (ctx={_ctx})")
 
         # Per-node model override (remote node with custom model)
         node_override = (message_metadata or {}).get("node_model_override")
@@ -1504,7 +1508,11 @@ class ConversationManager:
                 _node_entry = next((m for m in _node_models if m.get("key") == node_override), {})
                 conv.model_params = _node_entry.get("params") or conv.model_params
                 conv.reasoning_visible = bool(_node_entry.get("reasoning_visible", False))
-                logger.info(f"Node model override for {chat_id}: {node_override}")
+                # Update context_mgr to match override model's context_window
+                _ctx = int(_node_entry.get("context_window", 0)) or override_provider.context_window
+                _reserved = override_provider.reserved_output_tokens
+                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved)
+                logger.info(f"Node model override for {chat_id}: {node_override} (ctx={_ctx})")
 
         # Apply streaming callbacks (CLI only — None for Telegram/WA)
         conv.stream_callbacks = self._stream_callbacks
