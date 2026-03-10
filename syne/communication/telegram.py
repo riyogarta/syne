@@ -3975,8 +3975,8 @@ Or just send me a message!"""
         gw_node = self.agent.gateway._nodes[node_id]
         cmd_name = cmd.strip().split()[0].lower()
 
-        from ..gateway.conversation_remote import _make_chat_id
-        chat_id = _make_chat_id(node_id, gw_node.cwd or "~")
+        from ..gateway.conversation_remote import _make_tg_chat_id
+        chat_id = _make_tg_chat_id(node_id)
         session_key = f"node:{chat_id}"
 
         if cmd_name == "/compact":

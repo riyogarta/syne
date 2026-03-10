@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .server import NodeConnection
 
 # Expose _make_chat_id for imports
-__all__ = ["handle_remote_message", "handle_remote_message_for_telegram", "_make_chat_id"]
+__all__ = ["handle_remote_message", "handle_remote_message_for_telegram", "_make_chat_id", "_make_tg_chat_id"]
 
 logger = logging.getLogger("syne.gateway.remote")
 
@@ -161,6 +161,11 @@ async def handle_remote_message(
         agent.conversations._node_connections.pop(chat_id, None)
 
 
+def _make_tg_chat_id(node_id: str) -> str:
+    """Build a chat ID for Telegram remote sessions (no per-directory split)."""
+    return f"tgremote:{node_id}"
+
+
 async def handle_remote_message_for_telegram(
     agent: "SyneAgent",
     node: "NodeConnection",
@@ -171,6 +176,7 @@ async def handle_remote_message_for_telegram(
 
     Like handle_remote_message() but collects the response text instead of
     streaming via WebSocket. Tools still execute on the remote node.
+    Uses a separate chat_id (tgremote:) so it never clashes with CLI sessions.
 
     Returns:
         The agent's response text, or None if empty.
@@ -179,7 +185,7 @@ async def handle_remote_message_for_telegram(
         return "Agent not ready — conversation manager not initialized."
 
     user = await _get_node_user(node.node_id, node.display_name)
-    chat_id = _make_chat_id(node.node_id, cwd)
+    chat_id = _make_tg_chat_id(node.node_id)
 
     # Per-node model override
     node_record = await get_node(node.node_id)
