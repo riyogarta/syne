@@ -91,16 +91,47 @@ def _setup_screen():
     _write(f"\033[{_sr_end};1H")             # cursor at bottom of scroll region
 
 
-def _draw_prompt(buf="", cursor_col=0, status_left="", status_right=""):
-    """Draw the fixed prompt area (separator with status + input line).
+def _draw_prompt(buf="", cursor_col=0, status_left="", status_right="", buf_lines=None, cursor_line=0):
+    """Draw the fixed prompt area: separator + multiline input.
 
-    Like Pi's footer: status info embedded in the separator line.
+    Like Pi's editor: input area grows with content (up to 30% of terminal),
+    scroll region shrinks to accommodate. Separator line has footer stats.
+
+    Args:
+        buf: Current line text (for single-line compat)
+        cursor_col: Cursor column in current line
+        status_left/right: Footer stats
+        buf_lines: All input lines (multiline). If None, uses buf as single line.
+        cursor_line: Which line the cursor is on (0-based)
     """
+    global _sr_end, _sep_row, _input_row
+
     w = _term_cols
+    h = _term_rows
+
+    # Calculate editor height (Pi: 30% terminal, min 1, max based on content)
+    if buf_lines and len(buf_lines) > 1:
+        max_editor = max(5, h * 3 // 10)
+        editor_lines = min(len(buf_lines), max_editor)
+    else:
+        editor_lines = 1
+
+    # Layout: scroll_region (1..sr_end) | separator | editor lines
+    new_sr_end = h - 1 - editor_lines  # 1 for separator + N for editor
+    new_sep_row = new_sr_end + 1
+    new_input_start = new_sep_row + 1
+
+    # Update scroll region if it changed
+    if new_sr_end != _sr_end:
+        _sr_end = new_sr_end
+        _sep_row = new_sep_row
+        _input_row = new_input_start
+        _write(f"\033[1;{_sr_end}r")
+
     _write("\0337")  # save cursor
-    # Separator line with optional status (like Pi footer)
+
+    # Separator line with footer stats
     if status_left or status_right:
-        # ── status_left ──────────── status_right ──
         left_vis = _visible_len(status_left) if status_left else 0
         right_vis = _visible_len(status_right) if status_right else 0
         mid = w - left_vis - right_vis - 4
@@ -110,8 +141,38 @@ def _draw_prompt(buf="", cursor_col=0, status_left="", status_right=""):
         _write(f"\033[{_sep_row};1H\033[2K{sep}")
     else:
         _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
-    _write(f"\033[{_input_row};1H\033[2K> {buf}")
-    _write(f"\033[{_input_row};{cursor_col + 3}H")
+
+    # Editor area
+    if buf_lines and len(buf_lines) > 1:
+        # Scroll within editor if more lines than visible
+        max_vis = max(5, h * 3 // 10)
+        if len(buf_lines) > max_vis:
+            # Keep cursor visible
+            start = max(0, min(cursor_line - max_vis + 1, len(buf_lines) - max_vis))
+            if cursor_line < start:
+                start = cursor_line
+            visible = buf_lines[start:start + max_vis]
+            vis_cursor_line = cursor_line - start
+        else:
+            visible = buf_lines
+            vis_cursor_line = cursor_line
+
+        for i, line in enumerate(visible):
+            row = new_input_start + i
+            prefix = "> " if i == 0 and (not buf_lines or len(buf_lines) <= max_vis or start == 0) else "  "
+            if i > 0 or (buf_lines and len(buf_lines) > max_vis and start > 0):
+                prefix = "  "  # continuation
+            if i == 0 and start == 0:
+                prefix = "> "
+            _write(f"\033[{row};1H\033[2K{prefix}{line}")
+
+        # Position cursor on the right line and column
+        cursor_row = new_input_start + vis_cursor_line
+        _write(f"\033[{cursor_row};{cursor_col + 3}H")
+    else:
+        _write(f"\033[{new_input_start};1H\033[2K> {buf}")
+        _write(f"\033[{new_input_start};{cursor_col + 3}H")
+
     _write("\0338")  # restore cursor
 
 
@@ -501,27 +562,97 @@ def _read_key(fd: int) -> tuple[str, str]:
     return ("unknown", "")
 
 
-def _redraw_input(buf: str, cursor: int):
-    """Redraw the input line in the fixed prompt area."""
-    # For multiline, show line count + current line
+def _buf_cursor_info(buf: str, cursor: int):
+    """Get multiline cursor info: (lines, line_index, col_in_line)."""
     lines = buf.split("\n")
+    pos = 0
+    for i, ln in enumerate(lines):
+        if pos + len(ln) >= cursor:
+            return lines, i, cursor - pos
+        pos += len(ln) + 1
+    # Fallback: cursor at end
+    return lines, len(lines) - 1, len(lines[-1]) if lines else 0
+
+
+def _redraw_input(buf: str, cursor: int):
+    """Redraw the editor area using _draw_prompt (Pi-style multiline)."""
+    global _sr_end, _sep_row, _input_row
+
+    lines, cur_line_idx, col_in_line = _buf_cursor_info(buf, cursor)
+    h = _term_rows
+    w = _term_cols
+
     if len(lines) > 1:
-        # Find which line the cursor is on
-        pos = 0
-        cur_line_idx = 0
-        for i, ln in enumerate(lines):
-            if pos + len(ln) >= cursor:
-                cur_line_idx = i
-                break
-            pos += len(ln) + 1  # +1 for \n
-        cur_line = lines[cur_line_idx]
-        col_in_line = cursor - sum(len(lines[j]) + 1 for j in range(cur_line_idx))
-        prefix = f"({len(lines)}L) > "
-        _write(f"\033[{_input_row};1H\033[2K{prefix}{cur_line}")
-        _write(f"\033[{_input_row};{len(prefix) + col_in_line + 1}H")
+        max_editor = max(5, h * 3 // 10)
+        editor_lines = min(len(lines), max_editor)
     else:
-        _write(f"\033[{_input_row};1H\033[2K> {buf}")
-        _write(f"\033[{_input_row};{cursor + 3}H")
+        editor_lines = 1
+
+    new_sr_end = h - 1 - editor_lines
+    new_sep_row = new_sr_end + 1
+    new_input_start = new_sep_row + 1
+
+    # Update scroll region if changed
+    if new_sr_end != _sr_end:
+        _sr_end = new_sr_end
+        _sep_row = new_sep_row
+        _input_row = new_input_start
+        _write(f"\033[1;{_sr_end}r")
+
+    # Separator line (keep existing)
+    _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+
+    if len(lines) > 1:
+        max_vis = max(5, h * 3 // 10)
+        # Scroll to keep cursor visible
+        if len(lines) > max_vis:
+            start = max(0, min(cur_line_idx - max_vis + 1, len(lines) - max_vis))
+            if cur_line_idx < start:
+                start = cur_line_idx
+            visible = lines[start:start + max_vis]
+            vis_cursor_line = cur_line_idx - start
+        else:
+            visible = lines
+            vis_cursor_line = cur_line_idx
+            start = 0
+
+        for i, line in enumerate(visible):
+            row = new_input_start + i
+            prefix = "> " if i == 0 and start == 0 else "  "
+            _write(f"\033[{row};1H\033[2K{prefix}{line}")
+
+        # Clear any leftover lines below editor
+        for i in range(len(visible), max_vis):
+            row = new_input_start + i
+            if row <= h:
+                _write(f"\033[{row};1H\033[2K")
+
+        cursor_row = new_input_start + vis_cursor_line
+        _write(f"\033[{cursor_row};{col_in_line + 3}H")
+    else:
+        _write(f"\033[{new_input_start};1H\033[2K> {buf}")
+        _write(f"\033[{new_input_start};{cursor + 3}H")
+        # Clear extra rows if shrinking from multiline
+        for row in range(new_input_start + 1, h + 1):
+            _write(f"\033[{row};1H\033[2K")
+
+
+def _reset_editor_to_single():
+    """Reset scroll region back to single-line prompt layout."""
+    global _sr_end, _sep_row, _input_row
+    h = _term_rows
+    w = _term_cols
+    _sr_end = h - 2
+    _sep_row = h - 1
+    _input_row = h
+    _write(f"\033[1;{_sr_end}r")
+    # Clear the prompt area rows
+    _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+    _write(f"\033[{_input_row};1H\033[2K")
+    # Clear any extra rows that were part of the multiline editor
+    for row in range(_input_row + 1, h + 1):
+        _write(f"\033[{row};1H\033[2K")
+    _write(f"\033[{_sr_end};1H")
 
 
 def _blocking_read_line(history: list[str]) -> str | None:
@@ -545,11 +676,13 @@ def _blocking_read_line(history: list[str]) -> str | None:
                 if buf.endswith("\\"):
                     buf = buf[:-1] + "\n"
                     cursor = len(buf)
-                    # Temporarily exit raw to redraw
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                     _redraw_input(buf, cursor)
                     tty.setraw(fd)
                     continue
+                # Reset to single-line layout before returning
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                _reset_editor_to_single()
                 return buf
 
             elif key == "shift-enter":
@@ -564,6 +697,8 @@ def _blocking_read_line(history: list[str]) -> str | None:
 
             elif key == "ctrl-d":
                 if not buf:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _reset_editor_to_single()
                     return None  # EOF
 
             elif key == "backspace":
@@ -596,32 +731,52 @@ def _blocking_read_line(history: list[str]) -> str | None:
                     tty.setraw(fd)
 
             elif key == "home":
-                cursor = 0
+                # Go to start of current line
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                cursor = sum(len(lines[j]) + 1 for j in range(cur_line))
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
 
             elif key == "end":
-                cursor = len(buf)
+                # Go to end of current line
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                cursor = sum(len(lines[j]) + 1 for j in range(cur_line)) + len(lines[cur_line])
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
 
             elif key == "ctrl-u":
-                buf = buf[cursor:]
-                cursor = 0
+                # Kill from cursor to start of current line
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                line_start = sum(len(lines[j]) + 1 for j in range(cur_line))
+                buf = buf[:line_start] + buf[cursor:]
+                cursor = line_start
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
 
             elif key == "ctrl-k":
-                buf = buf[:cursor]
+                # Kill from cursor to end of current line
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                line_end = sum(len(lines[j]) + 1 for j in range(cur_line)) + len(lines[cur_line])
+                buf = buf[:cursor] + buf[line_end:]
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
 
             elif key == "up":
-                if history:
+                # Pi-style: navigate within multiline, history only at top
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                if cur_line > 0:
+                    # Move cursor up one line
+                    prev_line = lines[cur_line - 1]
+                    new_col = min(col, len(prev_line))
+                    cursor = sum(len(lines[j]) + 1 for j in range(cur_line - 1)) + new_col
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+                elif history:
                     if hist_idx == -1:
                         hist_save = buf
                         hist_idx = len(history) - 1
@@ -634,7 +789,17 @@ def _blocking_read_line(history: list[str]) -> str | None:
                     tty.setraw(fd)
 
             elif key == "down":
-                if hist_idx >= 0:
+                # Pi-style: navigate within multiline, history only at bottom
+                lines, cur_line, col = _buf_cursor_info(buf, cursor)
+                if cur_line < len(lines) - 1:
+                    # Move cursor down one line
+                    next_line = lines[cur_line + 1]
+                    new_col = min(col, len(next_line))
+                    cursor = sum(len(lines[j]) + 1 for j in range(cur_line + 1)) + new_col
+                    termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                    _redraw_input(buf, cursor)
+                    tty.setraw(fd)
+                elif hist_idx >= 0:
                     hist_idx += 1
                     if hist_idx >= len(history):
                         hist_idx = -1
