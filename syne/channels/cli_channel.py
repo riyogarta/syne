@@ -783,7 +783,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         continue
                     if row["role"] == "user":
                         _history.append(content)
-                        _write(f"\n  {_DIM}\033[7m {content} \033[27m{_RESET}\n")
+                        _write(f"\n  \033[48;2;52;53;65m {content} \033[49m\n")
                     else:
                         _write(f"  {content}\n")
                 _write(f"\n  {_DIM}── end of history ──{_RESET}\n")
@@ -838,10 +838,9 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _last_tool_key = ""
             _history.append(user_input)
 
-            # Echo user message in scroll region (Pi style: background tint)
+            # Echo user message in scroll region (Pi style: subtle bg #343541)
             _write(f"\033[{_sr_end};1H\033[2K")
-            # Use reverse video for user message background like Pi's userMessageBg
-            _write(f"\n  \033[7m {user_input} \033[27m\n")
+            _write(f"\n  \033[48;2;52;53;65m {user_input} \033[49m\n")
 
             # Clear input line
             _write(f"\033[{_input_row};1H\033[2K> ")
