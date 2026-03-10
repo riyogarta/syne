@@ -17,9 +17,84 @@ def _escape(text: str) -> str:
     return _html.escape(text, quote=False)
 
 
+def _html_to_telegram(text: str) -> str:
+    """Convert raw HTML from LLM output to Telegram-compatible format.
+
+    - HTML tables → monospace <pre> table (using _render_table)
+    - Supported tags preserved: <b>, <i>, <u>, <s>, <code>, <pre>, <a>
+    - Unsupported tags stripped or converted:
+      <strong> → <b>, <em> → <i>, <del> → <s>
+      <h1>-<h6> → **bold** (let markdown pass handle it)
+      <hr> → --- line
+      <br> → newline
+      <p> → double newline
+      <ul>/<ol>/<li> → markdown list
+      <table>/<tr>/<td>/<th> → pipe-delimited table (let table pass handle it)
+      <div>/<span> → content only
+    """
+    # === HTML table → markdown pipe table ===
+    def _table_to_md(m):
+        table_html = m.group(0)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
+        if not rows:
+            return ''
+        md_rows = []
+        for row in rows:
+            # Extract cells (th or td)
+            cells = re.findall(r'<(?:td|th)[^>]*>(.*?)</(?:td|th)>', row, re.DOTALL | re.IGNORECASE)
+            # Strip nested HTML from cell content
+            clean_cells = [re.sub(r'<[^>]+>', '', c).strip() for c in cells]
+            md_rows.append('| ' + ' | '.join(clean_cells) + ' |')
+        # Add separator after first row (header)
+        if len(md_rows) > 1:
+            md_rows.insert(1, '| ' + ' | '.join(['---'] * len(re.findall(r'<(?:td|th)[^>]*>', rows[0], re.IGNORECASE))) + ' |')
+        return '\n'.join(md_rows)
+
+    text = re.sub(r'<table[^>]*>.*?</table>', _table_to_md, text, flags=re.DOTALL | re.IGNORECASE)
+
+    # === Convert ALL HTML tags to markdown equivalents ===
+    # This way the main markdown pass handles everything uniformly.
+
+    # Bold: <b>, <strong>
+    text = re.sub(r'<(?:b|strong)>(.*?)</(?:b|strong)>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
+    # Italic: <i>, <em>
+    text = re.sub(r'<(?:i|em)>(.*?)</(?:i|em)>', r'*\1*', text, flags=re.DOTALL | re.IGNORECASE)
+    # Strikethrough: <s>, <del>
+    text = re.sub(r'<(?:s|del)>(.*?)</(?:s|del)>', r'~~\1~~', text, flags=re.DOTALL | re.IGNORECASE)
+    # Underline: <u> — Telegram supports, but no markdown equiv; use bold as fallback
+    text = re.sub(r'<u>(.*?)</u>', r'**\1**', text, flags=re.DOTALL | re.IGNORECASE)
+    # Inline code: <code>
+    text = re.sub(r'<code>(.*?)</code>', r'`\1`', text, flags=re.DOTALL | re.IGNORECASE)
+    # Code block: <pre>
+    text = re.sub(r'<pre>(.*?)</pre>', r'```\n\1\n```', text, flags=re.DOTALL | re.IGNORECASE)
+    # Links: <a href="url">text</a>
+    text = re.sub(r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>', r'[\2](\1)', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # === Headings → bold markdown ===
+    text = re.sub(r'<h[1-6][^>]*>(.*?)</h[1-6]>', r'\n**\1**\n', text, flags=re.DOTALL | re.IGNORECASE)
+
+    # === Block elements ===
+    text = re.sub(r'<hr\s*/?>', '\n---\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<p[^>]*>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'</p>', '\n', text, flags=re.IGNORECASE)
+
+    # === Lists ===
+    text = re.sub(r'<li[^>]*>(.*?)</li>', r'\n• \1', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'</?(?:ul|ol)[^>]*>', '', text, flags=re.IGNORECASE)
+
+    # === Strip any remaining HTML tags ===
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Clean up excessive newlines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+
+    return text
+
+
 def markdown_to_telegram_html(text: str) -> str:
     """Convert markdown-formatted text to Telegram-safe HTML.
-    
+
     Handles:
     - **bold** / __bold__ → <b>bold</b>
     - *italic* / _italic_ → <i>italic</i>
@@ -28,11 +103,16 @@ def markdown_to_telegram_html(text: str) -> str:
     - [text](url) → <a href="url">text</a>
     - ~~strikethrough~~ → <s>strikethrough</s>
     - Markdown tables → wrapped in <pre> for monospace alignment
-    
+    - Raw HTML from LLM → converted to Telegram-safe format
+
     Text outside of these patterns is HTML-escaped for safety.
     """
     if not text:
         return text
+
+    # Pre-process: if LLM output contains raw HTML tags, convert first
+    if re.search(r'<(?:b|i|u|s|pre|code|a |table|tr|td|th|h[1-6]|hr|div|span|p|br|strong|em|del|ul|ol|li)\b', text, re.IGNORECASE):
+        text = _html_to_telegram(text)
     
     result = []
     lines = text.split('\n')
