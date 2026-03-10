@@ -606,13 +606,20 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         except Exception:
             pass
 
-        # ── Output startup content, padded to push prompt to bottom ──
-        # +2 accounts for the separator line and prompt line that follow
-        content_height = len(_startup_buf) + 2
+        # ── Output startup content, pushed to bottom of terminal ──
+        # Force terminal to scroll so cursor is at the very bottom,
+        # then move up to make room for content. This anchors the
+        # header + prompt to the bottom of the screen like Pi's TUI.
+        content_height = len(_startup_buf) + 2  # +2 for separator + prompt
         term_h = _term_height()
-        pad_lines = max(0, term_h - content_height)
-        if pad_lines > 0:
-            _write("\n" * pad_lines)
+        if content_height < term_h:
+            # Print enough newlines to force-scroll cursor to the bottom
+            # row, regardless of where it started. Then move up to create
+            # space for the startup content.
+            sys.stdout.write("\n" * term_h)
+            sys.stdout.write(f"\033[{content_height}A")
+            sys.stdout.write("\033[J")  # clear from cursor to end
+            sys.stdout.flush()
         for line in _startup_buf:
             _write(line + "\n")
 
