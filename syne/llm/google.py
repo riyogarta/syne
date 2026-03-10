@@ -390,7 +390,8 @@ class GoogleProvider(LLMProvider):
 
                 if status == 400:
                     logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
-                    if "exceeds the maximum number of tokens" in error_text or "token count" in error_text.lower():
+                    combined = (error_text + " " + str(e)).lower()
+                    if "exceeds the maximum" in combined or "token count" in combined or "too many tokens" in combined:
                         raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}") from e
                     raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
 
@@ -552,8 +553,10 @@ class GoogleProvider(LLMProvider):
 
                 if resp.status_code == 429:
                     raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.")
-                if resp.status_code == 400 and ("exceeds the maximum number of tokens" in error_text or "token count" in error_text.lower()):
-                    raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}")
+                if resp.status_code == 400:
+                    _lower = error_text.lower()
+                    if "exceeds the maximum" in _lower or "token count" in _lower or "too many tokens" in _lower:
+                        raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}")
                 resp.raise_for_status()
 
         if data is None:

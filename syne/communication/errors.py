@@ -3,7 +3,7 @@
 import asyncio
 import httpx
 
-from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
+from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, LLMEmptyResponseError
 
 
 def classify_error(e: Exception) -> str:
@@ -17,6 +17,8 @@ def classify_error(e: Exception) -> str:
         return "Rate limited. Please wait a moment and try again."
     if isinstance(e, LLMAuthError):
         return "Authentication error. Owner may need to refresh credentials."
+    if isinstance(e, LLMContextWindowError):
+        return "Context too large. Use /compact to free up space, or start a new session."
     if isinstance(e, LLMBadRequestError):
         return "LLM rejected the request. This may be a conversation format issue."
     if isinstance(e, LLMEmptyResponseError):
