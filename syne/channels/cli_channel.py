@@ -138,12 +138,18 @@ def _draw_prompt(buf="", cursor_col=0, status_left="", status_right="", buf_line
 
     # Separator line with footer stats
     if status_left or status_right:
-        left_vis = _visible_len(status_left) if status_left else 0
         right_vis = _visible_len(status_right) if status_right else 0
-        mid = w - left_vis - right_vis - 4
-        if mid < 4:
-            mid = 4
-        sep = f"{_DIM}──{_RESET} {status_left} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
+        if status_left:
+            left_vis = _visible_len(status_left)
+            mid = w - left_vis - right_vis - 4
+            if mid < 4:
+                mid = 4
+            sep = f"{_DIM}──{_RESET} {status_left} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
+        else:
+            fill = w - right_vis - 2
+            if fill < 1:
+                fill = 1
+            sep = f"{_DIM}{'─' * fill}{_RESET} {_DIM}{status_right}{_RESET}"
         _write(f"\033[{_sep_row};1H\033[2K{sep}")
     else:
         _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
@@ -607,14 +613,19 @@ def _redraw_input(buf: str, cursor: int):
 
     # Separator line with footer stats
     if _footer_left or _footer_right:
-        _fl = _footer_left or ""
         _fr = _footer_right or ""
-        _fl_vis = _visible_len(_fl) if _fl else 0
         _fr_vis = _visible_len(_fr) if _fr else 0
-        _mid = w - _fl_vis - _fr_vis - 4
-        if _mid < 4:
-            _mid = 4
-        _sep = f"{_DIM}──{_RESET} {_fl} {_DIM}{'─' * _mid}{_RESET} {_DIM}{_fr}{_RESET}"
+        if _footer_left:
+            _fl_vis = _visible_len(_footer_left)
+            _mid = w - _fl_vis - _fr_vis - 4
+            if _mid < 4:
+                _mid = 4
+            _sep = f"{_DIM}──{_RESET} {_footer_left} {_DIM}{'─' * _mid}{_RESET} {_DIM}{_fr}{_RESET}"
+        else:
+            _fill = w - _fr_vis - 2
+            if _fill < 1:
+                _fill = 1
+            _sep = f"{_DIM}{'─' * _fill}{_RESET} {_DIM}{_fr}{_RESET}"
         _write(f"\033[{_sep_row};1H\033[2K{_sep}")
     else:
         _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
