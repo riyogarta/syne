@@ -665,3 +665,26 @@ INSERT INTO config (key, value, description) VALUES (
 INSERT INTO config (key, value, description) VALUES
     ('gateway.port', '8765', 'Gateway WebSocket server port')
 ON CONFLICT (key) DO NOTHING;
+
+-- Gateway tables (remote node pairing)
+CREATE TABLE IF NOT EXISTS paired_nodes (
+    id SERIAL PRIMARY KEY,
+    node_id VARCHAR(100) UNIQUE NOT NULL,
+    display_name VARCHAR(100) NOT NULL,
+    token_hash VARCHAR(128) NOT NULL,
+    platform VARCHAR(30) DEFAULT 'linux',
+    model VARCHAR(100) DEFAULT '',
+    active BOOLEAN DEFAULT true,
+    last_seen TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS pairing_tokens (
+    id SERIAL PRIMARY KEY,
+    token_hash VARCHAR(128) UNIQUE NOT NULL,
+    node_name VARCHAR(100) NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    used BOOLEAN DEFAULT false
+);
