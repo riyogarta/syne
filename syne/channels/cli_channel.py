@@ -615,11 +615,11 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         content_lines = len(_startup_buf) + 3
         term_h = _term_height()
         pad_count = max(0, term_h - content_lines)
-        _startup_buf = [""] * pad_count + _startup_buf
+        # DEBUG: visible padding to verify lines are printed
+        for i in range(pad_count):
+            _write(f"{_DIM}.{_RESET}\n")
         for line in _startup_buf:
             _write(line + "\n")
-        # DEBUG: right before prompt so it's always visible
-        _write(f"  {_DIM}[debug] term_h={term_h} content={content_lines} pad={pad_count}{_RESET}\n")
 
         # Build prompt session
         session = _build_prompt_session(_history)
