@@ -152,21 +152,66 @@ _MD_ITALIC = re.compile(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)')
 _MD_CODE = re.compile(r'`([^`]+)`')
 _MD_HEADING = re.compile(r'^(#{1,3})\s+(.+)$')
 _MD_BULLET = re.compile(r'^(\s*)([-*+]|\d+[.)]) (.*)$')
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
 _BASE_INDENT = "  "  # 2 spaces — matches Pi's paddingX=1
 
 
+def _visible_len(s: str) -> int:
+    """Length of string without ANSI escape codes."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _wrap_line(text: str, width: int, hang_indent: str = "") -> list[str]:
+    """Word-wrap text to width, with hanging indent for continuation lines.
+
+    First line is returned as-is (caller adds its own prefix).
+    Continuation lines get hang_indent prepended.
+    ANSI codes are preserved but not counted toward width.
+    """
+    if _visible_len(text) <= width:
+        return [text]
+
+    # Split into words, preserving ANSI codes attached to words
+    words = text.split(' ')
+    lines = []
+    current = ""
+    current_vis = 0
+    hang_width = len(hang_indent)
+
+    for word in words:
+        word_vis = _visible_len(word)
+        if not current:
+            current = word
+            current_vis = word_vis
+        elif current_vis + 1 + word_vis <= width:
+            current += " " + word
+            current_vis += 1 + word_vis
+        else:
+            lines.append(current)
+            current = word
+            current_vis = word_vis
+            width = _term_cols - hang_width  # continuation lines have less space
+
+    if current:
+        lines.append(current)
+
+    # Add hanging indent to continuation lines
+    return [lines[0]] + [hang_indent + ln for ln in lines[1:]] if len(lines) > 1 else lines
+
+
 class _MarkdownStream:
-    """Streaming markdown renderer with proper indentation.
+    """Streaming markdown renderer with proper indentation and word wrap.
 
     Follows Pi's approach: base indent for all content, structured list
-    indentation with depth tracking, continuation lines aligned to content.
+    indentation with depth tracking, wrapped continuation lines aligned
+    to content start (not margin).
     """
 
     def __init__(self):
         self._buf = ""
         self._in_code_block = False
-        self._list_depth = 0       # current nesting depth
-        self._in_list = False       # inside a list context
+        self._list_depth = 0
+        self._in_list = False
         self._last_was_blank = False
 
     def feed(self, chunk: str) -> None:
@@ -195,8 +240,17 @@ class _MarkdownStream:
         text = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', text)
         return text
 
+    def _write_wrapped(self, prefix: str, text: str, hang_indent: str) -> None:
+        """Write text with prefix, word-wrapped with hanging indent."""
+        styled = self._style_inline(text)
+        first_width = _term_cols - _visible_len(prefix)
+        wrapped = _wrap_line(styled, first_width, hang_indent)
+        _write(prefix + wrapped[0])
+        for cont_line in wrapped[1:]:
+            _write("\n" + cont_line)
+
     def _emit_line(self, line: str) -> None:
-        # Code blocks — pass through with indent
+        # Code blocks — no wrap
         if line.strip().startswith("```"):
             self._in_code_block = not self._in_code_block
             if self._in_code_block:
@@ -213,7 +267,8 @@ class _MarkdownStream:
         if m:
             self._in_list = False
             self._list_depth = 0
-            _write(f"{_BASE_INDENT}{_BOLD}{m.group(2)}{_RESET}")
+            prefix = _BASE_INDENT
+            self._write_wrapped(f"{prefix}{_BOLD}", m.group(2) + _RESET, prefix)
             return
 
         # Horizontal rules
@@ -222,7 +277,7 @@ class _MarkdownStream:
             self._list_depth = 0
             return
 
-        # Blank lines — reset list context if double blank
+        # Blank lines
         if not line.strip():
             if self._last_was_blank:
                 self._in_list = False
@@ -232,7 +287,7 @@ class _MarkdownStream:
             return
         self._last_was_blank = False
 
-        # List items — detect depth from leading whitespace (Pi: 2 spaces per level)
+        # List items
         bm = _MD_BULLET.match(line)
         if bm:
             leading = bm.group(1)
@@ -242,24 +297,25 @@ class _MarkdownStream:
             self._in_list = True
             self._list_depth = depth
 
-            # Build indent: base + depth
             indent = _BASE_INDENT + "  " * depth
-            # Use bullet character (Pi style: "- " styled with listBullet theme)
             if marker in ("-", "*", "+"):
                 bullet = "• "
             else:
                 bullet = f"{marker} "
-            _write(f"{indent}{_DIM_CYAN}{bullet}{_RESET}{self._style_inline(content)}")
+            # Hanging indent = indent + spaces matching bullet width
+            hang = indent + " " * len(bullet)
+            prefix = f"{indent}{_DIM_CYAN}{bullet}{_RESET}"
+            self._write_wrapped(prefix, content, hang)
             return
 
-        # Continuation text inside a list — align with content (indent + 2 for bullet width)
+        # Continuation text inside a list
         if self._in_list:
             indent = _BASE_INDENT + "  " * self._list_depth + "  "
-            _write(f"{indent}{self._style_inline(line)}")
+            self._write_wrapped(indent, line, indent)
             return
 
         # Regular paragraph text
-        _write(f"{_BASE_INDENT}{self._style_inline(line)}")
+        self._write_wrapped(_BASE_INDENT, line, _BASE_INDENT)
 
 
 # ── Slash commands ──
