@@ -151,12 +151,23 @@ _MD_BOLD = re.compile(r'\*\*(.+?)\*\*')
 _MD_ITALIC = re.compile(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)')
 _MD_CODE = re.compile(r'`([^`]+)`')
 _MD_HEADING = re.compile(r'^(#{1,3})\s+(.+)$')
+_MD_BULLET = re.compile(r'^(\s*)([-*+]|\d+[.)]) (.*)$')
+_BASE_INDENT = "  "  # 2 spaces — matches Pi's paddingX=1
 
 
 class _MarkdownStream:
+    """Streaming markdown renderer with proper indentation.
+
+    Follows Pi's approach: base indent for all content, structured list
+    indentation with depth tracking, continuation lines aligned to content.
+    """
+
     def __init__(self):
         self._buf = ""
         self._in_code_block = False
+        self._list_depth = 0       # current nesting depth
+        self._in_list = False       # inside a list context
+        self._last_was_blank = False
 
     def feed(self, chunk: str) -> None:
         self._buf += chunk
@@ -173,28 +184,82 @@ class _MarkdownStream:
     def reset(self) -> None:
         self._buf = ""
         self._in_code_block = False
+        self._list_depth = 0
+        self._in_list = False
+        self._last_was_blank = False
+
+    def _style_inline(self, text: str) -> str:
+        """Apply inline markdown styling (bold, code, italic)."""
+        text = _MD_BOLD.sub(f'{_BOLD}\\1{_RESET}', text)
+        text = _MD_CODE.sub(f'{_DIM_CYAN}\\1{_RESET}', text)
+        text = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', text)
+        return text
 
     def _emit_line(self, line: str) -> None:
+        # Code blocks — pass through with indent
         if line.strip().startswith("```"):
             self._in_code_block = not self._in_code_block
             if self._in_code_block:
                 lang = line.strip()[3:].strip()
                 if lang:
-                    _write(f"  {_DIM}[{lang}]{_RESET}")
+                    _write(f"{_BASE_INDENT}{_DIM}[{lang}]{_RESET}")
             return
         if self._in_code_block:
-            _write(f"  {_DIM_CYAN}{line}{_RESET}")
+            _write(f"{_BASE_INDENT}{_DIM_CYAN}{line}{_RESET}")
             return
+
+        # Headings
         m = _MD_HEADING.match(line)
         if m:
-            _write(f"  {_BOLD}{m.group(2)}{_RESET}")
+            self._in_list = False
+            self._list_depth = 0
+            _write(f"{_BASE_INDENT}{_BOLD}{m.group(2)}{_RESET}")
             return
+
+        # Horizontal rules
         if line.strip() in ("---", "***", "___"):
+            self._in_list = False
+            self._list_depth = 0
             return
-        line = _MD_BOLD.sub(f'{_BOLD}\\1{_RESET}', line)
-        line = _MD_CODE.sub(f'{_DIM_CYAN}\\1{_RESET}', line)
-        line = _MD_ITALIC.sub(f'{_ITALIC}\\1{_RESET}', line)
-        _write(f"  {line}")
+
+        # Blank lines — reset list context if double blank
+        if not line.strip():
+            if self._last_was_blank:
+                self._in_list = False
+                self._list_depth = 0
+            self._last_was_blank = True
+            _write("")
+            return
+        self._last_was_blank = False
+
+        # List items — detect depth from leading whitespace (Pi: 2 spaces per level)
+        bm = _MD_BULLET.match(line)
+        if bm:
+            leading = bm.group(1)
+            marker = bm.group(2)
+            content = bm.group(3)
+            depth = len(leading) // 2
+            self._in_list = True
+            self._list_depth = depth
+
+            # Build indent: base + depth
+            indent = _BASE_INDENT + "  " * depth
+            # Use bullet character (Pi style: "- " styled with listBullet theme)
+            if marker in ("-", "*", "+"):
+                bullet = "• "
+            else:
+                bullet = f"{marker} "
+            _write(f"{indent}{_DIM_CYAN}{bullet}{_RESET}{self._style_inline(content)}")
+            return
+
+        # Continuation text inside a list — align with content (indent + 2 for bullet width)
+        if self._in_list:
+            indent = _BASE_INDENT + "  " * self._list_depth + "  "
+            _write(f"{indent}{self._style_inline(line)}")
+            return
+
+        # Regular paragraph text
+        _write(f"{_BASE_INDENT}{self._style_inline(line)}")
 
 
 # ── Slash commands ──
