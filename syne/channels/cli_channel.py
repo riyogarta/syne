@@ -607,19 +607,15 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             pass
 
         # ── Output startup content, pushed to bottom of terminal ──
-        # Force terminal to scroll so cursor is at the very bottom,
-        # then move up to make room for content. This anchors the
-        # header + prompt to the bottom of the screen like Pi's TUI.
-        content_height = len(_startup_buf) + 3  # separator + prompt + bottom_toolbar
+        # Like Pi's TUI: fill the entire terminal height with output so
+        # the header + prompt naturally end up at the bottom. Pi achieves
+        # this because its editor takes ~30% of terminal height. We pad
+        # with empty lines at the top of the buffer instead.
+        # +3 = separator line + prompt "> " + bottom_toolbar
+        content_lines = len(_startup_buf) + 3
         term_h = _term_height()
-        if content_height < term_h:
-            # Print enough newlines to force-scroll cursor to the bottom
-            # row, regardless of where it started. Then move up to create
-            # space for the startup content.
-            sys.stdout.write("\n" * term_h)
-            sys.stdout.write(f"\033[{content_height}A")
-            sys.stdout.write("\033[J")  # clear from cursor to end
-            sys.stdout.flush()
+        pad_count = max(0, term_h - content_lines)
+        _startup_buf = [""] * pad_count + _startup_buf
         for line in _startup_buf:
             _write(line + "\n")
 
