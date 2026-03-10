@@ -24,6 +24,9 @@ if TYPE_CHECKING:
     from ..agent import SyneAgent
     from .server import NodeConnection
 
+# Expose _make_chat_id for imports
+__all__ = ["handle_remote_message", "handle_remote_message_for_telegram", "_make_chat_id"]
+
 logger = logging.getLogger("syne.gateway.remote")
 
 
@@ -152,6 +155,70 @@ async def handle_remote_message(
         return None
     finally:
         # Restore previous callbacks and clean up node connection
+        agent.conversations.set_stream_callbacks(prev_stream)
+        agent.conversations.set_tool_detail_callback(prev_tool_detail)
+        agent.conversations.set_tool_callback(prev_tool)
+        agent.conversations._node_connections.pop(chat_id, None)
+
+
+async def handle_remote_message_for_telegram(
+    agent: "SyneAgent",
+    node: "NodeConnection",
+    message: str,
+    cwd: str,
+) -> str | None:
+    """Handle a remote message initiated from Telegram.
+
+    Like handle_remote_message() but collects the response text instead of
+    streaming via WebSocket. Tools still execute on the remote node.
+
+    Returns:
+        The agent's response text, or None if empty.
+    """
+    if not agent.conversations:
+        return "Agent not ready — conversation manager not initialized."
+
+    user = await _get_node_user(node.node_id, node.display_name)
+    chat_id = _make_chat_id(node.node_id, cwd)
+
+    # Per-node model override
+    node_record = await get_node(node.node_id)
+    node_model = (node_record or {}).get("model", "") if node_record else ""
+
+    inbound = InboundContext(
+        channel="node",
+        platform="node",
+        chat_type="direct",
+        conversation_label=node.display_name,
+        chat_id=chat_id,
+    )
+
+    # Set up node tool interceptor (tools route to remote node)
+    agent.conversations._node_connections[chat_id] = node
+
+    # No streaming callbacks needed — Telegram sends the full response at once
+    prev_stream = agent.conversations._stream_callbacks
+    prev_tool_detail = agent.conversations._tool_detail_callback
+    prev_tool = agent.conversations._tool_callback
+
+    agent.conversations.set_stream_callbacks(None)
+    agent.conversations.set_tool_detail_callback(None)
+    agent.conversations.set_tool_callback(None)
+
+    try:
+        response = await agent.conversations.handle_message(
+            platform="node",
+            chat_id=chat_id,
+            user=user,
+            message=message,
+            message_metadata={
+                "cwd": cwd,
+                "inbound": inbound,
+                **({"node_model_override": node_model} if node_model else {}),
+            },
+        )
+        return response
+    finally:
         agent.conversations.set_stream_callbacks(prev_stream)
         agent.conversations.set_tool_detail_callback(prev_tool_detail)
         agent.conversations.set_tool_callback(prev_tool)

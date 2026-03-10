@@ -112,6 +112,8 @@ class TelegramChannel:
         self._browse_paths: dict[str, str] = {}
         # Auth flow state: {telegram_user_id: {"type": "oauth"|"apikey", "provider": str, ...}}
         self._auth_state: dict[int, dict] = {}
+        # Remote node mode: {telegram_user_id: node_id} — messages routed to node
+        self._remote_node: dict[int, str] = {}
         # Active processing tasks per chat_id — for /cancel support
         self._active_tasks: dict[int, asyncio.Task] = {}
         # Deduplicate inbound Telegram messages (Telegram may retry delivering the same update)
@@ -417,6 +419,13 @@ class TelegramChannel:
             handled = await self._handle_auth_input(update, context, text)
             if handled:
                 return  # Credential processed — do NOT save to history
+
+        # ═══════════════════════════════════════════════════════════════
+        # REMOTE NODE MODE: Route message to remote node for processing
+        # ═══════════════════════════════════════════════════════════════
+        if user.id in self._remote_node and not is_group:
+            await self._handle_remote_message(update, context, text)
+            return
 
         # Handle group messages with registration and mention checks
         if is_group:
@@ -3696,12 +3705,15 @@ Or just send me a message!"""
             f"Paired: {created_str}"
         )
 
-        buttons = [
+        buttons = []
+        if online:
+            buttons.append([InlineKeyboardButton("🔗 Remote", callback_data=f"nodes:remote:{node_id}")])
+        buttons.extend([
             [InlineKeyboardButton(f"🤖 Model: {model_label}", callback_data=f"nodes:model_list:{node_id}")],
             [InlineKeyboardButton("✏️ Rename", callback_data=f"nodes:rename_prompt:{node_id}")],
             [InlineKeyboardButton("🚫 Revoke", callback_data=f"nodes:revoke_confirm:{node_id}")],
             [InlineKeyboardButton("⬅️ Back", callback_data="nodes:main")],
-        ]
+        ])
 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -3835,6 +3847,22 @@ Or just send me a message!"""
                 await query.answer("Failed to update", show_alert=True)
             await self._nodes_menu_detail(query, node_id)
 
+        elif action == "remote" and len(parts) >= 3:
+            node_id = ":".join(parts[2:])
+            # Check node is online
+            if not self.agent.gateway or node_id not in self.agent.gateway._nodes:
+                await query.answer("Node is offline", show_alert=True)
+                return
+            gw_node = self.agent.gateway._nodes[node_id]
+            self._remote_node[query.from_user.id] = node_id
+            await query.edit_message_text(
+                f"🔗 <b>Remote: {gw_node.display_name}</b>\n\n"
+                f"All messages will be processed on <b>{gw_node.display_name}</b>.\n"
+                f"Tools (bash, file read/write) run on the remote machine.\n\n"
+                f"Send /quit to exit remote mode.",
+                parse_mode="HTML",
+            )
+
     async def _process_node_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
         """Process text input for node management flows."""
         bot = context.bot if context else self.app.bot
@@ -3876,6 +3904,116 @@ Or just send me a message!"""
             return True
 
         return False
+
+    async def _handle_remote_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+        """Handle a message while in remote node mode.
+
+        Routes the message through conversation_remote so tools execute on the
+        remote node. Response is sent back to Telegram as a normal message.
+        """
+        user = update.effective_user
+        chat = update.effective_chat
+        node_id = self._remote_node.get(user.id, "")
+
+        # /quit exits remote mode
+        if text.strip().lower() in ("/quit", "/exit"):
+            self._remote_node.pop(user.id, None)
+            await update.message.reply_text("Exited remote mode.")
+            return
+
+        # /compact on remote session
+        if text.strip().lower() == "/compact":
+            await self._remote_slash_command(update, context, text, node_id)
+            return
+
+        # /new on remote session
+        if text.strip().lower() == "/new":
+            await self._remote_slash_command(update, context, text, node_id)
+            return
+
+        # Check node is still online
+        if not self.agent.gateway or node_id not in self.agent.gateway._nodes:
+            self._remote_node.pop(user.id, None)
+            await update.message.reply_text("Node disconnected. Exited remote mode.")
+            return
+
+        gw_node = self.agent.gateway._nodes[node_id]
+
+        # Send typing indicator + read receipt
+        try:
+            await self.send_reaction(chat.id, update.message.message_id, "👀")
+        except Exception:
+            pass
+
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                from ..gateway.conversation_remote import handle_remote_message_for_telegram
+
+                response = await handle_remote_message_for_telegram(
+                    agent=self.agent,
+                    node=gw_node,
+                    message=text,
+                    cwd=gw_node.cwd or "~",
+                )
+
+                if response:
+                    await self._send_response(chat.id, response, context)
+                else:
+                    await update.message.reply_text("⚠️ Empty response from remote node.")
+            except Exception as e:
+                logger.error(f"Remote message error: {e}", exc_info=True)
+                from ..communication.errors import classify_error
+                await update.message.reply_text(f"⚠️ {classify_error(e)}")
+
+    async def _remote_slash_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, cmd: str, node_id: str):
+        """Handle slash commands in remote mode (server-side, like gateway does)."""
+        if not self.agent.gateway or node_id not in self.agent.gateway._nodes:
+            self._remote_node.pop(update.effective_user.id, None)
+            await update.message.reply_text("Node disconnected. Exited remote mode.")
+            return
+
+        gw_node = self.agent.gateway._nodes[node_id]
+        cmd_name = cmd.strip().split()[0].lower()
+
+        from ..gateway.conversation_remote import _make_chat_id
+        chat_id = _make_chat_id(node_id, gw_node.cwd or "~")
+        session_key = f"node:{chat_id}"
+
+        if cmd_name == "/compact":
+            conv = self.agent.conversations._active.get(session_key)
+            if not conv:
+                await update.message.reply_text("No active remote conversation.")
+                return
+            msg_count = len(conv._message_cache) if conv._message_cache else 0
+            if msg_count < 4:
+                await update.message.reply_text("Conversation too short to compact.")
+                return
+            try:
+                from ..compaction import compact_session
+                result = await compact_session(session_id=conv.session_id, provider=conv.provider)
+                if result:
+                    await conv.load_history()
+                    await update.message.reply_text(
+                        f"Compacted: {result['messages_before']} → {result['messages_after']} messages"
+                    )
+                else:
+                    await update.message.reply_text("Nothing to compact.")
+            except Exception as e:
+                await update.message.reply_text(f"Compact failed: {e}")
+
+        elif cmd_name == "/new":
+            from ..db.connection import get_connection
+            self.agent.conversations._active.pop(session_key, None)
+            async with get_connection() as conn:
+                result = await conn.fetch("""
+                    UPDATE sessions SET status = 'closed'
+                    WHERE platform = 'node' AND platform_chat_id = $1 AND status = 'active'
+                    RETURNING id
+                """, chat_id)
+                if result:
+                    session_ids = [r["id"] for r in result]
+                    await conn.execute("DELETE FROM messages WHERE session_id = ANY($1::int[])", session_ids)
+            await update.message.reply_text("Remote session cleared.")
 
     async def _cmd_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /groups command — manage group members, aliases, access levels.
