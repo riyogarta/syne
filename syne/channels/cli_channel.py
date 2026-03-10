@@ -1101,7 +1101,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     if row["role"] == "user":
                         _history.append(content)
                         for _hl in content.split("\n"):
-                            _write(f"\n  \033[48;2;52;53;65m {_hl} \033[49m")
+                            _write(f"\n  \033[48;2;52;53;65m{_hl} \033[49m")
                         _write("\n")
                     else:
                         _write(f"  {content}\n")
@@ -1163,7 +1163,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _bg_off = "\033[49m"
             _user_lines = user_input.split("\n")
             for _ul in _user_lines:
-                _write(f"\n  {_bg_user} {_ul} {_bg_off}")
+                _write(f"\n  {_bg_user}{_ul} {_bg_off}")
             _write("\n")
 
             # Clear input line
