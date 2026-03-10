@@ -81,13 +81,24 @@ def _setup_screen():
     _write(f"\033[{_sr_end};1H")             # cursor at bottom of scroll region
 
 
-def _draw_prompt(buf="", cursor_col=0):
-    """Draw the fixed prompt area (separator + input line)."""
+def _draw_prompt(buf="", cursor_col=0, status_left="", status_right=""):
+    """Draw the fixed prompt area (separator with status + input line).
+
+    Like Pi's footer: status info embedded in the separator line.
+    """
     w = _term_cols
     _write("\0337")  # save cursor
-    _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+    # Separator line with optional status (like Pi footer)
+    if status_left or status_right:
+        # ── status_left ──────────── status_right ──
+        mid = w - len(status_left) - len(status_right) - 4
+        if mid < 4:
+            mid = 4
+        sep = f"{_DIM}──{_RESET} {_DIM}{status_left}{_RESET} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
+        _write(f"\033[{_sep_row};1H\033[2K{sep}")
+    else:
+        _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
     _write(f"\033[{_input_row};1H\033[2K> {buf}")
-    # Position cursor in input line
     _write(f"\033[{_input_row};{cursor_col + 3}H")
     _write("\0338")  # restore cursor
 
@@ -118,8 +129,7 @@ async def _start_spinner(message: str = "Working..."):
         try:
             while True:
                 frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
-                # Write spinner at bottom of scroll region
-                _write(f"\033[{_sr_end};1H\033[2K  {_DIM_CYAN}{frame}{_RESET} {_DIM}{message}{_RESET}")
+                _write(f"\033[{_sr_end};1H\033[2K  {_DIM_CYAN}{frame}{_RESET} {_DIM}{message}{_RESET} {_DIM}(Ctrl+C to interrupt){_RESET}")
                 i += 1
                 await asyncio.sleep(0.08)
         except asyncio.CancelledError:
@@ -234,6 +244,7 @@ _last_tool_key = ""
 
 
 def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
+    """Display tool call in Pi style: bold title, accent path, muted output."""
     global _last_tool_key
     _stop_spinner()
 
@@ -242,34 +253,43 @@ def _format_tool_activity(name: str, args: dict, result_preview: str) -> None:
         return
     _last_tool_key = dedup_key
 
+    # Build Pi-style tool header: "bold_label accent_arg"
     label = _TOOL_LABELS.get(name, name)
     arg_hint = ""
     if args:
         for key in ("path", "file_path", "file", "command", "query", "action", "url", "name", "key"):
             if key in args:
                 v = str(args[key])
-                if len(v) > 60:
-                    v = v[:57] + "..."
+                if len(v) > 80:
+                    v = v[:77] + "..."
                 arg_hint = v
                 break
         if not arg_hint:
             v = str(list(args.values())[0])
-            if len(v) > 60:
-                v = v[:57] + "..."
+            if len(v) > 80:
+                v = v[:77] + "..."
             arg_hint = v
 
-    if arg_hint:
-        _write(f"\n  {_DIM_CYAN}●{_RESET} {label}({_DIM_YELLOW}{arg_hint}{_RESET})\n")
+    # Pi style: exec → "$ command", read → "read path", write → "write path"
+    if name == "exec" and arg_hint:
+        header = f"  {_BOLD}$ {arg_hint}{_RESET}"
+    elif arg_hint:
+        header = f"  {_BOLD}{label.lower()}{_RESET} {_DIM_CYAN}{arg_hint}{_RESET}"
     else:
-        _write(f"\n  {_DIM_CYAN}●{_RESET} {label}\n")
+        header = f"  {_BOLD}{label.lower()}{_RESET}"
+
+    w = _term_width()
+    _write(f"\n  {_DIM}{'─' * (w - 4)}{_RESET}\n")  # top border
+    _write(f"{header}\n")
 
     preview = result_preview.strip().replace("\n", " ")
-    if len(preview) > 80:
-        preview = preview[:77] + "..."
+    if len(preview) > 100:
+        preview = preview[:97] + "..."
     if preview:
         is_error = preview.lower().startswith("error")
         color = _DIM_RED if is_error else _DIM
-        _write(f"    {_DIM}⎿{_RESET}  {color}{preview}{_RESET}\n")
+        _write(f"  {color}{preview}{_RESET}\n")
+    _write(f"  {_DIM}{'─' * (w - 4)}{_RESET}\n")  # bottom border
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -763,7 +783,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         continue
                     if row["role"] == "user":
                         _history.append(content)
-                        _write(f"\n  {_DIM}> {content}{_RESET}\n")
+                        _write(f"\n  {_DIM}\033[7m {content} \033[27m{_RESET}\n")
                     else:
                         _write(f"  {content}\n")
                 _write(f"\n  {_DIM}── end of history ──{_RESET}\n")
@@ -818,9 +838,10 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _last_tool_key = ""
             _history.append(user_input)
 
-            # Echo user message in scroll region
+            # Echo user message in scroll region (Pi style: background tint)
             _write(f"\033[{_sr_end};1H\033[2K")
-            _write(f"\n  {_DIM}>{_RESET} {user_input}\n")
+            # Use reverse video for user message background like Pi's userMessageBg
+            _write(f"\n  \033[7m {user_input} \033[27m\n")
 
             # Clear input line
             _write(f"\033[{_input_row};1H\033[2K> ")
@@ -978,14 +999,17 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                     if in_tok or out_tok:
                         _session_usage.total_in += in_tok
                         _session_usage.total_out += out_tok
-                        _write(f"\n  {_DIM}↑{_format_tokens(in_tok)} ↓{_format_tokens(out_tok)}{_RESET}\n")
 
                 except (KeyboardInterrupt, asyncio.CancelledError):
                     _stop_spinner()
                     _write(f"{_RESET}\n  {_DIM_YELLOW}Cancelled{_RESET}\n")
 
-            # Redraw prompt after response
-            _draw_prompt()
+            # Redraw prompt with Pi-style footer stats
+            stat_left = f"↑{_format_tokens(_session_usage.total_in)} ↓{_format_tokens(_session_usage.total_out)}"
+            stat_right = ""
+            if not remote_mode:
+                stat_right = _short_model_name(getattr(agent.provider, 'chat_model', ''))
+            _draw_prompt(status_left=stat_left, status_right=stat_right)
 
     except Exception as e:
         _write(f"\n  {_DIM_RED}Error: {e}{_RESET}\n")
