@@ -632,19 +632,16 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         except Exception:
             pass
 
-        # ── DEBUG: test ANSI positioning ──
+        # ── DEBUG: print row 1-38 to verify ANSI positioning ──
         term_h = _term_height()
-        _write("\033[2J")                    # clear screen
-        _write("\033[1;1H")                  # row 1
-        _write(f"ROW 1 (top)")
-        _write(f"\033[{term_h};1H")          # last row
-        _write(f"ROW {term_h} (bottom)")
-        _write(f"\033[{term_h // 2};1H")     # middle
-        _write(f"ROW {term_h // 2} (middle)")
-        # Now position header near bottom
-        content_lines = len(_startup_buf) + 2
-        start_row = max(1, term_h - content_lines)
-        _write(f"\033[{start_row};1H")
+        _write("\033[2J\033[H")  # clear screen + home
+        for r in range(1, term_h + 1):
+            _write(f"\033[{r};1H")
+            _write(f"ROW {r}")
+        # pause so user can see before prompt takes over
+        import time as _t; _t.sleep(5)
+        # now print header normally after the test
+        _write("\033[2J\033[H")
         for line in _startup_buf:
             _write(line + "\n")
 
