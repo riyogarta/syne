@@ -1164,7 +1164,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             _user_lines = user_input.split("\n")
             for _ul in _user_lines:
                 _write(f"\n  {_bg_user}{_ul} {_bg_off}")
-            _write("\n")
+            _write("\n\n")
 
             # Clear input line
             _write(f"\033[{_input_row};1H\033[2K> ")
