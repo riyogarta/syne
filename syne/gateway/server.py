@@ -407,7 +407,6 @@ class Gateway:
                 if result:
                     session_ids = [r["id"] for r in result]
                     await conn.execute("DELETE FROM messages WHERE session_id = ANY($1::int[])", session_ids)
-            await node.send(ResponseChunkMsg(text="Session cleared. Starting fresh.", done=False))
             await node.send(ResponseChunkMsg(text="", done=True))
             return True
 
