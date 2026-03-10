@@ -489,7 +489,7 @@ class CodexProvider(LLMProvider):
 
             except _RetrySignal:
                 continue
-            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
             except httpx.ReadTimeout:
                 if not last_attempt:

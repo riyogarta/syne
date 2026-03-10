@@ -347,7 +347,7 @@ class VertexProvider(LLMProvider):
                     raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.") from e
                 raise
 
-            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
 
             except Exception as e:

@@ -333,7 +333,7 @@ class OpenAIProvider(LLMProvider):
                                 if fn.get("arguments"):
                                     tc_accum[idx]["arguments"] += fn["arguments"]
 
-            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError):
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
             except httpx.ReadTimeout:
                 if not last_attempt:
