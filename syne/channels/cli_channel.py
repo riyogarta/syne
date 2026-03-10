@@ -136,23 +136,7 @@ def _draw_prompt(buf="", cursor_col=0, status_left="", status_right="", buf_line
 
     _write("\0337")  # save cursor
 
-    # Separator line with footer stats
-    if status_left or status_right:
-        right_vis = _visible_len(status_right) if status_right else 0
-        if status_left:
-            left_vis = _visible_len(status_left)
-            mid = w - left_vis - right_vis - 4
-            if mid < 4:
-                mid = 4
-            sep = f"{_DIM}──{_RESET} {status_left} {_DIM}{'─' * mid}{_RESET} {_DIM}{status_right}{_RESET}"
-        else:
-            fill = w - right_vis - 2
-            if fill < 1:
-                fill = 1
-            sep = f"{_DIM}{'─' * fill}{_RESET} {_DIM}{status_right}{_RESET}"
-        _write(f"\033[{_sep_row};1H\033[2K{sep}")
-    else:
-        _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
+    _draw_separator()
 
     # Editor area
     if buf_lines and len(buf_lines) > 1:
@@ -575,43 +559,77 @@ def _read_key(fd: int) -> tuple[str, str]:
 
 
 def _buf_cursor_info(buf: str, cursor: int):
-    """Get multiline cursor info: (lines, line_index, col_in_line)."""
+    """Get logical line cursor info: (lines, line_index, col_in_line)."""
     lines = buf.split("\n")
     pos = 0
     for i, ln in enumerate(lines):
         if pos + len(ln) >= cursor:
             return lines, i, cursor - pos
         pos += len(ln) + 1
-    # Fallback: cursor at end
     return lines, len(lines) - 1, len(lines[-1]) if lines else 0
 
 
-def _redraw_input(buf: str, cursor: int):
-    """Redraw the editor area using _draw_prompt (Pi-style multiline)."""
-    global _sr_end, _sep_row, _input_row
+def _layout_visual_lines(buf: str, wrap_width: int):
+    """Build visual lines from buffer with word wrapping.
 
-    lines, cur_line_idx, col_in_line = _buf_cursor_info(buf, cursor)
-    h = _term_rows
-    w = _term_cols
+    Returns list of (text, logical_line_idx, col_start) tuples and
+    a mapping from buffer cursor position to (visual_line, visual_col).
+    """
+    logical_lines = buf.split("\n")
+    visual = []  # (text, logical_idx, col_start_in_logical)
 
-    if len(lines) > 1:
-        max_editor = max(5, h * 3 // 10)
-        editor_lines = min(len(lines), max_editor)
+    for li, line in enumerate(logical_lines):
+        if not line or wrap_width <= 0:
+            visual.append(("", li, 0))
+            continue
+        col = 0
+        while col < len(line):
+            chunk = line[col:col + wrap_width]
+            visual.append((chunk, li, col))
+            col += len(chunk)
+        if col == 0:
+            visual.append(("", li, 0))
+
+    return visual, logical_lines
+
+
+def _find_visual_cursor(visual_lines, logical_lines, cursor: int):
+    """Find (visual_line_idx, visual_col) for a buffer cursor position."""
+    # Find logical line and col
+    pos = 0
+    cur_logical = 0
+    cur_col = 0
+    for i, ln in enumerate(logical_lines):
+        if pos + len(ln) >= cursor:
+            cur_logical = i
+            cur_col = cursor - pos
+            break
+        pos += len(ln) + 1
     else:
-        editor_lines = 1
+        cur_logical = len(logical_lines) - 1
+        cur_col = len(logical_lines[-1]) if logical_lines else 0
 
-    new_sr_end = h - 1 - editor_lines
-    new_sep_row = new_sr_end + 1
-    new_input_start = new_sep_row + 1
+    # Find matching visual line
+    for vi, (text, li, col_start) in enumerate(visual_lines):
+        if li == cur_logical and col_start <= cur_col < col_start + max(len(text), 1):
+            return vi, cur_col - col_start
+        if li == cur_logical and col_start <= cur_col and col_start + len(text) == cur_col:
+            # Cursor at end of this visual line segment
+            # Check if next visual line is a continuation of same logical line
+            if vi + 1 < len(visual_lines) and visual_lines[vi + 1][1] == li:
+                continue  # cursor belongs to next visual line
+            return vi, cur_col - col_start
 
-    # Update scroll region if changed
-    if new_sr_end != _sr_end:
-        _sr_end = new_sr_end
-        _sep_row = new_sep_row
-        _input_row = new_input_start
-        _write(f"\033[1;{_sr_end}r")
+    # Fallback: last visual line
+    if visual_lines:
+        last = visual_lines[-1]
+        return len(visual_lines) - 1, cur_col - last[2]
+    return 0, 0
 
-    # Separator line with footer stats
+
+def _draw_separator():
+    """Draw separator line with cached footer stats."""
+    w = _term_cols
     if _footer_left or _footer_right:
         _fr = _footer_right or ""
         _fr_vis = _visible_len(_fr) if _fr else 0
@@ -630,39 +648,75 @@ def _redraw_input(buf: str, cursor: int):
     else:
         _write(f"\033[{_sep_row};1H\033[2K{_DIM}{'─' * w}{_RESET}")
 
-    if len(lines) > 1:
-        max_vis = max(5, h * 3 // 10)
-        # Scroll to keep cursor visible
-        if len(lines) > max_vis:
-            start = max(0, min(cur_line_idx - max_vis + 1, len(lines) - max_vis))
-            if cur_line_idx < start:
-                start = cur_line_idx
-            visible = lines[start:start + max_vis]
-            vis_cursor_line = cur_line_idx - start
-        else:
-            visible = lines
-            vis_cursor_line = cur_line_idx
-            start = 0
 
-        for i, line in enumerate(visible):
-            row = new_input_start + i
-            prefix = "> " if i == 0 and start == 0 else "  "
-            _write(f"\033[{row};1H\033[2K{prefix}{line}")
+_prev_editor_height = 1  # track for clearing leftover rows
 
-        # Clear any leftover lines below editor
-        for i in range(len(visible), max_vis):
-            row = new_input_start + i
-            if row <= h:
-                _write(f"\033[{row};1H\033[2K")
 
-        cursor_row = new_input_start + vis_cursor_line
-        _write(f"\033[{cursor_row};{col_in_line + 3}H")
+def _redraw_input(buf: str, cursor: int):
+    """Redraw the editor area with word wrapping (Pi-style)."""
+    global _sr_end, _sep_row, _input_row, _prev_editor_height
+
+    h = _term_rows
+    w = _term_cols
+    wrap_width = max(1, w - 2)  # 2 for "> " prefix
+
+    visual, logical = _layout_visual_lines(buf, wrap_width)
+    vis_cursor, vis_col = _find_visual_cursor(visual, logical, cursor)
+
+    max_editor = max(5, h * 3 // 10)
+    editor_lines = min(len(visual), max_editor)
+    if editor_lines < 1:
+        editor_lines = 1
+
+    new_sr_end = h - 1 - editor_lines
+    new_sep_row = new_sr_end + 1
+    new_input_start = new_sep_row + 1
+
+    # Update scroll region if changed
+    if new_sr_end != _sr_end:
+        _sr_end = new_sr_end
+        _sep_row = new_sep_row
+        _input_row = new_input_start
+        _write(f"\033[1;{_sr_end}r")
+
+    _draw_separator()
+
+    # Scroll to keep cursor visible
+    if len(visual) > max_editor:
+        start = max(0, min(vis_cursor - max_editor + 1, len(visual) - max_editor))
+        if vis_cursor < start:
+            start = vis_cursor
+        visible = visual[start:start + max_editor]
+        vis_cursor_row = vis_cursor - start
     else:
-        _write(f"\033[{new_input_start};1H\033[2K> {buf}")
-        _write(f"\033[{new_input_start};{cursor + 3}H")
-        # Clear extra rows if shrinking from multiline
-        for row in range(new_input_start + 1, h + 1):
-            _write(f"\033[{row};1H\033[2K")
+        visible = visual
+        vis_cursor_row = vis_cursor
+        start = 0
+
+    for i, (text, li, col_start) in enumerate(visible):
+        row = new_input_start + i
+        # First visual line of first logical line gets "> ", rest get "  "
+        if li == 0 and col_start == 0 and (start == 0 or i == 0 and start == 0):
+            prefix = "> "
+        else:
+            prefix = "  "
+        # Only show "> " for the very first visual line
+        if start + i == 0:
+            prefix = "> "
+        else:
+            prefix = "  "
+        _write(f"\033[{row};1H\033[2K{prefix}{text}")
+
+    # Clear leftover rows from previous taller editor
+    clear_from = new_input_start + len(visible)
+    clear_to = new_input_start + _prev_editor_height
+    for row in range(clear_from, min(clear_to, h) + 1):
+        _write(f"\033[{row};1H\033[2K")
+
+    _prev_editor_height = editor_lines
+
+    cursor_row = new_input_start + vis_cursor_row
+    _write(f"\033[{cursor_row};{vis_col + 3}H")
 
 
 def _reset_editor_to_single():
@@ -759,17 +813,23 @@ def _blocking_read_line(history: list[str]) -> str | None:
                     tty.setraw(fd)
 
             elif key == "home":
-                # Go to start of current line
-                lines, cur_line, col = _buf_cursor_info(buf, cursor)
-                cursor = sum(len(lines[j]) + 1 for j in range(cur_line))
+                # Go to start of current visual line
+                wrap_w = max(1, _term_cols - 2)
+                vis, logic = _layout_visual_lines(buf, wrap_w)
+                vi, vc = _find_visual_cursor(vis, logic, cursor)
+                _text, _li, _cs = vis[vi]
+                cursor = sum(len(logic[j]) + 1 for j in range(_li)) + _cs
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
 
             elif key == "end":
-                # Go to end of current line
-                lines, cur_line, col = _buf_cursor_info(buf, cursor)
-                cursor = sum(len(lines[j]) + 1 for j in range(cur_line)) + len(lines[cur_line])
+                # Go to end of current visual line
+                wrap_w = max(1, _term_cols - 2)
+                vis, logic = _layout_visual_lines(buf, wrap_w)
+                vi, vc = _find_visual_cursor(vis, logic, cursor)
+                _text, _li, _cs = vis[vi]
+                cursor = min(sum(len(logic[j]) + 1 for j in range(_li)) + _cs + len(_text), len(buf))
                 termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                 _redraw_input(buf, cursor)
                 tty.setraw(fd)
@@ -794,13 +854,17 @@ def _blocking_read_line(history: list[str]) -> str | None:
                 tty.setraw(fd)
 
             elif key == "up":
-                # Pi-style: navigate within multiline, history only at top
-                lines, cur_line, col = _buf_cursor_info(buf, cursor)
-                if cur_line > 0:
-                    # Move cursor up one line
-                    prev_line = lines[cur_line - 1]
-                    new_col = min(col, len(prev_line))
-                    cursor = sum(len(lines[j]) + 1 for j in range(cur_line - 1)) + new_col
+                # Navigate visual lines (including wrapped), history at top
+                wrap_w = max(1, _term_cols - 2)
+                vis, logic = _layout_visual_lines(buf, wrap_w)
+                vi, vc = _find_visual_cursor(vis, logic, cursor)
+                if vi > 0:
+                    # Move to previous visual line, same column
+                    prev_text, prev_li, prev_cs = vis[vi - 1]
+                    new_col = min(vc, len(prev_text))
+                    # Convert back to buffer position
+                    buf_pos = sum(len(logic[j]) + 1 for j in range(prev_li)) + prev_cs + new_col
+                    cursor = min(buf_pos, len(buf))
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                     _redraw_input(buf, cursor)
                     tty.setraw(fd)
@@ -817,13 +881,16 @@ def _blocking_read_line(history: list[str]) -> str | None:
                     tty.setraw(fd)
 
             elif key == "down":
-                # Pi-style: navigate within multiline, history only at bottom
-                lines, cur_line, col = _buf_cursor_info(buf, cursor)
-                if cur_line < len(lines) - 1:
-                    # Move cursor down one line
-                    next_line = lines[cur_line + 1]
-                    new_col = min(col, len(next_line))
-                    cursor = sum(len(lines[j]) + 1 for j in range(cur_line + 1)) + new_col
+                # Navigate visual lines (including wrapped), history at bottom
+                wrap_w = max(1, _term_cols - 2)
+                vis, logic = _layout_visual_lines(buf, wrap_w)
+                vi, vc = _find_visual_cursor(vis, logic, cursor)
+                if vi < len(vis) - 1:
+                    # Move to next visual line, same column
+                    next_text, next_li, next_cs = vis[vi + 1]
+                    new_col = min(vc, len(next_text))
+                    buf_pos = sum(len(logic[j]) + 1 for j in range(next_li)) + next_cs + new_col
+                    cursor = min(buf_pos, len(buf))
                     termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
                     _redraw_input(buf, cursor)
                     tty.setraw(fd)
