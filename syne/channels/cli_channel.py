@@ -1100,7 +1100,9 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
                         continue
                     if row["role"] == "user":
                         _history.append(content)
-                        _write(f"\n  \033[48;2;52;53;65m {content} \033[49m\n")
+                        for _hl in content.split("\n"):
+                            _write(f"\n  \033[48;2;52;53;65m {_hl} \033[49m")
+                        _write("\n")
                     else:
                         _write(f"  {content}\n")
                 _write(f"\n  {_DIM}── end of history ──{_RESET}\n")
@@ -1157,7 +1159,12 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
             # Echo user message in scroll region (Pi style: subtle bg #343541)
             _write(f"\033[{_sr_end};1H\033[2K")
-            _write(f"\n  \033[48;2;52;53;65m {user_input} \033[49m\n")
+            _bg_user = "\033[48;2;52;53;65m"
+            _bg_off = "\033[49m"
+            _user_lines = user_input.split("\n")
+            for _ul in _user_lines:
+                _write(f"\n  {_bg_user} {_ul} {_bg_off}")
+            _write("\n")
 
             # Clear input line
             _write(f"\033[{_input_row};1H\033[2K> ")
