@@ -744,7 +744,11 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             chat_id = f"{username}:{cwd_hash}"
 
         # Handle fresh start
-        if fresh and not remote_mode:
+        if fresh and remote_mode:
+            # Remote mode: send /new to gateway to clear session in DB
+            _write(f"  {_DIM}Starting fresh conversation...{_RESET}\n")
+            await node_client.send_message("/new", cwd=os.getcwd())
+        elif fresh:
             from ..db.connection import get_connection
             async with get_connection() as conn:
                 result = await conn.fetch("""
