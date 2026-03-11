@@ -229,13 +229,22 @@ def node_stop():
 
 @node.command(name="start")
 def node_start():
-    """Start the node daemon service."""
+    """Start the node daemon service (auto-setup if not installed yet)."""
     import subprocess as sp
+    from pathlib import Path
 
     from ..node.client import load_node_config
     config = load_node_config()
     if not config:
         console.print("[red]Node not configured. Run 'syne node init' first.[/red]")
+        return
+
+    # Auto-setup service if not installed yet
+    service_file = Path.home() / ".config" / "systemd" / "user" / "syne-node.service"
+    if not service_file.exists():
+        console.print("[dim]Service not installed yet, setting up...[/dim]")
+        from .helpers import _setup_node_service
+        _setup_node_service()
         return
 
     result = sp.run(
@@ -246,6 +255,37 @@ def node_start():
         console.print("[green]Node daemon started.[/green]")
     else:
         console.print(f"[red]Failed to start: {result.stderr.strip()}[/red]")
+        console.print("[dim]Try: systemctl --user status syne-node[/dim]")
+
+
+@node.command(name="restart")
+def node_restart():
+    """Restart the node daemon service."""
+    import subprocess as sp
+    from pathlib import Path
+
+    from ..node.client import load_node_config
+    config = load_node_config()
+    if not config:
+        console.print("[red]Node not configured. Run 'syne node init' first.[/red]")
+        return
+
+    # Auto-setup service if not installed yet
+    service_file = Path.home() / ".config" / "systemd" / "user" / "syne-node.service"
+    if not service_file.exists():
+        console.print("[dim]Service not installed yet, setting up...[/dim]")
+        from .helpers import _setup_node_service
+        _setup_node_service()
+        return
+
+    result = sp.run(
+        ["systemctl", "--user", "restart", "syne-node"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        console.print("[green]Node daemon restarted.[/green]")
+    else:
+        console.print(f"[red]Failed to restart: {result.stderr.strip()}[/red]")
         console.print("[dim]Try: systemctl --user status syne-node[/dim]")
 
 
