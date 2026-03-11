@@ -1,4 +1,4 @@
-"""Service management commands — autostart, stop, restart."""
+"""Service management commands — stop, restart."""
 
 import os
 import subprocess
@@ -6,34 +6,6 @@ import click
 
 from . import cli
 from .shared import console
-from .helpers import _setup_service
-
-
-@cli.command()
-@click.option("--enable/--disable", default=True, help="Enable or disable autostart")
-def autostart(enable):
-    """Configure systemd autostart for Syne."""
-    from pathlib import Path
-
-    if not enable:
-        service_dir = Path.home() / ".config" / "systemd" / "user"
-        service_file = service_dir / "syne.service"
-        subprocess.run(["systemctl", "--user", "stop", "syne"], capture_output=True)
-        subprocess.run(["systemctl", "--user", "disable", "syne"], capture_output=True)
-        if service_file.exists():
-            service_file.unlink()
-            subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
-        console.print("[yellow]Autostart disabled.[/yellow]")
-        return
-
-    _setup_service()
-    console.print()
-    console.print("[bold]Commands:[/bold]")
-    console.print("  systemctl --user start syne    # Start now")
-    console.print("  systemctl --user stop syne     # Stop")
-    console.print("  systemctl --user restart syne  # Restart")
-    console.print("  systemctl --user status syne   # Status")
-    console.print("  journalctl --user -u syne -f   # Logs")
 
 
 @cli.command()

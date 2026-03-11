@@ -27,10 +27,14 @@ def _show_help():
             ("reauth", "Re-authenticate OAuth provider"),
             ("uninstall", "Completely remove Syne"),
         ],
-        "Usage": [
-            ("start", "Start Syne agent (Telegram bot)"),
-            ("cli", "Interactive CLI chat (resumes per-directory, -n for fresh)"),
+        "Service": [
+            ("start", "Start Syne agent (auto-configures autostart)"),
+            ("stop", "Stop running Syne process"),
+            ("restart", "Restart Syne (stop + start)"),
             ("status", "Show agent status"),
+        ],
+        "Usage": [
+            ("cli", "Interactive CLI chat (resumes per-directory, -n for fresh)"),
         ],
         "Data": [
             ("identity", "View or set agent identity"),
@@ -52,11 +56,6 @@ def _show_help():
             ("node status", "Show node connection & service status"),
             ("gateway token", "Generate pairing token (run on server)"),
             ("gateway list", "List paired nodes (run on server)"),
-        ],
-        "Service": [
-            ("autostart", "Configure systemd autostart (--enable/--disable)"),
-            ("stop", "Stop running Syne process"),
-            ("restart", "Restart Syne (stop + start)"),
         ],
     }
 

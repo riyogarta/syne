@@ -10,7 +10,17 @@ from .shared import console
 @cli.command()
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def start(debug):
-    """Start Syne agent."""
+    """Start Syne agent (auto-configures autostart on first run)."""
+    from pathlib import Path
+
+    # Auto-setup systemd service if not installed yet
+    service_file = Path.home() / ".config" / "systemd" / "user" / "syne.service"
+    if not service_file.exists():
+        console.print("[dim]Setting up autostart service...[/dim]")
+        from .helpers import _setup_service
+        _setup_service()
+        return
+
     if debug:
         import logging
         logging.getLogger("syne").setLevel(logging.DEBUG)
