@@ -3416,7 +3416,7 @@ Or just send me a message!"""
                 await update.message.reply_text(f"❌ Update failed: {e}")
             return
 
-        import subprocess, sys, os, json, tempfile
+        import asyncio as _aio, sys, os, json, tempfile
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
@@ -3426,17 +3426,22 @@ Or just send me a message!"""
         # Read current version
         from syne import __version__ as current_version
 
-        # Fetch remote
-        subprocess.run(["git", "fetch", "origin"], cwd=syne_dir, capture_output=True, text=True)
+        # Fetch remote (async)
+        proc = await _aio.create_subprocess_exec(
+            "git", "fetch", "origin",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
+        )
+        await proc.communicate()
 
         # Compare with remote version
-        result = subprocess.run(
-            ["git", "show", "origin/main:syne/__init__.py"],
-            cwd=syne_dir, capture_output=True, text=True,
+        proc = await _aio.create_subprocess_exec(
+            "git", "show", "origin/main:syne/__init__.py",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
         )
+        stdout, _ = await proc.communicate()
         remote_version = current_version
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
+        if proc.returncode == 0:
+            for line in stdout.decode().splitlines():
                 if line.startswith("__version__"):
                     remote_version = line.split("=", 1)[1].strip().strip('"').strip("'")
                     break
@@ -3447,23 +3452,25 @@ Or just send me a message!"""
 
         await update.message.reply_text(f"🔄 Updating v{current_version} → v{remote_version}...")
 
-        # git pull
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            cwd=syne_dir, capture_output=True, text=True,
+        # git pull (async)
+        proc = await _aio.create_subprocess_exec(
+            "git", "pull", "origin", "main",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-            await update.message.reply_text(f"❌ Git pull failed:\n{result.stderr[:500]}")
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            await update.message.reply_text(f"❌ Git pull failed:\n{stderr.decode()[:500]}")
             return
-        pull_msg = result.stdout.strip()
+        pull_msg = stdout.decode().strip()
 
-        # pip install
-        result = subprocess.run(
-            [venv_pip, "install", "-e", ".", "-q"],
-            cwd=syne_dir, capture_output=True, text=True,
+        # pip install (async)
+        proc = await _aio.create_subprocess_exec(
+            venv_pip, "install", "-e", ".", "-q",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-            await update.message.reply_text(f"❌ Install failed:\n{result.stderr[:500]}")
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            await update.message.reply_text(f"❌ Install failed:\n{stderr.decode()[:500]}")
             return
 
         # Read new version from updated source
@@ -3503,30 +3510,32 @@ Or just send me a message!"""
             await update.message.reply_text("⚠️ Only the owner can update Syne.")
             return
 
-        import subprocess, sys, os, json, tempfile
+        import asyncio as _aio, sys, os, json, tempfile
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
 
         await update.message.reply_text("🔄 Updating Syne...")
 
-        # git pull
-        result = subprocess.run(
-            ["git", "pull", "origin", "main"],
-            cwd=syne_dir, capture_output=True, text=True,
+        # git pull (async)
+        proc = await _aio.create_subprocess_exec(
+            "git", "pull", "origin", "main",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-            await update.message.reply_text(f"❌ Git pull failed:\n{result.stderr[:500]}")
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            await update.message.reply_text(f"❌ Git pull failed:\n{stderr.decode()[:500]}")
             return
-        pull_msg = result.stdout.strip()
+        pull_msg = stdout.decode().strip()
 
-        # pip install
-        result = subprocess.run(
-            [venv_pip, "install", "-e", ".", "-q"],
-            cwd=syne_dir, capture_output=True, text=True,
+        # pip install (async)
+        proc = await _aio.create_subprocess_exec(
+            venv_pip, "install", "-e", ".", "-q",
+            cwd=syne_dir, stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.PIPE,
         )
-        if result.returncode != 0:
-            await update.message.reply_text(f"❌ Install failed:\n{result.stderr[:500]}")
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            await update.message.reply_text(f"❌ Install failed:\n{stderr.decode()[:500]}")
             return
 
         # Read new version from updated source
