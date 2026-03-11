@@ -3383,6 +3383,38 @@ Or just send me a message!"""
             await update.message.reply_text("⚠️ Only the owner can update Syne.")
             return
 
+        # Remote mode: run syne update on the remote node
+        if user.id in self._remote_node:
+            node_id = self._remote_node[user.id]
+            if not self.agent.gateway or node_id not in self.agent.gateway._nodes:
+                self._remote_node.pop(user.id, None)
+                await update.message.reply_text("Node disconnected. Exited remote mode.")
+                return
+            gw_node = self.agent.gateway._nodes[node_id]
+            await update.message.reply_text(f"🔄 Updating <b>{gw_node.display_name}</b>...", parse_mode="HTML")
+            try:
+                result = await gw_node.request_tool("exec", {"command": "syne update"}, timeout=120)
+                output = result.get("output", "").strip()
+                exit_code = result.get("exit_code", -1)
+                if exit_code == 0:
+                    # Truncate output for Telegram
+                    if len(output) > 3000:
+                        output = output[-3000:]
+                    import html as _h
+                    await update.message.reply_text(
+                        f"✅ <b>{gw_node.display_name}</b> updated.\n\n<pre>{_h.escape(output)}</pre>",
+                        parse_mode="HTML",
+                    )
+                else:
+                    import html as _h
+                    await update.message.reply_text(
+                        f"❌ Update failed (exit {exit_code}):\n<pre>{_h.escape(output[:2000])}</pre>",
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                await update.message.reply_text(f"❌ Update failed: {e}")
+            return
+
         import subprocess, sys, os, json, tempfile
 
         syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
