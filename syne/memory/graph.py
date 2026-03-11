@@ -36,7 +36,8 @@ Output valid JSON only, no other text:
 }
 
 Rules:
-- Entity names must be specific (not "he", "she", "it")
+- Entity names must be specific (not "he", "she", "it", "User")
+- When the speaker is identified, use their real name instead of "User"
 - Use consistent predicate verbs: lives_in, works_at, married_to, child_of, parent_of, sibling_of, friend_of, owns, member_of, studies_at, has_role, located_in, part_of, prefers, has_condition, takes_medication
 - If no clear entities or relations, return {"entities": [], "relations": []}
 - Keep descriptions brief (under 15 words)"""
@@ -46,6 +47,7 @@ async def extract_and_store(
     provider: LLMProvider,
     content: str,
     memory_id: int,
+    speaker_name: str = "",
 ) -> bool:
     """Extract entities/relations from a permanent memory and store in graph.
 
@@ -63,9 +65,9 @@ async def extract_and_store(
 
         if driver == "ollama":
             model = await get_config("graph.extractor_model", "qwen3:8b")
-            extracted = await _extract_via_ollama(content, model=model)
+            extracted = await _extract_via_ollama(content, model=model, speaker_name=speaker_name)
         else:
-            extracted = await _extract_via_provider(provider, content)
+            extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
 
         if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
             logger.debug(f"No entities/relations extracted from memory #{memory_id}")
@@ -83,13 +85,14 @@ async def extract_and_store(
         return False
 
 
-async def _extract_via_provider(provider: LLMProvider, content: str) -> Optional[dict]:
+async def _extract_via_provider(provider: LLMProvider, content: str, speaker_name: str = "") -> Optional[dict]:
     """Extract entities/relations using the main LLM provider."""
     from ..llm.provider import ChatMessage
 
+    speaker_ctx = f"The speaker is {speaker_name}. " if speaker_name else ""
     messages = [
         ChatMessage(role="system", content=EXTRACT_PROMPT),
-        ChatMessage(role="user", content=f'Memory: "{content}"'),
+        ChatMessage(role="user", content=f'{speaker_ctx}Memory: "{content}"'),
     ]
 
     response = await provider.chat(messages, temperature=0.1, max_tokens=1000, thinking_budget=0)
@@ -102,8 +105,10 @@ async def _extract_via_ollama(
     content: str,
     model: str = "qwen3:8b",
     base_url: str = "http://localhost:11434",
+    speaker_name: str = "",
 ) -> Optional[dict]:
     """Extract entities/relations using Ollama."""
+    speaker_ctx = f"The speaker is {speaker_name}. " if speaker_name else ""
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(
@@ -112,7 +117,7 @@ async def _extract_via_ollama(
                     "model": model,
                     "messages": [
                         {"role": "system", "content": EXTRACT_PROMPT},
-                        {"role": "user", "content": f'Memory: "{content}"'},
+                        {"role": "user", "content": f'{speaker_ctx}Memory: "{content}"'},
                     ],
                     "stream": False,
                     "options": {"temperature": 0.1},
@@ -339,9 +344,11 @@ async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
 
     try:
         async with get_connection() as conn:
-            # Find permanent memories without graph relations
+            # Find permanent memories without graph relations, include user name
             rows = await conn.fetch("""
-                SELECT m.id, m.content FROM memory m
+                SELECT m.id, m.content, u.display_name, u.name
+                FROM memory m
+                LEFT JOIN users u ON m.user_id = u.id
                 WHERE m.permanent = true
                 AND NOT EXISTS (
                     SELECT 1 FROM kg_relations r WHERE r.source_memory_id = m.id
@@ -351,8 +358,9 @@ async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
 
         for row in rows:
             stats["processed"] += 1
+            speaker = row["display_name"] or row["name"] or ""
             try:
-                ok = await extract_and_store(provider, row["content"], row["id"])
+                ok = await extract_and_store(provider, row["content"], row["id"], speaker_name=speaker)
                 if ok:
                     stats["succeeded"] += 1
                 else:

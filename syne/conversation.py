@@ -685,6 +685,7 @@ class Conversation:
                         user_id=self.user.get("id"),
                         evaluator_driver=eval_driver,
                         evaluator_model=eval_model,
+                        speaker_name=self.user.get("display_name") or self.user.get("name", ""),
                     )
                     logger.debug(f"Evaluator done: {'stored #' + str(result) if result else 'skipped'}")
                 except Exception as e:
