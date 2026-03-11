@@ -644,6 +644,36 @@ WantedBy=default.target
         console.print("    Try: systemctl --user start syne-node")
 
 
+def _split_sql_statements(schema: str) -> list[str]:
+    """Split a SQL schema into individual statements.
+
+    Handles DO $$ ... $$ blocks and CREATE FUNCTION as single units.
+    """
+    import re
+
+    statements = []
+    current = []
+    in_block = False
+    for line in schema.splitlines():
+        stripped = line.strip()
+        if not stripped or (stripped.startswith("--") and not current):
+            continue
+        if re.match(r"^(DO|CREATE\s+(OR\s+REPLACE\s+)?FUNCTION)\b", stripped, re.IGNORECASE):
+            in_block = True
+        current.append(line)
+        if in_block:
+            if stripped.endswith("$$;") or stripped == "$$;" or stripped.endswith("$$ LANGUAGE plpgsql;"):
+                statements.append("\n".join(current))
+                current = []
+                in_block = False
+        elif stripped.endswith(";"):
+            statements.append("\n".join(current))
+            current = []
+    if current:
+        statements.append("\n".join(current))
+    return statements
+
+
 def _run_schema_migration(syne_dir: str):
     """Run schema.sql to apply any new tables/columns.
 
@@ -666,35 +696,9 @@ def _run_schema_migration(syne_dir: str):
 
     async def _migrate():
         import asyncpg
-        import re
         conn = await asyncpg.connect(db_url)
         try:
-            # Split into individual statements — execute each independently
-            # so one failure doesn't block the rest.
-            # Handle DO $$ ... $$ blocks and CREATE FUNCTION as single units.
-            statements = []
-            current = []
-            in_block = False
-            for line in schema.splitlines():
-                stripped = line.strip()
-                # Skip empty lines and comments outside statements
-                if not stripped or (stripped.startswith("--") and not current):
-                    continue
-                # Detect DO $$ or CREATE FUNCTION blocks
-                if re.match(r"^(DO|CREATE\s+(OR\s+REPLACE\s+)?FUNCTION)\b", stripped, re.IGNORECASE):
-                    in_block = True
-                current.append(line)
-                if in_block:
-                    if stripped.endswith("$$;") or stripped == "$$;" or stripped.endswith("$$ LANGUAGE plpgsql;"):
-                        statements.append("\n".join(current))
-                        current = []
-                        in_block = False
-                elif stripped.endswith(";"):
-                    statements.append("\n".join(current))
-                    current = []
-            if current:
-                statements.append("\n".join(current))
-
+            statements = _split_sql_statements(schema)
             errors = []
             for stmt in statements:
                 stmt = stmt.strip()
