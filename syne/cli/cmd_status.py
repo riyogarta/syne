@@ -13,10 +13,10 @@ from rich.table import Table
 @cli.command()
 def status():
     """Show Syne status."""
-    from ..node.client import is_node_mode
-    if is_node_mode():
-        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
-        console.print("Use [bold]syne node status[/bold] instead.")
+    syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if not os.path.exists(os.path.join(syne_dir, ".env")):
+        console.print("[yellow]This machine is not a Syne server.[/yellow]")
+        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node status[/bold].")
         return
 
     async def _status():

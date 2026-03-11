@@ -8,13 +8,18 @@ from . import cli
 from .shared import console
 
 
+def _is_server() -> bool:
+    """Check if this machine is a Syne server (has .env from syne init)."""
+    syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    return os.path.exists(os.path.join(syne_dir, ".env"))
+
+
 @cli.command()
 def stop():
     """Stop running Syne process."""
-    from ..node.client import is_node_mode
-    if is_node_mode():
-        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
-        console.print("Use [bold]syne node stop[/bold] instead.")
+    if not _is_server():
+        console.print("[yellow]This machine is not a Syne server.[/yellow]")
+        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
         return
 
     # Try systemd first
@@ -38,10 +43,9 @@ def stop():
 @cli.command()
 def restart():
     """Restart Syne (stop + start)."""
-    from ..node.client import is_node_mode
-    if is_node_mode():
-        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
-        console.print("Use [bold]syne node restart[/bold] instead.")
+    if not _is_server():
+        console.print("[yellow]This machine is not a Syne server.[/yellow]")
+        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
         return
 
     # Try systemd

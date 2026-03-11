@@ -11,13 +11,15 @@ from .shared import console
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def start(debug):
     """Start Syne agent (auto-configures autostart on first run)."""
-    from ..node.client import is_node_mode
-    if is_node_mode():
-        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
-        console.print("Use [bold]syne node start[/bold] / [bold]syne node stop[/bold] instead.")
-        return
-
+    import os
     from pathlib import Path
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env_path = os.path.join(syne_dir, ".env")
+    if not os.path.exists(env_path):
+        console.print("[yellow]This machine is not a Syne server.[/yellow]")
+        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
+        return
 
     # Auto-setup systemd service if not installed yet
     service_file = Path.home() / ".config" / "systemd" / "user" / "syne.service"
