@@ -46,6 +46,10 @@ def _show_help():
         "Remote Node": [
             ("node init", "Pair this machine with a Syne server"),
             ("node cli", "Start remote CLI (connected to server)"),
+            ("node start", "Start node daemon service"),
+            ("node stop", "Stop node daemon service"),
+            ("node restart", "Restart node daemon service"),
+            ("node status", "Show node connection & service status"),
             ("gateway token", "Generate pairing token (run on server)"),
             ("gateway list", "List paired nodes (run on server)"),
         ],
