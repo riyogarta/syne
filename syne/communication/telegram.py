@@ -2227,6 +2227,7 @@ Or just send me a message!"""
                 f"{prefix}{label}", callback_data=f"graph:detail:{key}"
             )])
         buttons.append([InlineKeyboardButton("➕ Add Extractor", callback_data="graph:add_menu")])
+        buttons.append([InlineKeyboardButton("🔄 Reprocess Memories", callback_data="graph:reprocess")])
         buttons.append([InlineKeyboardButton(
             f"{'✅ ' if enabled else '⬜ '}Knowledge Graph: {en_label}",
             callback_data="graph:toggle",
@@ -2340,6 +2341,21 @@ Or just send me a message!"""
                     await set_config("graph.extractor_model", "")
             await query.answer("Extractor deleted")
             await self._graph_menu_main(query)
+
+        elif data == "graph:reprocess":
+            await query.answer("Reprocessing...")
+            from ..memory.graph import reprocess_permanent_memories
+            stats = await reprocess_permanent_memories(self.agent.provider)
+            await query.edit_message_text(
+                f"🔄 <b>Reprocess Complete</b>\n\n"
+                f"Processed: {stats['processed']}\n"
+                f"Succeeded: {stats['succeeded']}\n"
+                f"Failed: {stats['failed']}",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Back", callback_data="graph:main")],
+                ]),
+            )
 
         elif data == "graph:add_menu":
             drivers = [

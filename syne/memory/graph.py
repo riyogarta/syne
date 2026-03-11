@@ -325,6 +325,48 @@ async def get_graph_stats() -> dict:
         return {"entities": 0, "relations": 0, "types": []}
 
 
+async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
+    """Re-extract graph from all permanent memories that have no graph entries.
+
+    Useful after fixing extraction bugs — processes memories that were
+    stored before graph extraction was working.
+
+    Returns dict with counts of processed/succeeded/failed.
+    """
+    from ..db.connection import get_connection
+
+    stats = {"processed": 0, "succeeded": 0, "failed": 0}
+
+    try:
+        async with get_connection() as conn:
+            # Find permanent memories without graph relations
+            rows = await conn.fetch("""
+                SELECT m.id, m.content FROM memory m
+                WHERE m.permanent = true
+                AND NOT EXISTS (
+                    SELECT 1 FROM kg_relations r WHERE r.source_memory_id = m.id
+                )
+                ORDER BY m.id
+            """)
+
+        for row in rows:
+            stats["processed"] += 1
+            try:
+                ok = await extract_and_store(provider, row["content"], row["id"])
+                if ok:
+                    stats["succeeded"] += 1
+                else:
+                    stats["failed"] += 1
+            except Exception as e:
+                logger.error(f"Reprocess memory #{row['id']} failed: {e}")
+                stats["failed"] += 1
+
+    except Exception as e:
+        logger.error(f"Reprocess permanent memories failed: {e}")
+
+    return stats
+
+
 async def search_entities(query: str, limit: int = 20) -> list[dict]:
     """Search entities by name. Returns list of entity dicts."""
     try:
