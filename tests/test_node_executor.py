@@ -1,5 +1,6 @@
 """Tests for syne.node.executor — local tool execution on remote nodes."""
 
+import asyncio
 import os
 import tempfile
 import pytest
@@ -12,6 +13,9 @@ from syne.node.executor import (
     _read_source,
     _walk_tree,
 )
+
+# Suppress subprocess cleanup warnings (BaseSubprocessTransport.__del__ on closed loop)
+pytestmark = pytest.mark.filterwarnings("ignore::pytest.PytestUnraisableExceptionWarning")
 
 
 # ── execute_tool dispatcher ──────────────────────────────────────────
