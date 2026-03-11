@@ -11,6 +11,12 @@ from .shared import console
 @cli.command()
 def stop():
     """Stop running Syne process."""
+    from ..node.client import is_node_mode
+    if is_node_mode():
+        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
+        console.print("Use [bold]syne node stop[/bold] instead.")
+        return
+
     # Try systemd first
     result = subprocess.run(
         ["systemctl", "--user", "is-active", "syne"],
@@ -32,6 +38,12 @@ def stop():
 @cli.command()
 def restart():
     """Restart Syne (stop + start)."""
+    from ..node.client import is_node_mode
+    if is_node_mode():
+        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
+        console.print("Use [bold]syne node restart[/bold] instead.")
+        return
+
     # Try systemd
     result = subprocess.run(
         ["systemctl", "--user", "is-enabled", "syne"],

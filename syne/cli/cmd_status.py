@@ -13,6 +13,12 @@ from rich.table import Table
 @cli.command()
 def status():
     """Show Syne status."""
+    from ..node.client import is_node_mode
+    if is_node_mode():
+        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
+        console.print("Use [bold]syne node status[/bold] instead.")
+        return
+
     async def _status():
         from syne.config import load_settings
         from syne.db.connection import init_db, close_db

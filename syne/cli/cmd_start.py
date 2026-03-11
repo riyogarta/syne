@@ -11,6 +11,12 @@ from .shared import console
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def start(debug):
     """Start Syne agent (auto-configures autostart on first run)."""
+    from ..node.client import is_node_mode
+    if is_node_mode():
+        console.print("[yellow]This machine is configured as a remote node.[/yellow]")
+        console.print("Use [bold]syne node start[/bold] / [bold]syne node stop[/bold] instead.")
+        return
+
     from pathlib import Path
 
     # Auto-setup systemd service if not installed yet
