@@ -814,12 +814,12 @@
                     <div class="feature-card">
                         <div class="feature-icon">🧠</div>
                         <h3>Unlimited Persistent Memory</h3>
-                        <p>Semantic search over millions of memories. Never forgets, even across sessions.</p>
+                        <p>Semantic search over millions of memories via pgvector + knowledge graph for entity-relation traversal. Two retrieval systems, one shared memory.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🛡️</div>
                         <h3>Smart Memory — Anti-Hallucination & Auto-Dedup</h3>
-                        <p>Only user-confirmed facts stored. 3-layer filter + similarity-based insert/update/skip. Memory stays clean, never bloated.</p>
+                        <p>Only user-confirmed facts stored. 3-layer filter + similarity-based insert/update/skip. Non-permanent memories decay naturally — useful ones survive, irrelevant ones fade away.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🧬</div>
@@ -843,8 +843,8 @@
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🧑‍💻</div>
-                        <h3>Interactive — Telegram & CLI</h3>
-                        <p>Chat via Telegram bot or terminal. Same memory, same tools, same agent.</p>
+                        <h3>Interactive — Telegram, CLI & Remote Nodes</h3>
+                        <p>Chat via Telegram bot or terminal. Extend to multiple machines via WebSocket — each node has its own CLI, one shared memory for all.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🧵</div>
@@ -928,8 +928,10 @@
                         <div class="arch-modules">
                             <div class="arch-module">Chat <sub>LLM</sub></div>
                             <div class="arch-module">Memory <sub>pgvector</sub></div>
+                            <div class="arch-module">Graph <sub>KG</sub></div>
                             <div class="arch-module">Compaction <sub>context</sub></div>
                             <div class="arch-module">Channels <sub>TG + CLI</sub></div>
+                            <div class="arch-module">Gateway <sub>remote</sub></div>
                             <div class="arch-module">Sub-agents</div>
                         </div>
                         <div class="arch-tools">23 Core Tools: <span>exec · memory · web · config · files · voice · send · schedule · subagent · permissions</span></div>
@@ -951,7 +953,7 @@
                     <div class="arch-connector">↕</div>
                     <div class="arch-layer db">
                         <div class="arch-layer-label">PostgreSQL + pgvector</div>
-                        <div class="arch-tables">13 tables — identity, memory, config, and more. Everything in one database.</div>
+                        <div class="arch-tables">17 tables — identity, memory, knowledge graph, config, and more. Everything in one database.</div>
                     </div>
                 </div>
             </div>
