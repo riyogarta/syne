@@ -3344,7 +3344,7 @@ Or just send me a message!"""
         success, message = run_restore(filepath)
         if success:
             await query.edit_message_text(f"Restored {actual_filename}. Restarting...")
-            import os; asyncio.get_event_loop().call_later(1, os._exit, 1)
+            import os, threading; threading.Timer(1, os._exit, args=[1]).start()
         else:
             await query.edit_message_text(f"Restore failed: {message}")
 
@@ -3371,7 +3371,7 @@ Or just send me a message!"""
 
         # Exit with non-zero code so systemd (Restart=on-failure) will restart us
         # os._exit bypasses exception handlers that might catch SystemExit
-        import os; asyncio.get_event_loop().call_later(1, os._exit, 1)
+        import os, threading; threading.Timer(1, os._exit, args=[1]).start()
 
     async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /update — owner only, update to latest release (skip if same version)."""
@@ -3497,7 +3497,7 @@ Or just send me a message!"""
 
         await update.message.reply_text(f"✅ Updated to v{new_version}, restarting...")
         logger.info(f"Update requested by {user.id}, {current_version} → {new_version}")
-        import os; asyncio.get_event_loop().call_later(1, os._exit, 1)
+        import os, threading; threading.Timer(1, os._exit, args=[1]).start()
 
     async def _cmd_updatedev(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /updatedev — owner only, pull latest + reinstall + restart."""
@@ -3562,7 +3562,7 @@ Or just send me a message!"""
 
         await update.message.reply_text(f"✅ Updated to v{new_version}, restarting...")
         logger.info(f"Update (dev) requested by {user.id}, new version: {new_version}")
-        import os; asyncio.get_event_loop().call_later(1, os._exit, 1)
+        import os, threading; threading.Timer(1, os._exit, args=[1]).start()
 
     def _path_id(self, path: str) -> str:
         """Generate a short ID for a path (for callback_data 64-byte limit)."""
