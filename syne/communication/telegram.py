@@ -4012,7 +4012,8 @@ Or just send me a message!"""
                 )
 
                 if response:
-                    await self._send_response(chat.id, response, context)
+                    prefix = f"[{gw_node.display_name}]\n\n"
+                    await self._send_response(chat.id, prefix + response, context)
                 else:
                     await update.message.reply_text("⚠️ Empty response from remote node.")
             except Exception as e:
