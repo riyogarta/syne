@@ -1813,12 +1813,11 @@ Or just send me a message!"""
         try:
             from ..memory.graph import get_graph_stats
             gs = await get_graph_stats()
-            if gs["entities"] or gs["relations"]:
-                type_parts = ", ".join(f"{t['type']}: {t['count']}" for t in gs["types"])
-                lines.append("")
-                lines.append(f"🕸 Graph: {gs['entities']} entities, {gs['relations']} relations")
-                if type_parts:
-                    lines.append(type_parts)
+            lines.append("")
+            lines.append(f"🕸 Graph: {gs['entities']} entities, {gs['relations']} relations")
+            type_parts = ", ".join(f"{t['type']}: {t['count']}" for t in gs["types"])
+            if type_parts:
+                lines.append(type_parts)
         except Exception:
             pass
 
