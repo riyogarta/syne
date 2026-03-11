@@ -57,13 +57,15 @@ def _do_update(syne_dir: str):
     except Exception:
         pass
 
-    # Node mode: skip DB migration, evaluator check, and service restart
-    if _is_node_mode():
-        console.print("[dim]Node mode — skipping DB migration and service restart.[/dim]")
-        return True
+    # Run schema migrations if DB is configured (even on nodes that are also servers)
+    env_path = os.path.join(syne_dir, ".env")
+    if os.path.exists(env_path):
+        _run_schema_migration(syne_dir)
 
-    # Run schema migrations (safe — uses IF NOT EXISTS / DO $$ checks)
-    _run_schema_migration(syne_dir)
+    # Node-only mode: skip evaluator check and service restart
+    if _is_node_mode() and not os.path.exists(env_path):
+        console.print("[dim]Node mode — skipping service restart.[/dim]")
+        return True
 
     # Ensure Ollama + evaluator model if auto_capture is enabled (non-fatal).
     # Run as subprocess so we use the NEWLY installed code, not the old
