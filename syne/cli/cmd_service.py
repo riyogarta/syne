@@ -19,7 +19,6 @@ def stop():
     """Stop running Syne process."""
     if not _is_server():
         console.print("[yellow]This machine is not a Syne server.[/yellow]")
-        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
         return
 
     # Try systemd first
@@ -45,7 +44,6 @@ def restart():
     """Restart Syne (stop + start)."""
     if not _is_server():
         console.print("[yellow]This machine is not a Syne server.[/yellow]")
-        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
         return
 
     # Try systemd

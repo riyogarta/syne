@@ -18,7 +18,6 @@ def start(debug):
     env_path = os.path.join(syne_dir, ".env")
     if not os.path.exists(env_path):
         console.print("[yellow]This machine is not a Syne server.[/yellow]")
-        console.print("Run [bold]syne init[/bold] to set up as a server, or use [bold]syne node[/bold] commands.")
         return
 
     # Auto-setup systemd service if not installed yet
