@@ -14,7 +14,7 @@ Syne is a standalone, open-source AI agent framework built in Python. It feature
 
 Most AI assistants forget everything between sessions. They have no persistent memory, no learning, no growth. Syne is different:
 
-- **Unlimited memory** — Semantic search over millions of memories using pgvector
+- **Unlimited memory** — Semantic search over millions of memories using pgvector + knowledge graph for entity-relation traversal
 - **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
 - **Self-evolving** — Syne can create new abilities for itself (with your permission)
 - **No runtime config files** — No SOUL.md or CONFIG.yaml. All runtime behavior lives in PostgreSQL, changed through conversation
