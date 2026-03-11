@@ -143,6 +143,7 @@ async def evaluate_message(
             ],
             temperature=0.1,
             max_tokens=None,
+            thinking_budget=0,
         )
 
         result = response.content.strip()
