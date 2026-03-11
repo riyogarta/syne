@@ -99,7 +99,7 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 ## Memory System
 
-Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, the **embedding model** makes memories searchable, and the **decay engine** ensures only relevant memories survive.
+Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **decay engine** ensures only relevant memories survive.
 
 ### The Three Engines
 
@@ -128,11 +128,28 @@ The evaluator runs **asynchronously** — it never blocks the chat response. Onl
 | **Ollama** (default) | qwen3:0.6b | **$0** | Fast (local) | Good for most content |
 | Provider (main LLM) | Same as chat model | Tokens + 40s delay | Slower | Higher accuracy |
 
-#### 2. Embedding — "How do I find this later?"
+#### 2. Embedding & Knowledge Graph — "How do I find this later?"
 
-Every memory is converted to a high-dimensional vector (embedding) for semantic search. When the user asks a question, the question is also embedded, and pgvector finds the most similar memories using cosine distance with an HNSW index.
+Two retrieval systems work together to find relevant memories:
 
-This is what makes memory **unlimited** — you can store millions of memories and still find the right one in milliseconds, because the search is by meaning, not keywords.
+**Semantic Search (Embedding)** — Every memory is converted to a high-dimensional vector. When the user asks a question, pgvector finds the most similar memories using cosine distance with an HNSW index. This is what makes memory **unlimited** — millions of memories, millisecond lookup by meaning.
+
+**Knowledge Graph** — Permanent memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts.
+
+| Source | How it works | Best for |
+|--------|-------------|----------|
+| **Embedding** | Cosine similarity over memory vectors | Fuzzy recall ("what do you know about my work?") |
+| **Knowledge Graph** | Entity lookup → relation traversal | Structured facts ("who is Agha's mother?") |
+
+Both results are injected into the conversation context — the LLM sees everything and decides the best answer.
+
+```
+User:  Remember: Riyogarta is married to Yuliazmi. Agha is their daughter.
+Syne:  Stored.
+       → Graph: Riyogarta --married_to--> Yuliazmi
+                Agha --child_of--> Riyogarta
+                Agha --child_of--> Yuliazmi
+```
 
 | Embedding Provider | Model | Dimensions | Cost | Requirements |
 |--------------------|-------|------------|------|-------------|
@@ -145,6 +162,8 @@ This is what makes memory **unlimited** — you can store millions of memories a
 **Ollama** is auto-installed during `syne init` — binary, server, and model are all set up automatically. The installer recommends the best model for your hardware (see [Server Tiers](#server-tiers)).
 
 > **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces. Use the `/embedding` command in Telegram to switch.
+
+Graph extraction uses the main chat LLM by default, switchable to Ollama via `/graph` in Telegram. Manage extractors, toggle on/off, reprocess existing memories, and view stats from the same command.
 
 #### 3. Decay Engine — "What should I forget?"
 
@@ -213,36 +232,6 @@ Syne:     I can't share that. That's private information.
 ```
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
-
-### Knowledge Graph
-
-On top of semantic search, Syne builds a **knowledge graph** from permanent memories — extracting entities (people, places, organizations) and their relationships automatically.
-
-```
-User:  Remember: Riyogarta is married to Yuliazmi. Agha is their daughter.
-Syne:  Stored.
-       → Graph: Riyogarta --married_to--> Yuliazmi
-                Agha --child_of--> Riyogarta
-                Agha --child_of--> Yuliazmi
-```
-
-When answering questions, Syne uses **both** semantic search and graph traversal:
-
-| Source | How it works | Best for |
-|--------|-------------|----------|
-| **Embedding** | Cosine similarity over memory vectors | Fuzzy recall ("what do you know about my work?") |
-| **Knowledge Graph** | Entity lookup → 1-hop relation traversal | Structured facts ("who is Agha's mother?") |
-
-Both results are injected into the conversation context — the LLM sees everything and decides the best answer.
-
-**Graph extraction** runs automatically when permanent memories are stored. The extractor uses the main chat LLM by default, but can be switched to a local Ollama model via `/graph` in Telegram.
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `graph.enabled` | `true` | Enable/disable graph extraction |
-| `graph.extractor_driver` | `"provider"` | `"provider"` (main LLM) or `"ollama"` |
-
-Manage via `/graph` in Telegram: add/remove extractors, toggle on/off, reprocess existing memories, view stats.
 
 ---
 
