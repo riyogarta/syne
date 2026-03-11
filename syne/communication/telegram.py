@@ -6773,6 +6773,33 @@ Or just send me a message!"""
             await update.message.reply_text("⚠️ Owner only.")
             return
 
+        # Remote mode: /browse <path> sets cwd on the remote node
+        if user.id in self._remote_node:
+            node_id = self._remote_node[user.id]
+            if not self.agent.gateway or node_id not in self.agent.gateway._nodes:
+                self._remote_node.pop(user.id, None)
+                await update.message.reply_text("Node disconnected. Exited remote mode.")
+                return
+            gw_node = self.agent.gateway._nodes[node_id]
+            args = context.args
+            if args:
+                new_cwd = " ".join(args)
+                gw_node.cwd = new_cwd
+                await update.message.reply_text(
+                    f"🔗 <b>{gw_node.display_name}</b> — working directory set to:\n"
+                    f"<code>{new_cwd}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                current = gw_node.cwd or "~"
+                await update.message.reply_text(
+                    f"🔗 <b>{gw_node.display_name}</b> — current directory:\n"
+                    f"<code>{current}</code>\n\n"
+                    f"Usage: <code>/browse /path/to/dir</code>",
+                    parse_mode="HTML",
+                )
+            return
+
         # Get Syne project root as default
         import os
         syne_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
