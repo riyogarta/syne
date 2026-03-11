@@ -57,10 +57,18 @@ def _do_update(syne_dir: str):
     except Exception:
         pass
 
-    # Run schema migrations if DB is configured (even on nodes that are also servers)
+    # Run schema migrations using the NEWLY installed code (not the old code in memory)
     env_path = os.path.join(syne_dir, ".env")
     if os.path.exists(env_path):
-        _run_schema_migration(syne_dir)
+        venv_python = os.path.join(venv_dir, "bin", "python")
+        result = subprocess.run(
+            [venv_python, "-c",
+             f"from syne.cli.helpers import _run_schema_migration; "
+             f"_run_schema_migration({syne_dir!r})"],
+            cwd=syne_dir,
+        )
+        if result.returncode != 0:
+            console.print("[yellow]⚠️ Schema migration had issues[/yellow]")
 
     # Node-only mode: skip evaluator check and service restart
     if _is_node_mode() and not os.path.exists(env_path):
