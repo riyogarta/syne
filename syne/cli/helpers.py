@@ -666,9 +666,48 @@ def _run_schema_migration(syne_dir: str):
 
     async def _migrate():
         import asyncpg
+        import re
         conn = await asyncpg.connect(db_url)
         try:
-            await conn.execute(schema)
+            # Split into individual statements — execute each independently
+            # so one failure doesn't block the rest.
+            # Handle DO $$ ... $$ blocks and CREATE FUNCTION as single units.
+            statements = []
+            current = []
+            in_block = False
+            for line in schema.splitlines():
+                stripped = line.strip()
+                # Skip empty lines and comments outside statements
+                if not stripped or (stripped.startswith("--") and not current):
+                    continue
+                # Detect DO $$ or CREATE FUNCTION blocks
+                if re.match(r"^(DO|CREATE\s+(OR\s+REPLACE\s+)?FUNCTION)\b", stripped, re.IGNORECASE):
+                    in_block = True
+                current.append(line)
+                if in_block:
+                    if stripped.endswith("$$;") or stripped == "$$;" or stripped.endswith("$$ LANGUAGE plpgsql;"):
+                        statements.append("\n".join(current))
+                        current = []
+                        in_block = False
+                elif stripped.endswith(";"):
+                    statements.append("\n".join(current))
+                    current = []
+            if current:
+                statements.append("\n".join(current))
+
+            errors = []
+            for stmt in statements:
+                stmt = stmt.strip()
+                if not stmt or stmt.startswith("--"):
+                    continue
+                try:
+                    await conn.execute(stmt)
+                except Exception as e:
+                    errors.append(f"{str(e)[:120]}")
+            if errors:
+                console.print(f"[yellow]⚠️ Schema migration: {len(errors)} warning(s)[/yellow]")
+                for err in errors[:5]:
+                    console.print(f"[dim]  {err}[/dim]")
         finally:
             await conn.close()
 
