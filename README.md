@@ -252,8 +252,7 @@ On the remote machine:
 ```bash
 git clone https://github.com/riyogarta/syne.git
 cd syne
-bash install.sh          # Same installer — skip syne init when prompted
-syne node init           # Pair with server (enter pairing token)
+bash install.sh          # Same installer — select option 2 (Remote Node) during syne init
 ```
 
 Pairing is done via Telegram: use `/nodes` to generate a one-time token, then enter it on the remote machine. After pairing, the node daemon starts automatically and reconnects on reboot.
