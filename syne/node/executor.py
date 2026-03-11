@@ -69,6 +69,8 @@ async def _exec(args: dict) -> tuple[str, bool]:
         return output, proc.returncode == 0
 
     except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
         return f"Error: Command timed out after {timeout}s", False
 
 
