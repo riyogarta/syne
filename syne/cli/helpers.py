@@ -573,6 +573,77 @@ WantedBy=default.target
         console.print("    Try: systemctl --user start syne")
 
 
+def _setup_node_service():
+    """Setup systemd user service for the Syne node daemon."""
+    import getpass
+    import shutil as _shutil
+    from pathlib import Path
+
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    service_file = service_dir / "syne-node.service"
+
+    # Find syne binary
+    syne_bin = _shutil.which("syne")
+    if not syne_bin:
+        console.print("  [yellow]Could not find syne binary in PATH[/yellow]")
+        console.print("  [dim]Start manually with: syne node run[/dim]")
+        return
+
+    service_dir.mkdir(parents=True, exist_ok=True)
+
+    service_content = f"""[Unit]
+Description=Syne Remote Node Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={syne_bin} node run
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Install]
+WantedBy=default.target
+"""
+
+    service_file.write_text(service_content)
+    console.print(f"  [green]Service file: {service_file}[/green]")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(["systemctl", "--user", "enable", "syne-node"], capture_output=True)
+    console.print("  [green]Autostart enabled[/green]")
+
+    # Enable linger so service runs without active login session
+    username = getpass.getuser()
+    result = subprocess.run(["loginctl", "enable-linger", username], capture_output=True)
+    if result.returncode == 0:
+        console.print(f"  [green]Linger enabled for {username}[/green]")
+
+    # Start the service
+    console.print("  Starting node daemon...")
+    result = subprocess.run(
+        ["systemctl", "--user", "start", "syne-node"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0:
+        import time
+        time.sleep(2)
+        check = subprocess.run(
+            ["systemctl", "--user", "is-active", "syne-node"],
+            capture_output=True, text=True,
+        )
+        if check.stdout.strip() == "active":
+            console.print("  [green]Node daemon is running![/green]")
+        else:
+            console.print("  [yellow]Service started but may have exited. Check logs:[/yellow]")
+            console.print("    journalctl --user -u syne-node --no-pager -n 20")
+    else:
+        console.print(f"  [yellow]Could not start service: {result.stderr.strip()}[/yellow]")
+        console.print("    Try: systemctl --user start syne-node")
+
+
 def _run_schema_migration(syne_dir: str):
     """Run schema.sql to apply any new tables/columns.
 
