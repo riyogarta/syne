@@ -251,6 +251,7 @@ class TelegramChannel:
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("nodes", "Manage remote nodes (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
+            BotCommand("quit", "Exit remote node mode"),
             BotCommand("cancel", "Cancel active operation"),
         ]
         for scope in (BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()):
