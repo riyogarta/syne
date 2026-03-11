@@ -368,6 +368,21 @@ class Conversation:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
 
+        # 4b. Knowledge graph context (entity-relation traversal)
+        try:
+            from .memory.graph import recall_graph
+            graph_lines = await recall_graph(recall_query or user_message)
+            if graph_lines:
+                graph_block = "\n".join([
+                    "# Knowledge Graph",
+                    "Related entities and relationships from stored knowledge.",
+                    "",
+                ] + graph_lines)
+                messages.append(ChatMessage(role="system", content=graph_block))
+                logger.info(f"Graph: injected {len(graph_lines)} relations")
+        except Exception as e:
+            logger.debug(f"Graph recall skipped: {e}")
+
         # 5. Trim to fit context window
         # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)
         # Do NOT append it again here — that caused the LLM to see duplicate user messages.

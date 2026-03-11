@@ -1,5 +1,6 @@
 """Memory evaluator — decide what's worth remembering."""
 
+import asyncio
 import logging
 from typing import Optional
 import httpx
@@ -356,6 +357,10 @@ async def evaluate_and_store(
 
     if mem_id:
         logger.info(f"Stored memory #{mem_id}: [{result['category']}] {result['content'][:80]}")
+        # Extract knowledge graph entities/relations from permanent memories
+        if permanent:
+            from .graph import extract_and_store as graph_extract
+            asyncio.create_task(graph_extract(provider, result["content"], mem_id))
     else:
         logger.debug(f"Duplicate memory skipped: {result['content'][:80]}")
 

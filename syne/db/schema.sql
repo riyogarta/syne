@@ -654,6 +654,49 @@ CREATE TABLE IF NOT EXISTS pairing_tokens (
     used BOOLEAN DEFAULT false
 );
 
+-- ============================================================
+-- KNOWLEDGE GRAPH: Entity-relation store for permanent memories
+-- ============================================================
+CREATE TABLE IF NOT EXISTS kg_entities (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,                     -- canonical name
+    entity_type VARCHAR(50),               -- 'person', 'place', 'org', 'concept', etc.
+    aliases TEXT[] DEFAULT '{}',           -- alternative names for resolution
+    description TEXT,
+    embedding vector,                      -- for semantic entity resolution
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type
+    ON kg_entities (LOWER(name), entity_type);
+CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities (entity_type);
+
+CREATE TABLE IF NOT EXISTS kg_relations (
+    id SERIAL PRIMARY KEY,
+    subject_id INT REFERENCES kg_entities(id) ON DELETE CASCADE,
+    predicate VARCHAR(100) NOT NULL,       -- 'works_at', 'married_to', etc.
+    object_id INT REFERENCES kg_entities(id) ON DELETE CASCADE,
+    weight FLOAT DEFAULT 1.0,              -- confidence
+    source_memory_id INT REFERENCES memory(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(subject_id, predicate, object_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kg_relations_subject ON kg_relations (subject_id);
+CREATE INDEX IF NOT EXISTS idx_kg_relations_object ON kg_relations (object_id);
+CREATE INDEX IF NOT EXISTS idx_kg_relations_predicate ON kg_relations (predicate);
+
+-- Graph extractor config
+INSERT INTO config (key, value, description) VALUES
+    ('graph.extractor_driver', '"provider"', 'Graph extractor driver: "provider" (main LLM) or "ollama"'),
+    ('graph.extractor_model', '""', 'Ollama model for graph extraction (when driver=ollama)'),
+    ('graph.extractor_models', '[]', 'Graph extractor model registry'),
+    ('graph.active_extractor', '""', 'Active graph extractor key'),
+    ('graph.enabled', 'true', 'Enable knowledge graph extraction from permanent memories')
+ON CONFLICT (key) DO NOTHING;
+
 -- Default scheduler output policy
 INSERT INTO config (key, value, description) VALUES (
   'scheduler.echo_response_to_creator',
