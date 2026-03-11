@@ -252,7 +252,7 @@ On the remote machine:
 ```bash
 git clone https://github.com/riyogarta/syne.git
 cd syne
-bash install.sh          # Minimal install (no DB, no Telegram)
+bash install.sh          # Same installer — skip syne init when prompted
 syne node init           # Pair with server (enter pairing token)
 ```
 
