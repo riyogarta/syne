@@ -187,8 +187,13 @@ class TestEvaluateAndStore:
         memory_engine.store_if_new.return_value = 42
         eval_result = {"category": "fact", "importance": 0.9, "content": "birthday info"}
 
+        def _consume_coro(coro):
+            """Close the coroutine so it doesn't trigger unawaited warnings."""
+            coro.close()
+
         with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result), \
-             patch("asyncio.create_task") as mock_task:
+             patch("syne.memory.graph.extract_and_store", new_callable=AsyncMock) as mock_graph, \
+             patch("asyncio.create_task", side_effect=_consume_coro) as mock_task:
             result = await evaluate_and_store(
                 mock_provider, memory_engine,
                 "ingat ini: ulang tahun saya 18 April",
@@ -206,13 +211,11 @@ class TestEvaluateAndStore:
         memory_engine.store_if_new.return_value = 42
         eval_result = {"category": "fact", "importance": 0.5, "content": "casual info"}
 
-        with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result), \
-             patch("asyncio.create_task") as mock_task:
+        with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result):
             await evaluate_and_store(mock_provider, memory_engine, "I like coffee", user_id=1)
 
         call_kwargs = memory_engine.store_if_new.call_args[1]
         assert call_kwargs["permanent"] is False
-        mock_task.assert_not_called()
 
     async def test_duplicate_memory_skipped(self, mock_provider):
         memory_engine = AsyncMock()

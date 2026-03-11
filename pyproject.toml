@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "syne-agent"
-version = "0.94.0"
+version = "0.94.1"
 description = "AI Agent Framework with Unlimited Memory"
 readme = "README.md"
 license = "Apache-2.0"
@@ -36,12 +36,12 @@ dependencies = [
     "prompt_toolkit>=3.0",
     "edge-tts>=7.0",
     "websockets>=14.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
 
