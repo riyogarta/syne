@@ -214,6 +214,89 @@ Syne:     I can't share that. That's private information.
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
 
+### Knowledge Graph
+
+On top of semantic search, Syne builds a **knowledge graph** from permanent memories — extracting entities (people, places, organizations) and their relationships automatically.
+
+```
+User:  Remember: Riyogarta is married to Yuliazmi. Agha is their daughter.
+Syne:  Stored.
+       → Graph: Riyogarta --married_to--> Yuliazmi
+                Agha --child_of--> Riyogarta
+                Agha --child_of--> Yuliazmi
+```
+
+When answering questions, Syne uses **both** semantic search and graph traversal:
+
+| Source | How it works | Best for |
+|--------|-------------|----------|
+| **Embedding** | Cosine similarity over memory vectors | Fuzzy recall ("what do you know about my work?") |
+| **Knowledge Graph** | Entity lookup → 1-hop relation traversal | Structured facts ("who is Agha's mother?") |
+
+Both results are injected into the conversation context — the LLM sees everything and decides the best answer.
+
+**Graph extraction** runs automatically when permanent memories are stored. The extractor uses the main chat LLM by default, but can be switched to a local Ollama model via `/graph` in Telegram.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `graph.enabled` | `true` | Enable/disable graph extraction |
+| `graph.extractor_driver` | `"provider"` | `"provider"` (main LLM) or `"ollama"` |
+
+Manage via `/graph` in Telegram: add/remove extractors, toggle on/off, reprocess existing memories, view stats.
+
+---
+
+## Remote Node
+
+Syne can run on multiple machines. A **remote node** connects to a Syne server via WebSocket, allowing you to use Syne's tools (exec, file access) on your laptop or other machines — all controlled from Telegram.
+
+### Setup
+
+On the server (one-time):
+```bash
+# Gateway is built into Syne — no extra setup needed
+# It starts automatically with the main service
+```
+
+On the remote machine:
+```bash
+git clone https://github.com/riyogarta/syne.git
+cd syne
+bash install.sh          # Minimal install (no DB, no Telegram)
+syne node init           # Pair with server (enter pairing token)
+```
+
+Pairing is done via Telegram: use `/nodes` to generate a one-time token, then enter it on the remote machine. After pairing, the node daemon starts automatically and reconnects on reboot.
+
+### How It Works
+
+```
++------------------+        WebSocket        +------------------+
+|  Remote Node     | ◄--------------------► |  Syne Server     |
+|  (your laptop)   |   persistent conn      |  (cloud VPS)     |
+|                  |   auto-reconnect       |                  |
+|  syne-node.service|                       |  gateway (built-in)|
+|  exec, files     |                       |  DB, Telegram, LLM|
++------------------+                        +------------------+
+```
+
+| Feature | Detail |
+|---------|--------|
+| **Auto-reconnect** | Exponential backoff (5s → 60s max), survives network changes |
+| **Auto-start** | systemd user service with linger, starts on boot |
+| **Suspend/resume** | Reconnects automatically when laptop wakes from sleep |
+| **Coexistence** | A machine can be both server and node simultaneously |
+
+### Node CLI Commands
+
+```bash
+syne node init           # Pair with server
+syne node start          # Start node daemon
+syne node stop           # Stop node daemon
+syne node restart        # Restart node daemon
+syne node status         # Show connection status
+```
+
 ---
 
 ## Permission System
@@ -501,7 +584,10 @@ syne restore               # Restore from backup
 | `/wamembers` | Manage WhatsApp allowlist | Owner |
 | `/backup` | Backup database | Owner |
 | `/restore` | Restore database from backup | Owner |
+| `/graph` | Manage knowledge graph extractors | Owner |
+| `/nodes` | Manage remote nodes | Owner |
 | `/update` | Update Syne to latest version | Owner |
+| `/quit` | End conversation | Owner |
 | `/cancel` | Cancel active operation | Owner |
 | `/restart` | Restart agent | Owner |
 
@@ -518,6 +604,9 @@ syne restore               # Restore from backup
 |  |                                                      |  |
 |  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
 |  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
+|  |                                                      |  |
+|  |  [Graph]  [Gateway]                                  |  |
+|  |  (KG)    (remote)                                    |  |
 |  |                                                      |  |
 |  |  Core Tools (23):                                    |  |
 |  |  exec · db_query · memory · web · config · files     |  |
@@ -541,10 +630,12 @@ syne restore               # Restore from backup
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  13 tables — all state in one database              |  |
+|  |  17 tables — all state in one database              |  |
 |  |  memory · sessions · messages · config · abilities   |  |
 |  |  users · groups · identity · soul · capabilities     |  |
 |  |  rules · scheduled_tasks · subagent_runs             |  |
+|  |  kg_entities · kg_relations · gateway_nodes          |  |
+|  |  pairing_tokens                                      |  |
 |  +------------------------------------------------------+  |
 +------------------------------------------------------------+
 ```
@@ -568,6 +659,10 @@ syne restore               # Restore from backup
 | `config` | Runtime configuration (key-value) |
 | `subagent_runs` | Sub-agent execution history |
 | `scheduled_tasks` | Cron jobs and scheduled task definitions |
+| `kg_entities` | Knowledge graph entities (name, type, aliases) |
+| `kg_relations` | Knowledge graph relationships (subject → predicate → object) |
+| `gateway_nodes` | Registered remote nodes |
+| `pairing_tokens` | One-time pairing tokens for remote nodes |
 
 ---
 
@@ -626,16 +721,19 @@ syne/
 │   │   └── hybrid.py        # Multi-provider with failover
 │   ├── memory/
 │   │   ├── engine.py        # Store, recall, decay, dedup, conflict resolution
-│   │   └── evaluator.py     # Auto-evaluate (3-layer filter)
+│   │   ├── evaluator.py     # Auto-evaluate (3-layer filter)
+│   │   └── graph.py         # Knowledge graph extraction, storage, recall
 │   ├── tools/               # 23 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   │   ├── custom/          # User-created abilities (only writable dir)
 │   │   └── ...              # 6 bundled abilities
 │   ├── db/
-│   │   ├── schema.sql       # Database schema (13 tables)
+│   │   ├── schema.sql       # Database schema (17 tables)
 │   │   ├── connection.py    # Async connection pool (asyncpg)
 │   │   ├── models.py        # Data access layer
 │   │   └── credentials.py   # Encrypted credential storage
+│   ├── gateway/             # Remote node support
+│   │   └── server.py        # WebSocket gateway server
 │   └── cli/                 # CLI commands package
 │       ├── cmd_init.py      # syne init
 │       ├── cmd_start.py     # syne start
@@ -644,6 +742,7 @@ syne/
 │       ├── cmd_update.py    # syne update
 │       ├── cmd_db.py        # syne db
 │       ├── cmd_memory.py    # syne memory
+│       ├── cmd_node.py      # syne node (init/start/stop/restart/status)
 │       ├── cmd_backup.py    # syne backup/restore
 │       └── ...
 ├── docker-compose.yml
@@ -671,6 +770,8 @@ pytest
 ## Roadmap
 
 - [x] Interactive CLI (`syne cli`)
+- [x] Knowledge Graph (entity-relation extraction from memories)
+- [x] Remote Node (multi-machine via WebSocket gateway)
 - [ ] Ability marketplace
 
 ---
