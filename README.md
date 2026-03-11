@@ -21,7 +21,7 @@ Most AI assistants forget everything between sessions. They have no persistent m
 - **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding + memory evaluator via Ollama (local, $0). Entire stack can run at $0/month
 - **Linux-style permissions** — 3-digit octal permissions (owner/family/public) for every tool and ability
 - **Interactive CLI** — Terminal-based chat with persistent memory and tools
-- **Remote nodes** — Extend Syne to multiple machines via WebSocket, controlled from one Telegram bot
+- **Remote nodes** — Extend Syne to multiple machines via WebSocket. Each node has its own CLI (`syne cli`), all controlled from one Telegram bot
 
 ---
 
