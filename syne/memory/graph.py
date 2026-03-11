@@ -93,7 +93,7 @@ async def _extract_via_provider(provider: LLMProvider, content: str) -> Optional
     ]
 
     response = await provider.chat(messages, temperature=0.1, max_tokens=1000, thinking_budget=0)
-    raw = response.text.strip()
+    raw = response.content.strip()
 
     return _parse_extraction(raw)
 
