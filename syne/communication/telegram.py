@@ -6387,13 +6387,37 @@ Or just send me a message!"""
                     f"• Label: {entry['label']}\n"
                     f"• Driver: {driver}\n"
                     f"• Auth: {auth_type}\n"
-                    f"• Context: {ctx_display}\n\n"
-                    f"Use /models to switch to it."
+                    f"• Context: {ctx_display}"
                 ),
                 parse_mode="HTML",
             )
             logger.info(f"Model added: {entry}")
             self._auth_state.pop(user_id, None)
+
+            # Auto-start OAuth flow for OAuth models
+            if auth_type == "oauth":
+                _driver_to_auth = {
+                    "google_cca": "google",
+                    "codex": "codex",
+                    "anthropic": "claude",
+                }
+                auth_key = _driver_to_auth.get(driver)
+                if auth_key:
+                    providers = await self._get_auth_providers()
+                    auth_entry = next((p for p in providers if p.get("oauth_driver") == auth_key or p.get("key") == auth_key), None)
+                    if auth_entry:
+                        await self._start_oauth_flow(auth_entry, chat_id, user_id, None)
+                    else:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text="⚠️ OAuth provider not configured. Use /models → Re-authenticate later.",
+                        )
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="Use /models to switch to it.",
+                )
+
             return True
 
         return False
