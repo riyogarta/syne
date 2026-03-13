@@ -43,6 +43,28 @@ Rules:
 - Keep descriptions brief (under 15 words)"""
 
 
+async def _mark_kg_processed(memory_id: int) -> None:
+    """Mark a memory as KG-processed, regardless of extraction result."""
+    try:
+        async with get_connection() as conn:
+            # Ensure column exists
+            col_exists = await conn.fetchval(
+                """SELECT EXISTS(
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memory' AND column_name = 'kg_processed'
+                )"""
+            )
+            if not col_exists:
+                await conn.execute(
+                    "ALTER TABLE memory ADD COLUMN kg_processed BOOLEAN DEFAULT false"
+                )
+            await conn.execute(
+                "UPDATE memory SET kg_processed = true WHERE id = $1", memory_id
+            )
+    except Exception as e:
+        logger.debug(f"Failed to mark kg_processed for memory #{memory_id}: {e}")
+
+
 async def extract_and_store(
     provider: LLMProvider,
     content: str,
@@ -71,9 +93,13 @@ async def extract_and_store(
 
         if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
             logger.debug(f"No entities/relations extracted from memory #{memory_id}")
+            # Mark as processed so reprocess won't pick it up again
+            await _mark_kg_processed(memory_id)
             return False
 
         await _store_graph(extracted, memory_id)
+        # Mark as processed
+        await _mark_kg_processed(memory_id)
         logger.info(
             f"Graph: stored {len(extracted.get('entities', []))} entities, "
             f"{len(extracted.get('relations', []))} relations from memory #{memory_id}"
@@ -344,15 +370,25 @@ async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
 
     try:
         async with get_connection() as conn:
-            # Find permanent memories without graph relations, include user name
+            # Ensure kg_processed column exists
+            col_exists = await conn.fetchval(
+                """SELECT EXISTS(
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'memory' AND column_name = 'kg_processed'
+                )"""
+            )
+            if not col_exists:
+                await conn.execute(
+                    "ALTER TABLE memory ADD COLUMN kg_processed BOOLEAN DEFAULT false"
+                )
+
+            # Find permanent memories that haven't been KG-processed yet
             rows = await conn.fetch("""
                 SELECT m.id, m.content, u.display_name, u.name
                 FROM memory m
                 LEFT JOIN users u ON m.user_id = u.id
                 WHERE m.permanent = true
-                AND NOT EXISTS (
-                    SELECT 1 FROM kg_relations r WHERE r.source_memory_id = m.id
-                )
+                AND (m.kg_processed IS NOT TRUE)
                 ORDER BY m.id
             """)
 
