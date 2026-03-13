@@ -14,11 +14,12 @@ from .context import DEFAULT_CHARS_PER_TOKEN
 
 logger = logging.getLogger("syne.compaction")
 
-PROMPT_OVERHEAD_TOKENS = 4_096  # space for compaction prompt template + tags + previous summary
+PROMPT_OVERHEAD_TOKENS = 4_096  # space for compaction prompt template + tags
 OUTPUT_TOKENS = 16_384  # max_tokens for summary output
-SAFETY_MARGIN = 1.2  # 20% buffer — chars/4 heuristic underestimates for multi-byte chars,
-                      # code tokens, JSON, special tokens. Same approach as OpenClaw.
-TOOL_RESULT_CHARS_PER_TOKEN = 2.0  # tool results (code/JSON) tokenize less efficiently
+# Compaction uses a hardcoded conservative ratio (not the user-configurable one)
+# because tokenizer efficiency varies wildly: English ~4 chars/token, but mixed
+# Indonesian/code/JSON can be as low as 2.5. Using 3.0 as safe middle ground.
+COMPACTION_CHARS_PER_TOKEN = 3.0
 
 _BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{200,}={0,2}')
 _MAX_TOOL_RESULT_FOR_SUMMARY = 2_000
@@ -272,10 +273,10 @@ async def compact_session(
         conv_text = _serialize_messages(old_rows)
 
         # Cap input based on provider's actual context window.
-        # Apply SAFETY_MARGIN to compensate for estimateTokens() underestimation:
-        # chars/4 heuristic misses multi-byte chars, special tokens, code tokens, etc.
-        effective_context = int(provider.context_window / SAFETY_MARGIN)
-        available_tokens = effective_context - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
+        # Use conservative COMPACTION_CHARS_PER_TOKEN (3.0) instead of user-configurable
+        # chars_per_token because tokenizer efficiency varies: English ~4, mixed ~2.5-3.
+        cpt = COMPACTION_CHARS_PER_TOKEN
+        available_tokens = provider.context_window - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
 
         # Subtract space used by previous_summary + preservation context
         extra_chars = 0
@@ -283,19 +284,17 @@ async def compact_session(
             extra_chars += len(previous_summary) + 100  # tags + header
         if recent_context:
             extra_chars += len(recent_context) + 200  # tags + note text
-        extra_tokens = int(extra_chars / chars_per_token)
-        available_tokens -= extra_tokens
+        available_tokens -= int(extra_chars / cpt)
 
-        max_input_chars = int(available_tokens * chars_per_token)
+        max_input_chars = int(available_tokens * cpt)
         if max_input_chars < 1000:
             max_input_chars = 1000  # absolute minimum
         if len(conv_text) > max_input_chars:
             conv_text = conv_text[-max_input_chars:]
             logger.info(
                 f"Truncated summarizer input to {max_input_chars} chars "
-                f"(from {summarized_chars}, effective_context={effective_context}, "
-                f"context_window={provider.context_window} tokens, safety_margin={SAFETY_MARGIN}, "
-                f"extra_tokens={extra_tokens})"
+                f"(from {summarized_chars}, available_tokens={available_tokens}, "
+                f"context_window={provider.context_window}, cpt={cpt})"
             )
 
         logger.info(
