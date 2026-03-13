@@ -272,17 +272,30 @@ async def compact_session(
         conv_text = _serialize_messages(old_rows)
 
         # Cap input based on provider's actual context window.
-        # Apply SAFETY_MARGIN (20%) to compensate for estimateTokens() underestimation:
+        # Apply SAFETY_MARGIN to compensate for estimateTokens() underestimation:
         # chars/4 heuristic misses multi-byte chars, special tokens, code tokens, etc.
         effective_context = int(provider.context_window / SAFETY_MARGIN)
         available_tokens = effective_context - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
+
+        # Subtract space used by previous_summary + preservation context
+        extra_chars = 0
+        if previous_summary:
+            extra_chars += len(previous_summary) + 100  # tags + header
+        if recent_context:
+            extra_chars += len(recent_context) + 200  # tags + note text
+        extra_tokens = int(extra_chars / chars_per_token)
+        available_tokens -= extra_tokens
+
         max_input_chars = int(available_tokens * chars_per_token)
+        if max_input_chars < 1000:
+            max_input_chars = 1000  # absolute minimum
         if len(conv_text) > max_input_chars:
             conv_text = conv_text[-max_input_chars:]
             logger.info(
                 f"Truncated summarizer input to {max_input_chars} chars "
                 f"(from {summarized_chars}, effective_context={effective_context}, "
-                f"context_window={provider.context_window} tokens, safety_margin={SAFETY_MARGIN})"
+                f"context_window={provider.context_window} tokens, safety_margin={SAFETY_MARGIN}, "
+                f"extra_tokens={extra_tokens})"
             )
 
         logger.info(
