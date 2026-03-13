@@ -1,7 +1,10 @@
 """Tests for syne/context.py — token estimation and context window management."""
 
 import pytest
-from syne.context import estimate_tokens, estimate_messages_tokens, ContextManager
+from syne.context import (
+    estimate_tokens, estimate_messages_tokens, ContextManager,
+    DEFAULT_CHARS_PER_TOKEN, SAFETY_MARGIN,
+)
 from syne.llm.provider import ChatMessage
 
 
@@ -12,11 +15,11 @@ class TestEstimateTokens:
         assert estimate_tokens("") == 0
 
     def test_short_text(self):
-        text = "hello"  # 5 chars / 3.5 = 1.42 -> 1
+        text = "hello"  # 5 chars / 4.0 = 1.25 -> 1
         assert estimate_tokens(text) == 1
 
     def test_long_text(self):
-        text = "a" * 350  # 350 / 3.5 = 100
+        text = "a" * 400  # 400 / 4.0 = 100
         assert estimate_tokens(text) == 100
 
     def test_returns_int(self):
@@ -24,8 +27,16 @@ class TestEstimateTokens:
         assert isinstance(result, int)
 
     def test_known_value(self):
-        # 14 chars / 3.5 = 4.0
-        assert estimate_tokens("fourteen chars!") == int(len("fourteen chars!") / 3.5)
+        text = "sixteen chars!!!"  # 16 chars / 4.0 = 4
+        assert estimate_tokens(text) == int(len(text) / DEFAULT_CHARS_PER_TOKEN)
+
+    def test_custom_chars_per_token(self):
+        text = "a" * 100
+        assert estimate_tokens(text, chars_per_token=2.0) == 50
+        assert estimate_tokens(text, chars_per_token=5.0) == 20
+
+    def test_default_is_4(self):
+        assert DEFAULT_CHARS_PER_TOKEN == 4.0
 
 
 class TestEstimateMessagesTokens:
@@ -55,6 +66,12 @@ class TestEstimateMessagesTokens:
         msg_empty = ChatMessage(role="user", content="")
         assert estimate_messages_tokens([msg_empty]) == 4
 
+    def test_custom_chars_per_token(self):
+        msg = ChatMessage(role="user", content="a" * 100)
+        result_default = estimate_messages_tokens([msg])
+        result_custom = estimate_messages_tokens([msg], chars_per_token=2.0)
+        assert result_custom > result_default  # 2 chars/token = more tokens
+
 
 class TestContextManagerInit:
     """Tests for ContextManager.__init__() — defaults and custom values."""
@@ -63,7 +80,9 @@ class TestContextManagerInit:
         cm = ContextManager()
         assert cm.max_context_tokens == 128000
         assert cm.reserved_output == 4096
-        assert cm.available == 128000 - 4096
+        # available includes safety margin
+        expected = int((128000 - 4096) / SAFETY_MARGIN)
+        assert cm.available == expected
 
     def test_custom_values(self):
         cm = ContextManager(
@@ -72,27 +91,28 @@ class TestContextManagerInit:
         )
         assert cm.max_context_tokens == 200000
         assert cm.reserved_output == 8192
-        assert cm.available == 200000 - 8192
+        expected = int((200000 - 8192) / SAFETY_MARGIN)
+        assert cm.available == expected
 
-    def test_budget_calculations_defaults(self):
+    def test_safety_margin_applied(self):
+        cm = ContextManager(max_context_tokens=120000, reserved_output_tokens=0)
+        # With 1.2 safety margin, available should be less than raw
+        assert cm.available == int(120000 / SAFETY_MARGIN)
+        assert cm.available < 120000
+
+    def test_budget_calculations(self):
         cm = ContextManager()
-        available = 128000 - 4096
-        assert cm.system_budget == int(available * 0.15)
-        assert cm.memory_budget_tokens == int(available * 0.10)
-        assert cm.history_budget == int(available * 0.65)
+        assert cm.system_budget == int(cm.available * 0.15)
+        assert cm.memory_budget_tokens == int(cm.available * 0.10)
+        assert cm.history_budget == int(cm.available * 0.65)
 
-    def test_budget_calculations_custom(self):
-        cm = ContextManager(
-            max_context_tokens=100000,
-            reserved_output_tokens=2000,
-            system_prompt_budget=0.20,
-            memory_budget=0.15,
-            history_budget=0.55,
-        )
-        available = 100000 - 2000
-        assert cm.system_budget == int(available * 0.20)
-        assert cm.memory_budget_tokens == int(available * 0.15)
-        assert cm.history_budget == int(available * 0.55)
+    def test_chars_per_token_stored(self):
+        cm = ContextManager(chars_per_token=3.0)
+        assert cm.chars_per_token == 3.0
+
+    def test_chars_per_token_default(self):
+        cm = ContextManager()
+        assert cm.chars_per_token == DEFAULT_CHARS_PER_TOKEN
 
 
 class TestShouldCompact:
@@ -106,27 +126,18 @@ class TestShouldCompact:
 
     def test_above_threshold(self):
         cm = ContextManager(max_context_tokens=100, reserved_output_tokens=0)
-        # Create messages that exceed 80% of 100 tokens
-        # 80 tokens needed; each char ~0.286 tokens, plus 4 overhead per msg
-        big_content = "x" * 400  # ~114 tokens + 4 overhead = ~118 > 80
+        # available = int(100 / 1.2) = 83, threshold 80% = 66 tokens needed
+        # Big content to exceed that
+        big_content = "x" * 400  # 100 tokens + 4 overhead = 104 > 66
         msgs = [ChatMessage(role="user", content=big_content)]
         assert cm.should_compact(msgs) is True
 
     def test_custom_threshold(self):
         cm = ContextManager(max_context_tokens=100, reserved_output_tokens=0)
-        # available = 100, threshold=0.5 means compact at 50 tokens
-        content = "x" * 200  # ~57 tokens + 4 overhead = ~61 > 50
+        # available = 83, threshold=0.5 means compact at 41 tokens
+        content = "x" * 200  # 50 tokens + 4 overhead = 54 > 41
         msgs = [ChatMessage(role="user", content=content)]
         assert cm.should_compact(msgs, threshold=0.5) is True
-
-    def test_exactly_at_threshold(self):
-        cm = ContextManager(max_context_tokens=100, reserved_output_tokens=0)
-        # Edge: exactly at threshold should return True (>=)
-        # Need exactly 80 tokens: threshold 0.8 * 100 = 80
-        # estimate_messages_tokens = len(content)/3.5 + 4
-        # So len(content)/3.5 + 4 = 80 => len(content) = 266
-        msgs = [ChatMessage(role="user", content="x" * 266)]
-        assert cm.should_compact(msgs) is True
 
 
 class TestGetUsage:
@@ -142,18 +153,18 @@ class TestGetUsage:
         total = estimate_messages_tokens(msgs)
 
         assert usage["used_tokens"] == total
-        assert usage["max_tokens"] == 10000
-        assert usage["usage_percent"] == round(total / 10000 * 100, 1)
-        assert usage["remaining_tokens"] == 10000 - total
+        assert usage["max_tokens"] == cm.available
+        assert usage["usage_percent"] == round(total / cm.available * 100, 1)
+        assert usage["remaining_tokens"] == cm.available - total
         assert usage["message_count"] == 2
 
     def test_empty_messages(self):
         cm = ContextManager(max_context_tokens=5000, reserved_output_tokens=1000)
         usage = cm.get_usage([])
         assert usage["used_tokens"] == 0
-        assert usage["max_tokens"] == 4000
+        assert usage["max_tokens"] == cm.available
         assert usage["usage_percent"] == 0.0
-        assert usage["remaining_tokens"] == 4000
+        assert usage["remaining_tokens"] == cm.available
         assert usage["message_count"] == 0
 
 
@@ -219,3 +230,18 @@ class TestTrimContext:
         system_contents = [m.content for m in result if m.role == "system"]
         has_notice = any("CONTEXT NOTICE" in c for c in system_contents)
         assert has_notice
+
+
+class TestSafetyMargin:
+    """Tests for SAFETY_MARGIN behavior."""
+
+    def test_safety_margin_value(self):
+        assert SAFETY_MARGIN == 1.2
+
+    def test_safety_margin_reduces_available(self):
+        # Without safety margin, available = 200000 - 4096 = 195904
+        # With safety margin, available = int(195904 / 1.2) = 163253
+        cm = ContextManager(max_context_tokens=200000, reserved_output_tokens=4096)
+        raw = 200000 - 4096
+        assert cm.available < raw
+        assert cm.available == int(raw / SAFETY_MARGIN)

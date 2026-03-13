@@ -18,7 +18,7 @@ from .db.connection import get_connection
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
-from .context import ContextManager, estimate_messages_tokens
+from .context import ContextManager, estimate_messages_tokens, DEFAULT_CHARS_PER_TOKEN
 from .compaction import compact_session, _build_preservation_context
 from .boot import get_full_prompt
 from .tools.registry import ToolRegistry, ToolResult
@@ -151,7 +151,7 @@ class Conversation:
         self.is_group: bool = inbound.is_group if inbound else False
         self.chat_name: Optional[str] = inbound.group_subject if inbound else None
         self.chat_id: Optional[str] = inbound.chat_id if inbound else None
-        self.model_params: dict = {}  # Per-model LLM params (all 7: temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty)
+        self.model_params: dict = {}  # Per-model LLM params (all 8: temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty, chars_per_token)
         self.reasoning_visible: bool = False  # Per-model reasoning visibility
         self.stream_callbacks: Optional[StreamCallbacks] = None  # Set by ConversationManager for CLI streaming
         self._message_cache: list[ChatMessage] = []
@@ -521,6 +521,7 @@ class Conversation:
                 provider=self.provider,
                 keep_recent=_keep,
                 recent_context=_preservation,
+                chars_per_token=self.context_mgr.chars_per_token,
             )
             if result:
                 logger.info(
@@ -598,6 +599,7 @@ class Conversation:
                     provider=self.provider,
                     keep_recent=_keep,
                     recent_context=_preservation,
+                    chars_per_token=self.context_mgr.chars_per_token,
                 )
                 if result:
                     logger.info(f"Emergency compaction: {result['messages_before']} → {result['messages_after']} messages")
@@ -1411,13 +1413,13 @@ class ConversationManager:
         if not conv.model_params:
             _driver = model_entry.get("driver", "")
             _defaults = {
-                "google_cca":   {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
-                "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
-                "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
-                "openai_compat":{"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
-                "together":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
-                "ollama":       {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
-                "_default":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+                "google_cca":   {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None, "chars_per_token": 4.0},
+                "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0,    "chars_per_token": 4.0},
+                "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None, "chars_per_token": 4.0},
+                "openai_compat":{"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0,    "chars_per_token": 4.0},
+                "together":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0,    "chars_per_token": 4.0},
+                "ollama":       {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 0.9,  "top_k": 40,   "frequency_penalty": None, "presence_penalty": None, "chars_per_token": 4.0},
+                "_default":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0,    "chars_per_token": 4.0},
             }
             conv.model_params = _defaults.get(_driver, _defaults["_default"]).copy()
         # Load per-model reasoning_visible
@@ -1510,8 +1512,9 @@ class ConversationManager:
                 # Update context_mgr to match override model's context_window
                 _ctx = int(_wa_entry.get("context_window", 0)) or override_provider.context_window
                 _reserved = override_provider.reserved_output_tokens
-                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved)
-                logger.info(f"WA model override for {chat_id}: {wa_override} (ctx={_ctx})")
+                _cpt_wa = float(conv.model_params.get("chars_per_token", 0)) or DEFAULT_CHARS_PER_TOKEN
+                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved, chars_per_token=_cpt_wa)
+                logger.info(f"WA model override for {chat_id}: {wa_override} (ctx={_ctx}, cpt={_cpt_wa})")
 
         # Per-node model override (remote node with custom model)
         node_override = (message_metadata or {}).get("node_model_override")
@@ -1527,8 +1530,9 @@ class ConversationManager:
                 # Update context_mgr to match override model's context_window
                 _ctx = int(_node_entry.get("context_window", 0)) or override_provider.context_window
                 _reserved = override_provider.reserved_output_tokens
-                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved)
-                logger.info(f"Node model override for {chat_id}: {node_override} (ctx={_ctx})")
+                _cpt_node = float(conv.model_params.get("chars_per_token", 0)) or DEFAULT_CHARS_PER_TOKEN
+                conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved, chars_per_token=_cpt_node)
+                logger.info(f"Node model override for {chat_id}: {node_override} (ctx={_ctx}, cpt={_cpt_node})")
 
         # Apply streaming callbacks (CLI only — None for Telegram/WA)
         conv.stream_callbacks = self._stream_callbacks

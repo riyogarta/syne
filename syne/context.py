@@ -6,20 +6,27 @@ from .llm.provider import ChatMessage
 
 logger = logging.getLogger("syne.context")
 
-# Rough token estimation: 1 token ≈ 4 chars for English, ≈ 3 chars for CJK/Indonesian
-CHARS_PER_TOKEN = 3.5
+# Rough token estimation: ~4 chars per token for English (industry standard).
+# Code/multilingual content is less efficient (~2-3 chars/token).
+# Default 4.0 per OpenAI/Anthropic/Google documentation.
+# Per-model override available via model_params["chars_per_token"].
+DEFAULT_CHARS_PER_TOKEN = 4.0
+
+# 20% safety buffer — chars/4 heuristic underestimates for multi-byte chars,
+# code tokens, JSON, special tokens. Same approach as OpenClaw.
+SAFETY_MARGIN = 1.2
 
 
-def estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
     """Rough token count estimation."""
-    return int(len(text) / CHARS_PER_TOKEN)
+    return int(len(text) / chars_per_token)
 
 
-def estimate_messages_tokens(messages: list[ChatMessage]) -> int:
+def estimate_messages_tokens(messages: list[ChatMessage], chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
     """Estimate total tokens for a list of messages."""
     total = 0
     for msg in messages:
-        total += estimate_tokens(msg.content)
+        total += estimate_tokens(msg.content, chars_per_token)
         total += 4  # overhead per message (role, formatting)
     return total
 
@@ -34,10 +41,14 @@ class ContextManager:
         system_prompt_budget: float = 0.15,    # 15% for system prompt
         memory_budget: float = 0.10,           # 10% for recalled memories
         history_budget: float = 0.65,          # 65% for conversation history
+        chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
     ):
         self.max_context_tokens = max_context_tokens
         self.reserved_output = reserved_output_tokens
-        self.available = max_context_tokens - reserved_output_tokens
+        self.chars_per_token = chars_per_token
+
+        # Apply safety margin: effective capacity accounts for estimation inaccuracy
+        self.available = int((max_context_tokens - reserved_output_tokens) / SAFETY_MARGIN)
 
         self.system_budget = int(self.available * system_prompt_budget)
         self.memory_budget_tokens = int(self.available * memory_budget)
@@ -45,7 +56,7 @@ class ContextManager:
 
     def trim_context(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Trim messages to fit within context window.
-        
+
         Strategy:
         1. System prompt always kept (first message)
         2. Memory context kept (second system message if exists)
@@ -55,7 +66,7 @@ class ContextManager:
         if not messages:
             return messages
 
-        total_tokens = estimate_messages_tokens(messages)
+        total_tokens = estimate_messages_tokens(messages, self.chars_per_token)
 
         if total_tokens <= self.available:
             return messages  # Fits fine
@@ -76,9 +87,9 @@ class ContextManager:
                 history_msgs.append(msg)
 
         # System + current are non-negotiable
-        fixed_tokens = estimate_messages_tokens(system_msgs)
+        fixed_tokens = estimate_messages_tokens(system_msgs, self.chars_per_token)
         if current_msg:
-            fixed_tokens += estimate_tokens(current_msg.content) + 4
+            fixed_tokens += estimate_tokens(current_msg.content, self.chars_per_token) + 4
 
         # Budget remaining for history
         history_allowed = self.available - fixed_tokens
@@ -89,7 +100,7 @@ class ContextManager:
             if system_msgs:
                 system_msgs[0] = ChatMessage(
                     role="system",
-                    content=system_msgs[0].content[:self.system_budget * 4],  # rough char limit
+                    content=system_msgs[0].content[:int(self.system_budget * self.chars_per_token)],
                 )
             result = system_msgs
             if current_msg:
@@ -102,7 +113,7 @@ class ContextManager:
         running_tokens = 0
 
         for msg in reversed(history_msgs):
-            msg_tokens = estimate_tokens(msg.content) + 4
+            msg_tokens = estimate_tokens(msg.content, self.chars_per_token) + 4
             if running_tokens + msg_tokens > history_allowed:
                 break
             trimmed_history.insert(0, msg)
@@ -137,12 +148,12 @@ class ContextManager:
 
     def should_compact(self, messages: list[ChatMessage], threshold: float = 0.8) -> bool:
         """Check if context is getting too full and compaction should be triggered."""
-        total = estimate_messages_tokens(messages)
+        total = estimate_messages_tokens(messages, self.chars_per_token)
         return total >= (self.available * threshold)
 
     def get_usage(self, messages: list[ChatMessage]) -> dict:
         """Get context window usage stats."""
-        total = estimate_messages_tokens(messages)
+        total = estimate_messages_tokens(messages, self.chars_per_token)
         return {
             "used_tokens": total,
             "max_tokens": self.available,

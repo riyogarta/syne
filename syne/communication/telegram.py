@@ -1832,7 +1832,7 @@ Or just send me a message!"""
             await self._remote_slash_command(update, context, "/compact", node_id)
             return
 
-        from ..compaction import compact_session, get_session_stats
+        from ..compaction import compact_session, get_session_stats, _build_preservation_context
         from ..db.connection import get_connection
 
         chat_id = str(update.effective_chat.id)
@@ -1873,9 +1873,23 @@ Or just send me a message!"""
         )
 
         try:
+            # Derive keep_recent and preservation context (same as auto-compact)
+            _ctx_tokens = self.agent.context_mgr.available
+            _keep = max(20, min(200, _ctx_tokens // 5000))
+            key = f"telegram:{chat_id}"
+            conv = self.agent.conversations._active.get(key)
+            if conv and conv._message_cache:
+                _recent = conv._message_cache[-_keep:]
+                _preservation = _build_preservation_context(_recent)
+            else:
+                _preservation = ""
+
             result = await compact_session(
                 session_id=session_id,
                 provider=self.agent.provider,
+                keep_recent=_keep,
+                recent_context=_preservation,
+                chars_per_token=self.agent.context_mgr.chars_per_token,
             )
 
             if result:
@@ -4364,8 +4378,18 @@ Or just send me a message!"""
                 await update.message.reply_text("Conversation too short to compact.")
                 return
             try:
-                from ..compaction import compact_session
-                result = await compact_session(session_id=conv.session_id, provider=conv.provider)
+                from ..compaction import compact_session, _build_preservation_context
+                _ctx_tokens = conv.context_mgr.available
+                _keep = max(20, min(200, _ctx_tokens // 5000))
+                _recent = conv._message_cache[-_keep:] if conv._message_cache else []
+                _preservation = _build_preservation_context(_recent)
+                result = await compact_session(
+                    session_id=conv.session_id,
+                    provider=conv.provider,
+                    keep_recent=_keep,
+                    recent_context=_preservation,
+                    chars_per_token=conv.context_mgr.chars_per_token,
+                )
                 if result:
                     await conv.load_history()
                     await update.message.reply_text(

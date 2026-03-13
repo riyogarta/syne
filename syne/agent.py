@@ -97,14 +97,19 @@ class SyneAgent:
         models = await get_config("provider.models", None)
         active_key = await get_config("provider.active_model", None)
         ctx_window = None
+        _cpt = None  # chars_per_token from model entry
         if models and active_key:
             entry = get_model_from_list(models, active_key)
             if entry:
                 ctx_window = int(entry.get("context_window", 0)) or None
+                _params = entry.get("params") or {}
+                _cpt = _params.get("chars_per_token")
         ctx_window = ctx_window or self.provider.context_window
         reserved = self.provider.reserved_output_tokens
-        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
-        logger.info(f"Context window: {ctx_window} tokens (reserved output: {reserved})")
+        from .context import DEFAULT_CHARS_PER_TOKEN
+        _cpt = float(_cpt) if _cpt else DEFAULT_CHARS_PER_TOKEN
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved, chars_per_token=_cpt)
+        logger.info(f"Context window: {ctx_window} tokens (reserved output: {reserved}, chars_per_token: {_cpt})")
 
         # 6.5. Rate Limiter
         logger.info("Rate limiter initialized.")
@@ -179,14 +184,19 @@ class SyneAgent:
         models = await get_config("provider.models", None)
         active_key = await get_config("provider.active_model", None)
         ctx_window = None
+        _cpt = None
         if models and active_key:
             entry = get_model_from_list(models, active_key)
             if entry:
                 ctx_window = int(entry.get("context_window", 0)) or None
+                _params = entry.get("params") or {}
+                _cpt = _params.get("chars_per_token")
         ctx_window = ctx_window or self.provider.context_window
         reserved = self.provider.reserved_output_tokens
-        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved)
-        logger.info(f"Context window updated: {ctx_window} tokens (reserved output: {reserved})")
+        from .context import DEFAULT_CHARS_PER_TOKEN
+        _cpt = float(_cpt) if _cpt else DEFAULT_CHARS_PER_TOKEN
+        self.context_mgr = ContextManager(max_context_tokens=ctx_window, reserved_output_tokens=reserved, chars_per_token=_cpt)
+        logger.info(f"Context window updated: {ctx_window} tokens (reserved output: {reserved}, chars_per_token: {_cpt})")
 
         # Update conversation manager's provider + memory + context_mgr
         if self.conversations:

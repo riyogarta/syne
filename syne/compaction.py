@@ -10,12 +10,15 @@ from typing import Optional
 from .db.connection import get_connection
 from .db.models import get_config
 from .llm.provider import LLMProvider, ChatMessage
+from .context import DEFAULT_CHARS_PER_TOKEN
 
 logger = logging.getLogger("syne.compaction")
 
-CHARS_PER_TOKEN = 3.5  # rough estimate, same as context.py
-PROMPT_OVERHEAD_TOKENS = 2_000  # space for compaction prompt template + tags
+PROMPT_OVERHEAD_TOKENS = 4_096  # space for compaction prompt template + tags + previous summary
 OUTPUT_TOKENS = 16_384  # max_tokens for summary output
+SAFETY_MARGIN = 1.2  # 20% buffer — chars/4 heuristic underestimates for multi-byte chars,
+                      # code tokens, JSON, special tokens. Same approach as OpenClaw.
+TOOL_RESULT_CHARS_PER_TOKEN = 2.0  # tool results (code/JSON) tokenize less efficiently
 
 _BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{200,}={0,2}')
 _MAX_TOOL_RESULT_FOR_SUMMARY = 2_000
@@ -211,6 +214,7 @@ async def compact_session(
     provider: LLMProvider,
     keep_recent: int | None = None,
     recent_context: str = "",
+    chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
 ) -> Optional[dict]:
     """Compact a session by summarizing old messages.
 
@@ -267,14 +271,18 @@ async def compact_session(
         summarized_chars = sum(len(r["content"]) for r in old_rows)
         conv_text = _serialize_messages(old_rows)
 
-        # Cap input based on provider's actual context window
-        available_tokens = provider.context_window - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
-        max_input_chars = int(available_tokens * CHARS_PER_TOKEN)
+        # Cap input based on provider's actual context window.
+        # Apply SAFETY_MARGIN (20%) to compensate for estimateTokens() underestimation:
+        # chars/4 heuristic misses multi-byte chars, special tokens, code tokens, etc.
+        effective_context = int(provider.context_window / SAFETY_MARGIN)
+        available_tokens = effective_context - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
+        max_input_chars = int(available_tokens * chars_per_token)
         if len(conv_text) > max_input_chars:
             conv_text = conv_text[-max_input_chars:]
             logger.info(
                 f"Truncated summarizer input to {max_input_chars} chars "
-                f"(from {summarized_chars}, context_window={provider.context_window} tokens)"
+                f"(from {summarized_chars}, effective_context={effective_context}, "
+                f"context_window={provider.context_window} tokens, safety_margin={SAFETY_MARGIN})"
             )
 
         logger.info(
