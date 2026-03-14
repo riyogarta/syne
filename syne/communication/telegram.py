@@ -1829,8 +1829,8 @@ Or just send me a message!"""
         except Exception:
             pass
 
-        # KG pending — show independently of graph stats
-        if kg_pending:
+        # KG pending — show independently of graph stats (show even if 0)
+        if kg_pending is not None:
             lines.append(f"⏳ KG pending: {kg_pending}")
 
         await update.message.reply_text("\n".join(lines))
