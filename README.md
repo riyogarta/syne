@@ -205,6 +205,7 @@ Graph extraction uses the main chat LLM by default, switchable to Ollama via `/g
 
 Non-permanent memories fade naturally, mimicking human forgetting:
 
+- New memories start with `recall_count = 5` (configurable via `memory.initial_recall_count`)
 - Every **50 conversations** (configurable), `recall_count` decreases by 1
 - When `recall_count` reaches 0, the memory is **deleted**
 - Memories that are **recalled** (used in context) get a **+2 boost** each time
@@ -494,7 +495,8 @@ All configuration lives in the `config` table. Change via conversation or `updat
 | `memory.recall_limit` | `5` | Max memories per query |
 | `memory.decay_interval` | `50` | Decay every N conversations |
 | `memory.decay_amount` | `1` | Recall count decrease per decay cycle |
-| `memory.initial_recall_count` | `1` | Starting durability for new memories |
+| `memory.initial_recall_count` | `5` | Starting durability for new memories |
+| `memory.promotion_threshold` | `10` | Promote to permanent when recall_count exceeds this |
 | `memory.evaluator_driver` | `"ollama"` | Evaluator: "ollama" (local) or "provider" (main LLM) |
 | `memory.evaluator_model` | `"qwen3:0.6b"` | Ollama model for evaluation |
 
