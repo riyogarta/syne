@@ -1237,6 +1237,22 @@ class ConversationManager:
         else:
             msg = f"❌ Sub-agent failed (run: {run_id[:8]})\n\n{result}"
 
+        # Save to conversation history so the LLM knows the sub-agent finished.
+        # Without this, the bot has no memory of sub-agent results and can't
+        # answer questions about what happened.
+        conv = self._find_conversation_by_session(parent_session_id)
+        if conv:
+            # Truncate for history — execution reports can be long
+            history_msg = msg[:2000] if len(msg) > 2000 else msg
+            try:
+                await conv.save_message("system", history_msg, metadata={
+                    "type": "subagent_result",
+                    "run_id": run_id,
+                    "status": status,
+                })
+            except Exception as e:
+                logger.error(f"Failed to save sub-agent result to history: {e}")
+
         # Deliver via callbacks (e.g., Telegram, WhatsApp)
         if self._delivery_callbacks:
             for cb in self._delivery_callbacks:
@@ -1246,6 +1262,13 @@ class ConversationManager:
                     logger.error(f"Failed to deliver sub-agent result via {cb}: {e}")
         else:
             logger.info(f"Sub-agent result (no delivery callback): {msg[:200]}")
+
+    def _find_conversation_by_session(self, session_id: int) -> Optional[Conversation]:
+        """Find an active conversation by session ID."""
+        for conv in self._active.values():
+            if conv.session_id == session_id:
+                return conv
+        return None
 
     def add_delivery_callback(self, callback):
         """Register a callback for delivering sub-agent results.
