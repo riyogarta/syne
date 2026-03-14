@@ -174,6 +174,115 @@ def markdown_to_telegram_html(text: str) -> str:
     return output
 
 
+def _render_table_plain(table_lines: list[str]) -> str:
+    """Render markdown table rows as padded plain text inside ``` code block.
+
+    For WhatsApp and other platforms that don't support HTML but do support
+    triple-backtick code blocks for monospace display.
+    """
+    rows = []
+    for line in table_lines:
+        stripped = line.strip()
+        if stripped.startswith('|'):
+            stripped = stripped[1:]
+        if stripped.endswith('|'):
+            stripped = stripped[:-1]
+        cells = [_strip_md(c.strip()) for c in stripped.split('|')]
+        rows.append(cells)
+
+    if not rows:
+        return ''
+
+    col_count = max(len(r) for r in rows)
+    widths = [0] * col_count
+    for row in rows:
+        for j, cell in enumerate(row):
+            if j < col_count and len(cell) > widths[j]:
+                widths[j] = len(cell)
+
+    out = []
+    for idx, row in enumerate(rows):
+        parts = []
+        for j in range(col_count):
+            cell = row[j] if j < len(row) else ''
+            parts.append(cell + ' ' * (widths[j] - len(cell)))
+        out.append('| ' + ' | '.join(parts) + ' |')
+        if idx == 0:
+            sep_parts = ['-' * max(3, w) for w in widths]
+            out.append('|-' + '-|-'.join(sep_parts) + '-|')
+
+    return '```\n' + '\n'.join(out) + '\n```'
+
+
+def markdown_to_whatsapp(text: str) -> str:
+    """Convert markdown-formatted text to WhatsApp-compatible format.
+
+    WhatsApp supports: *bold*, _italic_, ~strikethrough~, `code`, ```code block```
+    Tables are wrapped in ``` for monospace display.
+    """
+    if not text:
+        return text
+
+    result = []
+    lines = text.split('\n')
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Code block: ```...```
+        if line.strip().startswith('```'):
+            code_lines = [line]
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith('```'):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                code_lines.append(lines[i])
+                i += 1
+            result.append('\n'.join(code_lines))
+            continue
+
+        # Markdown table detection
+        stripped = line.strip()
+        is_table_row = (
+            (stripped.startswith('|') and '|' in stripped[1:]) or
+            (stripped.count('|') >= 2 and not stripped.startswith('```'))
+        )
+        if is_table_row:
+            table_lines = []
+            while i < len(lines):
+                s = lines[i].strip()
+                if not s or (not s.startswith('|') and s.count('|') < 2):
+                    break
+                if re.match(r'^[\s|]*[\-:]+[\s\-:|]*$', s):
+                    i += 1
+                    continue
+                table_lines.append(lines[i])
+                i += 1
+            if table_lines:
+                result.append(_render_table_plain(table_lines))
+            continue
+
+        # Headers: # Header → *Header*
+        header_match = re.match(r'^#{1,6}\s+(.+)$', line)
+        if header_match:
+            result.append(f'*{header_match.group(1)}*')
+            i += 1
+            continue
+
+        # Inline formatting: **bold** → *bold*, ~~strike~~ → ~strike~
+        formatted = line
+        formatted = re.sub(r'\*\*(.+?)\*\*', r'*\1*', formatted)
+        formatted = re.sub(r'__(.+?)__', r'*\1*', formatted)
+        formatted = re.sub(r'~~(.+?)~~', r'~\1~', formatted)
+
+        result.append(formatted)
+        i += 1
+
+    return '\n'.join(result)
+
+
 def _strip_md(text: str) -> str:
     """Strip markdown formatting from text (for monospace display)."""
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)

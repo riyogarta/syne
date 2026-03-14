@@ -971,6 +971,10 @@ class WhatsAppAbility(Ability):
         if not text and not media_path:
             return
 
+        # Convert markdown to WhatsApp format (tables → code blocks, **bold** → *bold*)
+        from ..communication.formatting import markdown_to_whatsapp
+        text = markdown_to_whatsapp(text)
+
         async with self._send_lock:
             was_syncing = self._process is not None
             if was_syncing:
