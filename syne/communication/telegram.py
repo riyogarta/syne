@@ -2369,22 +2369,37 @@ Or just send me a message!"""
             await self._graph_menu_main(query)
 
         elif data == "graph:reprocess_force":
-            await query.answer("Reprocessing...")
+            await query.answer("Reprocessing started in background...")
             from ..memory.graph import reprocess_permanent_memories
-            stats = await reprocess_permanent_memories(self.agent.provider, force=True)
-            lines = [f"🔄 <b>Reprocess Complete</b>\n"]
-            if stats.get("reset"):
-                lines.append(f"Reset flags: {stats['reset']}")
-            lines.append(f"Processed: {stats['processed']}")
-            lines.append(f"Succeeded: {stats['succeeded']}")
-            lines.append(f"Failed: {stats['failed']}")
             await query.edit_message_text(
-                "\n".join(lines),
+                "🔄 <b>KG Reprocess Started</b>\n\n"
+                "Running in background. Results will be sent when complete.",
                 parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⬅️ Back", callback_data="graph:main")],
-                ]),
             )
+
+            async def _bg_reprocess():
+                try:
+                    stats = await reprocess_permanent_memories(self.agent.provider, force=True)
+                    lines = [f"🔄 <b>Reprocess Complete</b>\n"]
+                    if stats.get("reset"):
+                        lines.append(f"Reset flags: {stats['reset']}")
+                    lines.append(f"Processed: {stats['processed']}")
+                    lines.append(f"Succeeded: {stats['succeeded']}")
+                    lines.append(f"Failed: {stats['failed']}")
+                    await self.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text="\n".join(lines),
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.error(f"Background KG reprocess failed: {e}")
+                    await self.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=f"KG reprocess failed: {e}",
+                    )
+
+            import asyncio
+            asyncio.create_task(_bg_reprocess())
 
         elif data == "graph:add_menu":
             drivers = [

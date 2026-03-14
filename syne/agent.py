@@ -1826,15 +1826,9 @@ class SyneAgent:
             content=content,
             category=category,
             source="user_confirmed",
+            permanent=True,
         )
         if mem_id:
-            # Trigger KG extraction for user-confirmed memories
-            try:
-                import asyncio
-                from .memory.graph import extract_and_store as graph_extract
-                asyncio.create_task(graph_extract(self.provider, content, mem_id))
-            except Exception as e:
-                logger.debug(f"KG extraction skipped: {e}")
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
 

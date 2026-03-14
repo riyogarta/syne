@@ -65,6 +65,7 @@ async def extract_and_store(
     content: str,
     memory_id: int,
     speaker_name: str = "",
+    _use_semaphore: bool = True,
 ) -> bool:
     """Extract entities/relations from a permanent memory and store in graph.
 
@@ -73,44 +74,69 @@ async def extract_and_store(
 
     Uses a semaphore to limit concurrent extractions — prevents flooding
     the LLM provider when many memories are stored rapidly (bulk import).
+    Reprocess bypasses the semaphore since it's already sequential.
 
     Returns True if extraction succeeded, False otherwise.
     """
-    async with _KG_SEMAPHORE:
-        try:
-            enabled = await get_config("graph.enabled", True)
-            if not enabled:
-                return False
+    return await _do_extract_and_store(provider, content, memory_id, speaker_name, _use_semaphore)
 
-            driver = await get_config("graph.extractor_driver", "provider")
 
-            if driver == "ollama":
-                model = await get_config("graph.extractor_model", "qwen3:8b")
-                extracted = await _extract_via_ollama(content, model=model, speaker_name=speaker_name)
-            else:
-                extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
+async def _do_extract_and_store(
+    provider: LLMProvider,
+    content: str,
+    memory_id: int,
+    speaker_name: str,
+    use_semaphore: bool,
+) -> bool:
+    """Internal extraction — optionally throttled by semaphore."""
+    if use_semaphore:
+        async with _KG_SEMAPHORE:
+            result = await _run_extraction(provider, content, memory_id, speaker_name)
+        # Delay OUTSIDE semaphore — don't waste the slot on sleeping
+        await asyncio.sleep(_KG_DELAY)
+        return result
+    else:
+        return await _run_extraction(provider, content, memory_id, speaker_name)
 
-            if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
-                logger.debug(f"No entities/relations extracted from memory #{memory_id}")
-                # Mark as processed so reprocess won't pick it up again
-                await _mark_kg_processed(memory_id)
-                return False
 
-            await _store_graph(extracted, memory_id)
-            # Mark as processed
-            await _mark_kg_processed(memory_id)
-            logger.info(
-                f"Graph: stored {len(extracted.get('entities', []))} entities, "
-                f"{len(extracted.get('relations', []))} relations from memory #{memory_id}"
-            )
-            return True
-
-        except Exception as e:
-            logger.error(f"Graph extraction failed for memory #{memory_id}: {e}")
+async def _run_extraction(
+    provider: LLMProvider,
+    content: str,
+    memory_id: int,
+    speaker_name: str,
+) -> bool:
+    """Core extraction logic without throttling."""
+    try:
+        enabled = await get_config("graph.enabled", True)
+        if not enabled:
             return False
-        finally:
-            # Throttle — delay before releasing semaphore slot
-            await asyncio.sleep(_KG_DELAY)
+
+        driver = await get_config("graph.extractor_driver", "provider")
+
+        if driver == "ollama":
+            model = await get_config("graph.extractor_model", "qwen3:8b")
+            extracted = await _extract_via_ollama(content, model=model, speaker_name=speaker_name)
+        else:
+            extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
+
+        if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
+            logger.debug(f"No entities/relations extracted from memory #{memory_id}")
+            # Mark as processed so reprocess won't pick it up again
+            await _mark_kg_processed(memory_id)
+            return False
+
+        await _store_graph(extracted, memory_id)
+        # Mark as processed
+        await _mark_kg_processed(memory_id)
+        logger.info(
+            f"Graph: stored {len(extracted.get('entities', []))} entities, "
+            f"{len(extracted.get('relations', []))} relations from memory #{memory_id}"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Graph extraction failed for memory #{memory_id}: {e}")
+        return False
 
 
 async def _extract_via_provider(provider: LLMProvider, content: str, speaker_name: str = "") -> Optional[dict]:
@@ -430,11 +456,17 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
                 ORDER BY m.id
             """)
 
+        logger.info(f"KG reprocess: {len(rows)} memories to process")
         for row in rows:
             stats["processed"] += 1
             speaker = row["display_name"] or row["name"] or ""
             try:
-                ok = await extract_and_store(provider, row["content"], row["id"], speaker_name=speaker)
+                # Bypass semaphore — reprocess is already sequential, no need
+                # to compete with fire-and-forget tasks from evaluator
+                ok = await extract_and_store(
+                    provider, row["content"], row["id"],
+                    speaker_name=speaker, _use_semaphore=False,
+                )
                 if ok:
                     stats["succeeded"] += 1
                 else:
@@ -442,6 +474,8 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
             except Exception as e:
                 logger.error(f"Reprocess memory #{row['id']} failed: {e}")
                 stats["failed"] += 1
+            # Small delay between extractions to avoid flooding
+            await asyncio.sleep(0.3)
 
     except Exception as e:
         logger.error(f"Reprocess permanent memories failed: {e}")
