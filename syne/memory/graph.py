@@ -47,17 +47,6 @@ async def _mark_kg_processed(memory_id: int) -> None:
     """Mark a memory as KG-processed, regardless of extraction result."""
     try:
         async with get_connection() as conn:
-            # Ensure column exists
-            col_exists = await conn.fetchval(
-                """SELECT EXISTS(
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = 'memory' AND column_name = 'kg_processed'
-                )"""
-            )
-            if not col_exists:
-                await conn.execute(
-                    "ALTER TABLE memory ADD COLUMN kg_processed BOOLEAN DEFAULT false"
-                )
             await conn.execute(
                 "UPDATE memory SET kg_processed = true WHERE id = $1", memory_id
             )
@@ -381,6 +370,11 @@ async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
                 await conn.execute(
                     "ALTER TABLE memory ADD COLUMN kg_processed BOOLEAN DEFAULT false"
                 )
+                # Backfill: mark memories that already have KG relations as processed
+                await conn.execute("""
+                    UPDATE memory SET kg_processed = true
+                    WHERE id IN (SELECT DISTINCT source_memory_id FROM kg_relations)
+                """)
 
             # Find permanent memories that haven't been KG-processed yet
             rows = await conn.fetch("""
