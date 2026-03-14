@@ -180,11 +180,11 @@ Two retrieval systems work together to find relevant memories:
 | **Knowledge Graph** | Entity lookup → relation traversal | Structured facts ("who is Agha's mother?") |
 
 ```
-User:  Remember: Riyogarta is married to Yuliazmi. Agha is their daughter.
+User:  Remember: Alex is married to Sarah. Emma is their daughter.
 Syne:  Stored.
-       → Graph: Riyogarta --married_to--> Yuliazmi
-                Agha --child_of--> Riyogarta
-                Agha --child_of--> Yuliazmi
+       → Graph: Alex --married_to--> Sarah
+                Emma --child_of--> Alex
+                Emma --child_of--> Sarah
 ```
 
 | Embedding Provider | Model | Dimensions | Cost | Requirements |
