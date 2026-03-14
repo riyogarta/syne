@@ -2253,10 +2253,7 @@ Or just send me a message!"""
                 f"{prefix}{label}", callback_data=f"graph:detail:{key}"
             )])
         buttons.append([InlineKeyboardButton("➕ Add Extractor", callback_data="graph:add_menu")])
-        buttons.append([
-            InlineKeyboardButton("🔄 Reprocess", callback_data="graph:reprocess"),
-            InlineKeyboardButton("🔄 Force Reprocess", callback_data="graph:reprocess_force"),
-        ])
+        buttons.append([InlineKeyboardButton("🔄 Reprocess Memories", callback_data="graph:reprocess_force")])
         buttons.append([InlineKeyboardButton(
             f"{'✅ ' if enabled else '⬜ '}Knowledge Graph: {en_label}",
             callback_data="graph:toggle",
@@ -2371,11 +2368,10 @@ Or just send me a message!"""
             await query.answer("Extractor deleted")
             await self._graph_menu_main(query)
 
-        elif data in ("graph:reprocess", "graph:reprocess_force"):
-            force = data == "graph:reprocess_force"
-            await query.answer("Force reprocessing..." if force else "Reprocessing...")
+        elif data == "graph:reprocess_force":
+            await query.answer("Reprocessing...")
             from ..memory.graph import reprocess_permanent_memories
-            stats = await reprocess_permanent_memories(self.agent.provider, force=force)
+            stats = await reprocess_permanent_memories(self.agent.provider, force=True)
             lines = [f"🔄 <b>Reprocess Complete</b>\n"]
             if stats.get("reset"):
                 lines.append(f"Reset flags: {stats['reset']}")
