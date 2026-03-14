@@ -36,10 +36,12 @@ class TestParseExtraction:
         assert _parse_extraction(None) is None
 
     def test_no_json(self):
-        assert _parse_extraction("I don't know what to extract") is None
+        with pytest.raises(ValueError):
+            _parse_extraction("I don't know what to extract")
 
     def test_invalid_json(self):
-        assert _parse_extraction('{"entities": [broken') is None
+        with pytest.raises(ValueError):
+            _parse_extraction('{"entities": [broken')
 
     def test_entity_missing_name(self):
         raw = json.dumps({

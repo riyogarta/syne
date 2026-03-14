@@ -161,21 +161,32 @@ async def _extract_via_ollama(
 
         return _parse_extraction(raw)
 
+    except ValueError:
+        raise  # Parse failure — let caller handle (don't mark kg_processed)
     except Exception as e:
         logger.error(f"Ollama graph extraction failed: {e}")
         return None
 
 
 def _parse_extraction(raw: str) -> Optional[dict]:
-    """Parse LLM extraction output into structured dict."""
+    """Parse LLM extraction output into structured dict.
+
+    Returns None on parse failure — caller should NOT mark kg_processed
+    for parse errors (they are retryable, unlike genuinely empty results).
+    Raises ValueError on parse failure so caller can distinguish from empty.
+    """
     if not raw:
         return None
 
-    # Extract JSON from response (may have markdown code fences)
-    json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    # Strip markdown code fences: ```json ... ``` or ``` ... ```
+    cleaned = re.sub(r'```(?:json)?\s*', '', raw)
+    cleaned = cleaned.strip()
+
+    # Extract JSON from response
+    json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if not json_match:
         logger.warning(f"No JSON found in extraction: {raw[:200]}")
-        return None
+        raise ValueError(f"No JSON found in extraction output")
 
     try:
         data = json.loads(json_match.group())
@@ -197,7 +208,7 @@ def _parse_extraction(raw: str) -> Optional[dict]:
 
     except json.JSONDecodeError:
         logger.warning(f"Invalid JSON in extraction: {raw[:200]}")
-        return None
+        raise ValueError(f"Invalid JSON in extraction output")
 
 
 async def _resolve_entity(name: str, entity_type: str, description: str = "") -> int:
