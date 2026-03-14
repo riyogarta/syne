@@ -269,8 +269,8 @@ class MemoryEngine:
         source: str = "user_confirmed",
         user_id: Optional[int] = None,
         importance: float = 0.5,
-        similarity_threshold: float = 0.85,
-        conflict_threshold: float = 0.70,
+        similarity_threshold: float = None,
+        conflict_threshold: float = None,
         permanent: bool = False,
     ) -> Optional[int]:
         """Store a memory with conflict resolution.
@@ -287,6 +287,14 @@ class MemoryEngine:
 
         Returns memory ID (new or updated) or None if duplicate/skipped.
         """
+        from ..db.models import get_config
+
+        # Read thresholds from config (allow per-call override)
+        if similarity_threshold is None:
+            similarity_threshold = float(await get_config("memory.similarity_threshold", "0.85"))
+        if conflict_threshold is None:
+            conflict_threshold = float(await get_config("memory.conflict_threshold", "0.70"))
+
         # Embed ONCE — reuse vector for similarity search + store/update
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector

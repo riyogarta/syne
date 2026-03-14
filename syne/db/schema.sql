@@ -345,6 +345,8 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.decay_amount', '1', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '5', 'Starting recall_count for new memories'),
     ('memory.promotion_threshold', '10', 'Promote non-permanent to permanent when recall_count exceeds this'),
+    ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
+    ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
