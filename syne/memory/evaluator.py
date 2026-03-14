@@ -331,6 +331,11 @@ async def evaluate_and_store(
         evaluator_driver: "ollama" (local, no rate limit) or "provider" (main LLM)
         evaluator_model: Ollama model name when driver == "ollama"
     """
+    # Detect explicit "remember" — sets permanent=True + KG
+    # Also acts as safety net if LLM doesn't call memory_store tool.
+    # Dedup in store_if_new prevents double store.
+    is_explicit = _is_explicit_remember(user_message)
+
     result = None
     if evaluator_driver == "ollama":
         result = await evaluate_message_ollama(user_message, model=evaluator_model)
@@ -345,9 +350,8 @@ async def evaluate_and_store(
     if not result:
         return None
 
-    # Detect explicit "remember this" → permanent memory
-    permanent = _is_explicit_remember(user_message)
-    
+    permanent = is_explicit
+
     mem_id = await memory_engine.store_if_new(
         content=result["content"],
         category=result["category"],
@@ -359,7 +363,7 @@ async def evaluate_and_store(
 
     if mem_id:
         logger.info(f"Stored memory #{mem_id}: [{result['category']}] {result['content'][:80]}")
-        # Extract knowledge graph entities/relations from permanent memories
+        # Permanent memory → trigger KG extraction
         if permanent:
             from .graph import extract_and_store as graph_extract
             asyncio.create_task(graph_extract(provider, result["content"], mem_id, speaker_name=speaker_name))

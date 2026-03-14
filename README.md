@@ -102,24 +102,41 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **decay engine** ensures only relevant memories survive.
 
-### The Three Engines
+### Memory Flow
 
-#### 1. Evaluator — "Is this worth remembering?"
+Two modes, depending on whether `auto_capture` is enabled:
 
-A small, local LLM (default: Ollama qwen3:0.6b, **$0**) evaluates every message through a 3-layer filter:
+#### Auto Capture OFF (default)
 
 ```
-User message
-    │
-    ├─ Layer 1: Quick Filter (no LLM call)
-    │   └─ Skip: greetings, short messages, questions-only, technical noise
-    │
-    ├─ Layer 2: LLM Evaluation (evaluator model)
-    │   └─ Is this a fact, preference, event, decision, or lesson?
-    │   └─ Assigns: category, importance score (0.0–1.0), cleaned content
-    │
-    └─ Layer 3: Similarity Dedup (embedding model)
-        └─ Does this already exist? (cosine similarity check)
+Chat ──→ "Ingat/Remember" detected?
+          │
+          ├─ Yes → memory_store tool → permanent=true → Embed + KG
+          │
+          └─ No  → nothing stored (chat history only)
+```
+
+Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") trigger memory storage. Zero cost when not storing.
+
+#### Auto Capture ON
+
+```
+Chat ──→ "Ingat/Remember" detected?
+          │
+          ├─ Yes → memory_store tool → permanent=true → Embed + KG
+          │        (evaluator also processes as safety net — dedup prevents double store)
+          │
+          └─ No  → Evaluator processes message:
+                    │
+                    ├─ Layer 1: Quick Filter (no LLM call)
+                    │   └─ Skip: greetings, 1-word messages, questions-only, technical noise
+                    │
+                    ├─ Layer 2: LLM Evaluation (Ollama, $0)
+                    │   └─ Worth storing? Assigns category, importance, cleaned content
+                    │
+                    └─ Layer 3: Similarity Dedup (embedding)
+                        └─ New? → permanent=false → Embed (no KG) → subject to decay
+                        └─ Duplicate? → skip
 ```
 
 The evaluator runs **asynchronously** — it never blocks the chat response. Only user-confirmed facts are stored, never assistant suggestions.
@@ -129,20 +146,38 @@ The evaluator runs **asynchronously** — it never blocks the chat response. Onl
 | **Ollama** (default) | qwen3:0.6b | **$0** | Fast (local) | Good for most content |
 | Provider (main LLM) | Same as chat model | Tokens + 40s delay | Slower | Higher accuracy |
 
+#### Memory Recall
+
+When the user sends a message (2+ words), Syne retrieves relevant memories:
+
+```
+User message (2+ words)
+    │
+    ├─ Embedding Search — cosine similarity over all memory vectors (pgvector HNSW)
+    │
+    └─ Knowledge Graph — entity name match → 1-hop relation traversal
+```
+
+Both results are injected into the conversation context — the LLM sees everything and decides the best answer. Single-word messages ("ok", "ya", "thanks") skip recall entirely.
+
+### The Three Engines
+
+#### 1. Evaluator — "Is this worth remembering?"
+
+A small, local LLM (default: Ollama qwen3:0.6b, **$0**) evaluates messages when `auto_capture` is enabled. Explicit "remember" commands bypass the evaluator entirely — the LLM's `memory_store` tool handles them directly as permanent memories.
+
 #### 2. Embedding & Knowledge Graph — "How do I find this later?"
 
 Two retrieval systems work together to find relevant memories:
 
 **Semantic Search (Embedding)** — Every memory is converted to a high-dimensional vector. When the user asks a question, pgvector finds the most similar memories using cosine distance with an HNSW index. This is what makes memory **unlimited** — millions of memories, millisecond lookup by meaning.
 
-**Knowledge Graph** — Permanent memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts.
+**Knowledge Graph** — Permanent memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts. KG extraction only runs for **permanent** memories — transient memories are too short-lived to justify the cost.
 
 | Source | How it works | Best for |
 |--------|-------------|----------|
 | **Embedding** | Cosine similarity over memory vectors | Fuzzy recall ("what do you know about my work?") |
 | **Knowledge Graph** | Entity lookup → relation traversal | Structured facts ("who is Agha's mother?") |
-
-Both results are injected into the conversation context — the LLM sees everything and decides the best answer.
 
 ```
 User:  Remember: Riyogarta is married to Yuliazmi. Agha is their daughter.
@@ -174,16 +209,18 @@ Non-permanent memories fade naturally, mimicking human forgetting:
 - When `recall_count` reaches 0, the memory is **deleted**
 - Memories that are **recalled** (used in context) get a **+2 boost** each time
 - **Permanent** memories (explicit "remember this") **never decay**
+- Memories with `recall_count` exceeding the **promotion threshold** (default: 10) are **promoted to permanent** — they've proven their value through frequent recall, and KG extraction runs automatically
 
-This creates a natural selection: useful memories that keep getting recalled survive indefinitely, while irrelevant ones fade away. You don't need to manually clean up — the system self-maintains.
+This creates a natural selection: useful memories that keep getting recalled survive indefinitely and eventually become permanent, while irrelevant ones fade away. You don't need to manually clean up — the system self-maintains.
 
 ### Memory Types
 
-| Type | Decay | Created by | Example |
-|------|-------|------------|---------|
-| **Permanent** | Never | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
-| **Transient** | Fades over time | Auto-capture evaluation | Casual mentions, observations |
-| **Conversation history** | Compacted when long | Every message automatically | Full chat logs in `messages` table |
+| Type | Decay | KG | Created by | Example |
+|------|-------|-----|------------|---------|
+| **Permanent** | Never | Yes | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
+| **Promoted** | Never | Yes (on promotion) | Auto-captured, recalled 10+ times | Frequently useful observations |
+| **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
+| **Conversation history** | Compacted when long | No | Every message automatically | Full chat logs in `messages` table |
 
 ### Conflict Resolution
 

@@ -36,7 +36,7 @@ class MemoryEngine:
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector
         
-        initial_count = int(await get_config("memory.initial_recall_count", "1")) if not permanent else 0
+        initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
@@ -77,6 +77,12 @@ class MemoryEngine:
         allowed, reason = check_rule_760("", requester_access_level)
         if not allowed:
             logger.info(f"Memory recall blocked: {reason}")
+            return []
+
+        # Skip recall for very short queries (1 word) — no meaningful semantic match
+        words = [w for w in query.strip().split() if len(w) > 1]
+        if len(words) < 2:
+            logger.debug(f"Recall skipped: query too short ({query!r})")
             return []
 
         # Generate query embedding
@@ -365,7 +371,7 @@ class MemoryEngine:
     ) -> int:
         """Store a memory with a pre-computed embedding vector."""
         from ..db.models import get_config
-        initial_count = int(await get_config("memory.initial_recall_count", "1")) if not permanent else 0
+        initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
@@ -512,8 +518,37 @@ class MemoryEngine:
             return  # Not time yet
         
         decay_amount = int(await get_config("memory.decay_amount", "1"))
-        
+        promotion_threshold = int(await get_config("memory.promotion_threshold", "10"))
+
         async with get_connection() as conn:
+            # Promote non-permanent memories with recall_count > threshold to permanent
+            promoted = await conn.fetch("""
+                UPDATE memory m
+                SET permanent = true, updated_at = NOW()
+                FROM (
+                    SELECT m2.id, m2.content, COALESCE(u.display_name, u.name, '') AS speaker
+                    FROM memory m2
+                    LEFT JOIN users u ON m2.user_id = u.id
+                    WHERE m2.permanent = false
+                      AND m2.recall_count > $1
+                ) sub
+                WHERE m.id = sub.id
+                RETURNING m.id, m.content, sub.speaker
+            """, promotion_threshold)
+            if promoted:
+                logger.info(f"Memory decay: promoted {len(promoted)} memories to permanent")
+                # Trigger KG extraction for newly promoted memories
+                import asyncio
+                from .graph import extract_and_store as graph_extract
+                for row in promoted:
+                    try:
+                        asyncio.create_task(graph_extract(
+                            self.provider, row["content"], row["id"],
+                            speaker_name=row["speaker"],
+                        ))
+                    except Exception as e:
+                        logger.debug(f"KG extraction skipped for promoted memory #{row['id']}: {e}")
+
             # Decay non-permanent memories
             await conn.execute("""
                 UPDATE memory
@@ -522,7 +557,7 @@ class MemoryEngine:
                 WHERE permanent = false
                   AND recall_count > 0
             """, decay_amount)
-            
+
             # Delete memories with recall_count <= 0
             deleted = await conn.fetch("""
                 DELETE FROM memory
@@ -530,7 +565,7 @@ class MemoryEngine:
                   AND recall_count <= 0
                 RETURNING id, content
             """)
-            
+
             if deleted:
                 logger.info(f"Memory decay: deleted {len(deleted)} forgotten memories")
                 for row in deleted:

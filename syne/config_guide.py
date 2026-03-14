@@ -55,18 +55,20 @@ Which model judges whether a message is worth remembering.
 |-----|---------|------|
 | `memory.decay_interval` | `50` | integer |
 | `memory.decay_amount` | `1` | integer |
-| `memory.initial_recall_count` | `1` | integer |
+| `memory.initial_recall_count` | `5` | integer |
+| `memory.promotion_threshold` | `10` | integer |
 
-Controls how fast non-permanent memories fade.
+Controls how fast non-permanent memories fade and when they get promoted.
 - `decay_interval` — every N conversations, decay triggers. Lower = memories fade faster.
 - `decay_amount` — how much `recall_count` decreases per decay cycle.
 - `initial_recall_count` — starting durability of new memories. Higher = lasts more cycles.
+- `promotion_threshold` — when recall_count exceeds this, memory is promoted to permanent + KG extraction.
 - **Increase interval when**: Memories disappear too fast, bot forgets useful context.
 - **Decrease interval when**: Too many stale memories accumulate, bot recalls irrelevant things.
 - **Increase initial_recall_count when**: Auto-captured memories should last longer by default.
-- **Warning**: With default values (interval=50, amount=1, initial=1), a memory that is never
-  recalled will be deleted after 50 conversations. Frequently recalled memories get +2 boost
-  each time, so useful memories survive naturally.
+- **Warning**: With default values (interval=50, amount=1, initial=5), a memory that is never
+  recalled will be deleted after 250 conversations. Frequently recalled memories get +2 boost
+  each time, and memories with recall_count > 10 are promoted to permanent.
 
 ### Recall & Importance
 | Key | Default | Type |
