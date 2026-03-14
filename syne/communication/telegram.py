@@ -1826,10 +1826,12 @@ Or just send me a message!"""
             type_parts = ", ".join(f"{t['type']}: {t['count']}" for t in gs["types"])
             if type_parts:
                 lines.append(type_parts)
-            if kg_pending:
-                lines.append(f"⏳ KG pending: {kg_pending}")
         except Exception:
             pass
+
+        # KG pending — show independently of graph stats
+        if kg_pending:
+            lines.append(f"⏳ KG pending: {kg_pending}")
 
         await update.message.reply_text("\n".join(lines))
 
