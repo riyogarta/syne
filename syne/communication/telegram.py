@@ -1800,6 +1800,14 @@ Or just send me a message!"""
             session_count = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions")
             message_count = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
 
+            # KG pending count
+            try:
+                kg_pending = await conn.fetchval(
+                    "SELECT COUNT(*) FROM memory WHERE permanent = true AND (kg_processed IS NOT TRUE)"
+                )
+            except Exception:
+                kg_pending = None
+
         cat_parts = " • ".join(f"{row['category']}: {row['c']}" for row in by_cat)
         lines = [
             f"🧠 Memory: {total['c']} items",
@@ -1818,6 +1826,8 @@ Or just send me a message!"""
             type_parts = ", ".join(f"{t['type']}: {t['count']}" for t in gs["types"])
             if type_parts:
                 lines.append(type_parts)
+            if kg_pending:
+                lines.append(f"⏳ KG pending: {kg_pending}")
         except Exception:
             pass
 
