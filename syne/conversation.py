@@ -1005,6 +1005,21 @@ class Conversation:
                         content=f"Tool '{name}' failed permanently ({result.error_type}). Try an alternative approach.",
                     ))
 
+                # Anti-hallucination: flag exec results with non-zero exit code
+                # The LLM sometimes claims success despite error output.
+                if name == "exec" and result.ok:
+                    import re as _re
+                    _ec_match = _re.search(r'exit_code:\s*(\d+)', result.content)
+                    if _ec_match and _ec_match.group(1) != "0":
+                        context.append(ChatMessage(
+                            role="system",
+                            content=(
+                                f"IMPORTANT: The exec command exited with code {_ec_match.group(1)} "
+                                f"(non-zero = error). Report the ACTUAL output to the user. "
+                                f"Do NOT claim the command succeeded."
+                            ),
+                        ))
+
                 result_str = result.content
 
                 # ═══════════════════════════════════════════════════════
