@@ -205,7 +205,12 @@ class SubAgentManager:
             "- update_config, update_soul, update_ability\n"
             "- manage_group, manage_user\n"
             "- spawn_subagent (no nesting)\n\n"
-            "Analogy: You're a worker who can do tasks, but cannot change company policy.\n"
+            "## IMPORTANT CONSTRAINTS:\n"
+            "- You have a LIMITED number of tool call rounds. Use them wisely.\n"
+            "- NEVER use 'sleep' inside exec to wait/monitor — it wastes rounds.\n"
+            "- For long tasks: launch as background script (nohup) then STOP. "
+            "Do NOT poll/monitor progress — the user can check manually.\n"
+            "- Prefer doing the actual work directly over writing scripts to do it later.\n"
         )
         messages.append(ChatMessage(role="system", content=subagent_prompt))
 
@@ -240,9 +245,42 @@ class SubAgentManager:
         total_input_tokens += getattr(response, "input_tokens", 0) or 0
         total_output_tokens += getattr(response, "output_tokens", 0) or 0
 
-        # Tool-calling loop — no hard round limit, runs until LLM stops
+        # Tool-calling loop with round limit and inter-round delay
+        max_rounds = await get_config("subagents.max_rounds", 30)
+        round_delay = await get_config("subagents.round_delay", 2.0)  # seconds between rounds
         round_num = 0
+        forced_stop = False
         while response.tool_calls:
+            # Hard round limit — force stop to prevent runaway sub-agents
+            if round_num >= max_rounds:
+                logger.warning(f"Sub-agent {run_id[:8]}: hit max rounds ({max_rounds}), forcing stop")
+                messages.append(ChatMessage(
+                    role="system",
+                    content=(
+                        f"STOP. You have reached the maximum of {max_rounds} tool call rounds. "
+                        "Summarize what you have accomplished so far. If the task requires more work, "
+                        "describe what remains so the user can continue manually or spawn another sub-agent."
+                    ),
+                ))
+                forced_stop = True
+                break
+
+            # Warn at 80% of limit
+            if round_num == int(max_rounds * 0.8):
+                messages.append(ChatMessage(
+                    role="system",
+                    content=(
+                        f"WARNING: You have used {round_num}/{max_rounds} rounds. "
+                        "Wrap up your work soon. If the task needs a long-running process, "
+                        "launch it as a background script (nohup) and finish — do NOT monitor "
+                        "it with sleep loops, that wastes rounds."
+                    ),
+                ))
+
+            # Inter-round delay — yield CPU/API to main conversation
+            if round_num > 0 and round_delay > 0:
+                await asyncio.sleep(round_delay)
+
             # Add assistant message with tool calls
             messages.append(ChatMessage(
                 role="assistant",
@@ -264,7 +302,7 @@ class SubAgentManager:
                     if isinstance(args, str):
                         args = json.loads(args)
                 tool_call_id = tool_call.get("id")
-                logger.info(f"Sub-agent {run_id[:8]} tool call (round {round_num + 1}): {name}({args})")
+                logger.info(f"Sub-agent {run_id[:8]} tool call (round {round_num + 1}/{max_rounds}): {name}({args})")
                 parsed.append((name, args, tool_call_id))
 
             # Execute tools in parallel
@@ -299,6 +337,16 @@ class SubAgentManager:
             total_output_tokens += getattr(response, "output_tokens", 0) or 0
             round_num += 1
 
+        # If forced stop, get final summary response (no tools)
+        if forced_stop:
+            response = await llm.chat(
+                messages=messages,
+                tools=None,
+                temperature=0.3,
+            )
+            total_input_tokens += getattr(response, "input_tokens", 0) or 0
+            total_output_tokens += getattr(response, "output_tokens", 0) or 0
+
         # Track total tokens
         async with get_connection() as conn:
             await conn.execute("""
@@ -312,7 +360,7 @@ class SubAgentManager:
         # verifiable data to the user, not just the LLM's narrative.
         llm_narrative = response.content or ""
         report_lines = ["\n\n--- EXECUTION REPORT (auto-generated, not editable by AI) ---"]
-        report_lines.append(f"Tool call rounds: {round_num}")
+        report_lines.append(f"Tool call rounds: {round_num}/{max_rounds}{' (FORCED STOP)' if forced_stop else ''}")
         report_lines.append(f"Total tool calls: {len(tool_call_log)}")
         if tool_call_counts:
             for tname, counts in sorted(tool_call_counts.items()):
