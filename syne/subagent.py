@@ -8,7 +8,7 @@ Sub-agents are a CORE capability (not an ability). They enable:
 
 Guard rails:
 - Max concurrent sub-agents (default: 2)
-- Timeout per sub-agent (default: 5 min)
+- Timeout per sub-agent (default: 24 hours)
 - No nesting: sub-agents cannot spawn sub-agents
 - Owner can disable entirely via config
 - SECURITY: Sub-agents inherit owner tools but config/management tools blocked
@@ -56,7 +56,7 @@ class SubAgentManager:
 
     async def timeout_seconds(self) -> int:
         """Get sub-agent timeout."""
-        return await get_config("subagents.timeout_seconds", 900)
+        return await get_config("subagents.timeout_seconds", 86400)
 
     @property
     def active_count(self) -> int:
@@ -225,6 +225,12 @@ class SubAgentManager:
         total_input_tokens = 0
         total_output_tokens = 0
 
+        # ── Factual tool call tracking ──
+        # Track every tool call and its success/failure so the completion
+        # report contains verifiable data, not LLM-generated claims.
+        tool_call_log: list[dict] = []  # [{name, success, error?}, ...]
+        tool_call_counts: dict[str, dict] = {}  # name -> {total, success, failed}
+
         # Initial LLM call
         response = await llm.chat(
             messages=messages,
@@ -267,7 +273,17 @@ class SubAgentManager:
 
             for i, raw in enumerate(raw_results):
                 name, args, tool_call_id = parsed[i]
+                is_error = isinstance(raw, Exception) or (isinstance(raw, str) and raw.startswith("Error:"))
                 result = str(raw) if not isinstance(raw, Exception) else f"Error: {raw}"
+
+                # Track this call
+                success = not is_error
+                tool_call_log.append({"name": name, "success": success})
+                if name not in tool_call_counts:
+                    tool_call_counts[name] = {"total": 0, "success": 0, "failed": 0}
+                tool_call_counts[name]["total"] += 1
+                tool_call_counts[name]["success" if success else "failed"] += 1
+
                 tool_meta = {"tool_name": name}
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
@@ -291,7 +307,25 @@ class SubAgentManager:
                 WHERE run_id = $3
             """, total_input_tokens, total_output_tokens, run_id)
 
-        return response.content
+        # ── Build factual execution report ──
+        # This is appended to the result so the completion callback delivers
+        # verifiable data to the user, not just the LLM's narrative.
+        llm_narrative = response.content or ""
+        report_lines = ["\n\n--- EXECUTION REPORT (auto-generated, not editable by AI) ---"]
+        report_lines.append(f"Tool call rounds: {round_num}")
+        report_lines.append(f"Total tool calls: {len(tool_call_log)}")
+        if tool_call_counts:
+            for tname, counts in sorted(tool_call_counts.items()):
+                status = f"{counts['success']} ok"
+                if counts['failed']:
+                    status += f", {counts['failed']} failed"
+                report_lines.append(f"  {tname}: {counts['total']} calls ({status})")
+        else:
+            report_lines.append("  (no tools were called)")
+        report_lines.append(f"Tokens: {total_input_tokens} in / {total_output_tokens} out")
+        report_lines.append("--- END REPORT ---")
+
+        return llm_narrative + "\n".join(report_lines)
 
     def _get_tool_schemas(self, access_level: str) -> list[dict]:
         """Get tool schemas available to sub-agents (filtered)."""

@@ -1062,6 +1062,20 @@ class Conversation:
                 if guide:
                     context.append(ChatMessage(role="system", content=guide))
 
+                # Anti-hallucination: after spawning a sub-agent, inject hard constraint
+                if name == "spawn_subagent":
+                    context.append(ChatMessage(
+                        role="system",
+                        content=(
+                            "CRITICAL: A sub-agent has been spawned and is running in the background. "
+                            "You do NOT know its progress or results yet. "
+                            "NEVER claim the task is done, report numbers (e.g. '110 processed'), "
+                            "or fabricate progress. Only say: the task has been delegated and the user "
+                            "will be notified when it completes. If the user asks for progress, "
+                            "use the subagent_status tool to check — do NOT guess."
+                        ),
+                    ))
+
             # Get next response — may contain more tool calls
             current = await self.provider.chat(
                 messages=context,

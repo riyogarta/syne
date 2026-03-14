@@ -1197,7 +1197,12 @@ class SyneAgent:
         )
         
         if result["success"]:
-            return f"Sub-agent spawned (run_id: {result['run_id']}). {result['message']}"
+            return (
+                f"Sub-agent spawned (run_id: {result['run_id']}). "
+                f"Status: PENDING — work has NOT started yet. "
+                f"Do NOT claim any results or progress. "
+                f"The user will be notified automatically when the sub-agent completes."
+            )
         return f"Failed to spawn: {result['error']}"
 
     async def _tool_subagent_status(self, run_id: str = "") -> str:
