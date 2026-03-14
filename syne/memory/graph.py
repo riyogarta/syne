@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("syne.memory.graph")
 
+# ── KG extraction throttle ──
+# Limits concurrent KG extractions to prevent flooding the LLM provider
+# when many memories are stored rapidly (e.g. bulk import).
+_KG_SEMAPHORE = asyncio.Semaphore(2)  # max 2 concurrent extractions
+_KG_DELAY = 1.0  # seconds between extractions
+
 EXTRACT_PROMPT = """You are a knowledge graph extractor. Given a memory statement, extract entities and their relationships.
 
 Output valid JSON only, no other text:
@@ -65,39 +71,46 @@ async def extract_and_store(
     This is the main entry point, called after a permanent memory is stored.
     Reads graph config to decide provider vs ollama extraction.
 
+    Uses a semaphore to limit concurrent extractions — prevents flooding
+    the LLM provider when many memories are stored rapidly (bulk import).
+
     Returns True if extraction succeeded, False otherwise.
     """
-    try:
-        enabled = await get_config("graph.enabled", True)
-        if not enabled:
-            return False
+    async with _KG_SEMAPHORE:
+        try:
+            enabled = await get_config("graph.enabled", True)
+            if not enabled:
+                return False
 
-        driver = await get_config("graph.extractor_driver", "provider")
+            driver = await get_config("graph.extractor_driver", "provider")
 
-        if driver == "ollama":
-            model = await get_config("graph.extractor_model", "qwen3:8b")
-            extracted = await _extract_via_ollama(content, model=model, speaker_name=speaker_name)
-        else:
-            extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
+            if driver == "ollama":
+                model = await get_config("graph.extractor_model", "qwen3:8b")
+                extracted = await _extract_via_ollama(content, model=model, speaker_name=speaker_name)
+            else:
+                extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
 
-        if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
-            logger.debug(f"No entities/relations extracted from memory #{memory_id}")
-            # Mark as processed so reprocess won't pick it up again
+            if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
+                logger.debug(f"No entities/relations extracted from memory #{memory_id}")
+                # Mark as processed so reprocess won't pick it up again
+                await _mark_kg_processed(memory_id)
+                return False
+
+            await _store_graph(extracted, memory_id)
+            # Mark as processed
             await _mark_kg_processed(memory_id)
+            logger.info(
+                f"Graph: stored {len(extracted.get('entities', []))} entities, "
+                f"{len(extracted.get('relations', []))} relations from memory #{memory_id}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Graph extraction failed for memory #{memory_id}: {e}")
             return False
-
-        await _store_graph(extracted, memory_id)
-        # Mark as processed
-        await _mark_kg_processed(memory_id)
-        logger.info(
-            f"Graph: stored {len(extracted.get('entities', []))} entities, "
-            f"{len(extracted.get('relations', []))} relations from memory #{memory_id}"
-        )
-        return True
-
-    except Exception as e:
-        logger.error(f"Graph extraction failed for memory #{memory_id}: {e}")
-        return False
+        finally:
+            # Throttle — delay before releasing semaphore slot
+            await asyncio.sleep(_KG_DELAY)
 
 
 async def _extract_via_provider(provider: LLMProvider, content: str, speaker_name: str = "") -> Optional[dict]:
@@ -345,17 +358,23 @@ async def get_graph_stats() -> dict:
         return {"entities": 0, "relations": 0, "types": []}
 
 
-async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
-    """Re-extract graph from all permanent memories that have no graph entries.
+async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = False) -> dict:
+    """Re-extract graph from permanent memories that haven't been KG-processed.
 
     Useful after fixing extraction bugs — processes memories that were
     stored before graph extraction was working.
+
+    Args:
+        provider: LLM provider for extraction
+        force: If True, reset kg_processed flag for memories that have no
+               KG relations yet, then reprocess them. Useful when bulk imports
+               incorrectly set kg_processed=True.
 
     Returns dict with counts of processed/succeeded/failed.
     """
     from ..db.connection import get_connection
 
-    stats = {"processed": 0, "succeeded": 0, "failed": 0}
+    stats = {"processed": 0, "succeeded": 0, "failed": 0, "reset": 0}
 
     try:
         async with get_connection() as conn:
@@ -375,6 +394,20 @@ async def reprocess_permanent_memories(provider: "LLMProvider") -> dict:
                     UPDATE memory SET kg_processed = true
                     WHERE id IN (SELECT DISTINCT source_memory_id FROM kg_relations)
                 """)
+
+            # Force mode: reset kg_processed for memories marked processed
+            # but that have NO actual KG relations (e.g. bulk import set True incorrectly)
+            if force:
+                reset_result = await conn.execute("""
+                    UPDATE memory SET kg_processed = false
+                    WHERE permanent = true
+                    AND kg_processed = true
+                    AND id NOT IN (SELECT DISTINCT source_memory_id FROM kg_relations)
+                """)
+                reset_count = int(reset_result.split()[-1]) if reset_result else 0
+                stats["reset"] = reset_count
+                if reset_count:
+                    logger.info(f"Force reprocess: reset kg_processed on {reset_count} memories")
 
             # Find permanent memories that haven't been KG-processed yet
             rows = await conn.fetch("""

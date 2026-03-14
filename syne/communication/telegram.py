@@ -2253,7 +2253,10 @@ Or just send me a message!"""
                 f"{prefix}{label}", callback_data=f"graph:detail:{key}"
             )])
         buttons.append([InlineKeyboardButton("➕ Add Extractor", callback_data="graph:add_menu")])
-        buttons.append([InlineKeyboardButton("🔄 Reprocess Memories", callback_data="graph:reprocess")])
+        buttons.append([
+            InlineKeyboardButton("🔄 Reprocess", callback_data="graph:reprocess"),
+            InlineKeyboardButton("🔄 Force Reprocess", callback_data="graph:reprocess_force"),
+        ])
         buttons.append([InlineKeyboardButton(
             f"{'✅ ' if enabled else '⬜ '}Knowledge Graph: {en_label}",
             callback_data="graph:toggle",
@@ -2368,15 +2371,19 @@ Or just send me a message!"""
             await query.answer("Extractor deleted")
             await self._graph_menu_main(query)
 
-        elif data == "graph:reprocess":
-            await query.answer("Reprocessing...")
+        elif data in ("graph:reprocess", "graph:reprocess_force"):
+            force = data == "graph:reprocess_force"
+            await query.answer("Force reprocessing..." if force else "Reprocessing...")
             from ..memory.graph import reprocess_permanent_memories
-            stats = await reprocess_permanent_memories(self.agent.provider)
+            stats = await reprocess_permanent_memories(self.agent.provider, force=force)
+            lines = [f"🔄 <b>Reprocess Complete</b>\n"]
+            if stats.get("reset"):
+                lines.append(f"Reset flags: {stats['reset']}")
+            lines.append(f"Processed: {stats['processed']}")
+            lines.append(f"Succeeded: {stats['succeeded']}")
+            lines.append(f"Failed: {stats['failed']}")
             await query.edit_message_text(
-                f"🔄 <b>Reprocess Complete</b>\n\n"
-                f"Processed: {stats['processed']}\n"
-                f"Succeeded: {stats['succeeded']}\n"
-                f"Failed: {stats['failed']}",
+                "\n".join(lines),
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⬅️ Back", callback_data="graph:main")],
