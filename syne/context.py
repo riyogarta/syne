@@ -1,4 +1,8 @@
-"""Context window management — keep token usage under control."""
+"""Context window management — keep token usage under control.
+
+Follows OpenClaw's dynamic budget approach: system prompt and memory use
+whatever space they need, history gets the rest. No fixed percentage splits.
+"""
 
 import logging
 from typing import Optional
@@ -32,16 +36,21 @@ def estimate_messages_tokens(messages: list[ChatMessage], chars_per_token: float
 
 
 class ContextManager:
-    """Manages context window to stay within model limits."""
+    """Manages context window to stay within model limits.
+
+    Dynamic budget: system prompt and memory use what they need,
+    history gets the remaining space. No fixed percentage allocations.
+    """
 
     def __init__(
         self,
         max_context_tokens: int = 128000,
         reserved_output_tokens: int = 4096,
-        system_prompt_budget: float = 0.15,    # 15% for system prompt
-        memory_budget: float = 0.10,           # 10% for recalled memories
-        history_budget: float = 0.65,          # 65% for conversation history
         chars_per_token: float = DEFAULT_CHARS_PER_TOKEN,
+        # Legacy params — accepted but ignored for backward compatibility
+        system_prompt_budget: float = 0.0,
+        memory_budget: float = 0.0,
+        history_budget: float = 0.0,
     ):
         self.max_context_tokens = max_context_tokens
         self.reserved_output = reserved_output_tokens
@@ -50,18 +59,14 @@ class ContextManager:
         # Apply safety margin: effective capacity accounts for estimation inaccuracy
         self.available = int((max_context_tokens - reserved_output_tokens) / SAFETY_MARGIN)
 
-        self.system_budget = int(self.available * system_prompt_budget)
-        self.memory_budget_tokens = int(self.available * memory_budget)
-        self.history_budget = int(self.available * history_budget)
-
     def trim_context(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Trim messages to fit within context window.
 
-        Strategy:
-        1. System prompt always kept (first message)
-        2. Memory context kept (second system message if exists)
-        3. History trimmed from oldest, keeping most recent
-        4. Current user message always kept (last message)
+        Dynamic strategy (OpenClaw approach):
+        1. System prompt always kept — uses whatever space it needs
+        2. Memory context kept — uses whatever space it needs
+        3. Current user message always kept
+        4. History gets ALL remaining space, trimmed from oldest
         """
         if not messages:
             return messages
@@ -86,22 +91,17 @@ class ContextManager:
             else:
                 history_msgs.append(msg)
 
-        # System + current are non-negotiable
+        # System + current are non-negotiable — they use what they need
         fixed_tokens = estimate_messages_tokens(system_msgs, self.chars_per_token)
         if current_msg:
             fixed_tokens += estimate_tokens(current_msg.content, self.chars_per_token) + 4
 
-        # Budget remaining for history
+        # History gets ALL remaining space
         history_allowed = self.available - fixed_tokens
 
         if history_allowed <= 0:
-            # Even system prompt is too big — truncate it
-            logger.warning("System prompt exceeds budget, truncating")
-            if system_msgs:
-                system_msgs[0] = ChatMessage(
-                    role="system",
-                    content=system_msgs[0].content[:int(self.system_budget * self.chars_per_token)],
-                )
+            # System prompt alone exceeds budget — keep it but warn
+            logger.warning("System prompt exceeds available context")
             result = system_msgs
             if current_msg:
                 result.append(current_msg)
