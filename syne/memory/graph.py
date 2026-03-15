@@ -119,14 +119,20 @@ async def _run_extraction(
         else:
             extracted = await _extract_via_provider(provider, content, speaker_name=speaker_name)
 
-        if not extracted or (not extracted.get("entities") and not extracted.get("relations")):
+        # None = error (provider returned empty, network error, etc.)
+        # Do NOT mark processed — keep as pending for retry
+        if extracted is None:
+            logger.warning(f"KG extraction returned None for memory #{memory_id} (will retry)")
+            return False
+
+        # Empty but valid extraction — genuinely no entities/relations
+        # Mark processed so it won't be retried
+        if not extracted.get("entities") and not extracted.get("relations"):
             logger.debug(f"No entities/relations extracted from memory #{memory_id}")
-            # Mark as processed so reprocess won't pick it up again
             await _mark_kg_processed(memory_id)
             return False
 
         await _store_graph(extracted, memory_id)
-        # Mark as processed
         await _mark_kg_processed(memory_id)
         logger.info(
             f"Graph: stored {len(extracted.get('entities', []))} entities, "
@@ -135,6 +141,7 @@ async def _run_extraction(
         return True
 
     except Exception as e:
+        # Error — do NOT mark processed, keep as pending for retry
         logger.error(f"Graph extraction failed for memory #{memory_id}: {e}")
         return False
 
@@ -457,22 +464,60 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
             """)
 
         logger.info(f"KG reprocess: {len(rows)} memories to process")
+
+        # Read config once — avoid repeated DB queries in loop
+        driver = await get_config("graph.extractor_driver", "provider")
+        kg_model = await get_config("graph.extractor_model", "qwen3:8b") if driver == "ollama" else None
+
+        import time as _time
+
         for row in rows:
             stats["processed"] += 1
             speaker = row["display_name"] or row["name"] or ""
+            t0 = _time.monotonic()
             try:
-                # Bypass semaphore — reprocess is already sequential, no need
-                # to compete with fire-and-forget tasks from evaluator
-                ok = await extract_and_store(
-                    provider, row["content"], row["id"],
-                    speaker_name=speaker, _use_semaphore=False,
-                )
-                if ok:
-                    stats["succeeded"] += 1
+                # Extract directly — bypass semaphore and per-call config reads
+                if driver == "ollama":
+                    extracted = await _extract_via_ollama(
+                        row["content"], model=kg_model, speaker_name=speaker,
+                    )
                 else:
+                    extracted = await _extract_via_provider(
+                        provider, row["content"], speaker_name=speaker,
+                    )
+
+                elapsed = _time.monotonic() - t0
+
+                # None = error → don't mark, keep pending for retry
+                if extracted is None:
+                    logger.warning(f"Reprocess #{row['id']}: extraction returned None ({elapsed:.1f}s)")
                     stats["failed"] += 1
+                    continue
+
+                # Empty but valid → genuinely no entities, mark processed
+                if not extracted.get("entities") and not extracted.get("relations"):
+                    logger.debug(f"Reprocess #{row['id']}: no entities ({elapsed:.1f}s)")
+                    await _mark_kg_processed(row["id"])
+                    stats["failed"] += 1
+                    continue
+
+                await _store_graph(extracted, row["id"])
+                await _mark_kg_processed(row["id"])
+                stats["succeeded"] += 1
+                logger.info(
+                    f"Reprocess #{row['id']}: {len(extracted.get('entities', []))} entities, "
+                    f"{len(extracted.get('relations', []))} relations ({elapsed:.1f}s)"
+                )
+
+            except ValueError as e:
+                elapsed = _time.monotonic() - t0
+                # Parse failure → don't mark, keep pending for retry
+                logger.warning(f"Reprocess #{row['id']}: parse error ({elapsed:.1f}s): {e}")
+                stats["failed"] += 1
             except Exception as e:
-                logger.error(f"Reprocess memory #{row['id']} failed: {e}")
+                elapsed = _time.monotonic() - t0
+                # Error → don't mark, keep pending for retry
+                logger.error(f"Reprocess #{row['id']} failed ({elapsed:.1f}s): {e}")
                 stats["failed"] += 1
             # Small delay between extractions to avoid flooding
             await asyncio.sleep(0.3)
