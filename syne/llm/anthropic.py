@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import random
 import time
 from typing import Optional
 
@@ -19,34 +18,15 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 _BETA_HEADER = "oauth-2025-04-20"
 
-# Retry constants (aligned with OpenAI/Codex providers)
-_MAX_RETRIES = 4  # 5 total attempts
-_TOTAL_ATTEMPTS = _MAX_RETRIES + 1
-_BASE_DELAY_MS = 1_000
-_MAX_RETRY_DELAY_MS = 30_000
-_STREAM_IDLE_TIMEOUT = 300  # 5min per-chunk
-
-
-def _backoff_delay(base_ms: int, attempt: int) -> float:
-    """Exponential backoff with ±10% jitter. Returns seconds."""
-    delay_ms = base_ms * (2 ** (attempt - 1))
-    jitter = random.uniform(0.9, 1.1)
-    delay_ms = min(delay_ms * jitter, _MAX_RETRY_DELAY_MS)
-    return delay_ms / 1000.0
-
-
-def _parse_retry_delay(resp: httpx.Response, default: float = 1.0) -> float:
-    """Extract retry delay from response headers.
-
-    Checks retry-after (seconds or date), falls back to default.
-    """
-    retry_after = resp.headers.get("retry-after", "")
-    if retry_after:
-        try:
-            return min(float(retry_after), 30.0)
-        except ValueError:
-            pass
-    return default
+# Retry — import from global module
+from .retry import (
+    MAX_RETRIES as _MAX_RETRIES,
+    TOTAL_ATTEMPTS as _TOTAL_ATTEMPTS,
+    BASE_DELAY_MS as _BASE_DELAY_MS,
+    STREAM_IDLE_TIMEOUT as _STREAM_IDLE_TIMEOUT,
+    backoff_delay as _backoff_delay,
+    parse_retry_delay_header as _parse_retry_delay,
+)
 
 
 class AnthropicProvider(LLMProvider):

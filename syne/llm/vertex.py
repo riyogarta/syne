@@ -38,13 +38,16 @@ from .gemini_common import (
 
 logger = logging.getLogger("syne.llm.vertex")
 
-# Retry configuration — aligned with Gemini CLI
-_MAX_RETRIES = 9  # 10 total attempts
-_BASE_DELAY_MS = 5_000
-_MAX_RETRY_DELAY_MS = 30_000
+# Retry — import from global module
+from .retry import (
+    MAX_RETRIES as _MAX_RETRIES,
+    BASE_DELAY_MS as _BASE_DELAY_MS,
+    MAX_RETRY_DELAY_MS as _MAX_RETRY_DELAY_MS,
+    STREAM_IDLE_TIMEOUT as _STREAM_OVERALL_TIMEOUT,
+    EMPTY_STREAM_BASE_DELAY_MS as _EMPTY_STREAM_BASE_DELAY_MS,
+    backoff_delay,
+)
 _MAX_EMPTY_STREAM_RETRIES = 1
-_EMPTY_STREAM_BASE_DELAY_MS = 500
-_STREAM_OVERALL_TIMEOUT = 300  # 5min hard cap
 
 # Limit concurrent Vertex LLM calls
 _chat_semaphore = asyncio.Semaphore(2)

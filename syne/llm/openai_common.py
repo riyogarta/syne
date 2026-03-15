@@ -1,85 +1,27 @@
 """Shared retry helpers for OpenAI-compatible providers (openai.py + codex.py).
 
-Error classification and exponential backoff modeled after Codex CLI (../codex).
+Error classification modeled after Codex CLI (../codex).
+Retry constants and backoff from global retry module.
 Reuses ErrorClassification/_ErrorClass from gemini_common.py.
 """
 
 import json
 import logging
-import random
-import re
 from typing import Optional
 
 import httpx
 
 from .gemini_common import ErrorClassification, _ErrorClass
-
-logger = logging.getLogger("syne.llm.openai_common")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Constants (aligned with Codex CLI defaults)
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_MAX_RETRIES = 4  # 5 total attempts (Codex: request_max_retries=4)
-_BASE_DELAY_MS = 1_000  # 1s (conservative vs Codex's 200ms)
-_MAX_RETRY_DELAY_MS = 30_000
-_STREAM_IDLE_TIMEOUT = 300  # 5min per-chunk (Codex DEFAULT_STREAM_IDLE_TIMEOUT_MS)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Exponential backoff — from Codex retry.rs:38-47
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _backoff_delay(base_ms: int, attempt: int, max_ms: int = _MAX_RETRY_DELAY_MS) -> float:
-    """Exponential backoff with ±10% jitter.
-
-    Formula: base × 2^(attempt-1) × jitter(0.9-1.1), capped at max_ms.
-    Returns delay in seconds.
-    """
-    delay_ms = base_ms * (2 ** (attempt - 1))
-    jitter = random.uniform(0.9, 1.1)
-    delay_ms = min(delay_ms * jitter, max_ms)
-    return delay_ms / 1000.0
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Retry-After delay parsing — from Codex rate_limit_regex()
-# ═══════════════════════════════════════════════════════════════════════════════
-
-_RETRY_DELAY_RE = re.compile(
-    r'(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)'
+from .retry import (
+    MAX_RETRIES as _MAX_RETRIES,
+    TOTAL_ATTEMPTS as _TOTAL_ATTEMPTS,
+    BASE_DELAY_MS as _BASE_DELAY_MS,
+    STREAM_IDLE_TIMEOUT as _STREAM_IDLE_TIMEOUT,
+    backoff_delay as _backoff_delay,
+    parse_openai_retry_delay as _parse_openai_retry_delay,
 )
 
-
-def _parse_openai_retry_delay(
-    error_text: str,
-    headers: Optional[httpx.Headers] = None,
-) -> Optional[float]:
-    """Parse retry delay from OpenAI error response. Returns seconds or None.
-
-    Checks:
-    1. Body text: "try again in Xs" / "try again in Xms"
-    2. Retry-After header (seconds)
-    """
-    # Body text pattern (Codex rate_limit_regex)
-    m = _RETRY_DELAY_RE.search(error_text)
-    if m:
-        value = float(m.group(1))
-        unit = m.group(2).lower()
-        if unit == "ms":
-            return value / 1000.0
-        return value  # seconds
-
-    # Retry-After header
-    if headers:
-        retry_after = headers.get("retry-after")
-        if retry_after:
-            try:
-                return min(float(retry_after), 30.0)
-            except ValueError:
-                pass
-
-    return None
+logger = logging.getLogger("syne.llm.openai_common")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
