@@ -29,24 +29,53 @@ logger = logging.getLogger("syne.memory.graph")
 _KG_SEMAPHORE = asyncio.Semaphore(2)  # max 2 concurrent extractions
 _KG_DELAY = 1.0  # seconds between extractions
 
-EXTRACT_PROMPT = """You are a knowledge graph extractor. Given a memory statement, extract entities and their relationships.
-
-Output valid JSON only, no other text:
-{
-  "entities": [
-    {"name": "exact name", "type": "person|place|org|concept|role|event|item", "description": "one line"}
-  ],
-  "relations": [
-    {"subject": "entity_name", "predicate": "relation_verb", "object": "entity_name"}
-  ]
-}
+EXTRACT_PROMPT = """You are a knowledge graph extractor. Given a memory statement, extract entities and their relationships using the store_knowledge_graph tool.
 
 Rules:
 - Entity names must be specific (not "he", "she", "it", "User")
 - When the speaker is identified, use their real name instead of "User"
 - Use consistent predicate verbs: lives_in, works_at, married_to, child_of, parent_of, sibling_of, friend_of, owns, member_of, studies_at, has_role, located_in, part_of, prefers, has_condition, takes_medication
-- If no clear entities or relations, return {"entities": [], "relations": []}
+- If no clear entities or relations, call the tool with empty arrays
 - Keep descriptions brief (under 15 words)"""
+
+# Tool definition for structured extraction — no JSON parsing needed
+_KG_EXTRACT_TOOL = {
+    "name": "store_knowledge_graph",
+    "description": "Store extracted entities and relations from a memory statement",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entities": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Exact entity name"},
+                        "type": {
+                            "type": "string",
+                            "enum": ["person", "place", "org", "concept", "role", "event", "item"],
+                        },
+                        "description": {"type": "string", "description": "One-line description"},
+                    },
+                    "required": ["name", "type"],
+                },
+            },
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string", "description": "Subject entity name"},
+                        "predicate": {"type": "string", "description": "Relation verb"},
+                        "object": {"type": "string", "description": "Object entity name"},
+                    },
+                    "required": ["subject", "predicate", "object"],
+                },
+            },
+        },
+        "required": ["entities", "relations"],
+    },
+}
 
 
 async def _mark_kg_processed(memory_id: int) -> None:
@@ -147,7 +176,11 @@ async def _run_extraction(
 
 
 async def _extract_via_provider(provider: LLMProvider, content: str, speaker_name: str = "") -> Optional[dict]:
-    """Extract entities/relations using the main LLM provider."""
+    """Extract entities/relations using the main LLM provider via tool call.
+
+    Uses structured tool output instead of raw JSON parsing — the API
+    guarantees valid structure, no truncation, no preamble text issues.
+    """
     from ..llm.provider import ChatMessage
 
     speaker_ctx = f"The speaker is {speaker_name}. " if speaker_name else ""
@@ -156,10 +189,34 @@ async def _extract_via_provider(provider: LLMProvider, content: str, speaker_nam
         ChatMessage(role="user", content=f'{speaker_ctx}Memory: "{content}"'),
     ]
 
-    response = await provider.chat(messages, temperature=0.1, max_tokens=1000, thinking_budget=0)
-    raw = response.content.strip()
+    response = await provider.chat(
+        messages, temperature=0.1, thinking_budget=0,
+        tools=[_KG_EXTRACT_TOOL],
+    )
 
-    return _parse_extraction(raw)
+    # Extract from tool call response
+    if response.tool_calls:
+        tc = response.tool_calls[0]
+        args = tc.get("args") or tc.get("input") or {}
+        entities = args.get("entities", [])
+        relations = args.get("relations", [])
+
+        # Validate structure
+        valid_entities = [
+            e for e in entities
+            if isinstance(e, dict) and e.get("name") and e.get("type")
+        ]
+        valid_relations = [
+            r for r in relations
+            if isinstance(r, dict) and r.get("subject") and r.get("predicate") and r.get("object")
+        ]
+        return {"entities": valid_entities, "relations": valid_relations}
+
+    # Fallback: LLM responded with text instead of tool call — try parsing
+    if response.content and response.content.strip():
+        return _parse_extraction(response.content.strip())
+
+    return None
 
 
 async def _extract_via_ollama(
@@ -215,33 +272,50 @@ def _parse_extraction(raw: str) -> Optional[dict]:
     cleaned = re.sub(r'```(?:json)?\s*', '', raw)
     cleaned = cleaned.strip()
 
-    # Extract JSON from response
+    # Extract JSON from response — find outermost { ... }
     json_match = re.search(r'\{.*\}', cleaned, re.DOTALL)
     if not json_match:
-        logger.warning(f"No JSON found in extraction: {raw[:200]}")
+        logger.warning(f"No JSON found in extraction: {raw[:500]}")
         raise ValueError(f"No JSON found in extraction output")
 
-    try:
-        data = json.loads(json_match.group())
-        entities = data.get("entities", [])
-        relations = data.get("relations", [])
+    json_str = json_match.group()
 
-        # Validate structure
-        valid_entities = []
-        for e in entities:
-            if isinstance(e, dict) and e.get("name") and e.get("type"):
-                valid_entities.append(e)
+    # Try parsing as-is first
+    data = _try_parse_json(json_str)
+    if data is None:
+        # Fix common LLM JSON issues: trailing commas, unescaped newlines
+        fixed = re.sub(r',\s*([}\]])', r'\1', json_str)  # trailing commas
+        fixed = fixed.replace('\n', ' ')  # flatten newlines inside strings
+        data = _try_parse_json(fixed)
 
-        valid_relations = []
-        for r in relations:
-            if isinstance(r, dict) and r.get("subject") and r.get("predicate") and r.get("object"):
-                valid_relations.append(r)
-
-        return {"entities": valid_entities, "relations": valid_relations}
-
-    except json.JSONDecodeError:
-        logger.warning(f"Invalid JSON in extraction: {raw[:200]}")
+    if data is None:
+        logger.warning(f"Invalid JSON in extraction: {raw[:500]}")
         raise ValueError(f"Invalid JSON in extraction output")
+
+    entities = data.get("entities", [])
+    relations = data.get("relations", [])
+
+    # Validate structure
+    valid_entities = []
+    for e in entities:
+        if isinstance(e, dict) and e.get("name") and e.get("type"):
+            valid_entities.append(e)
+
+    valid_relations = []
+    for r in relations:
+        if isinstance(r, dict) and r.get("subject") and r.get("predicate") and r.get("object"):
+            valid_relations.append(r)
+
+    return {"entities": valid_entities, "relations": valid_relations}
+
+
+def _try_parse_json(s: str) -> Optional[dict]:
+    """Try to parse JSON string, return None on failure."""
+    try:
+        data = json.loads(s)
+        return data if isinstance(data, dict) else None
+    except (json.JSONDecodeError, ValueError):
+        return None
 
 
 async def _resolve_entity(name: str, entity_type: str, description: str = "") -> int:
