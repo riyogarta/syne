@@ -22,7 +22,6 @@ OUTPUT_TOKENS = 16_384  # max_tokens for summary output
 COMPACTION_CHARS_PER_TOKEN = 3.0
 
 _BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{200,}={0,2}')
-_MAX_TOOL_RESULT_FOR_SUMMARY = 2_000
 
 # ── Initial summary prompt (no previous summary exists) ─────
 
@@ -118,9 +117,7 @@ def _serialize_messages(rows: list) -> str:
         if role == "tool":
             # Strip base64 blobs — waste of summarizer tokens
             content = _BASE64_PATTERN.sub("[base64 data removed]", content)
-            # Cap long tool results for summarization
-            if len(content) > _MAX_TOOL_RESULT_FOR_SUMMARY:
-                content = content[:_MAX_TOOL_RESULT_FOR_SUMMARY] + "\n[... truncated for summary]"
+            # Base64 already stripped above — no additional truncation
 
         if role == "user":
             parts.append(f"[User]: {content}")

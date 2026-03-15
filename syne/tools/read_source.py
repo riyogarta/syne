@@ -42,9 +42,8 @@ _BLOCKED_PATTERNS = [
     "node_modules",
 ]
 
-# Max lines per read — high enough to read most files in 1-2 calls
-# (largest file agent.py ~1500 lines, security.py ~660 lines)
-_MAX_LINES = 500
+# Default lines per read — bot can request more via limit parameter
+_DEFAULT_LINES = 500
 
 
 def _is_allowed_path(rel_path: str) -> bool:
@@ -94,7 +93,7 @@ async def _handle_read_source(
     action: str = "read",
     path: str = "",
     offset: int = 1,
-    limit: int = _MAX_LINES,
+    limit: int = _DEFAULT_LINES,
     pattern: str = "",
 ) -> str:
     """Handler for read_source tool."""
@@ -169,8 +168,6 @@ def _action_read(path: str, offset: int, limit: int) -> str:
     if not resolved.is_file():
         return f"Error: '{path}' is not a file."
 
-    # Cap limit
-    limit = min(limit, _MAX_LINES)
     offset = max(1, offset)
 
     try:
@@ -297,7 +294,7 @@ READ_SOURCE_TOOL = {
             },
             "limit": {
                 "type": "integer",
-                "description": f"Max lines to read (default/max {_MAX_LINES}). Most files fit in 1-2 reads.",
+                "description": f"Number of lines to read (default {_DEFAULT_LINES}).",
             },
             "pattern": {
                 "type": "string",

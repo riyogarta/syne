@@ -563,7 +563,7 @@ class TelegramChannel:
                     if conv and conv.reasoning_visible:
                         thinking = getattr(conv, '_last_thinking', None)
                         if thinking:
-                            thinking_block = f"💭 **Thinking:**\n_{thinking[:3000]}_\n\n"
+                            thinking_block = f"💭 **Thinking:**\n_{thinking}_\n\n"
                             response = thinking_block + response
 
                     # Parse reply and react tags from LLM response

@@ -12,7 +12,7 @@ logger = logging.getLogger("syne.db")
 _pool: Optional[asyncpg.Pool] = None
 
 
-async def init_db(dsn: str, min_size: int = 2, max_size: int = 10) -> asyncpg.Pool:
+async def init_db(dsn: str, min_size: int = 2, max_size: int = 50) -> asyncpg.Pool:
     """Initialize the database connection pool with retry.
     
     Retries up to 5 times with exponential backoff (2, 4, 8, 8, 8 seconds).

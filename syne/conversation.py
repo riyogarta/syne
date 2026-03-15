@@ -1050,11 +1050,6 @@ class Conversation:
                 # Strip server paths
                 result_str = strip_server_paths(result_str)
 
-                # Cap oversized results — global safety net
-                _MAX_TOOL_RESULT_CHARS = 50_000
-                if len(result_str) > _MAX_TOOL_RESULT_CHARS:
-                    result_str = result_str[:_MAX_TOOL_RESULT_CHARS] + "\n\n[... truncated, full result too large for context]"
-
                 # Notify CLI about tool execution details
                 if self._mgr and self._mgr._tool_detail_callback:
                     try:

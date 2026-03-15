@@ -50,7 +50,7 @@ class MemoryEngine:
     async def recall(
         self,
         query: str,
-        limit: int = 10,
+        limit: int = 5,
         min_similarity: float = 0.3,
         category: Optional[str] = None,
         user_id: Optional[int] = None,
