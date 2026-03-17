@@ -376,8 +376,14 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
         }
 
+        # OAuth tokens MUST include Claude Code identity as first system block
+        system_blocks = []
+        if self._is_oauth:
+            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
         if system_text:
-            body["system"] = [{"type": "text", "text": system_text}]
+            system_blocks.append({"type": "text", "text": system_text})
+        if system_blocks:
+            body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
         effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
