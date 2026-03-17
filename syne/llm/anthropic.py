@@ -16,8 +16,7 @@ logger = logging.getLogger("syne.llm.anthropic")
 # Anthropic Messages API
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
-# Beta headers required by Anthropic for OAuth tokens (from OpenClaw)
-_BETA_HEADER = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+_BETA_HEADER = "oauth-2025-04-20"
 
 # Retry — import from global module
 from .retry import (
@@ -384,28 +383,8 @@ class AnthropicProvider(LLMProvider):
 
         stream_body = {**body, "stream": True}
 
-        # Debug: log message structure to diagnose 400 errors
-        msg_summary = []
-        for cm in conversation:
-            role = cm.get("role", "?")
-            content = cm.get("content", "")
-            if isinstance(content, list):
-                types = [b.get("type", "?") for b in content if isinstance(b, dict)]
-                msg_summary.append(f"{role}:[{','.join(types)}]")
-            else:
-                msg_summary.append(f"{role}:text({len(content)})")
-        logger.info(f"Anthropic request: {len(conversation)} msgs, structure: {' | '.join(msg_summary[-20:])}")
-        # Debug: log full body params (exclude messages/system content for brevity)
-        body_debug = {k: v for k, v in body.items() if k not in ("messages", "system")}
-        body_debug["system_len"] = len(body.get("system", ""))
-        body_debug["tools_count"] = len(body.get("tools", []))
-        if body.get("tools"):
-            body_debug["tool_names"] = [t.get("name", "?") for t in body["tools"]]
-        logger.info(f"Anthropic body params: {body_debug}")
-
         token = await self._load_token()
         headers = self._build_headers(token)
-        self._400_token_refreshed = False  # reset per-call
 
         async with httpx.AsyncClient(timeout=180) as client:
           for attempt in range(_TOTAL_ATTEMPTS):
@@ -462,39 +441,6 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         error_text = resp.text
                         logger.error(f"Anthropic 400 Bad Request: {error_text}")
-
-                        # Log token prefix and headers for diagnosis
-                        token_prefix = headers.get("Authorization", "")[:35]
-                        beta = headers.get("anthropic-beta", "")
-                        ver = headers.get("anthropic-version", "")
-                        logger.error(f"400 debug: token={token_prefix}... beta={beta} ver={ver} model={stream_body.get('model')}")
-
-                        # Anthropic sometimes returns 400 instead of 401 for bad tokens.
-                        # If error is vague ("Error" with no detail), try token refresh first.
-                        is_vague_error = '"message":"Error"' in error_text or '"message": "Error"' in error_text
-                        if is_vague_error and self._claude_creds and not getattr(self, '_400_token_refreshed', False):
-                            logger.warning("400 with vague error — attempting token refresh (Anthropic may return 400 for auth issues)")
-                            try:
-                                self._claude_creds.expires_at = 0
-                                token = await self._claude_creds.get_token()
-                                self._access_token = token
-                                headers = self._build_headers(token)
-                                self._400_token_refreshed = True
-                                continue
-                            except Exception as e:
-                                logger.error(f"Token refresh on 400 failed: {e}")
-
-                        # Auto-fallback: try stripping parameters to diagnose
-                        if "thinking" in stream_body and stream_body["thinking"].get("type") == "enabled":
-                            logger.warning("400 fallback: retrying WITHOUT thinking")
-                            stream_body.pop("thinking", None)
-                            stream_body["temperature"] = temperature
-                            continue
-                        if "tools" in stream_body and stream_body["tools"]:
-                            logger.warning("400 fallback: retrying WITHOUT tools")
-                            stream_body.pop("tools", None)
-                            continue
-
                         raise RuntimeError(f"Anthropic API error 400: {error_text}")
 
                     if 500 <= resp.status_code < 600:
