@@ -17,9 +17,22 @@ logger = logging.getLogger("syne.llm.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
-# Beta headers — must match Pi/OpenClaw for OAuth to work
-_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
-_API_KEY_BETA = "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+# Beta headers — matched to Pi exactly
+# interleaved-thinking is DEPRECATED for adaptive models (Opus 4.6, Sonnet 4.6)
+_BETA_TOOL_STREAMING = "fine-grained-tool-streaming-2025-05-14"
+_BETA_INTERLEAVED = "interleaved-thinking-2025-05-14"
+_BETA_OAUTH_PREFIX = "claude-code-20250219,oauth-2025-04-20"
+
+
+def _build_beta_header(is_oauth: bool, model_id: str) -> str:
+    """Build beta header exactly like Pi — conditional on model."""
+    adaptive = any(t in model_id for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
+    betas = [_BETA_TOOL_STREAMING]
+    if not adaptive:
+        betas.append(_BETA_INTERLEAVED)
+    if is_oauth:
+        return f"{_BETA_OAUTH_PREFIX},{','.join(betas)}"
+    return ",".join(betas)
 
 # Retry — import from global module
 from .retry import (
@@ -127,16 +140,17 @@ class AnthropicProvider(LLMProvider):
             "  2. Set ANTHROPIC_API_KEY environment variable"
         )
 
-    def _build_headers(self, token: str) -> dict:
+    def _build_headers(self, token: str, model_id: str = "") -> dict:
         is_oauth = token.startswith("sk-ant-oat") or self._is_oauth
         headers = {
             "Authorization": f"Bearer {token}",
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
-            "anthropic-beta": _OAUTH_BETA if is_oauth else _API_KEY_BETA,
+            "anthropic-beta": _build_beta_header(is_oauth, model_id),
         }
         if is_oauth:
             headers["anthropic-dangerous-direct-browser-access"] = "true"
+            headers["x-app"] = "cli"
         return headers
 
     @staticmethod
@@ -394,7 +408,7 @@ class AnthropicProvider(LLMProvider):
         stream_body = {**body, "stream": True}
 
         token = await self._load_token()
-        headers = self._build_headers(token)
+        headers = self._build_headers(token, model)
 
         async with httpx.AsyncClient(timeout=180) as client:
           for attempt in range(_TOTAL_ATTEMPTS):
@@ -438,7 +452,7 @@ class AnthropicProvider(LLMProvider):
                                 self._claude_creds.expires_at = 0  # force invalidate
                                 token = await self._claude_creds.get_token()
                                 self._access_token = token
-                                headers = self._build_headers(token)
+                                headers = self._build_headers(token, model)
                                 continue
                             except Exception as e:
                                 logger.error(f"Token refresh failed: {e}")
