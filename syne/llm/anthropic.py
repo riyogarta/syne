@@ -394,6 +394,13 @@ class AnthropicProvider(LLMProvider):
             else:
                 msg_summary.append(f"{role}:text({len(content)})")
         logger.info(f"Anthropic request: {len(conversation)} msgs, structure: {' | '.join(msg_summary[-20:])}")
+        # Debug: log full body params (exclude messages/system content for brevity)
+        body_debug = {k: v for k, v in body.items() if k not in ("messages", "system")}
+        body_debug["system_len"] = len(body.get("system", ""))
+        body_debug["tools_count"] = len(body.get("tools", []))
+        if body.get("tools"):
+            body_debug["tool_names"] = [t.get("name", "?") for t in body["tools"]]
+        logger.info(f"Anthropic body params: {body_debug}")
 
         token = await self._load_token()
         headers = self._build_headers(token)
