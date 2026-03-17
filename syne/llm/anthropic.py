@@ -383,6 +383,18 @@ class AnthropicProvider(LLMProvider):
 
         stream_body = {**body, "stream": True}
 
+        # Debug: log message structure to diagnose 400 errors
+        msg_summary = []
+        for cm in conversation:
+            role = cm.get("role", "?")
+            content = cm.get("content", "")
+            if isinstance(content, list):
+                types = [b.get("type", "?") for b in content if isinstance(b, dict)]
+                msg_summary.append(f"{role}:[{','.join(types)}]")
+            else:
+                msg_summary.append(f"{role}:text({len(content)})")
+        logger.info(f"Anthropic request: {len(conversation)} msgs, structure: {' | '.join(msg_summary[-20:])}")
+
         token = await self._load_token()
         headers = self._build_headers(token)
 

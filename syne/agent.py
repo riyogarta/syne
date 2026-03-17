@@ -144,8 +144,9 @@ class SyneAgent:
         # 9. Background token refresh task
         self._token_refresh_task = asyncio.create_task(self._periodic_token_refresh())
 
-        # 10. Background memory dedup task (weekly)
-        self._dedup_task = asyncio.create_task(self._periodic_memory_dedup())
+        # 10. Background memory dedup — DISABLED (too aggressive for religious texts)
+        # Can still be triggered manually via /memory dedup
+        # self._dedup_task = asyncio.create_task(self._periodic_memory_dedup())
 
         logger.info("Syne agent started.")
 
@@ -346,7 +347,7 @@ class SyneAgent:
 
         while self._running:
             try:
-                result = await self.memory.dedup(similarity_threshold=0.85)
+                result = await self.memory.dedup(similarity_threshold=0.95)
                 if result["duplicates_found"] > 0:
                     logger.info(
                         f"Memory dedup: removed {result['duplicates_found']} duplicates "

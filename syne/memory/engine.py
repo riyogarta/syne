@@ -428,7 +428,7 @@ class MemoryEngine:
             row = await conn.fetchrow("SELECT COUNT(*) as count FROM memory")
             return row["count"]
 
-    async def dedup(self, similarity_threshold: float = 0.85, dry_run: bool = False) -> dict:
+    async def dedup(self, similarity_threshold: float = 0.95, dry_run: bool = False) -> dict:
         """Remove duplicate memories based on embedding similarity.
         
         Compares all pairs of memories and removes newer duplicates.
