@@ -462,17 +462,11 @@ class AnthropicProvider(LLMProvider):
                         error_text = resp.text
                         logger.error(f"Anthropic 400 Bad Request: {error_text}")
 
-                        # Dump request for manual debugging
-                        try:
-                            import json as _json
-                            debug_body = {**stream_body}
-                            debug_body["_token_prefix"] = headers.get("Authorization", "")[:30]
-                            debug_body["_headers"] = {k: v for k, v in headers.items() if k != "Authorization"}
-                            with open("/tmp/syne_400_debug.json", "w") as f:
-                                _json.dump(debug_body, f, indent=2, default=str)
-                            logger.error("Dumped request to /tmp/syne_400_debug.json")
-                        except Exception:
-                            pass
+                        # Log token prefix and headers for diagnosis
+                        token_prefix = headers.get("Authorization", "")[:35]
+                        beta = headers.get("anthropic-beta", "")
+                        ver = headers.get("anthropic-version", "")
+                        logger.error(f"400 debug: token={token_prefix}... beta={beta} ver={ver} model={stream_body.get('model')}")
 
                         # Anthropic sometimes returns 400 instead of 401 for bad tokens.
                         # If error is vague ("Error" with no detail), try token refresh first.
