@@ -458,8 +458,20 @@ class AnthropicProvider(LLMProvider):
 
                     if resp.status_code == 400:
                         await resp.aread()
-                        error_text = resp.text[:500]
+                        error_text = resp.text
                         logger.error(f"Anthropic 400 Bad Request: {error_text}")
+
+                        # Auto-fallback: try stripping parameters to diagnose
+                        if "thinking" in stream_body and stream_body["thinking"].get("type") == "enabled":
+                            logger.warning("400 fallback: retrying WITHOUT thinking")
+                            stream_body.pop("thinking", None)
+                            stream_body["temperature"] = temperature
+                            continue
+                        if "tools" in stream_body and stream_body["tools"]:
+                            logger.warning("400 fallback: retrying WITHOUT tools")
+                            stream_body.pop("tools", None)
+                            continue
+
                         raise RuntimeError(f"Anthropic API error 400: {error_text}")
 
                     if 500 <= resp.status_code < 600:
