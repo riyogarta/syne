@@ -404,6 +404,7 @@ class AnthropicProvider(LLMProvider):
 
         token = await self._load_token()
         headers = self._build_headers(token)
+        self._400_token_refreshed = False  # reset per-call
 
         async with httpx.AsyncClient(timeout=180) as client:
           for attempt in range(_TOTAL_ATTEMPTS):
@@ -460,6 +461,21 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         error_text = resp.text
                         logger.error(f"Anthropic 400 Bad Request: {error_text}")
+
+                        # Anthropic sometimes returns 400 instead of 401 for bad tokens.
+                        # If error is vague ("Error" with no detail), try token refresh first.
+                        is_vague_error = '"message":"Error"' in error_text or '"message": "Error"' in error_text
+                        if is_vague_error and self._claude_creds and not getattr(self, '_400_token_refreshed', False):
+                            logger.warning("400 with vague error — attempting token refresh (Anthropic may return 400 for auth issues)")
+                            try:
+                                self._claude_creds.expires_at = 0
+                                token = await self._claude_creds.get_token()
+                                self._access_token = token
+                                headers = self._build_headers(token)
+                                self._400_token_refreshed = True
+                                continue
+                            except Exception as e:
+                                logger.error(f"Token refresh on 400 failed: {e}")
 
                         # Auto-fallback: try stripping parameters to diagnose
                         if "thinking" in stream_body and stream_body["thinking"].get("type") == "enabled":
