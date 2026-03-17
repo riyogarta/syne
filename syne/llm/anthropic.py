@@ -16,7 +16,10 @@ logger = logging.getLogger("syne.llm.anthropic")
 # Anthropic Messages API
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
-_BETA_HEADER = "oauth-2025-04-20"
+
+# Beta headers — must match Pi/OpenClaw for OAuth to work
+_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+_API_KEY_BETA = "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
 
 # Retry — import from global module
 from .retry import (
@@ -125,14 +128,15 @@ class AnthropicProvider(LLMProvider):
         )
 
     def _build_headers(self, token: str) -> dict:
+        is_oauth = token.startswith("sk-ant-oat") or self._is_oauth
         headers = {
             "Authorization": f"Bearer {token}",
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
+            "anthropic-beta": _OAUTH_BETA if is_oauth else _API_KEY_BETA,
         }
-        # OAuth tokens require the beta header
-        if token.startswith("sk-ant-oat") or self._is_oauth:
-            headers["anthropic-beta"] = _BETA_HEADER
+        if is_oauth:
+            headers["anthropic-dangerous-direct-browser-access"] = "true"
         return headers
 
     @staticmethod
@@ -359,16 +363,22 @@ class AnthropicProvider(LLMProvider):
         }
 
         if system_text:
-            body["system"] = system_text
+            body["system"] = [{"type": "text", "text": system_text}]
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
         effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
         if effective_budget > 0:
-            body["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": effective_budget,
-            }
-            body["temperature"] = 1  # required by Anthropic when thinking is on
+            # Opus 4.6 / Sonnet 4.6: adaptive thinking (model decides when/how much)
+            # Older models: budget-based thinking
+            _adaptive = any(t in model for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
+            if _adaptive:
+                body["thinking"] = {"type": "adaptive"}
+            else:
+                body["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": effective_budget,
+                }
+            # Temperature incompatible with thinking (both adaptive and budget)
         else:
             body["temperature"] = temperature
 
