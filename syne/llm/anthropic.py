@@ -16,7 +16,8 @@ logger = logging.getLogger("syne.llm.anthropic")
 # Anthropic Messages API
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
-_BETA_HEADER = "oauth-2025-04-20"
+# Beta headers required by Anthropic for OAuth tokens (from OpenClaw)
+_BETA_HEADER = "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
 
 # Retry — import from global module
 from .retry import (
