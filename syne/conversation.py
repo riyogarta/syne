@@ -383,9 +383,10 @@ class Conversation:
         except Exception as e:
             logger.debug(f"Graph recall skipped: {e}")
 
-        # 5. Trim to fit context window
+        # 5. Prune oversized tool results, then trim to fit context window
         # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)
         # Do NOT append it again here — that caused the LLM to see duplicate user messages.
+        messages = self.context_mgr.prune_tool_results(messages)
         messages = self.context_mgr.trim_context(messages)
 
         return messages

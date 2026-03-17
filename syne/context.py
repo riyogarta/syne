@@ -151,6 +151,79 @@ class ContextManager:
         total = estimate_messages_tokens(messages, self.chars_per_token)
         return total >= (self.available * threshold)
 
+    def prune_tool_results(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Prune oversized tool results to fit context — OpenClaw 2-tier approach.
+
+        Tier 1 (soft trim): when context > 30%, tool results > 4000 chars
+        get head+tail trimmed (keep first 1500 + last 1500 chars).
+
+        Tier 2 (hard clear): when context > 50%, oldest tool results
+        replaced entirely with placeholder.
+
+        Never touches: user messages, assistant messages, system messages,
+        last 3 tool results (recent context protected).
+        """
+        total_tokens = estimate_messages_tokens(messages, self.chars_per_token)
+        ratio = total_tokens / self.available if self.available > 0 else 0
+
+        if ratio <= 0.3:
+            return messages  # Under 30% — no pruning needed
+
+        SOFT_THRESHOLD = 4000   # chars
+        HEAD_CHARS = 1500
+        TAIL_CHARS = 1500
+        KEEP_RECENT_TOOLS = 3  # protect last N tool results
+
+        # Find tool message indices (oldest first)
+        tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
+
+        # Protect the most recent tool results
+        prunable = tool_indices[:-KEEP_RECENT_TOOLS] if len(tool_indices) > KEEP_RECENT_TOOLS else []
+
+        if not prunable:
+            return messages
+
+        result = list(messages)
+
+        # Tier 1: soft trim — keep head + tail
+        if ratio > 0.3:
+            for idx in prunable:
+                msg = result[idx]
+                if len(msg.content) > SOFT_THRESHOLD:
+                    head = msg.content[:HEAD_CHARS]
+                    tail = msg.content[-TAIL_CHARS:]
+                    original_len = len(msg.content)
+                    trimmed = f"{head}\n\n... [{original_len - HEAD_CHARS - TAIL_CHARS} chars trimmed] ...\n\n{tail}"
+                    result[idx] = ChatMessage(
+                        role=msg.role, content=trimmed, metadata=msg.metadata,
+                    )
+
+        # Re-estimate after soft trim
+        total_tokens = estimate_messages_tokens(result, self.chars_per_token)
+        ratio = total_tokens / self.available if self.available > 0 else 0
+
+        # Tier 2: hard clear — replace oldest tool results entirely
+        if ratio > 0.5:
+            for idx in prunable:
+                msg = result[idx]
+                if msg.content and not msg.content.startswith("[Tool result cleared"):
+                    result[idx] = ChatMessage(
+                        role=msg.role,
+                        content="[Tool result cleared — older content removed to fit context]",
+                        metadata=msg.metadata,
+                    )
+                    # Re-check ratio after each clear
+                    total_tokens = estimate_messages_tokens(result, self.chars_per_token)
+                    ratio = total_tokens / self.available if self.available > 0 else 0
+                    if ratio <= 0.5:
+                        break
+
+        pruned_tokens = estimate_messages_tokens(result, self.chars_per_token)
+        if pruned_tokens < total_tokens:
+            logger.info(f"Pruned tool results: {total_tokens} → {pruned_tokens} tokens ({ratio:.0%} of context)")
+
+        return result
+
     def get_usage(self, messages: list[ChatMessage]) -> dict:
         """Get context window usage stats."""
         total = estimate_messages_tokens(messages, self.chars_per_token)
