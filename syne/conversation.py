@@ -517,8 +517,8 @@ class Conversation:
             _recent = self._message_cache[-_keep:] if self._message_cache else []
             _preservation = _build_preservation_context(_recent)
             # Use agent's base provider for compaction (not conversation's override)
-            # Conversation provider may have model override that fails for compaction.
             _compact_provider = self._mgr.provider if self._mgr else self.provider
+            logger.info(f"Auto-compact provider: {_compact_provider.name} (mgr={'yes' if self._mgr else 'NO-FALLBACK'})")
             result = await compact_session(
                 session_id=self.session_id,
                 provider=_compact_provider,
