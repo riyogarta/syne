@@ -537,7 +537,11 @@ class Conversation:
                         )
                     except Exception as e:
                         logger.debug(f"Status callback failed: {e}")
-            result = await self.run_compact()
+            try:
+                result = await self.run_compact()
+            except Exception as e:
+                logger.error(f"Auto-compact failed for session {self.session_id}: {e}")
+                result = None
             if result:
                 logger.info(
                     f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
