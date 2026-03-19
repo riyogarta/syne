@@ -1885,14 +1885,11 @@ Or just send me a message!"""
         )
 
         try:
-            # Use the conversation's own provider + context_mgr (respects model override)
+            # Derive keep_recent and preservation context (same as auto-compact)
+            _ctx_tokens = self.agent.context_mgr.available
+            _keep = max(20, min(200, _ctx_tokens // 5000))
             key = f"telegram:{chat_id}"
             conv = self.agent.conversations._active.get(key)
-            _provider = conv.provider if conv else self.agent.provider
-            _ctx_mgr = conv.context_mgr if conv else self.agent.context_mgr
-
-            _ctx_tokens = _ctx_mgr.available
-            _keep = max(20, min(200, _ctx_tokens // 5000))
             if conv and conv._message_cache:
                 _recent = conv._message_cache[-_keep:]
                 _preservation = _build_preservation_context(_recent)
@@ -1901,10 +1898,10 @@ Or just send me a message!"""
 
             result = await compact_session(
                 session_id=session_id,
-                provider=_provider,
+                provider=self.agent.provider,
                 keep_recent=_keep,
                 recent_context=_preservation,
-                chars_per_token=_ctx_mgr.chars_per_token,
+                chars_per_token=self.agent.context_mgr.chars_per_token,
             )
 
             if result:

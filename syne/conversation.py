@@ -516,10 +516,12 @@ class Conversation:
             _keep = max(20, min(200, _ctx_tokens // 5000))
             _recent = self._message_cache[-_keep:] if self._message_cache else []
             _preservation = _build_preservation_context(_recent)
-            # IMPORTANT: auto-compact must call the same function as manual /compact.
+            # Use agent's base provider for compaction (not conversation's override)
+            # Conversation provider may have model override that fails for compaction.
+            _compact_provider = self._mgr.provider if self._mgr else self.provider
             result = await compact_session(
                 session_id=self.session_id,
-                provider=self.provider,
+                provider=_compact_provider,
                 keep_recent=_keep,
                 recent_context=_preservation,
                 chars_per_token=self.context_mgr.chars_per_token,
@@ -595,9 +597,10 @@ class Conversation:
                 _keep = max(20, min(200, self.context_mgr.available // 5000))
                 _recent = self._message_cache[-_keep:] if self._message_cache else []
                 _preservation = _build_preservation_context(_recent)
+                _compact_provider = self._mgr.provider if self._mgr else self.provider
                 result = await compact_session(
                     session_id=self.session_id,
-                    provider=self.provider,
+                    provider=_compact_provider,
                     keep_recent=_keep,
                     recent_context=_preservation,
                     chars_per_token=self.context_mgr.chars_per_token,
