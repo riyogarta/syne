@@ -2366,9 +2366,15 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
+            # Use the provider from the user's active conversation, fallback to agent default
+            _user_chat_id = str(query.message.chat_id)
+            _conv_key = f"telegram:{_user_chat_id}"
+            _conv = self.agent.conversations._active.get(_conv_key)
+            _reprocess_provider = _conv.provider if _conv else self.agent.provider
+
             async def _bg_reprocess():
                 try:
-                    stats = await reprocess_permanent_memories(self.agent.provider, force=True)
+                    stats = await reprocess_permanent_memories(_reprocess_provider, force=True)
                     lines = [f"🔄 <b>Reprocess Complete</b>\n"]
                     if stats.get("reset"):
                         lines.append(f"Reset flags: {stats['reset']}")
