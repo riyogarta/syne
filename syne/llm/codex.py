@@ -281,7 +281,7 @@ class CodexProvider(LLMProvider):
         # Codex API does not support temperature/top_p/penalties at all
 
         if max_tokens is not None and max_tokens > 0:
-            body["max_output_tokens"] = max_tokens
+            body["max_tokens"] = max_tokens
 
         if tools:
             body["tools"] = self._format_tools(tools)
