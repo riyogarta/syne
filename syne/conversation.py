@@ -1101,6 +1101,9 @@ class Conversation:
                         ),
                     ))
 
+            # Small delay between tool call rounds to avoid rate limiting
+            await asyncio.sleep(1.0)
+
             # Get next response — may contain more tool calls
             current = await self.provider.chat(
                 messages=context,
