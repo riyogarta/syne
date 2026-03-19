@@ -540,7 +540,14 @@ class Conversation:
             try:
                 result = await self.run_compact()
             except Exception as e:
+                _err_msg = f"❌ Compaction failed: {e}"
                 logger.error(f"Auto-compact failed for session {self.session_id}: {e}")
+                if self._mgr and self._mgr._status_callbacks:
+                    for cb in self._mgr._status_callbacks:
+                        try:
+                            await cb(self.session_id, _err_msg)
+                        except Exception:
+                            pass
                 result = None
             if result:
                 logger.info(
