@@ -4415,7 +4415,7 @@ Or just send me a message!"""
                 _preservation = _build_preservation_context(_recent)
                 result = await compact_session(
                     session_id=conv.session_id,
-                    provider=conv.provider,
+                    provider=self.agent.provider,
                     keep_recent=_keep,
                     recent_context=_preservation,
                     chars_per_token=conv.context_mgr.chars_per_token,

@@ -581,13 +581,13 @@ class AnthropicProvider(LLMProvider):
                             u = data.get("usage", {})
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
-            except httpx.ReadTimeout:
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                    logger.warning(f"Anthropic stream read timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    logger.warning(f"Anthropic stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Anthropic stream timed out after {_TOTAL_ATTEMPTS} attempts")
+                raise RuntimeError(f"Anthropic stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
 
             # Flush any partial blocks left by interrupted stream
             # (e.g. stream ended before content_block_stop events)

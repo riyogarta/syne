@@ -335,13 +335,13 @@ class OpenAIProvider(LLMProvider):
 
             except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
-            except httpx.ReadTimeout:
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                    logger.warning(f"OpenAI stream read timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    logger.warning(f"OpenAI stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"OpenAI stream timed out after {_TOTAL_ATTEMPTS} attempts")
+                raise RuntimeError(f"OpenAI stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
 
             # If we got here without continue, we have a valid response
             break
@@ -409,13 +409,13 @@ class OpenAIProvider(LLMProvider):
                     return resp.json()
                 except (LLMRateLimitError, LLMAuthError):
                     raise
-                except httpx.ReadTimeout:
+                except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
                     if not last_attempt:
                         delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                        logger.warning(f"OpenAI embed timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                        logger.warning(f"OpenAI embed error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                         await asyncio.sleep(delay)
                         continue
-                    raise RuntimeError(f"OpenAI embed timed out after {_TOTAL_ATTEMPTS} attempts")
+                    raise RuntimeError(f"OpenAI embed failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
 
         raise RuntimeError(f"OpenAI embed failed after {_TOTAL_ATTEMPTS} attempts")
 

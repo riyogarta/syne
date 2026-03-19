@@ -491,13 +491,13 @@ class CodexProvider(LLMProvider):
                 continue
             except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
-            except httpx.ReadTimeout:
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                    logger.warning(f"Codex stream timeout, retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    logger.warning(f"Codex stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                     await asyncio.sleep(delay)
                     continue
-                raise RuntimeError(f"Codex stream timed out after {_TOTAL_ATTEMPTS} attempts")
+                raise RuntimeError(f"Codex stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
 
             # Log stream summary
             logger.info(
