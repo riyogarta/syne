@@ -1453,6 +1453,16 @@ class ConversationManager:
         # in build_context). This is the fix for restart amnesia.
         await conv.load_history()
 
+        # Auto-compact on session load if history is large — prevents
+        # format mismatch errors after syne update/restart/model change.
+        if len(conv._message_cache) >= 50:
+            try:
+                result = await conv.run_compact()
+                if result:
+                    logger.info(f"Session-load compact: {result['messages_before']} → {result['messages_after']} msgs")
+            except Exception as e:
+                logger.warning(f"Session-load compact failed: {e}")
+
         # Load per-model LLM params from model registry
         from .db.models import get_config as _get_config
         active_models = await _get_config("provider.models", [])
