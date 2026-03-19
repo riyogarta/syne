@@ -378,21 +378,8 @@ class Gateway:
                 return True
             await node.send(ResponseChunkMsg(text="Compacting conversation...", done=False))
             try:
-                from ..compaction import compact_session, _build_preservation_context
-                _ctx_tokens = conv.context_mgr.available
-                _keep = max(20, min(200, _ctx_tokens // 5000))
-                _recent = conv._message_cache[-_keep:] if conv._message_cache else []
-                _preservation = _build_preservation_context(_recent)
-                _compact_provider = conv._mgr.provider if conv._mgr else conv.provider
-                result = await compact_session(
-                    session_id=conv.session_id,
-                    provider=_compact_provider,
-                    keep_recent=_keep,
-                    recent_context=_preservation,
-                    chars_per_token=conv.context_mgr.chars_per_token,
-                )
+                result = await conv.run_compact()
                 if result:
-                    await conv.load_history()
                     await node.send(ResponseChunkMsg(
                         text=f"Compacted: {result['messages_before']} → {result['messages_after']} messages",
                         done=False,

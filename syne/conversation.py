@@ -160,6 +160,31 @@ class Conversation:
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
 
+    async def run_compact(self) -> Optional[dict]:
+        """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
+
+        Always uses the agent's base provider (via ConversationManager),
+        never the conversation's overridden provider.
+        """
+        _ctx_tokens = self.context_mgr.available
+        _keep = max(20, min(200, _ctx_tokens // 5000))
+        _recent = self._message_cache[-_keep:] if self._message_cache else []
+        _preservation = _build_preservation_context(_recent)
+
+        # Agent's base provider — never conversation override
+        _provider = self._mgr.provider if self._mgr else self.provider
+
+        result = await compact_session(
+            session_id=self.session_id,
+            provider=_provider,
+            keep_recent=_keep,
+            recent_context=_preservation,
+            chars_per_token=self.context_mgr.chars_per_token,
+        )
+        if result:
+            await self.load_history()
+        return result
+
     async def load_history(self) -> list[ChatMessage]:
         """Load ALL message history from database for this session.
         
@@ -512,25 +537,11 @@ class Conversation:
                         )
                     except Exception as e:
                         logger.debug(f"Status callback failed: {e}")
-            # Build preservation context from recent messages
-            _keep = max(20, min(200, _ctx_tokens // 5000))
-            _recent = self._message_cache[-_keep:] if self._message_cache else []
-            _preservation = _build_preservation_context(_recent)
-            # Use agent's base provider for compaction (not conversation's override)
-            _compact_provider = self._mgr.provider if self._mgr else self.provider
-            logger.info(f"Auto-compact provider: {_compact_provider.name} (mgr={'yes' if self._mgr else 'NO-FALLBACK'})")
-            result = await compact_session(
-                session_id=self.session_id,
-                provider=_compact_provider,
-                keep_recent=_keep,
-                recent_context=_preservation,
-                chars_per_token=self.context_mgr.chars_per_token,
-            )
+            result = await self.run_compact()
             if result:
                 logger.info(
                     f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
                 )
-                await self.load_history()
                 if self._mgr and self._mgr._status_callbacks:
                     for cb in self._mgr._status_callbacks:
                         try:
@@ -594,20 +605,9 @@ class Conversation:
                             await cb(self.session_id, "Context limit hit — compacting memory...")
                         except Exception:
                             pass
-                _keep = max(20, min(200, self.context_mgr.available // 5000))
-                _recent = self._message_cache[-_keep:] if self._message_cache else []
-                _preservation = _build_preservation_context(_recent)
-                _compact_provider = self._mgr.provider if self._mgr else self.provider
-                result = await compact_session(
-                    session_id=self.session_id,
-                    provider=_compact_provider,
-                    keep_recent=_keep,
-                    recent_context=_preservation,
-                    chars_per_token=self.context_mgr.chars_per_token,
-                )
+                result = await self.run_compact()
                 if result:
                     logger.info(f"Emergency compaction: {result['messages_before']} → {result['messages_after']} messages")
-                    await self.load_history()
                     # Rebuild context after compaction
                     context = await self.build_context(user_message, recall_query=recall_query)
                     tool_schemas = self.tools.to_openai_schema(effective_access_level)
