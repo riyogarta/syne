@@ -38,42 +38,46 @@ Rules:
 - If no clear entities or relations, call the tool with empty arrays
 - Keep descriptions brief (under 15 words)"""
 
-# Tool definition for structured extraction — no JSON parsing needed
+# Tool definition for structured extraction — OpenAI format (works for all drivers)
+# Anthropic driver has _convert_tools() that converts this to Anthropic format.
 _KG_EXTRACT_TOOL = {
-    "name": "store_knowledge_graph",
-    "description": "Store extracted entities and relations from a memory statement",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "entities": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "Exact entity name"},
-                        "type": {
-                            "type": "string",
-                            "enum": ["person", "place", "org", "concept", "role", "event", "item"],
+    "type": "function",
+    "function": {
+        "name": "store_knowledge_graph",
+        "description": "Store extracted entities and relations from a memory statement",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "entities": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string", "description": "Exact entity name"},
+                            "type": {
+                                "type": "string",
+                                "enum": ["person", "place", "org", "concept", "role", "event", "item"],
+                            },
+                            "description": {"type": "string", "description": "One-line description"},
                         },
-                        "description": {"type": "string", "description": "One-line description"},
+                        "required": ["name", "type"],
                     },
-                    "required": ["name", "type"],
+                },
+                "relations": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string", "description": "Subject entity name"},
+                            "predicate": {"type": "string", "description": "Relation verb"},
+                            "object": {"type": "string", "description": "Object entity name"},
+                        },
+                        "required": ["subject", "predicate", "object"],
+                    },
                 },
             },
-            "relations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string", "description": "Subject entity name"},
-                        "predicate": {"type": "string", "description": "Relation verb"},
-                        "object": {"type": "string", "description": "Object entity name"},
-                    },
-                    "required": ["subject", "predicate", "object"],
-                },
-            },
+            "required": ["entities", "relations"],
         },
-        "required": ["entities", "relations"],
     },
 }
 
