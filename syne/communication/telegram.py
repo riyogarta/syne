@@ -2394,11 +2394,14 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-            # Use the provider from the user's active conversation, fallback to agent default
-            _user_chat_id = str(query.message.chat_id)
-            _conv_key = f"telegram:{_user_chat_id}"
-            _conv = self.agent.conversations._active.get(_conv_key)
-            _reprocess_provider = _conv.provider if _conv else self.agent.provider
+            # Use the user's preferred model, fallback to agent default
+            _reprocess_provider = self.agent.provider
+            _user_db = await get_user("telegram", str(query.from_user.id))
+            _user_model = ((_user_db or {}).get("preferences") or {}).get("model")
+            if _user_model and self.agent:
+                _override = await self.agent.create_provider_for_model(_user_model)
+                if _override:
+                    _reprocess_provider = _override
 
             async def _bg_reprocess():
                 try:
