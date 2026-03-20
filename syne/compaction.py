@@ -265,13 +265,7 @@ async def compact_session(
         if not old_rows:
             return None
 
-        # Serialize conversation for summarization
-        summarized_chars = sum(len(r["content"]) for r in old_rows)
-        conv_text = _serialize_messages(old_rows)
-
-        # Cap input based on provider's actual context window.
-        # Use conservative COMPACTION_CHARS_PER_TOKEN (3.0) instead of user-configurable
-        # chars_per_token because tokenizer efficiency varies: English ~4, mixed ~2.5-3.
+        # Calculate max input chars from provider's context window
         cpt = COMPACTION_CHARS_PER_TOKEN
         available_tokens = provider.context_window - PROMPT_OVERHEAD_TOKENS - OUTPUT_TOKENS
 
@@ -283,16 +277,20 @@ async def compact_session(
             extra_chars += len(recent_context) + 200  # tags + note text
         available_tokens -= int(extra_chars / cpt)
 
-        max_input_chars = int(available_tokens * cpt)
-        if max_input_chars < 1000:
-            max_input_chars = 1000  # absolute minimum
-        if len(conv_text) > max_input_chars:
-            conv_text = conv_text[-max_input_chars:]
-            logger.info(
-                f"Truncated summarizer input to {max_input_chars} chars "
-                f"(from {summarized_chars}, available_tokens={available_tokens}, "
-                f"context_window={provider.context_window}, cpt={cpt})"
-            )
+        max_input_chars = max(1000, int(available_tokens * cpt))
+
+        # Adaptive reduction: if messages exceed context, reduce by 4 from
+        # oldest until they fit. Remaining messages stay in DB for next compact.
+        while len(old_rows) > 4:
+            conv_text = _serialize_messages(old_rows)
+            if len(conv_text) <= max_input_chars:
+                break
+            old_rows = old_rows[4:]  # drop 4 oldest
+            logger.info(f"Compact adaptive reduction: {len(old_rows)} msgs, {len(conv_text)} chars (max {max_input_chars})")
+        else:
+            conv_text = _serialize_messages(old_rows)
+
+        summarized_chars = sum(len(r["content"]) for r in old_rows)
 
         logger.info(
             f"Compacting session {session_id}: {to_summarize} messages ({summarized_chars} chars) → summary"
