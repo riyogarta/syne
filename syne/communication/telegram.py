@@ -1916,12 +1916,28 @@ Or just send me a message!"""
         if not self.agent or not self.agent.conversations:
             return
         for key, conv in list(self.agent.conversations._active.items()):
-            if not conv._message_cache or len(conv._message_cache) < 10:
+            # Load history if cache is empty (session not yet used this restart)
+            if not conv._message_cache:
+                try:
+                    await conv.load_history()
+                except Exception:
+                    continue
+            if len(conv._message_cache) < 10:
                 continue
             try:
                 result = await conv.run_compact()
                 if result:
                     logger.info(f"Model-switch compact {key}: {result['messages_before']} → {result['messages_after']} msgs")
+                    # Notify the chat
+                    try:
+                        chat_id = key.split(":", 1)[1] if ":" in key else None
+                        if chat_id:
+                            await self.bot.send_message(
+                                chat_id=int(chat_id),
+                                text=f"🧹 Auto-compacted: {result['messages_before']} → {result['messages_after']} messages",
+                            )
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.warning(f"Model-switch compact failed for {key}: {e}")
 
