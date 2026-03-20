@@ -95,11 +95,15 @@ Controls how fast non-permanent memories fade and when they get promoted.
 | `session.compaction_threshold` | `80000` | integer (chars) |
 | `session.compaction_keep_recent` | `40` | integer (messages) |
 | `session.max_messages` | `100` | integer |
+| `session.history_limit` | `100` | integer (messages) |
 
 Controls when conversation history is compacted (summarized) to save context.
 - `compaction_threshold` — character count that triggers auto-compaction.
 - `compaction_keep_recent` — number of recent messages preserved verbatim after compaction.
 - `max_messages` — soft limit before suggesting compaction.
+- `history_limit` — max messages loaded into context per turn. Only the last N messages
+  are loaded from DB. If they exceed context, oldest are dropped 4 at a time. Compaction
+  operates on full session in DB — not affected by this limit.
 - **Increase threshold when**: Owner wants longer uncompacted conversations (needs large context model).
 - **Decrease threshold when**: Running into context limits, responses slowing down.
 - **Increase keep_recent when**: Bot loses too much recent context after compaction.

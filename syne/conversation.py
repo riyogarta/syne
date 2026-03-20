@@ -186,20 +186,27 @@ class Conversation:
         return result
 
     async def load_history(self) -> list[ChatMessage]:
-        """Load ALL message history from database for this session.
-        
-        No artificial limits — compaction controls session size.
-        If the session has been compacted, there are fewer messages.
-        If not, load everything and let compaction handle it before
-        the next LLM call.
+        """Load recent message history from database for this session.
+
+        Loads at most N messages (from session.history_limit config, default 100).
+        Compaction controls total session size; this limits what enters context.
         """
+        from .db.models import get_config as _get_config
+        limit = await _get_config("session.history_limit", 100)
+        if isinstance(limit, str):
+            limit = int(limit)
+
         async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT role, content, metadata
                 FROM messages
                 WHERE session_id = $1
-                ORDER BY created_at ASC
-            """, self.session_id)
+                ORDER BY created_at DESC
+                LIMIT $2
+            """, self.session_id, limit)
+
+        # Reverse to chronological order
+        rows = list(reversed(rows))
 
         messages = []
         for row in rows:
@@ -209,7 +216,7 @@ class Conversation:
                 metadata=json.loads(row["metadata"]) if row["metadata"] else None,
             ))
 
-        logger.info(f"load_history: loaded {len(messages)} messages for session {self.session_id}")
+        logger.info(f"load_history: loaded {len(messages)} messages (limit={limit}) for session {self.session_id}")
         self._message_cache = messages
         return messages
 
@@ -408,10 +415,30 @@ class Conversation:
         except Exception as e:
             logger.debug(f"Graph recall skipped: {e}")
 
-        # 5. Prune oversized tool results, then trim to fit context window
+        # 5. Prune oversized tool results
         # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)
         # Do NOT append it again here — that caused the LLM to see duplicate user messages.
         messages = self.context_mgr.prune_tool_results(messages)
+
+        # 6. Adaptive history reduction — drop oldest 4 non-system messages per
+        # iteration until context fits. Gentler than trim_context's emergency drop.
+        from .context import estimate_messages_tokens
+        _est = estimate_messages_tokens(messages, self.context_mgr.chars_per_token)
+        while _est > self.context_mgr.available:
+            _new = []
+            _skip = 4
+            for m in messages:
+                if m.role == "system" or _skip <= 0:
+                    _new.append(m)
+                else:
+                    _skip -= 1
+            if len(_new) == len(messages):
+                break  # nothing left to drop
+            messages = _new
+            _est = estimate_messages_tokens(messages, self.context_mgr.chars_per_token)
+            logger.info(f"Adaptive reduction: {len(messages)} msgs, ~{_est} tokens")
+
+        # Safety net — should rarely trigger after adaptive reduction
         messages = self.context_mgr.trim_context(messages)
 
         return messages
@@ -510,24 +537,26 @@ class Conversation:
         # the response, which meant trim_context could silently drop
         # messages and cause amnesia.
         # ═══════════════════════════════════════════════════════════════
-        # Compaction gate: trigger on EITHER context fullness OR message count/char threshold
-        # Two paths: (1) context window >90% full, (2) message count or chars exceed config thresholds
-        context_full = self._message_cache and self.context_mgr.should_compact(
-            self._message_cache,
-            threshold=0.90,
-        )
+        # Compaction gate: use REAL DB totals (not _message_cache which only has last N)
+        from .compaction import get_session_stats
+        _real_stats = await get_session_stats(self.session_id)
+        _real_msg_count = _real_stats["message_count"]
+        _real_char_total = _real_stats["total_chars"]
+
         # Derive thresholds from effective context (minus reserved output tokens)
         _ctx_tokens = self.context_mgr.available
         _msg_thresh = max(100, min(2000, _ctx_tokens // 1000))
         _chr_thresh = int(_ctx_tokens * 0.75 * 3.5)
-        msg_count = len(self._message_cache) if self._message_cache else 0
-        count_exceeded = msg_count >= _msg_thresh
-        # Quick char estimate from message cache
-        char_total = sum(len(m.content or "") for m in self._message_cache) if self._message_cache else 0
-        chars_exceeded = char_total >= _chr_thresh
+        count_exceeded = _real_msg_count >= _msg_thresh
+        chars_exceeded = _real_char_total >= _chr_thresh
+        # Also check if cached messages (what LLM will see) fill 90% of context
+        context_full = self._message_cache and self.context_mgr.should_compact(
+            self._message_cache,
+            threshold=0.90,
+        )
 
         if context_full or count_exceeded or chars_exceeded:
-            logger.info(f"Compaction triggered for session {self.session_id}: context_full={context_full}, msgs={msg_count}/{_msg_thresh}, chars={char_total}/{_chr_thresh}")
+            logger.info(f"Compaction triggered for session {self.session_id}: context_full={context_full}, db_msgs={_real_msg_count}/{_msg_thresh}, db_chars={_real_char_total}/{_chr_thresh}")
             if self._mgr and self._mgr._status_callbacks:
                 for cb in self._mgr._status_callbacks:
                     try:
@@ -1456,15 +1485,9 @@ class ConversationManager:
         # in build_context). This is the fix for restart amnesia.
         await conv.load_history()
 
-        # Auto-compact on session load if history is large — prevents
-        # format mismatch errors after syne update/restart/model change.
-        if len(conv._message_cache) >= 50:
-            try:
-                result = await conv.run_compact()
-                if result:
-                    logger.info(f"Session-load compact: {result['messages_before']} → {result['messages_after']} msgs")
-            except Exception as e:
-                logger.warning(f"Session-load compact failed: {e}")
+        # With Limit N history loading, only last N messages are loaded.
+        # Auto-compact on session load is no longer needed — the pre-flight
+        # compaction check in _chat_inner uses real DB totals.
 
         # Load per-model LLM params from model registry
         from .db.models import get_config as _get_config
