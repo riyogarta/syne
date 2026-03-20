@@ -1849,12 +1849,6 @@ Or just send me a message!"""
 
         chat_id = str(update.effective_chat.id)
 
-        # Only owner can compact
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can compact sessions.")
-            return
 
         # Find active session
         async with get_connection() as conn:
