@@ -597,8 +597,9 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
                 # Error → don't mark, keep pending for retry
                 logger.error(f"Reprocess #{row['id']} failed ({elapsed:.1f}s): {e}")
                 stats["failed"] += 1
-            # Small delay between extractions to avoid flooding
-            await asyncio.sleep(0.3)
+            # Delay between extractions — Gemini CCA has strict rate limits
+            _delay = 3.0 if provider.name in ("google", "vertex") else 0.3
+            await asyncio.sleep(_delay)
 
     except Exception as e:
         logger.error(f"Reprocess permanent memories failed: {e}")
