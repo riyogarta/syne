@@ -359,20 +359,39 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
 
 
 async def _store_graph(extracted: dict, memory_id: int) -> None:
-    """Store extracted entities and relations into the graph tables."""
-    entity_map = {}  # name -> entity_id
-    linked_ids = set()  # track entities that got linked to relations
+    """Store extracted entities and relations into the graph tables.
 
-    # Resolve all entities first
-    for e in extracted.get("entities", []):
-        name = e["name"].strip()
-        etype = e["type"].strip().lower()
-        desc = e.get("description", "").strip()
-        entity_id = await _resolve_entity(name, etype, desc)
-        entity_map[name.lower()] = entity_id
+    Only creates entities that are referenced in relations — no orphans.
+    """
+    entities = extracted.get("entities", [])
+    relations = extracted.get("relations", [])
+
+    # Build entity lookup by name (from LLM extraction)
+    entity_info = {}
+    for e in entities:
+        name = e["name"].strip().lower()
+        entity_info[name] = {
+            "name": e["name"].strip(),
+            "type": e["type"].strip().lower(),
+            "desc": e.get("description", "").strip(),
+        }
+
+    # Determine which entities are actually needed by relations
+    needed = set()
+    for r in relations:
+        needed.add(r["subject"].strip().lower())
+        needed.add(r["object"].strip().lower())
+
+    # Only resolve/create entities that have relations
+    entity_map = {}  # name -> entity_id
+    for name in needed:
+        info = entity_info.get(name)
+        if info:
+            entity_id = await _resolve_entity(info["name"], info["type"], info["desc"])
+            entity_map[name] = entity_id
 
     # Store relations
-    for r in extracted.get("relations", []):
+    for r in relations:
         subj_name = r["subject"].strip().lower()
         obj_name = r["object"].strip().lower()
         predicate = r["predicate"].strip().lower()
@@ -392,22 +411,6 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
                    DO UPDATE SET source_memory_id = $4, updated_at = NOW()""",
                 subj_id, predicate, obj_id, memory_id,
             )
-        linked_ids.add(subj_id)
-        linked_ids.add(obj_id)
-
-
-    # Cleanup: remove orphan entities created in this batch but not linked
-    orphan_ids = set(entity_map.values()) - linked_ids
-    if orphan_ids:
-        async with get_connection() as conn:
-            await conn.execute(
-                """DELETE FROM kg_entities WHERE id = ANY($1::int[])
-                   AND NOT EXISTS (SELECT 1 FROM kg_relations r WHERE r.subject_id = kg_entities.id)
-                   AND NOT EXISTS (SELECT 1 FROM kg_relations r WHERE r.object_id = kg_entities.id)""",
-                list(orphan_ids),
-            )
-            if len(orphan_ids) > 0:
-                logger.debug(f"Cleaned up {len(orphan_ids)} orphan entities from memory {memory_id}")
 
 
 async def recall_graph(query: str, limit: int = 10) -> list[str]:
