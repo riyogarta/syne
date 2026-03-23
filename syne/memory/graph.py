@@ -30,6 +30,7 @@ _KG_SEMAPHORE = asyncio.Semaphore(2)  # max 2 concurrent extractions
 _KG_DELAY = 1.0  # seconds between extractions
 
 
+
 EXTRACT_PROMPT = """You are a knowledge graph extractor. Given a memory statement, extract entities and their relationships using the store_knowledge_graph tool.
 
 Rules:
@@ -582,11 +583,6 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
             speaker = row["display_name"] or row["name"] or ""
             t0 = _time.monotonic()
             try:
-                # Final check right before API call
-                if conversations_mgr and hasattr(conversations_mgr, 'is_any_chat_active'):
-                    while conversations_mgr.is_any_chat_active():
-                        await asyncio.sleep(0.5)
-
                 # Extract directly — bypass semaphore and per-call config reads
                 if driver == "ollama":
                     extracted = await _extract_via_ollama(
