@@ -269,7 +269,7 @@ Controls how voice messages are transcribed.
 |-----|---------|------|
 | `subagents.enabled` | `true` | boolean |
 | `subagents.max_concurrent` | `2` | integer |
-| `subagents.timeout_seconds` | `900` | integer (15 min) |
+| `subagents.timeout_seconds` | `172800` | integer (48 hours) |
 
 Controls background task delegation.
 - **Disable when**: Not using sub-agents, want to save resources.
