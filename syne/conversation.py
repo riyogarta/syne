@@ -630,12 +630,25 @@ class Conversation:
         max_attempts = 1 if self.provider.name in ("google", "vertex") else 2
         for attempt in range(max_attempts):
             try:
-                response = await self.provider.chat(
-                    messages=context,
-                    tools=tool_schemas if tool_schemas else None,
-                    stream_callbacks=self.stream_callbacks,
-                    **chat_kwargs,
-                )
+                # Auto-retry on vague 400 errors (e.g. concurrent KG extraction)
+                _vague_retries = 3
+                for _vague_attempt in range(_vague_retries):
+                    try:
+                        response = await self.provider.chat(
+                            messages=context,
+                            tools=tool_schemas if tool_schemas else None,
+                            stream_callbacks=self.stream_callbacks,
+                            **chat_kwargs,
+                        )
+                        break  # success
+                    except (RuntimeError, LLMBadRequestError) as _re:
+                        _msg = str(_re)
+                        _is_vague = '"message":"Error"' in _msg or '"message": "Error"' in _msg
+                        if _is_vague and _vague_attempt < _vague_retries - 1:
+                            logger.warning(f"Vague 400 error, retrying in 2s ({_vague_attempt + 1}/{_vague_retries})")
+                            await asyncio.sleep(2.0)
+                            continue
+                        raise  # not vague or last attempt — let outer handler deal with it
             except LLMContextWindowError:
                 # Input tokens exceeded model limit — emergency compact and retry once
                 logger.warning(f"Context window exceeded for session {self.session_id}, triggering emergency compaction")
@@ -1134,12 +1147,24 @@ class Conversation:
             await asyncio.sleep(1.0)
 
             # Get next response — may contain more tool calls
-            current = await self.provider.chat(
-                messages=context,
-                tools=tool_schemas if tool_schemas else None,
-                stream_callbacks=self.stream_callbacks,
-                **self._build_chat_kwargs(),
-            )
+            # Auto-retry on vague 400 errors
+            for _vague_attempt in range(3):
+                try:
+                    current = await self.provider.chat(
+                        messages=context,
+                        tools=tool_schemas if tool_schemas else None,
+                        stream_callbacks=self.stream_callbacks,
+                        **self._build_chat_kwargs(),
+                    )
+                    break
+                except (RuntimeError, LLMBadRequestError) as _re:
+                    _msg = str(_re)
+                    _is_vague = '"message":"Error"' in _msg or '"message": "Error"' in _msg
+                    if _is_vague and _vague_attempt < 2:
+                        logger.warning(f"Vague 400 in tool loop, retrying in 2s ({_vague_attempt + 1}/3)")
+                        await asyncio.sleep(2.0)
+                        continue
+                    raise
             usage.add(current)
             round_num += 1
 
