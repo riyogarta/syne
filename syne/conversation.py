@@ -15,7 +15,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 from .db.connection import get_connection
-from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError
+from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens, DEFAULT_CHARS_PER_TOKEN
