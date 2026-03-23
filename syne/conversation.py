@@ -1302,10 +1302,6 @@ class ConversationManager:
         self.workspace_outputs: Optional[str] = None  # Set by agent after init
         self._active: dict[str, Conversation] = {}
         self._delivery_callbacks: list = []  # Multi-slot: channels register via add/remove
-
-    def is_any_chat_active(self) -> bool:
-        """Check if any conversation is currently processing a chat request."""
-        return any(conv._processing for conv in self._active.values())
         self._status_callbacks: list = []  # Multi-slot: channels register via add/remove
         self._tool_callback = None  # Single-slot (CLI only, per-cycle)
         self._stream_callbacks: Optional[StreamCallbacks] = None  # CLI streaming
@@ -1315,6 +1311,10 @@ class ConversationManager:
         # Wire up sub-agent completion callback
         if self.subagents:
             self.subagents.set_completion_callback(self._on_subagent_complete)
+
+    def is_any_chat_active(self) -> bool:
+        """Check if any conversation is currently processing a chat request."""
+        return any(conv._processing for conv in self._active.values())
 
     async def _on_subagent_complete(self, run_id: str, status: str, result: str, parent_session_id: int):
         """Called when a sub-agent finishes. Delivers result to the parent session."""
