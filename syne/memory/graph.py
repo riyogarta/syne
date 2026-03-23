@@ -361,6 +361,7 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
 async def _store_graph(extracted: dict, memory_id: int) -> None:
     """Store extracted entities and relations into the graph tables."""
     entity_map = {}  # name -> entity_id
+    linked_ids = set()  # track entities that got linked to relations
 
     # Resolve all entities first
     for e in extracted.get("entities", []):
@@ -391,6 +392,22 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
                    DO UPDATE SET source_memory_id = $4, updated_at = NOW()""",
                 subj_id, predicate, obj_id, memory_id,
             )
+        linked_ids.add(subj_id)
+        linked_ids.add(obj_id)
+
+
+    # Cleanup: remove orphan entities created in this batch but not linked
+    orphan_ids = set(entity_map.values()) - linked_ids
+    if orphan_ids:
+        async with get_connection() as conn:
+            await conn.execute(
+                """DELETE FROM kg_entities WHERE id = ANY($1::int[])
+                   AND NOT EXISTS (SELECT 1 FROM kg_relations r WHERE r.subject_id = kg_entities.id)
+                   AND NOT EXISTS (SELECT 1 FROM kg_relations r WHERE r.object_id = kg_entities.id)""",
+                list(orphan_ids),
+            )
+            if len(orphan_ids) > 0:
+                logger.debug(f"Cleaned up {len(orphan_ids)} orphan entities from memory {memory_id}")
 
 
 async def recall_graph(query: str, limit: int = 10) -> list[str]:
