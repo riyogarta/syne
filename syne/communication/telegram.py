@@ -38,14 +38,14 @@ from ..db.models import (
 logger = logging.getLogger("syne.telegram")
 
 
-def _classify_error(e: Exception) -> str:
+def _classify_error(e: Exception, model: str = "") -> str:
     """Classify any exception into a user-friendly message for Telegram.
 
     Delegates to the channel-agnostic classify_error() and prepends the
     warning emoji for Telegram display.
     """
     from .errors import classify_error
-    return f"⚠️ {classify_error(e)}"
+    return f"⚠️ {classify_error(e, model=model)}"
 
 
 class _TypingIndicator:
@@ -392,7 +392,14 @@ class TelegramChannel:
         except Exception as e:
             logger.error(f"Error processing scheduled message: {e}", exc_info=True)
             try:
-                await self.app.bot.send_message(chat_id, _classify_error(e))
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat_id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await self.app.bot.send_message(chat_id, _classify_error(e, model=_model))
             except Exception:
                 pass
 
@@ -584,7 +591,15 @@ class TelegramChannel:
                 return
             except Exception as e:
                 logger.error(f"Error handling message: {e}", exc_info=True)
-                await update.message.reply_text(_classify_error(e))
+                _model = ""
+                try:
+                    _key = f"telegram:{chat.id}"
+                    _conv = self.agent.conversations._active.get(_key)
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
             finally:
                 self._active_tasks.pop(chat.id, None)
 
@@ -972,7 +987,14 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
-                await update.message.reply_text(_classify_error(e))
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle voice messages and audio files — transcribe via STT and process as text."""
@@ -1079,7 +1101,14 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling voice: {e}", exc_info=True)
-                await update.message.reply_text(_classify_error(e))
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document/file uploads — download, save to disk, pass path to LLM."""
@@ -1210,7 +1239,14 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling document: {e}", exc_info=True)
-                await update.message.reply_text(_classify_error(e))
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""
@@ -1307,7 +1343,14 @@ class TelegramChannel:
 
             except Exception as e:
                 logger.error(f"Error handling location: {e}", exc_info=True)
-                await update.message.reply_text(_classify_error(e))
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
 
     async def _reverse_geocode(self, lat: float, lng: float) -> str | None:
         """Reverse geocode coordinates to address using Google Maps API."""
