@@ -132,22 +132,6 @@ async def _do_extract_and_store(
         return await _run_extraction(provider, content, memory_id, speaker_name)
 
 
-def _is_kg_worthy(content: str) -> bool:
-    """Check if content has enough substance for KG extraction.
-
-    Filters out short messages, commands, and low-value content
-    that would waste an LLM call and always produce 0 relations.
-    """
-    text = content.strip()
-    if len(text) < 30:
-        return False
-    # Count words with substance (> 2 chars)
-    words = [w for w in text.split() if len(w) > 2]
-    if len(words) < 5:
-        return False
-    return True
-
-
 async def _run_extraction(
     provider: LLMProvider,
     content: str,
@@ -156,12 +140,6 @@ async def _run_extraction(
 ) -> bool:
     """Core extraction logic without throttling."""
     try:
-        # Skip content too short/trivial for KG — mark processed immediately
-        if not _is_kg_worthy(content):
-            logger.debug(f"KG skip: content too short for memory #{memory_id}")
-            await _mark_kg_processed(memory_id)
-            return False
-
         enabled = await get_config("graph.enabled", True)
         if not enabled:
             return False
