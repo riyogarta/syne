@@ -289,14 +289,15 @@ class AnthropicProvider(LLMProvider):
     ) -> ChatResponse:
         model = model or self.chat_model
 
-        # Separate system message from conversation messages
-        system_text = None
+        # Separate system messages from conversation messages
+        system_parts = []
         conversation = []
         pending_tool_results = []
 
         for m in messages:
             if m.role == "system":
-                system_text = m.content
+                if m.content:
+                    system_parts.append(m.content)
             elif m.role == "tool":
                 tool_call_id = (m.metadata or {}).get("tool_call_id", "unknown")
                 pending_tool_results.append({
@@ -376,12 +377,12 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
         }
 
-        # OAuth tokens MUST include Claude Code identity as first system block
+        # Build system blocks from all system messages
         system_blocks = []
         if self._is_oauth:
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
-        if system_text:
-            system_blocks.append({"type": "text", "text": system_text})
+        for sp in system_parts:
+            system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
             body["system"] = system_blocks
 
