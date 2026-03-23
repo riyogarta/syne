@@ -2448,7 +2448,10 @@ Or just send me a message!"""
 
             async def _bg_reprocess():
                 try:
-                    stats = await reprocess_permanent_memories(_reprocess_provider, force=True)
+                    stats = await reprocess_permanent_memories(
+                        _reprocess_provider, force=True,
+                        conversations_mgr=self.agent.conversations,
+                    )
                     lines = [f"🔄 <b>Reprocess Complete</b>\n"]
                     if stats.get("reset"):
                         lines.append(f"Reset flags: {stats['reset']}")

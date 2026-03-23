@@ -500,7 +500,7 @@ async def get_graph_stats() -> dict:
         return {"entities": 0, "relations": 0, "types": []}
 
 
-async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = False) -> dict:
+async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = False, conversations_mgr=None) -> dict:
     """Re-extract graph from permanent memories that haven't been KG-processed.
 
     Useful after fixing extraction bugs — processes memories that were
@@ -508,6 +508,8 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
 
     Args:
         provider: LLM provider for extraction
+        conversations_mgr: ConversationManager — if provided, pauses extraction
+            when any chat is active to avoid concurrent API calls
         force: If True, reset kg_processed flag for memories that have no
                KG relations yet, then reprocess them. Useful when bulk imports
                incorrectly set kg_processed=True.
@@ -570,6 +572,11 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
         import time as _time
 
         for row in rows:
+            # Pause if any chat is active — avoid concurrent API calls on same provider
+            if conversations_mgr and hasattr(conversations_mgr, 'is_any_chat_active'):
+                while conversations_mgr.is_any_chat_active():
+                    await asyncio.sleep(1.0)
+
             stats["processed"] += 1
             speaker = row["display_name"] or row["name"] or ""
             t0 = _time.monotonic()

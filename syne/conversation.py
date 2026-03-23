@@ -1277,6 +1277,10 @@ class ConversationManager:
         self.workspace_outputs: Optional[str] = None  # Set by agent after init
         self._active: dict[str, Conversation] = {}
         self._delivery_callbacks: list = []  # Multi-slot: channels register via add/remove
+
+    def is_any_chat_active(self) -> bool:
+        """Check if any conversation is currently processing a chat request."""
+        return any(conv._processing for conv in self._active.values())
         self._status_callbacks: list = []  # Multi-slot: channels register via add/remove
         self._tool_callback = None  # Single-slot (CLI only, per-cycle)
         self._stream_callbacks: Optional[StreamCallbacks] = None  # CLI streaming
