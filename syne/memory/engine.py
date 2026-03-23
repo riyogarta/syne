@@ -526,36 +526,10 @@ class MemoryEngine:
             return  # Not time yet
         
         decay_amount = int(await get_config("memory.decay_amount", "1"))
-        promotion_threshold = int(await get_config("memory.promotion_threshold", "10"))
 
         async with get_connection() as conn:
-            # Promote non-permanent memories with recall_count > threshold to permanent
-            promoted = await conn.fetch("""
-                UPDATE memory m
-                SET permanent = true, updated_at = NOW()
-                FROM (
-                    SELECT m2.id, m2.content, COALESCE(u.display_name, u.name, '') AS speaker
-                    FROM memory m2
-                    LEFT JOIN users u ON m2.user_id = u.id
-                    WHERE m2.permanent = false
-                      AND m2.recall_count > $1
-                ) sub
-                WHERE m.id = sub.id
-                RETURNING m.id, m.content, sub.speaker
-            """, promotion_threshold)
-            if promoted:
-                logger.info(f"Memory decay: promoted {len(promoted)} memories to permanent")
-                # Trigger KG extraction for newly promoted memories
-                import asyncio
-                from .graph import extract_and_store as graph_extract
-                for row in promoted:
-                    try:
-                        asyncio.create_task(graph_extract(
-                            self.provider, row["content"], row["id"],
-                            speaker_name=row["speaker"],
-                        ))
-                    except Exception as e:
-                        logger.debug(f"KG extraction skipped for promoted memory #{row['id']}: {e}")
+            # No promotion — permanent is only set by explicit user command ("ingat").
+            # Non-permanent memories stay non-permanent and subject to decay.
 
             # Decay non-permanent memories
             await conn.execute("""
