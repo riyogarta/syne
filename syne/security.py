@@ -43,7 +43,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "manage_schedule": 0o770,
     "spawn_subagent":  0o750,
     "subagent_status": 0o550,
-    "memory_search":   0o550,
+    "memory_search":   0o555,  # public can search allowed categories (Rule 765)
     "memory_store":    0o770,
     "memory_delete":   0o700,
     "manage_group":    0o700,
