@@ -477,19 +477,11 @@ class Conversation:
         try:
             await asyncio.wait_for(self._lock.acquire(), timeout=30)
         except asyncio.TimeoutError:
-            # Force release stuck lock — the previous request hung
-            if self._lock.locked():
-                logger.error(f"Session {self.session_id}: force-releasing stuck lock")
-                try:
-                    self._lock.release()
-                except RuntimeError:
-                    pass  # already released by someone else
-                self._processing = False
-                # Now acquire for ourselves
-                await self._lock.acquire()
-            else:
-                logger.warning(f"Session {self.session_id}: lock freed while waiting")
-                await self._lock.acquire()
+            # Replace stuck lock with a fresh one — old lock is abandoned
+            logger.error(f"Session {self.session_id}: lock stuck for 30s, replacing with new lock")
+            self._lock = asyncio.Lock()
+            self._processing = False
+            await self._lock.acquire()
         logger.debug(f"Session {self.session_id}: lock acquired")
         try:
             # Reset per-turn state
