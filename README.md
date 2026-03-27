@@ -210,18 +210,49 @@ Non-permanent memories fade naturally, mimicking human forgetting:
 - When `recall_count` reaches 0, the memory is **deleted**
 - Memories that are **recalled** (used in context) get a **+2 boost** each time
 - **Permanent** memories (explicit "remember this") **never decay**
-- Memories with `recall_count` exceeding the **promotion threshold** (default: 10) are **promoted to permanent** — they've proven their value through frequent recall, and KG extraction runs automatically
 
-This creates a natural selection: useful memories that keep getting recalled survive indefinitely and eventually become permanent, while irrelevant ones fade away. You don't need to manually clean up — the system self-maintains.
+This creates a natural selection: useful memories that keep getting recalled survive, while irrelevant ones fade away. No manual cleanup needed.
 
 ### Memory Types
 
 | Type | Decay | KG | Created by | Example |
 |------|-------|-----|------------|---------|
 | **Permanent** | Never | Yes | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
-| **Promoted** | Never | Yes (on promotion) | Auto-captured, recalled 10+ times | Frequently useful observations |
 | **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
 | **Conversation history** | Compacted when long | No | Every message automatically | Full chat logs in `messages` table |
+
+### Memory Access Control
+
+Two security rules govern who can access memories:
+
+**Rule 760 — Family Privacy**: All memories are private by default. Only `owner` and `family` access levels can read memories.
+
+**Rule 765 — Public Category Exception**: Specific memory categories can be opened for public access via the `memory.public_categories` config (JSON array).
+
+```
+# Example: allow public to search Al-Quran and Hadith memories
+Set config memory.public_categories to ["alquran","bukhari","muslim","fiqih"]
+```
+
+| Requester | Allowed categories | Rule |
+|-----------|-------------------|------|
+| **Owner** | All | 760 |
+| **Family** | All | 760 |
+| **Public** | Only categories in `memory.public_categories` | 765 |
+
+When a public user searches memories, results outside the allowed categories are silently filtered — they appear as if they don't exist.
+
+### History & Compaction
+
+Syne uses **Limit N** history loading — only the last N messages (default: 100, configurable via `session.history_limit`) are loaded from the database per chat turn. This leverages PostgreSQL's ability to query with `LIMIT` efficiently, regardless of total session size.
+
+**Adaptive reduction**: If the loaded messages still exceed the context window, the oldest non-system messages are dropped 4 at a time until they fit. This is transparent — no data is lost in the database.
+
+**Compaction** summarizes old messages when the session grows large:
+- Triggered automatically when total messages in DB exceed thresholds
+- Creates a detailed narrative summary preserving conversation context, facts, and decisions
+- Adaptive: if the batch to summarize exceeds the LLM's context, reduces by 4 messages at a time — remaining messages stay for the next compact round
+- All compact paths (auto, manual `/compact`, emergency) use the same `run_compact()` method
 
 ### Conflict Resolution
 
