@@ -25,82 +25,67 @@ _BASE64_PATTERN = re.compile(r'[A-Za-z0-9+/]{200,}={0,2}')
 
 # ── Initial summary prompt (no previous summary exists) ─────
 
-COMPACTION_PROMPT = """The messages above are a conversation to summarize. Create a structured context checkpoint summary that another LLM will use to continue the work.
+COMPACTION_PROMPT = """The messages above are a conversation to summarize. Create a detailed summary that another LLM will use to continue the conversation seamlessly — the user should NOT notice any loss of context.
 
-CRITICAL: Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
+CRITICAL RULES:
+- Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
+- Preserve ALL specific details: names, numbers, dates, data, preferences, facts mentioned.
+- Include the TONE and FLOW of the conversation, not just tasks.
 
-Use this EXACT format:
+Use this format:
 
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
+## Conversation Summary
+[Detailed narrative of what was discussed, in chronological order. Include what the user said, what was agreed upon, what was debated. Be specific — "user asked to embed Al Hadist" not "user requested data processing".]
 
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
+## Key Facts & Data
+- [Specific facts, names, numbers, preferences mentioned by the user]
+- [Any data the user provided or referenced]
 
-## Progress
-### Done
-- [x] [Completed tasks/changes]
+## Decisions Made
+- [What was decided and why — include context]
 
-### In Progress
-- [ ] [Current work]
+## Current State
+- What was completed
+- What is in progress
+- What needs to be done next
 
-### Blocked
-- [Issues preventing progress, if any]
+## Important Context
+- [Anything needed to continue naturally — ongoing topics, user's mood/preferences, unresolved questions]
 
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
-
-Keep each section concise. Preserve exact names, identifiers, and error messages."""
+Be DETAILED. A longer summary that preserves context is better than a short one that loses it."""
 
 # ── Update prompt (previous summary exists, merge new info) ──
 
 UPDATE_COMPACTION_PROMPT = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
-Update the existing structured summary with new information. RULES:
-- PRESERVE all existing information from the previous summary
-- ADD new progress, decisions, and context from the new messages
-- UPDATE the Progress section: move items from "In Progress" to "Done" when completed
-- UPDATE "Next Steps" based on what was accomplished
-- If something is no longer relevant, you may remove it
+Update the summary with new information. RULES:
+- PRESERVE all existing information — do NOT drop details from previous summary
+- ADD new conversations, facts, decisions from the new messages
+- If a topic evolved, UPDATE it — don't just append
+- Only remove information that is explicitly contradicted or no longer relevant
 
 CRITICAL: Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
 
-Use this EXACT format:
+Use this format:
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
+## Conversation Summary
+[Merge previous summary narrative with new conversations. Keep chronological flow.]
 
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
+## Key Facts & Data
+- [Preserve ALL previous facts, add new ones]
 
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
+## Decisions Made
+- [Preserve previous decisions, add new ones with context]
 
-### In Progress
-- [ ] [Current work — update based on progress]
+## Current State
+- What was completed
+- What is in progress
+- What needs to be done next
 
-### Blocked
-- [Current blockers — remove if resolved]
+## Important Context
+- [Preserve and update ongoing context]
 
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact names, identifiers, and error messages."""
+Be DETAILED. A longer summary that preserves context is better than a short one that loses it."""
 
 
 def _serialize_messages(rows: list) -> str:
