@@ -129,18 +129,73 @@ def check_rule_760(memory_category: str, requester_access: str) -> tuple[bool, s
     Yahyo policy: ALL memories are treated as family-private.
     Only owner and family can access memory, regardless of category.
 
+    Exception: Rule 765 allows public access to specific categories.
+
     Args:
-        memory_category: Category of the memory being accessed (kept for compatibility)
+        memory_category: Category of the memory being accessed
         requester_access: Access level of the user requesting the memory
 
     Returns:
         Tuple of (allowed: bool, reason: str)
     """
-    if requester_access not in ("owner", "family"):
-        reason = "[Rule 760] Memory access is restricted to owner/family only."
-        logger.warning(f"Rule 760 violation: memory access attempted by {requester_access}")
-        return False, reason
-    return True, ""
+    if requester_access in ("owner", "family"):
+        return True, ""
+
+    # Rule 765: public access exception for allowed categories
+    allowed, reason = check_rule_765(memory_category)
+    if allowed:
+        return True, ""
+
+    reason = "[Rule 760] Memory access is restricted to owner/family only."
+    logger.warning(f"Rule 760 violation: memory access attempted by {requester_access}")
+    return False, reason
+
+
+# Cached public categories — refreshed periodically
+_public_categories_cache: list[str] = []
+_public_categories_ts: float = 0
+
+
+async def _load_public_categories() -> list[str]:
+    """Load memory.public_categories from DB config with 60s cache."""
+    global _public_categories_cache, _public_categories_ts
+    import time
+    now = time.time()
+    if now - _public_categories_ts < 60 and _public_categories_cache is not None:
+        return _public_categories_cache
+    try:
+        from .db.models import get_config
+        cats = await get_config("memory.public_categories", [])
+        if isinstance(cats, str):
+            import json
+            cats = json.loads(cats)
+        _public_categories_cache = [c.lower().strip() for c in cats] if cats else []
+    except Exception:
+        _public_categories_cache = []
+    _public_categories_ts = now
+    return _public_categories_cache
+
+
+def check_rule_765(memory_category: str) -> tuple[bool, str]:
+    """Check Rule 765: public category exception.
+
+    Allows public access to memories in categories listed in
+    memory.public_categories config. If the category is in the
+    allow list, access is granted regardless of requester level.
+
+    Args:
+        memory_category: Category of the memory being accessed
+
+    Returns:
+        Tuple of (allowed: bool, reason: str)
+    """
+    if not memory_category or not _public_categories_cache:
+        return False, "[Rule 765] No public categories configured."
+
+    if memory_category.lower().strip() in _public_categories_cache:
+        return True, ""
+
+    return False, f"[Rule 765] Category '{memory_category}' is not public."
 
 
 # ============================================================

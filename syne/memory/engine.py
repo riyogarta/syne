@@ -70,14 +70,13 @@ class MemoryEngine:
             List of matching memories (filtered by Rule 760 for privacy)
         """
         # ═══════════════════════════════════════════════════════
-        # RULE 760 CHECK — FAMILY PRIVACY PROTECTION (Yahyo policy)
-        # All memory recall is restricted to owner/family.
-        # Do this BEFORE embedding/DB query for safety and efficiency.
+        # RULE 760/765 — PRIVACY PROTECTION
+        # Owner/family: access all. Public: only allowed categories (Rule 765).
+        # Load public categories cache for Rule 765 checks below.
         # ═══════════════════════════════════════════════════════
-        allowed, reason = check_rule_760("", requester_access_level)
-        if not allowed:
-            logger.info(f"Memory recall blocked: {reason}")
-            return []
+        if requester_access_level not in ("owner", "family"):
+            from ..security import _load_public_categories
+            await _load_public_categories()  # refresh cache for Rule 765
 
         # Skip recall for very short queries (1 word) — no meaningful semantic match
         words = [w for w in query.strip().split() if len(w) > 1]

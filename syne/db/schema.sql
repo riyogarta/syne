@@ -347,6 +347,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.promotion_threshold', '10', 'Promote non-permanent to permanent when recall_count exceeds this'),
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
+    ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
@@ -740,4 +741,9 @@ CREATE TABLE IF NOT EXISTS pairing_tokens (
 -- Migration: session.history_limit
 INSERT INTO config (key, value, description) VALUES
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)')
+ON CONFLICT (key) DO NOTHING;
+
+-- Migration: memory.public_categories (Rule 765)
+INSERT INTO config (key, value, description) VALUES
+    ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]')
 ON CONFLICT (key) DO NOTHING;
