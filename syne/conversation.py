@@ -856,8 +856,8 @@ class Conversation:
     ) -> ChatResponse:
         """Execute tool calls and get final response. Loops for multi-step tool use.
 
-        No hard round limit — loop runs until LLM stops calling tools or
-        loop detection kicks in. Token usage is accumulated across all rounds.
+        Hard limit of max_rounds (default 30, configurable via session.max_tool_rounds).
+        Token usage is accumulated across all rounds.
         """
         from .tools.loop_detection import ToolLoopDetector
 
@@ -879,6 +879,12 @@ class Conversation:
         loop_stuck = False
         round_num = 0
 
+        # Hard round limit — prevents infinite tool loops from holding session lock
+        from .db.models import get_config as _gc_rounds
+        _max_rounds = await _gc_rounds("session.max_tool_rounds", 30)
+        if isinstance(_max_rounds, str):
+            _max_rounds = int(_max_rounds)
+
         # Track which on-demand guides have been injected this turn
         _injected_guides: set = set()
 
@@ -887,7 +893,7 @@ class Conversation:
         usage = UsageAccumulator()
         usage.add(response)  # Initial response that triggered tool calls
 
-        while current.tool_calls:
+        while current.tool_calls and round_num < _max_rounds:
 
             context.append(ChatMessage(
                 role="assistant",
@@ -1179,11 +1185,13 @@ class Conversation:
             usage.add(current)
             round_num += 1
 
-        if loop_stuck:
+        if loop_stuck or (round_num >= _max_rounds and current.tool_calls):
             # Force a final text response with no tools
+            reason = "tool call loop detected" if loop_stuck else f"max tool rounds ({_max_rounds}) reached"
+            logger.warning(f"Forcing final response: {reason}")
             context.append(ChatMessage(
                 role="system",
-                content="STOP. A tool call loop was detected — you keep calling the same tool(s) with identical arguments. Summarize what you've done so far and try a completely different approach if the task is incomplete.",
+                content=f"STOP. {reason.capitalize()}. Summarize what you've done so far and respond to the user with what you have.",
             ))
             current = await self.provider.chat(
                 messages=context,

@@ -349,6 +349,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
+    ('session.max_tool_rounds', '30', 'Max tool call rounds per chat turn (prevents infinite loops)'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
@@ -746,4 +747,9 @@ ON CONFLICT (key) DO NOTHING;
 -- Migration: memory.public_categories (Rule 765)
 INSERT INTO config (key, value, description) VALUES
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]')
+ON CONFLICT (key) DO NOTHING;
+
+-- Migration: session.max_tool_rounds
+INSERT INTO config (key, value, description) VALUES
+    ('session.max_tool_rounds', '30', 'Max tool call rounds per chat turn (prevents infinite loops)')
 ON CONFLICT (key) DO NOTHING;
