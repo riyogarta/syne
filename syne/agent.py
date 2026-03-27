@@ -801,7 +801,7 @@ class SyneAgent:
                 "required": ["query"],
             },
             handler=self._tool_memory_search,
-            permission=0o550,
+            permission=0o555,  # public can search allowed categories (Rule 765)
         )
 
         # Memory store tool
