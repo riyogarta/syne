@@ -48,6 +48,17 @@ def _classify_error(e: Exception, model: str = "") -> str:
     return f"⚠️ {classify_error(e, model=model)}"
 
 
+def _make_model_key(model_id: str, driver: str = "") -> str:
+    """Generate a short unique key from model_id + driver prefix."""
+    slug = model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()
+    # Add driver prefix for non-default drivers to avoid key collision
+    # (e.g. vertex-gemini-2-5-pro vs gemini-2-5-pro for google_cca)
+    if driver and driver not in ("google_cca", "codex", "anthropic"):
+        prefix = driver.split("_")[0]
+        slug = f"{prefix}-{slug}"
+    return slug[:40]
+
+
 class _TypingIndicator:
     """Keeps sending 'typing' action every 4s until cancelled.
 
@@ -2245,7 +2256,7 @@ Or just send me a message!"""
                 label = text
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
+                "key": _make_model_key(model_id, driver),
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
@@ -2567,7 +2578,7 @@ Or just send me a message!"""
                 label = text
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
+                "key": _make_model_key(model_id, driver),
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
@@ -6444,7 +6455,7 @@ Or just send me a message!"""
             # Build model entry and save
             auth_type = state.get("auth_override") or self._DRIVER_AUTH_TYPES.get(driver, "api_key")
             entry = {
-                "key": state["model_id"].replace("/", "-").replace(".", "-").lower()[:40],
+                "key": _make_model_key(state["model_id"], state.get("driver", "")),
                 "label": state["label"],
                 "driver": driver,
                 "model_id": state["model_id"],
@@ -6817,7 +6828,7 @@ Or just send me a message!"""
             cost = "FREE (local)" if driver == "ollama" else "API Key"
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
+                "key": _make_model_key(model_id, driver),
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
