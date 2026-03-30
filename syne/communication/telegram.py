@@ -2245,7 +2245,7 @@ Or just send me a message!"""
                 label = text
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower(),
+                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
@@ -2567,7 +2567,7 @@ Or just send me a message!"""
                 label = text
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower(),
+                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
@@ -6444,7 +6444,7 @@ Or just send me a message!"""
             # Build model entry and save
             auth_type = state.get("auth_override") or self._DRIVER_AUTH_TYPES.get(driver, "api_key")
             entry = {
-                "key": state["model_id"].replace("/", "-").replace(".", "-").lower(),
+                "key": state["model_id"].replace("/", "-").replace(".", "-").lower()[:40],
                 "label": state["label"],
                 "driver": driver,
                 "model_id": state["model_id"],
@@ -6817,7 +6817,7 @@ Or just send me a message!"""
             cost = "FREE (local)" if driver == "ollama" else "API Key"
 
             entry = {
-                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower(),
+                "key": model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()[:40],
                 "label": label,
                 "driver": driver,
                 "model_id": model_id,
