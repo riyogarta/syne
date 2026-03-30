@@ -548,7 +548,7 @@ class Conversation:
 
         # Derive thresholds from effective context (minus reserved output tokens)
         _ctx_tokens = self.context_mgr.available
-        _msg_thresh = max(100, min(2000, _ctx_tokens // 1000))
+        _msg_thresh = max(100, min(300, _ctx_tokens // 1000))
         _chr_thresh = int(_ctx_tokens * 0.75 * 3.5)
         count_exceeded = _real_msg_count >= _msg_thresh
         chars_exceeded = _real_char_total >= _chr_thresh
