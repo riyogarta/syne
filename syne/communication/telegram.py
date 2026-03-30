@@ -1944,6 +1944,16 @@ Or just send me a message!"""
             key = f"telegram:{chat_id}"
             conv = self.agent.conversations._active.get(key)
             if not conv:
+                # Session exists in DB but not loaded yet — trigger load via a dummy dispatch
+                from ..db.models import get_user
+                db_user = await get_user("telegram", str(user.id))
+                if db_user:
+                    conv = await self.agent.conversations.get_or_create_session(
+                        platform="telegram",
+                        chat_id=chat_id,
+                        user=db_user,
+                    )
+            if not conv:
                 await update.message.reply_text("No active conversation to compact.")
                 return
 
