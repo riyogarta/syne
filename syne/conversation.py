@@ -630,7 +630,7 @@ class Conversation:
         # Google driver already retries empty streams internally — skip conversation-level retry
         chat_kwargs = self._build_chat_kwargs()
         response = None
-        max_attempts = 1 if self.provider.name in ("google", "vertex") else 2
+        max_attempts = 1 if self.provider.name in ("google", "vertex") else 3
         for attempt in range(max_attempts):
             try:
                 # Auto-retry on vague 400 errors (e.g. concurrent KG extraction)
@@ -694,11 +694,11 @@ class Conversation:
             if (response.tool_calls) or ((response.content or "").strip()):
                 break
 
-            if attempt == 0:
+            if attempt < max_attempts - 1:
                 logger.warning(
-                    "LLM returned empty content (no tool calls). Retrying once after short backoff..."
+                    f"LLM returned empty content (no tool calls). Retrying after 1s (attempt {attempt + 1}/{max_attempts})..."
                 )
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(1.0)
 
         # Handle tool calls
         logger.info(f"LLM response: content={len(response.content or '')} chars, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, model={response.model}")

@@ -567,8 +567,16 @@ class TelegramChannel:
                     return
 
                 if not response:
-                    response = "⚠️ LLM returned an empty response. Please try again."
-                    logger.warning(f"Empty response for chat {chat.id} — sending fallback")
+                    _model = ""
+                    try:
+                        _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                        if _conv:
+                            _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                    except Exception:
+                        pass
+                    _tag = f"[{_model}] " if _model else ""
+                    response = f"⚠️ {_tag}No response received. Please try again."
+                    logger.warning(f"Empty response for chat {chat.id} ({_model}) — sending fallback")
 
                 if response:
                     # Check if per-model reasoning visibility is ON — prepend thinking if available
