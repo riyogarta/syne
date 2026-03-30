@@ -463,10 +463,16 @@ class TelegramChannel:
 
         # Handle DMs - auto-create user
         else:
+            # Check if user exists BEFORE creating — new users need approval
+            _existing = await get_user("telegram", str(user.id))
             db_user = await self._ensure_user(user, is_dm=True)
             # Block rejected/blocked users silently
             if db_user.get("access_level") == "blocked":
                 logger.debug(f"Ignoring message from blocked user {user.id}")
+                return
+            # New user (didn't exist before) and not auto-promoted to owner → pending approval
+            if not _existing and db_user.get("access_level") != "owner":
+                await self._handle_pending_user(update, db_user)
                 return
             # DM received — send 👀 read receipt
             try:
