@@ -7852,17 +7852,21 @@ Or just send me a message!"""
                     reply_parameters=rp,
                 )
             except Exception:
-                # HTML parse failed — send as plain text
+                # HTML parse failed — send as plain text (strip HTML tags)
+                import re as _re
+                import html as _html_mod
+                plain = _re.sub(r'<[^>]+>', '', chunk)
+                plain = _html_mod.unescape(plain)  # decode &amp; &gt; etc.
                 try:
                     last_msg = await bot.send_message(
                         chat_id=chat_id,
-                        text=text if i == 0 else chunk,  # Use original markdown for first chunk fallback
+                        text=plain,
                         reply_parameters=rp,
                     )
                 except Exception:
                     last_msg = await bot.send_message(
                         chat_id=chat_id,
-                        text=chunk,
+                        text=plain[:4096],
                         reply_parameters=rp,
                     )
 

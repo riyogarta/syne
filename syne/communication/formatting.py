@@ -86,6 +86,9 @@ def _html_to_telegram(text: str) -> str:
     # === Strip any remaining HTML tags ===
     text = re.sub(r'<[^>]+>', '', text)
 
+    # Decode HTML entities (LLM output may contain &gt; &amp; &lt; etc.)
+    text = _html.unescape(text)
+
     # Clean up excessive newlines
     text = re.sub(r'\n{3,}', '\n\n', text)
 
