@@ -1197,6 +1197,18 @@ class Conversation:
         set_owner_dm(False)
         set_current_user(None)
 
+        # If final response is empty (e.g. thinking-only), use fallback
+        if not (current.content or "").strip():
+            fallback = f"[Completed {usage.rounds} tool rounds but could not generate a text response. Please try asking again.]"
+            current = ChatResponse(
+                content=fallback,
+                model=current.model,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                tool_calls=None,
+                thinking=current.thinking,
+            )
+
         logger.info(f"Tool loop done: {usage.rounds} rounds, in={usage.last_input}, out={usage.total_output}")
         return usage.apply_to(current)
 
