@@ -1185,11 +1185,14 @@ class Conversation:
                 role="system",
                 content=f"STOP. {reason.capitalize()}. Summarize what you've done so far and respond to the user with what you have.",
             ))
+            # Disable thinking for forced final — all output budget goes to text
+            _forced_kwargs = self._build_chat_kwargs()
+            _forced_kwargs["thinking_budget"] = 0
             current = await self.provider.chat(
                 messages=context,
                 tools=None,
                 stream_callbacks=self.stream_callbacks,
-                **self._build_chat_kwargs(),
+                **_forced_kwargs,
             )
             usage.add(current)
 
