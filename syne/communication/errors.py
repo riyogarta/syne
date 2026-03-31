@@ -44,7 +44,25 @@ def classify_error(e: Exception, model: str = "") -> str:
     if isinstance(e, RuntimeError):
         msg = str(e)
         if "429" in msg or "rate" in msg.lower():
-            return f"{tag}Rate limited. Please wait a moment and try again."
+            # Try to extract reset time from usage_limit_reached errors
+            _reset_info = ""
+            if "resets_at" in msg:
+                try:
+                    import re as _re, json as _json
+                    _json_match = _re.search(r'\{.*\}', msg, _re.DOTALL)
+                    if _json_match:
+                        _data = _json.loads(_json_match.group())
+                        _err = _data.get("error", _data)
+                        _resets_at = _err.get("resets_at")
+                        if _resets_at:
+                            from datetime import datetime, timezone
+                            _dt = datetime.fromtimestamp(int(_resets_at), tz=timezone.utc)
+                            _reset_info = f" Resets: {_dt.strftime('%d %b %Y %H:%M UTC')}."
+                except Exception:
+                    pass
+            if "usage_limit" in msg:
+                return f"{tag}Usage limit reached.{_reset_info} Use a different model or wait."
+            return f"{tag}Rate limited.{_reset_info} Please wait a moment and try again."
         if "401" in msg or "403" in msg or "auth" in msg.lower():
             return f"{tag}Authentication error. Owner may need to refresh credentials."
         if "400" in msg or "bad request" in msg.lower():
