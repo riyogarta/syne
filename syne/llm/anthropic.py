@@ -271,7 +271,7 @@ class AnthropicProvider(LLMProvider):
 
     # Claude-specific defaults — tuned for quality over creativity
     DEFAULT_TEMPERATURE = 0.3
-    DEFAULT_MAX_TOKENS = 16000  # conservative — Pi uses model.maxTokens/3 ≈ 32K
+    DEFAULT_MAX_TOKENS = 32000  # fallback — actual default computed from context_window/3
     DEFAULT_THINKING_BUDGET = 32000  # generous default; None=use this, 0=off, >0=use that
 
     async def chat(
@@ -375,7 +375,7 @@ class AnthropicProvider(LLMProvider):
         body: dict = {
             "model": model,
             "messages": conversation,
-            "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
+            "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
         # Build system blocks with prompt caching (like Pi)
