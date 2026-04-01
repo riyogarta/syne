@@ -26,7 +26,7 @@ from .abilities import AbilityRegistry
 import re as _re
 
 # ── Tool routing: only send tools relevant to user's message ──
-_CORE_TOOLS = {"memory_search"}  # minimal — always available for recall
+_CORE_TOOLS = {"memory_search", "exec", "db_query"}  # always available
 
 _TOOL_SIGNALS = {
     # signal patterns (ID + EN) → tool names
