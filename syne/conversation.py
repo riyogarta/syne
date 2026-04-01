@@ -167,7 +167,12 @@ class Conversation:
         never the conversation's overridden provider.
         """
         _ctx_tokens = self.context_mgr.available
-        _keep = max(20, min(200, _ctx_tokens // 5000))
+        from .db.models import get_config as _gc_hl
+        _history_limit = await _gc_hl("session.history_limit", 100)
+        if isinstance(_history_limit, str):
+            _history_limit = int(_history_limit)
+        # keep_recent must be less than history_limit so resume + recent all fit in loaded history
+        _keep = max(20, min(_history_limit - 10, _ctx_tokens // 5000))
         _recent = self._message_cache[-_keep:] if self._message_cache else []
         _preservation = _build_preservation_context(_recent)
 
