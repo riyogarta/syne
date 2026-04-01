@@ -388,14 +388,15 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
-        # Build system blocks with prompt caching (like Pi)
+        # Build system blocks — cache_control only on LAST block (max 4 total)
         _cache = {"type": "ephemeral"}
         system_blocks = []
         if self._is_oauth:
-            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": _cache})
+            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
         for sp in system_parts:
-            system_blocks.append({"type": "text", "text": sp, "cache_control": _cache})
+            system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
+            system_blocks[-1]["cache_control"] = _cache  # only last block
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
