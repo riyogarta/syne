@@ -23,6 +23,57 @@ from .compaction import compact_session, _build_preservation_context
 from .boot import get_full_prompt
 from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
+import re as _re
+
+# ── Tool routing: core tools always sent, others based on message signals ──
+_CORE_TOOLS = {
+    "memory_search", "web_search", "web_fetch", "exec",
+    "file_read", "file_write", "send_message", "memory_store",
+}
+
+_TOOL_SIGNALS = {
+    # signal patterns → tool names to include
+    r"gambar|image|foto|generate|buat gambar": {"image_gen", "image_analysis"},
+    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode": {"maps"},
+    r"jadwal|schedule|cron|remind|pengingat|alarm": {"manage_schedule"},
+    r"wa\b|whatsapp|kirim wa|send wa": {"whatsapp"},
+    r"pdf|dokumen|document": {"pdf", "send_file"},
+    r"screenshot|tangkap layar|web capture": {"website_screenshot"},
+    r"voice|suara|bicara|speak|tts": {"send_voice"},
+    r"config|setting|\bpengaturan\b|konfigurasi": {"update_config"},
+    r"grou?p|grup": {"manage_group"},
+    r"user|member|akses|access": {"manage_user"},
+    r"abilit|kemampuan": {"update_ability"},
+    r"identity|soul|\baturan\b|\brule\b|kepribadian": {"update_soul"},
+    r"subagent|background|sub.agent|delegasi": {"spawn_subagent", "subagent_status"},
+    r"auth|token|oauth|credential": {"check_auth"},
+    r"node|remote": {"node_status"},
+    r"database|query|sql|tabel|table": {"db_query"},
+    r"source|kode|code|baca.?kode|read.?source": {"read_source"},
+    r"hapus memori|delete memory|forget": {"memory_delete"},
+    r"react|emoji|reaksi": {"send_reaction"},
+    r"kirim file|send file|upload": {"send_file"},
+}
+
+
+def _route_tools(tool_schemas: list[dict], user_message: str) -> list[dict]:
+    """Filter tools based on user message — core always included, others by signal."""
+    msg_lower = user_message.lower()
+
+    # Collect needed tool names: core + signal-matched
+    needed = set(_CORE_TOOLS)
+    for pattern, tools in _TOOL_SIGNALS.items():
+        if _re.search(pattern, msg_lower):
+            needed.update(tools)
+
+    # Filter schemas — keep tools whose name is in needed set
+    result = []
+    for schema in tool_schemas:
+        name = schema.get("name") or schema.get("function", {}).get("name", "")
+        if name in needed:
+            result.append(schema)
+
+    return result
 from .security import (
     get_group_context_restrictions,
     filter_tools_for_group,
@@ -627,6 +678,12 @@ class Conversation:
         # Additional filter: remove owner-only tools entirely in group context
         if self.is_group and should_filter_tools_for_group(self.is_group):
             tool_schemas = filter_tools_for_group(tool_schemas)
+
+        # Tool routing: only send tools relevant to the user's message
+        _before = len(tool_schemas)
+        tool_schemas = _route_tools(tool_schemas, user_message)
+        if len(tool_schemas) < _before:
+            logger.info(f"Tool routing: {_before} → {len(tool_schemas)} tools for: {user_message[:60]}")
 
         # Call LLM with all params from model registry.
         # Retry once on *empty* non-tool responses — some providers occasionally
