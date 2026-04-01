@@ -21,13 +21,14 @@ ANTHROPIC_API_VERSION = "2023-06-01"
 # interleaved-thinking is DEPRECATED for adaptive models (Opus 4.6, Sonnet 4.6)
 _BETA_TOOL_STREAMING = "fine-grained-tool-streaming-2025-05-14"
 _BETA_INTERLEAVED = "interleaved-thinking-2025-05-14"
+_BETA_PROMPT_CACHING = "prompt-caching-2024-07-31"
 _BETA_OAUTH_PREFIX = "claude-code-20250219,oauth-2025-04-20"
 
 
 def _build_beta_header(is_oauth: bool, model_id: str) -> str:
     """Build beta header exactly like Pi — conditional on model."""
     adaptive = any(t in model_id for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
-    betas = [_BETA_TOOL_STREAMING]
+    betas = [_BETA_PROMPT_CACHING, _BETA_TOOL_STREAMING]
     if not adaptive:
         betas.append(_BETA_INTERLEAVED)
     if is_oauth:
@@ -372,6 +373,17 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
+        # Cache last user message for prompt caching
+        _cache = {"type": "ephemeral"}
+        for msg in reversed(conversation):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = [{"type": "text", "text": content, "cache_control": _cache}]
+                elif isinstance(content, list) and content:
+                    content[-1]["cache_control"] = _cache
+                break
+
         body: dict = {
             "model": model,
             "messages": conversation,
@@ -379,12 +391,14 @@ class AnthropicProvider(LLMProvider):
         }
 
         # Build system blocks
+        _cache = {"type": "ephemeral"}
         system_blocks = []
         if self._is_oauth:
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
+            system_blocks[-1]["cache_control"] = _cache
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
@@ -421,7 +435,10 @@ class AnthropicProvider(LLMProvider):
             body["top_k"] = top_k
 
         if tools:
-            body["tools"] = self._convert_tools(tools)
+            converted = self._convert_tools(tools)
+            if converted:
+                converted[-1]["cache_control"] = _cache
+            body["tools"] = converted
 
         # Metadata for Anthropic rate limit tracking (like Pi)
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
