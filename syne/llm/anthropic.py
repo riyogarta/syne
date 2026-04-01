@@ -452,14 +452,14 @@ class AnthropicProvider(LLMProvider):
                         await resp.aread()
                         retry_after = _parse_retry_delay(resp)
                         status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
-                        if not last_attempt:
-                            # Use max(backoff, server delay) for rate limits
-                            backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                            delay = max(backoff, retry_after)
-                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                        # 429: max 2 retries (aggressive retry worsens rate limit)
+                        _max_429 = 2
+                        if attempt < _max_429:
+                            delay = max(_backoff_delay(_BASE_DELAY_MS, attempt + 1), retry_after)
+                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_max_429 + 1})")
                             await asyncio.sleep(delay)
                             continue
-                        raise RuntimeError(f"{status_label} ({resp.status_code}) after {_TOTAL_ATTEMPTS} attempts")
+                        raise RuntimeError(f"{status_label} ({resp.status_code}) after {attempt + 1} attempts")
 
                     if resp.status_code == 401:
                         await resp.aread()
