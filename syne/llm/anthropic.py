@@ -372,31 +372,19 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
-        # Add cache_control to last user message (Anthropic prompt caching)
-        for msg in reversed(conversation):
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
-                elif isinstance(content, list) and content:
-                    content[-1]["cache_control"] = {"type": "ephemeral"}
-                break
-
         body: dict = {
             "model": model,
             "messages": conversation,
             "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
-        # Build system blocks — cache_control only on LAST block (max 4 total)
-        _cache = {"type": "ephemeral"}
+        # Build system blocks
         system_blocks = []
         if self._is_oauth:
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
-            system_blocks[-1]["cache_control"] = _cache  # only last block
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
@@ -433,11 +421,7 @@ class AnthropicProvider(LLMProvider):
             body["top_k"] = top_k
 
         if tools:
-            converted = self._convert_tools(tools)
-            # Add cache_control to last tool (Anthropic caches up to the marked block)
-            if converted:
-                converted[-1]["cache_control"] = {"type": "ephemeral"}
-            body["tools"] = converted
+            body["tools"] = self._convert_tools(tools)
 
         # Metadata for Anthropic rate limit tracking (like Pi)
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
