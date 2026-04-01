@@ -774,6 +774,8 @@ class Conversation:
                 # Last retry: disable thinking so all output goes to text
                 if attempt == max_attempts - 2:
                     chat_kwargs["thinking_budget"] = 0
+                    chat_kwargs.pop("top_p", None)
+                    chat_kwargs.pop("top_k", None)
                     logger.info("Final empty retry: thinking disabled")
                 await asyncio.sleep(1.0)
 
@@ -1265,6 +1267,8 @@ class Conversation:
             # Disable thinking for forced final — all output budget goes to text
             _forced_kwargs = self._build_chat_kwargs()
             _forced_kwargs["thinking_budget"] = 0
+            _forced_kwargs.pop("top_p", None)
+            _forced_kwargs.pop("top_k", None)
             current = await self.provider.chat(
                 messages=context,
                 tools=None,
@@ -1283,6 +1287,8 @@ class Conversation:
             try:
                 _retry_kwargs = self._build_chat_kwargs()
                 _retry_kwargs["thinking_budget"] = 0
+                _retry_kwargs.pop("top_p", None)  # can't send both temperature + top_p
+                _retry_kwargs.pop("top_k", None)
                 current = await self.provider.chat(
                     messages=context,
                     tools=None,
