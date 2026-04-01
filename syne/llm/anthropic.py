@@ -146,6 +146,7 @@ class AnthropicProvider(LLMProvider):
             "Authorization": f"Bearer {token}",
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
+            "accept": "application/json",
             "anthropic-beta": _build_beta_header(is_oauth, model_id),
         }
         if is_oauth:
@@ -270,7 +271,7 @@ class AnthropicProvider(LLMProvider):
 
     # Claude-specific defaults — tuned for quality over creativity
     DEFAULT_TEMPERATURE = 0.3
-    DEFAULT_MAX_TOKENS = 64000
+    DEFAULT_MAX_TOKENS = 16000  # conservative — Pi uses model.maxTokens/3 ≈ 32K
     DEFAULT_THINKING_BUDGET = 32000  # generous default; None=use this, 0=off, >0=use that
 
     async def chat(
@@ -377,12 +378,13 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
         }
 
-        # Build system blocks from all system messages
+        # Build system blocks with prompt caching (like Pi)
+        _cache = {"type": "ephemeral"}
         system_blocks = []
         if self._is_oauth:
-            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
+            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": _cache})
         for sp in system_parts:
-            system_blocks.append({"type": "text", "text": sp})
+            system_blocks.append({"type": "text", "text": sp, "cache_control": _cache})
         if system_blocks:
             body["system"] = system_blocks
 
@@ -421,6 +423,10 @@ class AnthropicProvider(LLMProvider):
 
         if tools:
             body["tools"] = self._convert_tools(tools)
+
+        # Metadata for Anthropic rate limit tracking (like Pi)
+        if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
+            body["metadata"] = {"user_id": str(self._user_id)}
 
         stream_body = {**body, "stream": True}
 
