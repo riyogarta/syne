@@ -29,37 +29,37 @@ import re as _re
 _CORE_TOOLS = {"memory_search"}  # minimal — always available for recall
 
 _TOOL_SIGNALS = {
-    # signal patterns → tool names to include
-    r"cari|search|internet|web|browse|google": {"web_search", "web_fetch"},
-    r"baca|read|buka|open|tulis|write|simpan|save|file": {"file_read", "file_write"},
-    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script": {"exec"},
-    r"kirim|send|pesan|message|notif": {"send_message"},
-    r"ingat|remember|catat|store|hafal": {"memory_store"},
-    r"gambar|image|foto|generate|buat gambar|draw": {"image_gen", "image_analysis"},
-    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi": {"maps"},
-    r"jadwal|schedule|cron|remind|pengingat|alarm|timer": {"manage_schedule"},
-    r"wa\b|whatsapp|kirim wa|send wa": {"whatsapp"},
-    r"pdf|dokumen|document": {"pdf", "send_file"},
-    r"screenshot|tangkap layar|web capture": {"website_screenshot"},
-    r"voice|suara|bicara|speak|tts": {"send_voice"},
-    r"config|setting|\bpengaturan\b|konfigurasi": {"update_config"},
-    r"grou?p|grup": {"manage_group"},
-    r"user|member|akses|access": {"manage_user"},
-    r"abilit|kemampuan": {"update_ability"},
-    r"identity|soul|\baturan\b|\brule\b|kepribadian": {"update_soul"},
-    r"subagent|background|sub.agent|delegasi": {"spawn_subagent", "subagent_status"},
-    r"auth|token|oauth|credential": {"check_auth"},
-    r"node|remote": {"node_status"},
-    r"database|query|sql|tabel|table": {"db_query"},
-    r"source|kode|code|baca.?kode|read.?source": {"read_source"},
-    r"hapus memori|delete memory|forget|lupa": {"memory_delete"},
-    r"react|emoji|reaksi": {"send_reaction"},
-    r"kirim file|send file|upload": {"send_file"},
+    # signal patterns (ID + EN) → tool names
+    r"cari|search|internet|web|browse|google|lookup|find online": {"web_search", "web_fetch"},
+    r"baca|read|buka|open|tulis|write|simpan|save|\bfile\b": {"file_read", "file_write"},
+    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"exec"},
+    r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
+    r"ingat|remember|catat|store|hafal|note|simpan.?memori": {"memory_store"},
+    r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
+    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
+    r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
+    r"\bwa\b|whatsapp|kirim.?wa|send.?wa": {"whatsapp"},
+    r"\bpdf\b|dokumen|document": {"pdf", "send_file"},
+    r"screenshot|tangkap.?layar|web.?capture|snapshot": {"website_screenshot"},
+    r"voice|suara|bicara|speak|tts|audio|dengar|listen": {"send_voice"},
+    r"config|setting|\bpengaturan\b|konfigurasi|preference": {"update_config"},
+    r"\bgrou?p\b|\bgrup\b": {"manage_group"},
+    r"\buser\b|\bmember\b|akses|access|pengguna": {"manage_user"},
+    r"abilit|kemampuan|capability|fitur|feature": {"update_ability"},
+    r"identity|soul|\baturan\b|\brule\b|kepribadian|personality": {"update_soul"},
+    r"subagent|background|sub.?agent|delegasi|delegate|parallel": {"spawn_subagent", "subagent_status"},
+    r"\bauth\b|token|oauth|credential|login|autentikasi": {"check_auth"},
+    r"\bnode\b|remote|device|perangkat": {"node_status"},
+    r"database|query|\bsql\b|tabel|table|\bdb\b": {"db_query"},
+    r"source.?code|kode.?sumber|\bbaca.?kode\b|read.?source|inspect|diagnos": {"read_source"},
+    r"hapus.?memori|delete.?memory|forget|lupa|remove.?memory": {"memory_delete"},
+    r"\breact\b|emoji|reaksi|reaction": {"send_reaction"},
+    r"kirim.?file|send.?file|upload|lampir|attach": {"send_file"},
 }
 
 
-def _route_tools(tool_schemas: list[dict], user_message: str) -> list[dict]:
-    """Filter tools based on user message — core always included, others by signal."""
+def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = None) -> list[dict]:
+    """Filter tools based on user message + media type — core always included, others by signal."""
     msg_lower = user_message.lower()
 
     # Collect needed tool names: core + signal-matched
@@ -67,6 +67,15 @@ def _route_tools(tool_schemas: list[dict], user_message: str) -> list[dict]:
     for pattern, tools in _TOOL_SIGNALS.items():
         if _re.search(pattern, msg_lower):
             needed.update(tools)
+
+    # Auto-detect media type from metadata
+    if metadata:
+        if metadata.get("image"):
+            needed.update({"image_gen", "image_analysis"})
+        if metadata.get("audio") or metadata.get("voice"):
+            needed.update({"send_voice"})
+        if metadata.get("document"):
+            needed.update({"file_read", "file_write", "send_file"})
 
     # Filter schemas — keep tools whose name is in needed set
     result = []
@@ -683,7 +692,7 @@ class Conversation:
 
         # Tool routing: only send tools relevant to the user's message
         _before = len(tool_schemas)
-        tool_schemas = _route_tools(tool_schemas, user_message)
+        tool_schemas = _route_tools(tool_schemas, user_message, metadata=message_metadata)
         if len(tool_schemas) < _before:
             logger.info(f"Tool routing: {_before} → {len(tool_schemas)} tools for: {user_message[:60]}")
 
