@@ -1200,7 +1200,23 @@ class Conversation:
         set_owner_dm(False)
         set_current_user(None)
 
-        # If final response is empty (e.g. thinking-only), use fallback
+        # If final response is empty (e.g. thinking-only), retry once without thinking
+        if not (current.content or "").strip():
+            logger.warning(f"Tool loop final response empty after {usage.rounds} rounds — retrying without thinking")
+            try:
+                _retry_kwargs = self._build_chat_kwargs()
+                _retry_kwargs["thinking_budget"] = 0
+                current = await self.provider.chat(
+                    messages=context,
+                    tools=None,
+                    stream_callbacks=self.stream_callbacks,
+                    **_retry_kwargs,
+                )
+                usage.add(current)
+            except Exception as e:
+                logger.error(f"Retry without thinking failed: {e}")
+
+        # Still empty after retry — use fallback message
         if not (current.content or "").strip():
             fallback = f"[Completed {usage.rounds} tool rounds but could not generate a text response. Please try asking again.]"
             current = ChatResponse(
