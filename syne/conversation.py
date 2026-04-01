@@ -771,6 +771,10 @@ class Conversation:
                 logger.warning(
                     f"LLM returned empty content (no tool calls). Retrying after 1s (attempt {attempt + 1}/{max_attempts})..."
                 )
+                # Last retry: disable thinking so all output goes to text
+                if attempt == max_attempts - 2:
+                    chat_kwargs["thinking_budget"] = 0
+                    logger.info("Final empty retry: thinking disabled")
                 await asyncio.sleep(1.0)
 
         # Handle tool calls
