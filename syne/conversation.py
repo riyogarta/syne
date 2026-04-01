@@ -25,17 +25,19 @@ from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
 import re as _re
 
-# ── Tool routing: core tools always sent, others based on message signals ──
-_CORE_TOOLS = {
-    "memory_search", "web_search", "web_fetch", "exec",
-    "file_read", "file_write", "send_message", "memory_store",
-}
+# ── Tool routing: only send tools relevant to user's message ──
+_CORE_TOOLS = {"memory_search"}  # minimal — always available for recall
 
 _TOOL_SIGNALS = {
     # signal patterns → tool names to include
-    r"gambar|image|foto|generate|buat gambar": {"image_gen", "image_analysis"},
-    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode": {"maps"},
-    r"jadwal|schedule|cron|remind|pengingat|alarm": {"manage_schedule"},
+    r"cari|search|internet|web|browse|google": {"web_search", "web_fetch"},
+    r"baca|read|buka|open|tulis|write|simpan|save|file": {"file_read", "file_write"},
+    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script": {"exec"},
+    r"kirim|send|pesan|message|notif": {"send_message"},
+    r"ingat|remember|catat|store|hafal": {"memory_store"},
+    r"gambar|image|foto|generate|buat gambar|draw": {"image_gen", "image_analysis"},
+    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi": {"maps"},
+    r"jadwal|schedule|cron|remind|pengingat|alarm|timer": {"manage_schedule"},
     r"wa\b|whatsapp|kirim wa|send wa": {"whatsapp"},
     r"pdf|dokumen|document": {"pdf", "send_file"},
     r"screenshot|tangkap layar|web capture": {"website_screenshot"},
@@ -50,7 +52,7 @@ _TOOL_SIGNALS = {
     r"node|remote": {"node_status"},
     r"database|query|sql|tabel|table": {"db_query"},
     r"source|kode|code|baca.?kode|read.?source": {"read_source"},
-    r"hapus memori|delete memory|forget": {"memory_delete"},
+    r"hapus memori|delete memory|forget|lupa": {"memory_delete"},
     r"react|emoji|reaksi": {"send_reaction"},
     r"kirim file|send file|upload": {"send_file"},
 }
