@@ -372,6 +372,16 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
+        # Add cache_control to last user message (Anthropic prompt caching)
+        for msg in reversed(conversation):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
+                elif isinstance(content, list) and content:
+                    content[-1]["cache_control"] = {"type": "ephemeral"}
+                break
+
         body: dict = {
             "model": model,
             "messages": conversation,
@@ -422,7 +432,11 @@ class AnthropicProvider(LLMProvider):
             body["top_k"] = top_k
 
         if tools:
-            body["tools"] = self._convert_tools(tools)
+            converted = self._convert_tools(tools)
+            # Add cache_control to last tool (Anthropic caches up to the marked block)
+            if converted:
+                converted[-1]["cache_control"] = {"type": "ephemeral"}
+            body["tools"] = converted
 
         # Metadata for Anthropic rate limit tracking (like Pi)
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
