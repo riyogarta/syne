@@ -170,12 +170,7 @@ async def db_query_handler(sql: str) -> str:
 
 DB_QUERY_TOOL = {
     "name": "db_query",
-    "description": (
-        "Execute a read-only SQL SELECT query against your PostgreSQL database. "
-        "Use this to inspect your own config, memories, sessions, messages, abilities, "
-        "users, rules, and other tables. Only SELECT queries are allowed. "
-        "Credential columns are automatically redacted."
-    ),
+    "description": "Execute a read-only SQL SELECT query on the database.",
     "parameters": {
         "type": "object",
         "properties": {

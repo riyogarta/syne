@@ -269,13 +269,7 @@ def _action_search(path: str, pattern: str) -> str:
 
 READ_SOURCE_TOOL = {
     "name": "read_source",
-    "description": (
-        "Read Syne's own source code (READ-ONLY). "
-        "Actions: 'tree' (list files/dirs), 'read' (read file with line numbers), "
-        "'search' (grep pattern in source). "
-        "Covers: syne/ (all core, tools, channels, db, llm, abilities), tests/, README.md, etc. "
-        "Use for: self-healing diagnosis, bug reporting, feature proposals, understanding architecture."
-    ),
+    "description": "Read Syne source code (tree/read/search). READ-ONLY.",
     "parameters": {
         "type": "object",
         "properties": {

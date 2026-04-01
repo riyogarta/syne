@@ -121,7 +121,7 @@ async def web_fetch_handler(url: str, max_chars: int = 4000) -> str:
 # Tool metadata for registration
 WEB_FETCH_TOOL = {
     "name": "web_fetch",
-    "description": "Fetch a URL and extract readable text content. Use for reading web pages, articles, documentation.",
+    "description": "Fetch a URL and extract text content.",
     "parameters": {
         "type": "object",
         "properties": {

@@ -337,16 +337,7 @@ async def manage_schedule_handler(
 
 MANAGE_SCHEDULE_TOOL = {
     "name": "manage_schedule",
-    "description": (
-        "Create and manage scheduled tasks. Tasks execute by injecting payload as user message. "
-        "Actions: create, list, get, delete, enable, disable, bulk_create, bulk_delete. "
-        "Types: 'once' (ISO timestamp), 'interval' (seconds), 'cron' (cron expression). "
-        "IMPORTANT: Cron expressions are interpreted in the system.timezone config (check with update_config). "
-        "For example, '0 9 * * *' means 9 AM in the configured timezone, NOT UTC (unless timezone is UTC). "
-        "Optional end_date for recurring tasks — auto-disables after the date passes. "
-        "Use bulk_create with a JSON array to create many tasks in one call. "
-        "Use bulk_delete with comma-separated IDs or ranges (e.g., '64-131') to delete many at once."
-    ),
+    "description": "Manage scheduled tasks (create/list/delete/enable/disable). Types: once, interval, cron.",
     "parameters": {
         "type": "object",
         "properties": {

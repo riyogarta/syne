@@ -757,7 +757,7 @@ class SyneAgent:
         # ── Exec (Core) ──
         self.tools.register(
             name="exec",
-            description="Execute a shell command on the host system. Returns stdout, stderr, and exit code. Use for file operations, system checks, installing packages, running scripts, or any system task. Commands run as the Syne process user.",
+            description="Run a shell command. Returns stdout, stderr, exit code.",
             parameters=self._add_node_param({
                 "type": "object",
                 "properties": {
@@ -829,7 +829,7 @@ class SyneAgent:
         # Memory delete tool
         self.tools.register(
             name="memory_delete",
-            description="Delete memory entries by ID. Use with caution as this is destructive.",
+            description="Delete memory entries by ID.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -848,7 +848,7 @@ class SyneAgent:
         # Sub-agent spawn tool
         self.tools.register(
             name="spawn_subagent",
-            description="Spawn a background sub-agent to work on a task in parallel. Use for heavy tasks like documentation, research, or analysis while continuing the conversation.",
+            description="Spawn a background sub-agent for heavy/parallel tasks.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -870,7 +870,7 @@ class SyneAgent:
         # Sub-agent status tool
         self.tools.register(
             name="subagent_status",
-            description="Check status of running sub-agents or get result of a completed sub-agent.",
+            description="Check sub-agent status or get result.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -888,7 +888,7 @@ class SyneAgent:
         # ── Group Management (owner only) ──
         self.tools.register(
             name="manage_group",
-            description="Add, update, remove, or list Telegram groups. Use to control which groups the bot responds in.",
+            description="Manage Telegram groups (add/update/remove/list).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -928,7 +928,7 @@ class SyneAgent:
         # ── User Management ──
         self.tools.register(
             name="manage_user",
-            description="View, update user settings including aliases/display names per group.",
+            description="Manage user settings and access levels.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -966,7 +966,7 @@ class SyneAgent:
         # Update config
         self.tools.register(
             name="update_config",
-            description="Read or update a configuration setting in the database. Use action 'get' to read, 'set' to write, 'list' to show all settings.",
+            description="Read or update a config setting (get/set/list).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -993,13 +993,7 @@ class SyneAgent:
         # Update ability config
         self.tools.register(
             name="update_ability",
-            description=(
-                "Manage abilities. Actions: "
-                "'list' — show all abilities; "
-                "'create' — register a new self-created ability (provide name, description, module_path for the Python file you wrote to syne/abilities/custom/); "
-                "'enable'/'disable' — toggle an ability; "
-                "'config' — update ability settings (JSON)."
-            ),
+            description="Manage abilities (list/create/enable/disable/config).",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1034,7 +1028,7 @@ class SyneAgent:
         # Update identity/soul/rules
         self.tools.register(
             name="update_soul",
-            description="Update identity, soul entries, or rules. Use target 'identity' to set name/motto/personality, 'soul' to add/remove behavior entries, 'rules' to add/remove rules.",
+            description="Update identity, soul, or rules.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1071,7 +1065,7 @@ class SyneAgent:
         # ── Auth Status Check ──
         self.tools.register(
             name="check_auth",
-            description="Check OAuth token status (expired/valid/time remaining). Does NOT expose credentials — only returns status.",
+            description="Check OAuth token status.",
             parameters={
                 "type": "object",
                 "properties": {},
@@ -1083,7 +1077,7 @@ class SyneAgent:
         # ── Node Status (Gateway) ──
         self.tools.register(
             name="node_status",
-            description="List remote nodes and their connection status. Use this to check which nodes are online before executing commands on them.",
+            description="List remote nodes and connection status.",
             parameters={
                 "type": "object",
                 "properties": {},
