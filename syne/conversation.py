@@ -1160,21 +1160,13 @@ class Conversation:
             # Small delay between tool call rounds to avoid rate limiting
             await asyncio.sleep(1.0)
 
-            # Build reduced tool set for subsequent rounds — only tools used so far
-            _used_names = set()
-            for msg in context:
-                if msg.metadata and msg.metadata.get("tool_calls"):
-                    for tc in msg.metadata["tool_calls"]:
-                        _used_names.add(tc.get("name") or tc.get("function", {}).get("name", ""))
-            _round_tools = [t for t in (tool_schemas or []) if t.get("name") or t.get("function", {}).get("name") in _used_names] if _used_names else tool_schemas
-
             # Get next response — may contain more tool calls
             # Auto-retry on vague 400 errors
             for _vague_attempt in range(3):
                 try:
                     current = await self.provider.chat(
                         messages=context,
-                        tools=_round_tools if _round_tools else None,
+                        tools=tool_schemas if tool_schemas else None,
                         stream_callbacks=self.stream_callbacks,
                         **self._build_chat_kwargs(),
                     )
