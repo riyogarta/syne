@@ -950,11 +950,13 @@ class Conversation:
         loop_stuck = False
         round_num = 0
 
-        # Hard round limit — prevents infinite tool loops from holding session lock
-        from .db.models import get_config as _gc_rounds
-        _max_rounds = await _gc_rounds("session.max_tool_rounds", 30)
-        if isinstance(_max_rounds, str):
-            _max_rounds = int(_max_rounds)
+        # Timeout-based limit (like OpenClaw) — default 30 min, configurable
+        import time as _time
+        from .db.models import get_config as _gc_timeout
+        _timeout_sec = await _gc_timeout("session.tool_loop_timeout", 1800)
+        if isinstance(_timeout_sec, str):
+            _timeout_sec = int(_timeout_sec)
+        _loop_deadline = _time.monotonic() + _timeout_sec
 
         # Track which on-demand guides have been injected this turn
         _injected_guides: set = set()
@@ -964,7 +966,7 @@ class Conversation:
         usage = UsageAccumulator()
         usage.add(response)  # Initial response that triggered tool calls
 
-        while current.tool_calls and round_num < _max_rounds:
+        while current.tool_calls and _time.monotonic() < _loop_deadline:
 
             context.append(ChatMessage(
                 role="assistant",
@@ -1256,9 +1258,10 @@ class Conversation:
             usage.add(current)
             round_num += 1
 
-        if loop_stuck or (round_num >= _max_rounds and current.tool_calls):
+        _timed_out = _time.monotonic() >= _loop_deadline and current.tool_calls
+        if loop_stuck or _timed_out:
             # Force a final text response with no tools
-            reason = "tool call loop detected" if loop_stuck else f"max tool rounds ({_max_rounds}) reached"
+            reason = "tool call loop detected" if loop_stuck else f"tool loop timeout ({_timeout_sec}s, {round_num} rounds)"
             logger.warning(f"Forcing final response: {reason}")
 
             context.append(ChatMessage(
