@@ -1260,10 +1260,12 @@ class Conversation:
             # Force a final text response with no tools
             reason = "tool call loop detected" if loop_stuck else f"max tool rounds ({_max_rounds}) reached"
             logger.warning(f"Forcing final response: {reason}")
+
             context.append(ChatMessage(
                 role="system",
                 content=f"STOP. {reason.capitalize()}. Summarize what you've done so far and respond to the user with what you have.",
             ))
+
             # Disable thinking for forced final — all output budget goes to text
             _forced_kwargs = self._build_chat_kwargs()
             _forced_kwargs["thinking_budget"] = 0
@@ -1296,6 +1298,10 @@ class Conversation:
                     **_retry_kwargs,
                 )
                 usage.add(current)
+                if (current.content or "").strip():
+                    logger.info(f"Retry without thinking succeeded: {len(current.content)} chars")
+                else:
+                    logger.warning(f"Retry without thinking also empty")
             except Exception as e:
                 logger.error(f"Retry without thinking failed: {e}")
 
