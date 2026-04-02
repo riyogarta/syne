@@ -1278,6 +1278,7 @@ class Conversation:
                 **_forced_kwargs,
             )
             usage.add(current)
+            logger.info(f"Forced response: content={len(current.content or '')} chars, thinking={len(current.thinking or '')} chars, tool_calls={len(current.tool_calls or [])}, in={current.input_tokens}, out={current.output_tokens}")
 
         # Reset context after tool execution
         set_owner_dm(False)
