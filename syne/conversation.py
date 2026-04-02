@@ -549,6 +549,9 @@ class Conversation:
             self._lock = asyncio.Lock()
             self._processing = False
             await self._lock.acquire()
+        # Save reference to the lock we acquired — release THIS one, not self._lock
+        # (which may be replaced by another task during our execution)
+        _my_lock = self._lock
         logger.debug(f"Session {self.session_id}: lock acquired")
         try:
             # Reset per-turn state
@@ -561,7 +564,10 @@ class Conversation:
             finally:
                 self._processing = False
         finally:
-            self._lock.release()
+            try:
+                _my_lock.release()
+            except RuntimeError:
+                pass  # lock already released or replaced
 
     async def _chat_inner(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Inner chat logic. Wrapped by chat() with try/finally for _processing flag."""
