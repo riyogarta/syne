@@ -475,15 +475,32 @@ class AnthropicProvider(LLMProvider):
                         _rl_headers = {k: v for k, v in resp.headers.items() if "ratelimit" in k.lower() or "retry" in k.lower()}
                         logger.warning(f"Anthropic {resp.status_code} body: {resp.text[:500]} headers: {_rl_headers}")
                         retry_after = _parse_retry_delay(resp)
-                        status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
-                        # 429: max 2 retries (aggressive retry worsens rate limit)
-                        _max_429 = 2
-                        if attempt < _max_429:
-                            delay = max(_backoff_delay(_BASE_DELAY_MS, attempt + 1), retry_after)
-                            logger.warning(f"{status_label} ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_max_429 + 1})")
-                            await asyncio.sleep(delay)
-                            continue
-                        raise RuntimeError(f"{status_label} ({resp.status_code}) after {attempt + 1} attempts")
+
+                        # Distinguish real rate limit vs transient error:
+                        # Real rate limit has x-ratelimit-* headers and descriptive message
+                        # Transient has only "Error" message and x-should-retry: true
+                        _is_transient = '"message":"Error"' in resp.text and not any(
+                            "ratelimit-remaining" in k.lower() for k in resp.headers
+                        )
+
+                        if _is_transient:
+                            # Transient — retry up to 5 times with short backoff
+                            if not last_attempt:
+                                delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                                logger.warning(f"Transient 429 (not real rate limit), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                                await asyncio.sleep(delay)
+                                continue
+                            raise RuntimeError(f"Anthropic transient error after {_TOTAL_ATTEMPTS} attempts")
+                        else:
+                            # Real rate limit — max 2 retries
+                            status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
+                            _max_429 = 2
+                            if attempt < _max_429:
+                                delay = max(_backoff_delay(_BASE_DELAY_MS, attempt + 1), retry_after)
+                                logger.warning(f"{status_label} ({resp.status_code}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_max_429 + 1})")
+                                await asyncio.sleep(delay)
+                                continue
+                            raise RuntimeError(f"{status_label} ({resp.status_code}) after {attempt + 1} attempts")
 
                     if resp.status_code == 401:
                         await resp.aread()
