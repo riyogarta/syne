@@ -373,7 +373,7 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
-        # Cache last user message (Pi does this without beta header)
+        # Cache last user message (Pi style — no beta header needed)
         _cache = {"type": "ephemeral"}
         for msg in reversed(conversation):
             if msg.get("role") == "user":
