@@ -397,8 +397,9 @@ class AnthropicProvider(LLMProvider):
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": _cache})
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
-        if len(system_blocks) > 1:
-            system_blocks[-1]["cache_control"] = _cache
+        if system_blocks:
+            if len(system_blocks) > 1:
+                system_blocks[-1]["cache_control"] = _cache
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
