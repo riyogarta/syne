@@ -118,12 +118,13 @@ class ClaudeCredentials:
             data = resp.json()
 
         self.access_token = data["access_token"]
-        self.expires_at = time.time() + data.get("expires_in", 3600) - 300
+        _expires_in = data.get("expires_in", 3600)
+        self.expires_at = time.time() + _expires_in - 300
         if data.get("refresh_token"):
             self.refresh_token = data["refresh_token"]
 
         await self.save_to_db()
-        logger.info("Claude access token refreshed and saved to DB.")
+        logger.info(f"Claude access token refreshed and saved to DB. expires_in={_expires_in}s, token_prefix={self.access_token[:20]}...")
 
     def to_dict(self) -> dict:
         return {
