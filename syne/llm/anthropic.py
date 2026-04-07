@@ -390,13 +390,13 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
-        # Build system blocks — cache last block (Pi style, no beta header needed)
+        # Build system blocks — cache first + last (like Pi, max 2 cached)
         system_blocks = []
         if self._is_oauth:
-            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
+            system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": _cache})
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
-        if system_blocks:
+        if len(system_blocks) > 1:
             system_blocks[-1]["cache_control"] = _cache
             body["system"] = system_blocks
 
@@ -434,10 +434,7 @@ class AnthropicProvider(LLMProvider):
             body["top_k"] = top_k
 
         if tools:
-            converted = self._convert_tools(tools)
-            if converted:
-                converted[-1]["cache_control"] = _cache
-            body["tools"] = converted
+            body["tools"] = self._convert_tools(tools)
 
         # Metadata for Anthropic rate limit tracking (like Pi)
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
