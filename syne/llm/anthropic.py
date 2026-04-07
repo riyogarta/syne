@@ -410,16 +410,7 @@ class AnthropicProvider(LLMProvider):
             _adaptive = any(t in model for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
             if _adaptive:
                 body["thinking"] = {"type": "adaptive"}
-                # Map thinking_budget to effort level (like Pi)
-                if effective_budget >= 32000:
-                    _effort = "max" if "opus" in model else "high"
-                elif effective_budget >= 8192:
-                    _effort = "high"
-                elif effective_budget >= 2048:
-                    _effort = "medium"
-                else:
-                    _effort = "low"
-                body["output_config"] = {"effort": _effort}
+                # No output_config.effort — let Claude decide entirely on its own
             else:
                 body["thinking"] = {
                     "type": "enabled",
