@@ -630,7 +630,7 @@ class AnthropicProvider(LLMProvider):
                             u = data.get("usage", {})
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
-            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ReadError) as exc:
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
                     logger.warning(f"Anthropic stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")

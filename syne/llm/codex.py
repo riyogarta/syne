@@ -490,7 +490,7 @@ class CodexProvider(LLMProvider):
                 continue
             except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
                 raise
-            except (httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ReadError) as exc:
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
                     logger.warning(f"Codex stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
