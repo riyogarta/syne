@@ -373,19 +373,31 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
+        # Cache last user message (Pi does this without beta header)
+        _cache = {"type": "ephemeral"}
+        for msg in reversed(conversation):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    msg["content"] = [{"type": "text", "text": content, "cache_control": _cache}]
+                elif isinstance(content, list) and content:
+                    content[-1]["cache_control"] = _cache
+                break
+
         body: dict = {
             "model": model,
             "messages": conversation,
             "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
-        # Build system blocks
+        # Build system blocks — cache last block (Pi style, no beta header needed)
         system_blocks = []
         if self._is_oauth:
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude."})
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
+            system_blocks[-1]["cache_control"] = _cache
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
@@ -422,7 +434,10 @@ class AnthropicProvider(LLMProvider):
             body["top_k"] = top_k
 
         if tools:
-            body["tools"] = self._convert_tools(tools)
+            converted = self._convert_tools(tools)
+            if converted:
+                converted[-1]["cache_control"] = _cache
+            body["tools"] = converted
 
         # Metadata for Anthropic rate limit tracking (like Pi)
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
