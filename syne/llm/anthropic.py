@@ -481,6 +481,17 @@ class AnthropicProvider(LLMProvider):
                         )
 
                         if _is_transient:
+                            # Try token refresh on 3rd attempt — refreshed token may be stale
+                            if attempt == 2 and self._claude_creds:
+                                logger.warning("Transient 429 persists — refreshing OAuth token")
+                                try:
+                                    self._claude_creds.expires_at = 0
+                                    token = await self._claude_creds.get_token()
+                                    self._access_token = token
+                                    headers = self._build_headers(token, model)
+                                except Exception as e:
+                                    logger.error(f"Token refresh on transient 429 failed: {e}")
+
                             # Transient — retry up to 5 times with short backoff
                             if not last_attempt:
                                 delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
