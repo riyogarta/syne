@@ -152,6 +152,7 @@ class AnthropicProvider(LLMProvider):
         }
         if is_oauth:
             headers["anthropic-dangerous-direct-browser-access"] = "true"
+            headers["user-agent"] = "claude-cli/2.1.62"
             headers["x-app"] = "cli"
         return headers
 
