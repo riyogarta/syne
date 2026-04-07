@@ -472,7 +472,8 @@ class AnthropicProvider(LLMProvider):
                     # ── Error handling before consuming stream ──
                     if resp.status_code in (429, 529):
                         await resp.aread()
-                        logger.warning(f"Anthropic {resp.status_code} body: {resp.text[:500]}")
+                        _rl_headers = {k: v for k, v in resp.headers.items() if "ratelimit" in k.lower() or "retry" in k.lower()}
+                        logger.warning(f"Anthropic {resp.status_code} body: {resp.text[:500]} headers: {_rl_headers}")
                         retry_after = _parse_retry_delay(resp)
                         status_label = "Rate limited" if resp.status_code == 429 else "Overloaded"
                         # 429: max 2 retries (aggressive retry worsens rate limit)
