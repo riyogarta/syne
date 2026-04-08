@@ -2493,14 +2493,14 @@ Or just send me a message!"""
                     lines.append(f"Processed: {stats['processed']}")
                     lines.append(f"Succeeded: {stats['succeeded']}")
                     lines.append(f"Failed: {stats['failed']}")
-                    await self.bot.send_message(
+                    await self.app.bot.send_message(
                         chat_id=query.message.chat_id,
                         text="\n".join(lines),
                         parse_mode="HTML",
                     )
                 except Exception as e:
                     logger.error(f"Background KG reprocess failed: {e}")
-                    await self.bot.send_message(
+                    await self.app.bot.send_message(
                         chat_id=query.message.chat_id,
                         text=f"KG reprocess failed: {e}",
                     )
