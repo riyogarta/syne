@@ -2010,7 +2010,7 @@ Or just send me a message!"""
                     try:
                         chat_id = key.split(":", 1)[1] if ":" in key else None
                         if chat_id:
-                            await self.bot.send_message(
+                            await self.app.bot.send_message(
                                 chat_id=int(chat_id),
                                 text=f"🧹 Auto-compacted: {result['messages_before']} → {result['messages_after']} messages",
                             )
