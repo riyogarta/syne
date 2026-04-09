@@ -225,8 +225,7 @@ class Conversation:
     async def run_compact(self) -> Optional[dict]:
         """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
 
-        Always uses the agent's base provider (via ConversationManager),
-        never the conversation's overridden provider.
+        Uses the conversation's own provider (same model as chat).
         """
         _ctx_tokens = self.context_mgr.available
         from .db.models import get_config as _gc_hl
@@ -238,8 +237,7 @@ class Conversation:
         _recent = self._message_cache[-_keep:] if self._message_cache else []
         _preservation = _build_preservation_context(_recent)
 
-        # Agent's base provider — never conversation override
-        _provider = self._mgr.provider if self._mgr else self.provider
+        _provider = self.provider
 
         result = await compact_session(
             session_id=self.session_id,
