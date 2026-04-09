@@ -64,6 +64,8 @@ class AnthropicProvider(LLMProvider):
         self._expires_at: float = 0
         self._last_load: float = 0
         self._claude_creds = None  # ClaudeCredentials instance
+        # Persistent HTTP client — reuse connections like Anthropic SDK
+        self._http_client: Optional[httpx.AsyncClient] = None
 
     @property
     def name(self) -> str:
@@ -76,6 +78,15 @@ class AnthropicProvider(LLMProvider):
     @property
     def context_window(self) -> int:
         return 200_000  # Claude Sonnet 4 default; Opus 4.6 = 1M (set in model registry)
+
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get or create persistent HTTP client for connection reuse."""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(120.0, connect=10.0),
+                http2=True,  # HTTP/2 for multiplexing like Anthropic SDK
+            )
+        return self._http_client
 
     @property
     def reserved_output_tokens(self) -> int:
@@ -438,7 +449,7 @@ class AnthropicProvider(LLMProvider):
         token = await self._load_token()
         headers = self._build_headers(token, model)
 
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, http2=True) as client:
           for attempt in range(_TOTAL_ATTEMPTS):
             # Accumulated state — reset each attempt
             content_text = ""
