@@ -126,6 +126,10 @@ class ClaudeCredentials:
         await self.save_to_db()
         logger.info(f"Claude access token refreshed and saved to DB. expires_in={_expires_in}s, token_prefix={self.access_token[:20]}...")
 
+        # Wait for token propagation — refreshed tokens may get 429 if used immediately
+        import asyncio
+        await asyncio.sleep(3)
+
     def to_dict(self) -> dict:
         return {
             "access_token": self.access_token,
