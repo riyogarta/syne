@@ -104,14 +104,13 @@ class ClaudeCredentials:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
                 _TOKEN_URL,
-                data={
+                json={
                     "grant_type": "refresh_token",
                     "client_id": client_id,
                     "refresh_token": self.refresh_token,
                 },
                 headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "anthropic-beta": _BETA_HEADER,
+                    "Content-Type": "application/json",
                 },
             )
             resp.raise_for_status()
