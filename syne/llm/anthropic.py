@@ -449,7 +449,8 @@ class AnthropicProvider(LLMProvider):
         token = await self._load_token()
         headers = self._build_headers(token, model)
 
-        async with httpx.AsyncClient(timeout=180, http2=True) as client:
+        client = self._get_client()
+        if True:  # preserve indentation (was: async with client)
           for attempt in range(_TOTAL_ATTEMPTS):
             # Accumulated state — reset each attempt
             content_text = ""
@@ -462,9 +463,6 @@ class AnthropicProvider(LLMProvider):
             last_attempt = attempt >= _MAX_RETRIES
 
             try:
-                if attempt == 0:
-                    _body_keys = {k: (len(str(v)) if k in ("messages", "tools", "system") else v) for k, v in stream_body.items()}
-                    logger.info(f"Anthropic request: headers={dict(headers)} body_summary={_body_keys}")
                 async with client.stream(
                     "POST",
                     ANTHROPIC_API_URL,
