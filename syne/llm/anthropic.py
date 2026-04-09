@@ -462,6 +462,9 @@ class AnthropicProvider(LLMProvider):
             last_attempt = attempt >= _MAX_RETRIES
 
             try:
+                if attempt == 0:
+                    _body_keys = {k: (len(str(v)) if k in ("messages", "tools", "system") else v) for k, v in stream_body.items()}
+                    logger.info(f"Anthropic request: headers={dict(headers)} body_summary={_body_keys}")
                 async with client.stream(
                     "POST",
                     ANTHROPIC_API_URL,
