@@ -634,13 +634,53 @@ class AnthropicProvider(LLMProvider):
                             u = data.get("usage", {})
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
-            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            except (
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+                httpx.RemoteProtocolError,
+                httpx.LocalProtocolError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.ConnectError,
+                httpx.NetworkError,
+            ) as exc:
+                # Transport-level error — likely stale HTTP/2 connection.
+                # Close and recreate the persistent client so retry uses fresh pool.
+                logger.warning(f"Anthropic transport error ({type(exc).__name__}: {str(exc)[:200]}), recreating HTTP client")
+                try:
+                    if self._http_client is not None and not self._http_client.is_closed:
+                        await self._http_client.aclose()
+                except Exception:
+                    pass
+                self._http_client = None
                 if not last_attempt:
                     delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                    logger.warning(f"Anthropic stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    logger.warning(f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                     await asyncio.sleep(delay)
+                    client = self._get_client()
                     continue
-                raise RuntimeError(f"Anthropic stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
+                raise RuntimeError(f"Anthropic stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}: {str(exc)[:200]}")
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                # Catch-all for unexpected exceptions (e.g. h2 protocol errors).
+                # Log fully and recreate client before retry.
+                logger.warning(f"Anthropic unexpected error ({type(exc).__name__}: {str(exc)[:200]}), recreating HTTP client", exc_info=True)
+                try:
+                    if self._http_client is not None and not self._http_client.is_closed:
+                        await self._http_client.aclose()
+                except Exception:
+                    pass
+                self._http_client = None
+                if not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    await asyncio.sleep(delay)
+                    client = self._get_client()
+                    continue
+                raise RuntimeError(f"Anthropic stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}: {str(exc)[:200]}")
 
             # Flush any partial blocks left by interrupted stream
             # (e.g. stream ended before content_block_stop events)

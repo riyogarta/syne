@@ -31,14 +31,45 @@ _KG_DELAY = 1.0  # seconds between extractions
 
 
 
-EXTRACT_PROMPT = """You are a knowledge graph extractor. Given a memory statement, extract entities and their relationships using the store_knowledge_graph tool.
+EXTRACT_PROMPT = """You extract knowledge graphs from personal memory statements. Always call store_knowledge_graph with the entities and relations you find.
 
-Rules:
-- Entity names must be specific (not "he", "she", "it", "User")
-- When the speaker is identified, use their real name instead of "User"
-- Use consistent predicate verbs: lives_in, works_at, married_to, child_of, parent_of, sibling_of, friend_of, owns, member_of, studies_at, has_role, located_in, part_of, prefers, has_condition, takes_medication
-- If no clear entities or relations, call the tool with empty arrays
-- Keep descriptions brief (under 15 words)"""
+LANGUAGE
+Memory may be in any language (often Indonesian or English). Extract entity names verbatim — do not translate.
+
+SPEAKER
+When the speaker is identified (e.g. "The speaker is Riyo"), replace first-person references ("I", "me", "my", "saya", "aku", "ku") with the speaker's real name. Never emit "User", "he", "she", "it" as entity names.
+
+ENTITIES
+Extract specific named things — people, places, organizations, roles, events, items, dates, skills, animals, abstract concepts. Always extract at least the people, places, organizations, and key items mentioned.
+
+RELATIONS
+Express facts as subject-predicate-object triples. Prefer common predicates in snake_case:
+  lives_in, works_at, married_to, child_of, parent_of, sibling_of, friend_of,
+  owns, member_of, studies_at, has_role, located_in, part_of, prefers,
+  has_condition, takes_medication, knows, likes, dislikes, born_in, visited,
+  speaks, plays, follows, supports, founded
+Create new snake_case predicates for facts that don't fit the list above. Always extract at least one relation if any subject-predicate-object can be inferred from the memory.
+
+EXAMPLE
+Speaker: Riyo
+Memory: "Aku tinggal di Jakarta dan bekerja sebagai engineer di Surelden. Suka kopi pagi dan punya kucing bernama Mochi."
+
+entities:
+  - Riyo (person)
+  - Jakarta (place)
+  - Surelden (org)
+  - engineer (role)
+  - kopi (item)
+  - Mochi (animal)
+relations:
+  - Riyo lives_in Jakarta
+  - Riyo works_at Surelden
+  - Riyo has_role engineer
+  - Riyo prefers kopi
+  - Riyo owns Mochi
+
+EMPTY OUTPUT
+Only call the tool with empty arrays if the memory is purely emotional or abstract with no concrete entities at all (e.g. "I felt sad today", "Hari ini melelahkan"). Any memory mentioning a name, place, or fact must produce at least one entity."""
 
 # Tool definition for structured extraction — OpenAI format (works for all drivers)
 # Anthropic driver has _convert_tools() that converts this to Anthropic format.
@@ -46,33 +77,57 @@ _KG_EXTRACT_TOOL = {
     "type": "function",
     "function": {
         "name": "store_knowledge_graph",
-        "description": "Store extracted entities and relations from a memory statement",
+        "description": (
+            "Store entities and their relationships extracted from a memory statement. "
+            "Always extract at least the people, places, organizations, and key items "
+            "mentioned, even if relations between them are weak."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "entities": {
                     "type": "array",
+                    "description": "All named things mentioned in the memory.",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Exact entity name"},
+                            "name": {
+                                "type": "string",
+                                "description": "Exact entity name as it appears (do not translate).",
+                            },
                             "type": {
                                 "type": "string",
-                                "enum": ["person", "place", "org", "concept", "role", "event", "item"],
+                                "enum": [
+                                    "person", "place", "org", "concept", "role",
+                                    "event", "item", "date", "skill", "animal",
+                                ],
                             },
-                            "description": {"type": "string", "description": "One-line description"},
+                            "description": {
+                                "type": "string",
+                                "description": "Brief description under 15 words. Leave empty if not informative.",
+                            },
                         },
                         "required": ["name", "type"],
                     },
                 },
                 "relations": {
                     "type": "array",
+                    "description": "Subject-predicate-object triples expressing facts. Subject and object names must appear in entities[].",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "subject": {"type": "string", "description": "Subject entity name"},
-                            "predicate": {"type": "string", "description": "Relation verb"},
-                            "object": {"type": "string", "description": "Object entity name"},
+                            "subject": {
+                                "type": "string",
+                                "description": "Subject entity name (must match an entity in entities[]).",
+                            },
+                            "predicate": {
+                                "type": "string",
+                                "description": "Relation verb in snake_case. Prefer common verbs like lives_in, works_at, owns, prefers; create new snake_case verbs as needed.",
+                            },
+                            "object": {
+                                "type": "string",
+                                "description": "Object entity name (must match an entity in entities[]).",
+                            },
                         },
                         "required": ["subject", "predicate", "object"],
                     },
@@ -200,10 +255,27 @@ async def _extract_via_provider(provider: LLMProvider, content: str, speaker_nam
         tools=[_KG_EXTRACT_TOOL],
     )
 
-    # Extract from tool call response
+    # Extract from tool call response — handle both driver formats:
+    #   1. Anthropic/OpenAI/Codex: {"name": ..., "args": <dict>, "id": ...}
+    #   2. Vertex/Google: {"id": ..., "function": {"name": ..., "arguments": <json_string>}}
     if response.tool_calls:
         tc = response.tool_calls[0]
-        args = tc.get("args") or tc.get("input") or {}
+        args = tc.get("args") or tc.get("input")
+        if args is None:
+            # Vertex/Google format: function.arguments is a JSON string
+            fn = tc.get("function") or {}
+            raw_args = fn.get("arguments")
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except (json.JSONDecodeError, ValueError):
+                    args = {}
+            elif isinstance(raw_args, dict):
+                args = raw_args
+            else:
+                args = {}
+        if not isinstance(args, dict):
+            args = {}
         entities = args.get("entities", [])
         relations = args.get("relations", [])
 
@@ -605,7 +677,7 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
                 if not extracted.get("entities") and not extracted.get("relations"):
                     logger.debug(f"Reprocess #{row['id']}: no entities ({elapsed:.1f}s)")
                     await _mark_kg_processed(row["id"])
-                    stats["failed"] += 1
+                    stats["succeeded"] += 1
                     continue
 
                 await _store_graph(extracted, row["id"])
