@@ -251,8 +251,13 @@ async def _extract_via_provider(provider: LLMProvider, content: str, speaker_nam
     ]
 
     response = await provider.chat(
-        messages, temperature=0.1, thinking_budget=0,
+        messages, temperature=0.1, thinking_budget=None,
         tools=[_KG_EXTRACT_TOOL],
+    )
+
+    logger.debug(
+        f"KG extract response: tool_calls={response.tool_calls is not None and len(response.tool_calls) if response.tool_calls else 0}, "
+        f"content={len(response.content or '')} chars, provider={provider.name}"
     )
 
     # Extract from tool call response — handle both driver formats:
@@ -260,11 +265,13 @@ async def _extract_via_provider(provider: LLMProvider, content: str, speaker_nam
     #   2. Vertex/Google: {"id": ..., "function": {"name": ..., "arguments": <json_string>}}
     if response.tool_calls:
         tc = response.tool_calls[0]
+        logger.debug(f"KG tool_call raw keys: {list(tc.keys())}")
         args = tc.get("args") or tc.get("input")
         if args is None:
             # Vertex/Google format: function.arguments is a JSON string
             fn = tc.get("function") or {}
             raw_args = fn.get("arguments")
+            logger.debug(f"KG tool_call function.arguments type={type(raw_args).__name__}, value={str(raw_args)[:300]}")
             if isinstance(raw_args, str):
                 try:
                     args = json.loads(raw_args)
@@ -288,10 +295,12 @@ async def _extract_via_provider(provider: LLMProvider, content: str, speaker_nam
             r for r in relations
             if isinstance(r, dict) and r.get("subject") and r.get("predicate") and r.get("object")
         ]
+        logger.debug(f"KG parsed: {len(valid_entities)} entities, {len(valid_relations)} relations")
         return {"entities": valid_entities, "relations": valid_relations}
 
     # Fallback: LLM responded with text instead of tool call — try parsing
     if response.content and response.content.strip():
+        logger.debug(f"KG no tool_call, falling back to text parse: {response.content[:300]}")
         return _parse_extraction(response.content.strip())
 
     return None
