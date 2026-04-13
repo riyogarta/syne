@@ -784,7 +784,7 @@ class SyneAgent:
         # Memory search tool
         self.tools.register(
             name="memory_search",
-            description="Search through stored memories for relevant information.",
+            description="Search through stored memories for relevant information. Optionally filter by one or more categories for focused results.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -796,6 +796,11 @@ class SyneAgent:
                         "type": "integer",
                         "description": "Max results to return",
                         "default": 5,
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by memory categories (e.g. [\"fact\", \"preference\"]). If empty or omitted, search all categories.",
                     },
                 },
                 "required": ["query"],
@@ -1798,14 +1803,14 @@ class SyneAgent:
 
         return f"Unknown target/action: {target}/{action}"
 
-    async def _tool_memory_search(self, query: str, limit: int = 5) -> str:
+    async def _tool_memory_search(self, query: str, limit: int = 5, categories: list[str] | None = None) -> str:
         """Tool handler: search memories."""
         # Pass requester access level for Rule 760 filtering
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
         if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
             access = conv.inbound.sender_access
-        results = await self.memory.recall(query, limit=limit, requester_access_level=access)
+        results = await self.memory.recall(query, limit=limit, categories=categories or None, requester_access_level=access)
         if not results:
             return "No relevant memories found."
 

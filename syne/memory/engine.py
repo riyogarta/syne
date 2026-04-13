@@ -53,19 +53,21 @@ class MemoryEngine:
         limit: int = 5,
         min_similarity: float = 0.3,
         category: Optional[str] = None,
+        categories: Optional[list[str]] = None,
         user_id: Optional[int] = None,
         requester_access_level: str = "public",
     ) -> list[dict]:
         """Recall memories by semantic similarity.
-        
+
         Args:
             query: Search query
             limit: Maximum results to return
             min_similarity: Minimum similarity threshold
-            category: Filter by category
+            category: Filter by single category (legacy, still supported)
+            categories: Filter by multiple categories (e.g. ["fact", "preference"])
             user_id: Filter by user
             requester_access_level: Access level of the requester (for Rule 760 filtering)
-            
+
         Returns:
             List of matching memories (filtered by Rule 760 for privacy)
         """
@@ -94,9 +96,15 @@ class MemoryEngine:
             params = [str(vector), limit]
             param_idx = 3
 
-            if category:
-                conditions.append(f"category = ${param_idx}")
-                params.append(category)
+            # Category filter: categories (list) takes priority over category (single)
+            _cats = categories if categories else ([category] if category else None)
+            if _cats:
+                if len(_cats) == 1:
+                    conditions.append(f"category = ${param_idx}")
+                    params.append(_cats[0])
+                else:
+                    conditions.append(f"category = ANY(${param_idx})")
+                    params.append(_cats)
                 param_idx += 1
 
             if user_id is not None:
