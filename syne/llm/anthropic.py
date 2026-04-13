@@ -111,20 +111,26 @@ class AnthropicProvider(LLMProvider):
                     return token
             return self._access_token
 
-        # Try DB first
+        # Try DB first — separate load from refresh so refresh failure
+        # doesn't lose the credentials entirely
         try:
             from ..auth.claude_oauth import ClaudeCredentials
             creds = await ClaudeCredentials.load_from_db()
             if creds:
-                if creds.is_expired:
-                    await creds.get_token()
                 self._claude_creds = creds
-                self._access_token = creds.access_token
                 self._is_oauth = True
                 self._last_load = now
+                if creds.is_expired:
+                    try:
+                        await creds.get_token()
+                    except Exception as e:
+                        # Refresh failed — use expired token anyway.
+                        # The 401 handler in the API call will retry refresh.
+                        logger.warning(f"Token refresh failed, using expired token (401 handler will retry): {e}")
+                self._access_token = creds.access_token
                 return creds.access_token
         except Exception as e:
-            logger.debug(f"DB credential load failed: {e}")
+            logger.warning(f"DB credential load failed: {e}")
 
         # Try DB API key
         try:

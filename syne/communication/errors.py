@@ -63,7 +63,7 @@ def classify_error(e: Exception, model: str = "") -> str:
             if "usage_limit" in msg:
                 return f"{tag}Usage limit reached.{_reset_info} Use a different model or wait."
             return f"{tag}Rate limited.{_reset_info} Please wait a moment and try again."
-        if "401" in msg or "403" in msg or "auth" in msg.lower():
+        if "401" in msg or "403" in msg or "auth" in msg.lower() or "credential" in msg.lower():
             return f"{tag}Authentication error. Owner may need to refresh credentials."
         if "400" in msg or "bad request" in msg.lower():
             return f"{tag}Provider rejected the request. Try /compact or send a shorter message."
