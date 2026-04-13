@@ -491,11 +491,20 @@ class AnthropicProvider(LLMProvider):
                         )
 
                         if _is_transient:
-                            # Transient — retry with same token (don't refresh — would destroy good reauth token)
+                            # Transient — retry with fresh connection (may route to different server)
                             if not last_attempt:
-                                delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
-                                logger.warning(f"Transient 429 (not real rate limit), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                                # Recreate HTTP client to force new TCP/TLS connection
+                                try:
+                                    if self._http_client is not None and not self._http_client.is_closed:
+                                        await self._http_client.aclose()
+                                except Exception:
+                                    pass
+                                self._http_client = None
+                                # Longer base delay for transient 429 (3s base instead of 1s)
+                                delay = _backoff_delay(3000, attempt + 1)
+                                logger.warning(f"Transient 429 (not real rate limit), new connection + retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
                                 await asyncio.sleep(delay)
+                                client = self._get_client()
                                 continue
                             raise RuntimeError(f"Anthropic transient error after {_TOTAL_ATTEMPTS} attempts")
                         else:
