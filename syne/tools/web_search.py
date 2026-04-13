@@ -1,5 +1,6 @@
 """Web Search Tool — search the web via Tavily or Brave Search API."""
 
+import asyncio
 import logging
 import httpx
 
@@ -7,11 +8,32 @@ from ..db.models import get_config
 
 logger = logging.getLogger("syne.tools.web_search")
 
+_MAX_RETRIES = 3
+_BASE_DELAY = 2.0  # seconds
+
+
+async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
+    """Make HTTP request with retry on 429/5xx."""
+    for attempt in range(_MAX_RETRIES):
+        response = await client.request(method, url, **kwargs)
+        if response.status_code == 429 or response.status_code >= 500:
+            if attempt < _MAX_RETRIES - 1:
+                # Parse retry-after header if present
+                retry_after = response.headers.get("retry-after")
+                delay = float(retry_after) if retry_after else _BASE_DELAY * (2 ** attempt)
+                delay = min(delay, 30.0)
+                logger.warning(f"Web search {response.status_code}, retrying in {delay:.1f}s (attempt {attempt + 1}/{_MAX_RETRIES})")
+                await asyncio.sleep(delay)
+                continue
+        return response
+    return response  # return last response even if failed
+
 
 async def _search_tavily(query: str, api_key: str, count: int) -> str:
     """Search using Tavily API (POST, Bearer auth)."""
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
+        response = await _request_with_retry(
+            client, "POST",
             "https://api.tavily.com/search",
             headers={
                 "Content-Type": "application/json",
@@ -46,7 +68,8 @@ async def _search_tavily(query: str, api_key: str, count: int) -> str:
 async def _search_brave(query: str, api_key: str, count: int) -> str:
     """Search using Brave Search API (GET, X-Subscription-Token)."""
     async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.get(
+        response = await _request_with_retry(
+            client, "GET",
             "https://api.search.brave.com/res/v1/web/search",
             headers={
                 "Accept": "application/json",
