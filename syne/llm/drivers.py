@@ -147,9 +147,16 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     # Anthropic Claude (OAuth via claude.ai)
     # ═══════════════════════════════════════════════════════════════
     elif driver_name == "anthropic":
-        return AnthropicProvider(
+        provider = AnthropicProvider(
             chat_model=model_id,
         )
+        # Pre-load token at init time — avoids lazy-load delay/error on first chat
+        try:
+            await provider._load_token()
+            logger.info(f"Anthropic token pre-loaded (oauth={provider._is_oauth})")
+        except Exception as e:
+            logger.warning(f"Anthropic token pre-load failed (will retry on first chat): {e}")
+        return provider
     
     # ═══════════════════════════════════════════════════════════════
     # OpenAI-Compatible (Groq, Together, OpenRouter, etc.)
