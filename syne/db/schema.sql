@@ -90,9 +90,11 @@ DECLARE
 BEGIN
     SELECT vector_dims(embedding) INTO dim FROM memory WHERE embedding IS NOT NULL LIMIT 1;
     IF dim IS NULL THEN RETURN; END IF;
+    -- Fix column type to explicit dimension so HNSW index matches query expressions
+    EXECUTE format('ALTER TABLE memory ALTER COLUMN embedding TYPE vector(%s)', dim);
     DROP INDEX IF EXISTS idx_memory_embedding_hnsw;
     EXECUTE format(
-        'CREATE INDEX idx_memory_embedding_hnsw ON memory USING hnsw ((embedding::vector(%s)) vector_cosine_ops) WITH (m = 16, ef_construction = 64)',
+        'CREATE INDEX idx_memory_embedding_hnsw ON memory USING hnsw (embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)',
         dim
     );
 END;
