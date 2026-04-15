@@ -58,6 +58,21 @@ _TOOL_SIGNALS = {
 }
 
 
+_NON_ANTHROPIC_GUARDRAILS = """
+
+# Accuracy & Tool Discipline (CRITICAL)
+You MUST follow these rules strictly. Violations will produce wrong answers.
+
+1. NEVER fabricate facts. If you don't know something, say "I don't know" or use a tool to find out. Never invent dates, names, statistics, URLs, prices, or version numbers.
+2. ALWAYS use web_search BEFORE answering questions about current events, prices, schedules, weather, news, real-time data, or anything that changes over time. Do NOT answer from training data for these topics.
+3. When a tool returns a result, report the ACTUAL result. Do not embellish, reinterpret, or add information that wasn't in the tool output.
+4. If a tool call fails or returns no results, tell the user honestly. Do not make up an alternative answer.
+5. Follow the user's instructions EXACTLY. Do not add extra steps, skip steps, or reinterpret what was asked. If unclear, ask for clarification instead of guessing.
+6. When using memory_search, base your answer ONLY on the returned memories. Do not supplement with imagined details.
+7. Distinguish clearly between what you KNOW (from tools/memory) and what you THINK (inference). Use hedging language ("I think", "possibly", "based on...") for inferences.
+"""
+
+
 def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = None) -> list[dict]:
     """Filter tools based on user message + media type — core always included, others by signal."""
     msg_lower = user_message.lower()
@@ -360,7 +375,17 @@ class Conversation:
 
         # 1. System prompt
         prompt = self.system_prompt
-        
+
+        # ═══════════════════════════════════════════════════════════════
+        # PROVIDER-SPECIFIC: Anti-hallucination for non-Anthropic models
+        # Gemini/Vertex and GPT tend to hallucinate facts and ignore
+        # tool-calling instructions more than Claude. These extra rules
+        # reduce (not eliminate) that tendency.
+        # ═══════════════════════════════════════════════════════════════
+        _pname = getattr(self.provider, 'name', '')
+        if _pname and 'anthropic' not in _pname:
+            prompt += _NON_ANTHROPIC_GUARDRAILS
+
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Add group context restrictions to system prompt
         # This reinforces that owner tools are DM-only when in groups
@@ -368,7 +393,7 @@ class Conversation:
         if self.is_group:
             group_restrictions = get_group_context_restrictions(access_level, is_group=True)
             prompt = prompt + group_restrictions
-        
+
         messages.append(ChatMessage(role="system", content=prompt))
 
 
