@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 import httpx
 
 from ..db.models import get_config
@@ -10,11 +11,24 @@ logger = logging.getLogger("syne.tools.web_search")
 
 _MAX_RETRIES = 3
 _BASE_DELAY = 2.0  # seconds
+_MIN_INTERVAL = 1.1  # seconds between requests (Brave free: 1 req/sec)
+_last_request_time: float = 0.0
+
+
+async def _throttle():
+    """Ensure minimum interval between search API requests."""
+    global _last_request_time
+    now = time.monotonic()
+    elapsed = now - _last_request_time
+    if elapsed < _MIN_INTERVAL:
+        await asyncio.sleep(_MIN_INTERVAL - elapsed)
+    _last_request_time = time.monotonic()
 
 
 async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> httpx.Response:
-    """Make HTTP request with retry on 429/5xx."""
+    """Make HTTP request with retry on 429/5xx. Throttled to 1 req/sec."""
     for attempt in range(_MAX_RETRIES):
+        await _throttle()
         response = await client.request(method, url, **kwargs)
         if response.status_code == 429 or response.status_code >= 500:
             if attempt < _MAX_RETRIES - 1:
