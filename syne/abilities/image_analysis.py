@@ -4,6 +4,7 @@ All configuration comes from the ability's config in DB.
 No hardcoded providers or models. Owner decides everything.
 
 Example configs:
+  Ollama:      {"provider": "ollama", "model": "gemma3:4b"}
   Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen2.5-VL-72B-Instruct"}
   Google:      {"provider": "google"}  (uses OAuth, model defaults to gemini-2.0-flash)
   OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-4o"}
@@ -78,6 +79,14 @@ class ImageAnalysisAbility(Ability):
         model = config.get("model", "")
 
         # Dispatch to provider
+        if provider == "ollama":
+            base_url = config.get("base_url", "http://localhost:11434")
+            return await self._call_ollama(
+                image_base64, mime_type, prompt,
+                model=model or "gemma3:4b",
+                base_url=base_url,
+            )
+
         if provider == "together" and api_key:
             return await self._call_openai_compatible(
                 image_base64, mime_type, prompt,
@@ -128,6 +137,41 @@ class ImageAnalysisAbility(Ability):
                 mime = "image/jpeg"
 
             return base64.b64encode(resp.content).decode(), mime
+
+    async def _call_ollama(
+        self, b64: str, mime: str, prompt: str,
+        model: str, base_url: str,
+    ) -> dict:
+        """Call Ollama vision API (images field with base64 array)."""
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": [{
+                            "role": "user",
+                            "content": prompt,
+                            "images": [b64],
+                        }],
+                        "stream": False,
+                    },
+                )
+
+                if resp.status_code != 200:
+                    return {"success": False, "error": f"Ollama HTTP {resp.status_code}: {resp.text[:200]}"}
+
+                text = resp.json().get("message", {}).get("content", "")
+                if not text:
+                    return {"success": False, "error": "Ollama returned empty response"}
+                return {"success": True, "result": text}
+
+        except httpx.TimeoutException:
+            return {"success": False, "error": "Ollama timeout (120s) — model may be loading"}
+        except httpx.ConnectError:
+            return {"success": False, "error": f"Cannot connect to Ollama at {base_url}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     async def _call_openai_compatible(
         self, b64: str, mime: str, prompt: str,
@@ -267,9 +311,9 @@ class ImageAnalysisAbility(Ability):
             )
         return (
             "- Status: **not ready**\n"
-            "- Providers: google (OAuth, no key needed), together, openai (need api_key)\n"
+            "- Providers: ollama (local, no key), google (OAuth, no key), together, openai (need api_key)\n"
             "- Setup: `update_ability(action='config', name='image_analysis', "
-            "config='{\"provider\": \"google\"}')`"
+            "config='{\"provider\": \"ollama\", \"model\": \"gemma3:4b\"}')`"
         )
 
     def get_required_config(self) -> list[str]:
