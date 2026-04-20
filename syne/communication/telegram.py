@@ -2418,6 +2418,12 @@ Or just send me a message!"""
                 await query.edit_message_text(f"Error: {e}")
                 return
 
+            # Update in-memory ability config so it takes effect immediately
+            if self.agent.abilities:
+                reg = self.agent.abilities.get("image_analysis")
+                if reg:
+                    reg.config = new_config
+
             await query.edit_message_text(
                 f"Vision provider switched to <b>{provider}</b>.\n"
                 f"Config: <code>{_json.dumps(new_config)}</code>",
