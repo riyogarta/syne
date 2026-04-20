@@ -79,6 +79,14 @@ class ImageAnalysisAbility(Ability):
         model = config.get("model", "")
 
         # Dispatch to provider
+        if provider == "vertex":
+            return await self._call_vertex(
+                image_base64, mime_type, prompt,
+                model=model or "gemini-2.0-flash",
+                api_key=api_key,
+                region=config.get("region", ""),
+            )
+
         if provider == "ollama":
             base_url = config.get("base_url", "http://localhost:11434")
             return await self._call_ollama(
@@ -137,6 +145,88 @@ class ImageAnalysisAbility(Ability):
                 mime = "image/jpeg"
 
             return base64.b64encode(resp.content).decode(), mime
+
+    async def _call_vertex(
+        self, b64: str, mime: str, prompt: str,
+        model: str, api_key: str = "", region: str = "",
+    ) -> dict:
+        """Call Vertex AI Gemini vision API.
+
+        Auto-reads API key and region from model registry if not provided.
+        """
+        # Auto-load API key + region from existing Vertex model config
+        if not api_key or not region:
+            try:
+                _key, _region = await self._load_vertex_credentials()
+                api_key = api_key or _key
+                region = region or _region
+            except Exception as e:
+                return {"success": False, "error": f"Vertex credentials: {e}"}
+
+        if not api_key:
+            return {"success": False, "error": "No Vertex API key. Set in ability config or add a Vertex model in /models."}
+        if not region:
+            return {"success": False, "error": "No Vertex region. Set in ability config or add a Vertex model in /models."}
+
+        url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    url,
+                    params={"key": api_key},
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "contents": [{"parts": [
+                            {"text": prompt},
+                            {"inlineData": {"mimeType": mime, "data": b64}},
+                        ]}],
+                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
+                    },
+                )
+
+                if resp.status_code != 200:
+                    return {"success": False, "error": f"Vertex HTTP {resp.status_code}: {resp.text[:200]}"}
+
+                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+                return {"success": True, "result": text}
+
+        except httpx.TimeoutException:
+            return {"success": False, "error": "Vertex timeout"}
+        except (KeyError, IndexError):
+            return {"success": False, "error": "Unexpected Vertex response format"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _load_vertex_credentials(self) -> tuple[str, str]:
+        """Auto-load Vertex API key and region from model registry."""
+        from ..db.connection import get_connection
+        import json as _json
+
+        async with get_connection() as conn:
+            row = await conn.fetchrow("SELECT value FROM config WHERE key = 'provider.models'")
+            if not row:
+                raise ValueError("No model registry found")
+
+            models = _json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
+            for m in models:
+                if m.get("driver") == "vertex":
+                    credential_key = m.get("credential_key", "")
+                    region = m.get("region", "")
+
+                    # Load API key
+                    api_key = ""
+                    if credential_key:
+                        key_row = await conn.fetchrow(
+                            "SELECT value FROM config WHERE key = $1", credential_key
+                        )
+                        if key_row:
+                            val = key_row["value"]
+                            api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
+
+                    return api_key, region
+
+        raise ValueError("No Vertex model found in registry")
 
     async def _call_ollama(
         self, b64: str, mime: str, prompt: str,
@@ -311,9 +401,9 @@ class ImageAnalysisAbility(Ability):
             )
         return (
             "- Status: **not ready**\n"
-            "- Providers: ollama (local, no key), google (OAuth, no key), together, openai (need api_key)\n"
+            "- Providers: vertex (auto-reads key from /models), ollama (local), google (OAuth), together, openai\n"
             "- Setup: `update_ability(action='config', name='image_analysis', "
-            "config='{\"provider\": \"ollama\", \"model\": \"gemma3:4b\"}')`"
+            "config='{\"provider\": \"vertex\"}')`"
         )
 
     def get_required_config(self) -> list[str]:
