@@ -2396,6 +2396,45 @@ Or just send me a message!"""
             }
             new_config = defaults.get(provider, {"provider": provider})
 
+            # Ollama: auto-pull model if not available
+            if provider == "ollama":
+                model = new_config.get("model", "gemma3:4b")
+                await query.edit_message_text(f"Checking Ollama model <code>{model}</code>...", parse_mode="HTML")
+                import subprocess, shutil
+                if not shutil.which("ollama"):
+                    await query.edit_message_text("Ollama is not installed on this server.")
+                    return
+                # Check if model exists
+                try:
+                    result = subprocess.run(
+                        ["ollama", "list"], capture_output=True, text=True, timeout=10,
+                    )
+                    model_exists = any(model in line for line in result.stdout.splitlines())
+                except Exception:
+                    model_exists = False
+
+                if not model_exists:
+                    await query.edit_message_text(
+                        f"Downloading <code>{model}</code>... This may take a few minutes.",
+                        parse_mode="HTML",
+                    )
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            "ollama", "pull", model,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+                        if proc.returncode != 0:
+                            await query.edit_message_text(
+                                f"Failed to pull <code>{model}</code>:\n<code>{stderr.decode()[:300]}</code>",
+                                parse_mode="HTML",
+                            )
+                            return
+                    except asyncio.TimeoutError:
+                        await query.edit_message_text(f"Download timed out (10min). Try manually: <code>ollama pull {model}</code>", parse_mode="HTML")
+                        return
+
             # Preserve existing api_key if switching between providers that need it
             from ..db.connection import get_connection
             import json as _json
