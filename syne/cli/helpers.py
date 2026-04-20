@@ -192,6 +192,70 @@ def _ensure_evaluator_model(eval_model="qwen3:0.6b"):
     console.print(f"[green]✓ Evaluator model {model_name} ready[/green]")
 
 
+def _ensure_ability_ollama_models(syne_dir: str):
+    """Ensure Ollama models required by abilities are pulled.
+
+    Reads ability configs from DB and pulls any Ollama vision models.
+    Non-fatal: if DB is unreachable or model pull fails, just warn.
+    """
+    import asyncio
+    import shutil
+
+    if not shutil.which("ollama"):
+        return
+
+    db_url = _get_db_url(syne_dir)
+    if not db_url:
+        return
+
+    async def _check():
+        import asyncpg
+        import json
+        conn = await asyncpg.connect(db_url)
+        try:
+            rows = await conn.fetch(
+                "SELECT name, config FROM abilities WHERE enabled = true AND config IS NOT NULL"
+            )
+            models = []
+            for row in rows:
+                cfg = row["config"]
+                if isinstance(cfg, str):
+                    cfg = json.loads(cfg)
+                if isinstance(cfg, dict) and cfg.get("provider") == "ollama":
+                    model = cfg.get("model", "")
+                    if model:
+                        models.append((row["name"], model))
+            return models
+        finally:
+            await conn.close()
+
+    try:
+        needed = asyncio.run(_check())
+    except Exception:
+        return
+
+    for ability_name, model_name in needed:
+        # Check if already pulled
+        try:
+            result = subprocess.run(
+                ["ollama", "list"], capture_output=True, text=True, timeout=10,
+            )
+            if any(model_name in line for line in result.stdout.splitlines()):
+                console.print(f"[green]✓ Ollama model {model_name} ({ability_name}) already available[/green]")
+                continue
+        except Exception:
+            pass
+
+        console.print(f"[bold]Downloading {model_name} for {ability_name} ability...[/bold]")
+        sys.stdout.flush()
+        ret = subprocess.run(["ollama", "pull", model_name]).returncode
+        if ret != 0:
+            console.print(f"[yellow]⚠️ Failed to pull {model_name} — {ability_name} may not work.[/yellow]")
+            console.print(f"[dim]Try manually: ollama pull {model_name}[/dim]")
+        else:
+            console.print(f"[green]✓ Model {model_name} ({ability_name}) ready[/green]")
+
+
 def _ensure_evaluator_if_enabled(syne_dir: str):
     """Ensure Ollama models are available: embedding always, evaluator if auto_capture is ON.
 
@@ -260,6 +324,9 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
         _ensure_evaluator_model(eval_model=eval_model)
     else:
         console.print("[dim]⏭ Auto-capture disabled — skipping evaluator model[/dim]")
+
+    # Ability Ollama models (image_analysis, etc.)
+    _ensure_ability_ollama_models(syne_dir)
 
 
 def _ensure_system_deps():
