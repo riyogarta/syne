@@ -190,6 +190,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
+        self.app.add_handler(CommandHandler("vision", self._cmd_vision))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO & ~filters.LOCATION, self._handle_photo))
@@ -2318,6 +2319,112 @@ Or just send me a message!"""
             return True
 
         return False
+
+    # ── Vision / Image Analysis provider ──
+
+    async def _cmd_vision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /vision command — switch image analysis provider."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can manage vision settings.")
+            return
+        await self._vision_menu_main(update)
+
+    async def _vision_menu_main(self, update_or_query):
+        """Render vision provider selection menu."""
+        # Load current config
+        from ..db.connection import get_connection
+        import json as _json
+        config = {}
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT config FROM abilities WHERE name = 'image_analysis'"
+                )
+                if row and row["config"]:
+                    config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+        except Exception:
+            pass
+
+        current = config.get("provider", "not set")
+        current_model = config.get("model", "default")
+
+        providers = [
+            ("vertex", "Vertex AI", "Auto-reads API key from /models"),
+            ("ollama", "Ollama (local)", "gemma3:4b — free, no API key"),
+            ("google", "Google OAuth", "Needs Gemini API scope"),
+            ("together", "Together AI", "Needs API key"),
+            ("openai", "OpenAI", "Needs API key"),
+        ]
+
+        buttons = []
+        for key, label, desc in providers:
+            prefix = ">> " if key == current else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"vision:set:{key}"
+            )])
+
+        text = (
+            f"<b>Vision / Image Analysis</b>\n\n"
+            f"Provider: <b>{current}</b>\n"
+            f"Model: <code>{current_model}</code>"
+        )
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_vision_callback(self, query, data: str):
+        """Handle vision:* callback routing."""
+        if data == "vision:main":
+            await self._vision_menu_main(query)
+            return
+
+        if data.startswith("vision:set:"):
+            provider = data.split(":", 2)[2]
+
+            # Default models per provider
+            defaults = {
+                "vertex": {"provider": "vertex", "model": "gemini-2.0-flash"},
+                "ollama": {"provider": "ollama", "model": "gemma3:4b"},
+                "google": {"provider": "google", "model": "gemini-2.0-flash"},
+                "together": {"provider": "together"},
+                "openai": {"provider": "openai"},
+            }
+            new_config = defaults.get(provider, {"provider": provider})
+
+            # Preserve existing api_key if switching between providers that need it
+            from ..db.connection import get_connection
+            import json as _json
+            try:
+                async with get_connection() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT config FROM abilities WHERE name = 'image_analysis'"
+                    )
+                    if row and row["config"]:
+                        old_config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+                        old_key = old_config.get("api_key", "")
+                        if old_key and provider in ("together", "openai"):
+                            new_config["api_key"] = old_key
+
+                    # Update config
+                    await conn.execute(
+                        "UPDATE abilities SET config = $1 WHERE name = 'image_analysis'",
+                        _json.dumps(new_config),
+                    )
+            except Exception as e:
+                await query.edit_message_text(f"Error: {e}")
+                return
+
+            await query.edit_message_text(
+                f"Vision provider switched to <b>{provider}</b>.\n"
+                f"Config: <code>{_json.dumps(new_config)}</code>",
+                parse_mode="HTML",
+            )
 
     # ── Knowledge Graph extractor management ──
 
@@ -7457,6 +7564,9 @@ Or just send me a message!"""
 
         elif data.startswith("eval:"):
             await self._handle_eval_callback(query, data)
+
+        elif data.startswith("vision:"):
+            await self._handle_vision_callback(query, data)
 
         elif data.startswith("graph:"):
             await self._handle_graph_callback(query, data)
