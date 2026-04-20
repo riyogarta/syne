@@ -2354,7 +2354,6 @@ Or just send me a message!"""
         providers = [
             ("vertex", "Vertex AI", "Auto-reads API key from /models"),
             ("ollama", "Ollama (local)", "gemma3:4b — free, no API key"),
-            ("together", "Together AI", "Needs API key"),
             ("openai", "OpenAI", "Needs API key"),
         ]
 
