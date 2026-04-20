@@ -1436,11 +1436,16 @@ class Conversation:
                 metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
                 self._message_metadata = metadata if metadata else None
             else:
-                # Ability failed — strip raw input, inject error so user knows
-                logger.warning(f"{spec['label']} failed — no silent fallback")
-                user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
-                metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
-                self._message_metadata = metadata if metadata else None
+                # Ability failed — check if LLM can handle natively
+                if spec["native_check"]():
+                    # LLM supports this natively — keep metadata, let LLM handle it
+                    logger.info(f"{spec['label']} ability failed, falling back to native LLM")
+                else:
+                    # No native support — strip and show error
+                    logger.warning(f"{spec['label']} failed — no native fallback available")
+                    user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
+                    metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                    self._message_metadata = metadata if metadata else None
         
         return user_message, metadata if metadata else None
 

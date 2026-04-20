@@ -266,6 +266,7 @@ class TelegramChannel:
             BotCommand("status", "Agent status"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("version", "Version info"),
+            BotCommand("vision", "Switch image analysis provider (owner only)"),
             BotCommand("wamembers", "Manage WhatsApp allowlist (owner only)"),
         ]
         for scope in (BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(), BotCommandScopeAllGroupChats()):
