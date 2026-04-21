@@ -398,6 +398,49 @@ def init():
     else:
         console.print("[dim]  Auto-capture disabled — you can enable it later via /autocapture or chat.[/dim]")
 
+    # 3b. Vision / Image Analysis provider
+    console.print("\n[bold]Image Analysis (Vision)[/bold]")
+    console.print("  Choose how to analyze images sent to the bot.")
+    console.print()
+
+    # Determine available options based on selected provider
+    has_vertex = provider_config and provider_config.get("driver") == "vertex"
+    has_native_vision = provider_config and provider_config.get("driver") in ("anthropic", "google_cca", "vertex", "codex")
+
+    vision_options = []
+    if has_vertex:
+        vision_options.append(("vertex", "Vertex AI [green](uses same API key)[/green]"))
+    vision_options.append(("ollama", "Ollama local [green](free, downloads ~3GB model)[/green]"))
+    if has_native_vision:
+        vision_options.append(("native", "Native LLM [dim](no separate ability — let chat model handle images)[/dim]"))
+
+    for i, (_, label) in enumerate(vision_options, 1):
+        console.print(f"  {i}. {label}")
+    console.print()
+
+    vision_choice = click.prompt("Select", type=click.IntRange(1, len(vision_options)), default=1)
+    vision_provider = vision_options[vision_choice - 1][0]
+    vision_config = None
+
+    if vision_provider == "vertex":
+        vision_config = {"provider": "vertex", "model": "gemini-2.0-flash"}
+        console.print("[green]✓ Vision: Vertex AI (gemini-2.0-flash)[/green]")
+    elif vision_provider == "ollama":
+        vision_model = "gemma3:4b"
+        console.print(f"[dim]Downloading vision model {vision_model}...[/dim]")
+        import shutil
+        if shutil.which("ollama"):
+            ret = subprocess.run(["ollama", "pull", vision_model]).returncode
+            if ret == 0:
+                console.print(f"[green]✓ Vision model {vision_model} ready[/green]")
+            else:
+                console.print(f"[yellow]⚠️ Failed to pull {vision_model} — can download later via /vision[/yellow]")
+        else:
+            console.print("[yellow]⚠️ Ollama not available yet — model will be pulled on first update[/yellow]")
+        vision_config = {"provider": "ollama", "model": vision_model}
+    else:
+        console.print("[dim]  Vision: native LLM (no separate ability configured)[/dim]")
+
     # 4. Database (Docker only — no external DB option)
     console.print("\n[bold]Step 4: Database[/bold]")
     console.print("  Syne uses its own isolated PostgreSQL + pgvector container.")
@@ -698,6 +741,15 @@ def init():
         if auto_capture_enabled:
             await set_config("memory.evaluator_driver", "ollama")
             await set_config("memory.evaluator_model", selected_eval_model)
+        # Save vision/image_analysis config
+        if vision_config:
+            import json as _json
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE abilities SET config = $1, enabled = true WHERE name = 'image_analysis'",
+                    _json.dumps(vision_config),
+                )
+            console.print("[green]✓ Image analysis ability enabled and configured[/green]")
         await close_db()
 
     asyncio.run(_save_identity())
