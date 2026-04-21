@@ -191,6 +191,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
         self.app.add_handler(CommandHandler("vision", self._cmd_vision))
+        self.app.add_handler(CommandHandler("imagegen", self._cmd_imagegen))
         # Message handlers
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(MessageHandler(filters.PHOTO & ~filters.LOCATION, self._handle_photo))
@@ -254,6 +255,7 @@ class TelegramChannel:
             BotCommand("groups", "Manage groups, members & aliases"),
             BotCommand("help", "Available commands"),
             BotCommand("identity", "Show agent identity"),
+            BotCommand("imagegen", "Switch image generation provider (owner only)"),
             BotCommand("members", "Manage global user access levels"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("models", "Manage LLM models (owner only)"),
@@ -2320,6 +2322,112 @@ Or just send me a message!"""
             return True
 
         return False
+
+    # ── Image Generation provider ──
+
+    async def _cmd_imagegen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /imagegen command — switch image generation provider."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can manage image generation settings.")
+            return
+        await self._imggen_menu_main(update)
+
+    async def _imggen_menu_main(self, update_or_query):
+        """Render image generation provider selection menu."""
+        from ..db.connection import get_connection
+        import json as _json
+        config = {}
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT config FROM abilities WHERE name = 'image_gen'"
+                )
+                if row and row["config"]:
+                    config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+        except Exception:
+            pass
+
+        current = config.get("provider", "not set")
+        current_model = config.get("model", "default")
+
+        providers = [
+            ("vertex", "Vertex AI (Imagen 3)", "Auto-reads API key from /models"),
+            ("openai", "OpenAI (DALL-E 3)", "Needs API key"),
+        ]
+
+        buttons = []
+        for key, label, desc in providers:
+            prefix = ">> " if key == current else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"imggen:set:{key}"
+            )])
+
+        text = (
+            f"<b>Image Generation</b>\n\n"
+            f"Provider: <b>{current}</b>\n"
+            f"Model: <code>{current_model}</code>"
+        )
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_imggen_callback(self, query, data: str):
+        """Handle imggen:* callback routing."""
+        if data == "imggen:main":
+            await self._imggen_menu_main(query)
+            return
+
+        if data.startswith("imggen:set:"):
+            provider = data.split(":", 2)[2]
+
+            defaults = {
+                "vertex": {"provider": "vertex", "model": "imagen-3.0-generate-002"},
+                "openai": {"provider": "openai"},
+                "together": {"provider": "together"},
+            }
+            new_config = defaults.get(provider, {"provider": provider})
+
+            # Preserve existing api_key
+            from ..db.connection import get_connection
+            import json as _json
+            try:
+                async with get_connection() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT config FROM abilities WHERE name = 'image_gen'"
+                    )
+                    if row and row["config"]:
+                        old_config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+                        old_key = old_config.get("api_key", "")
+                        if old_key and provider in ("together", "openai"):
+                            new_config["api_key"] = old_key
+
+                    # Update config
+                    await conn.execute(
+                        "UPDATE abilities SET config = $1, enabled = true WHERE name = 'image_gen'",
+                        _json.dumps(new_config),
+                    )
+            except Exception as e:
+                await query.edit_message_text(f"Error: {e}")
+                return
+
+            # Update in-memory ability config
+            if self.agent.abilities:
+                reg = self.agent.abilities.get("image_gen")
+                if reg:
+                    reg.config = new_config
+                    reg.enabled = True
+
+            await query.edit_message_text(
+                f"Image generation provider switched to <b>{provider}</b>.\n"
+                f"Config: <code>{_json.dumps(new_config)}</code>",
+                parse_mode="HTML",
+            )
 
     # ── Vision / Image Analysis provider ──
 
@@ -7611,6 +7719,9 @@ Or just send me a message!"""
 
         elif data.startswith("vision:"):
             await self._handle_vision_callback(query, data)
+
+        elif data.startswith("imggen:"):
+            await self._handle_imggen_callback(query, data)
 
         elif data.startswith("graph:"):
             await self._handle_graph_callback(query, data)
