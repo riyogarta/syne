@@ -2355,6 +2355,7 @@ Or just send me a message!"""
 
         providers = [
             ("vertex", "Vertex AI (Imagen 3)", "Auto-reads API key from /models"),
+            ("together", "Together AI (FLUX.1)", "Needs API key"),
             ("openai", "OpenAI (DALL-E 3)", "Needs API key"),
         ]
 
