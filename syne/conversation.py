@@ -60,17 +60,38 @@ _TOOL_SIGNALS = {
 
 _NON_ANTHROPIC_GUARDRAILS = """
 
-# Accuracy & Tool Discipline (CRITICAL)
-You MUST follow these rules strictly. Violations will produce wrong answers.
+# Accuracy & Tool Discipline (CRITICAL — VIOLATIONS = WRONG ANSWERS)
 
-1. NEVER fabricate facts. If you don't know something, say "I don't know" or use a tool to find out. Never invent dates, names, statistics, URLs, prices, or version numbers.
-2. ALWAYS use web_search BEFORE answering questions about current events, prices, schedules, weather, news, real-time data, or anything that changes over time. Do NOT answer from training data for these topics.
-3. When a tool returns a result, report the ACTUAL result. Do not embellish, reinterpret, or add information that wasn't in the tool output.
-4. If a tool call fails or returns no results, tell the user honestly. Do not make up an alternative answer.
-5. Follow the user's instructions EXACTLY. Do not add extra steps, skip steps, or reinterpret what was asked. If unclear, ask for clarification instead of guessing.
-6. When using memory_search, base your answer ONLY on the returned memories. Do not supplement with imagined details.
-7. Distinguish clearly between what you KNOW (from tools/memory) and what you THINK (inference). Use hedging language ("I think", "possibly", "based on...") for inferences.
+## NEVER CLAIM ACTIONS YOU DID NOT PERFORM
+- NEVER say "I saved", "I wrote", "I ran", "I executed", "I searched", "I stored" unless you ACTUALLY called the corresponding tool AND received a success response.
+- If you did NOT call a tool, you did NOT perform the action. Period.
+- Saying "done" without a tool call is LYING. The user will check and you will be caught.
+
+## TOOL RESULTS ARE SACRED
+- When a tool returns a result, report ONLY what the tool returned. Do not add, embellish, or supplement with information from your training data.
+- If web_search returns 3 results, report those 3 results. Do not add a 4th from your imagination.
+- If memory_search returns nothing, say "no memories found". Do not fabricate memories.
+- If a tool fails, say it failed. Do not invent an alternative result.
+
+## FACTS MUST COME FROM TOOLS
+- NEVER answer factual questions (prices, dates, events, statistics, addresses, phone numbers) from training data alone. Use web_search first.
+- If you cannot use a tool, say "I don't have that information" instead of guessing.
+- Your training data may be outdated or wrong. Tools give real-time truth.
+
+## DO NOT FABRICATE
+- Never invent URLs, email addresses, phone numbers, prices, or statistics.
+- Never claim a file exists unless file_read confirmed it.
+- Never claim data is in the database unless db_query confirmed it.
+- When uncertain, say "I'm not sure" — never present uncertainty as fact.
 """
+
+# Regex for detecting phantom action claims (used post-response)
+_PHANTOM_ACTION_RE = _re.compile(
+    r"(?:sudah|telah|berhasil|sudah saya|sudah ku|I have|I've|I already|successfully|done)"
+    r"[^.!?\n]{0,40}"
+    r"(?:simpan|tulis|jalankan|eksekusi|kirim|hapus|buat|save|writ|ran|execut|sent|delet|creat|search|stor)",
+    _re.IGNORECASE,
+)
 
 
 def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = None) -> list[dict]:
@@ -813,6 +834,22 @@ class Conversation:
         if response.tool_calls:
             logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
+
+        # Phantom action detection — non-Anthropic models sometimes claim actions
+        # they never performed (no tool calls). Append a warning so user knows.
+        _pname = getattr(self.provider, 'name', '')
+        if _pname and 'anthropic' not in _pname and not response.tool_calls:
+            content = response.content or ""
+            if _PHANTOM_ACTION_RE.search(content):
+                logger.warning(f"Phantom action detected in response (no tool calls): {content[:200]}")
+                response = ChatResponse(
+                    content=content + "\n\n⚠️ _Warning: the above claims may not have been executed. No tool was actually called. Please verify._",
+                    model=response.model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    tool_calls=response.tool_calls,
+                    thinking=response.thinking,
+                )
 
         # Save assistant response
         await self.save_message("assistant", response.content)
