@@ -740,11 +740,17 @@ class Conversation:
         if self.is_group and should_filter_tools_for_group(self.is_group):
             tool_schemas = filter_tools_for_group(tool_schemas)
 
-        # Tool routing: only send tools relevant to the user's message
-        _before = len(tool_schemas)
-        tool_schemas = _route_tools(tool_schemas, user_message, metadata=message_metadata)
-        if len(tool_schemas) < _before:
-            logger.info(f"Tool routing: {_before} → {len(tool_schemas)} tools for: {user_message[:60]}")
+        # Tool routing: only send tools relevant to the user's message.
+        # SKIP for scheduled tasks — payload may lack keywords (e.g. "[REMINDER]")
+        # but LLM still needs full toolset (send_message, etc.) to fulfill it.
+        _is_scheduled = bool((message_metadata or {}).get("scheduled"))
+        if not _is_scheduled:
+            _before = len(tool_schemas)
+            tool_schemas = _route_tools(tool_schemas, user_message, metadata=message_metadata)
+            if len(tool_schemas) < _before:
+                logger.info(f"Tool routing: {_before} → {len(tool_schemas)} tools for: {user_message[:60]}")
+        else:
+            logger.info(f"Scheduled task — skipping tool routing ({len(tool_schemas)} tools available)")
 
         # Call LLM with all params from model registry.
         # Retry once on *empty* non-tool responses — some providers occasionally
