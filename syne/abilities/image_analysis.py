@@ -6,7 +6,7 @@ No hardcoded providers or models. Owner decides everything.
 Example configs:
   Ollama:      {"provider": "ollama", "model": "gemma3:4b"}
   Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen2.5-VL-72B-Instruct"}
-  Google:      {"provider": "google"}  (uses OAuth, model defaults to gemini-2.0-flash)
+  Google:      {"provider": "google"}  (uses OAuth, model defaults to gemini-2.5-flash)
   OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-4o"}
 """
 
@@ -82,7 +82,7 @@ class ImageAnalysisAbility(Ability):
         if provider == "vertex":
             return await self._call_vertex(
                 image_base64, mime_type, prompt,
-                model=model or "gemini-2.0-flash",
+                model=model or "gemini-2.5-flash",
                 api_key=api_key,
                 region=config.get("region", ""),
             )
@@ -115,7 +115,7 @@ class ImageAnalysisAbility(Ability):
             # Google Gemini via OAuth — no API key needed
             return await self._call_gemini(
                 image_base64, mime_type, prompt,
-                model=model or "gemini-2.0-flash",
+                model=model or "gemini-2.5-flash",
             )
 
         return {"success": False, "error": f"Unknown provider '{provider}' or missing api_key"}

@@ -423,8 +423,8 @@ def init():
     vision_config = None
 
     if vision_provider == "vertex":
-        vision_config = {"provider": "vertex", "model": "gemini-2.0-flash"}
-        console.print("[green]✓ Vision: Vertex AI (gemini-2.0-flash)[/green]")
+        vision_config = {"provider": "vertex", "model": "gemini-2.5-flash"}
+        console.print("[green]✓ Vision: Vertex AI (gemini-2.5-flash)[/green]")
     elif vision_provider == "ollama":
         vision_model = "gemma3:4b"
         console.print(f"[dim]Downloading vision model {vision_model}...[/dim]")

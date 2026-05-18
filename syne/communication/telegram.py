@@ -2497,9 +2497,9 @@ Or just send me a message!"""
 
             # Default models per provider
             defaults = {
-                "vertex": {"provider": "vertex", "model": "gemini-2.0-flash"},
+                "vertex": {"provider": "vertex", "model": "gemini-2.5-flash"},
                 "ollama": {"provider": "ollama", "model": "gemma3:4b"},
-                "google": {"provider": "google", "model": "gemini-2.0-flash"},
+                "google": {"provider": "google", "model": "gemini-2.5-flash"},
                 "together": {"provider": "together"},
                 "openai": {"provider": "openai"},
             }
