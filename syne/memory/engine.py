@@ -25,17 +25,27 @@ class MemoryEngine:
         permanent: bool = False,
     ) -> int:
         """Store a memory with its embedding vector.
-        
+
         Args:
             permanent: If True, memory never decays (explicit "remember this").
                       If False (default), memory has recall_count that decays over conversations.
+
+        Raises:
+            RuntimeError: if embedding generation returns an empty vector. We refuse
+                to insert zombie memory rows (memories without embedding can't be
+                recalled and crash similarity comparisons).
         """
         from ..db.models import get_config
-        
+
         # Generate embedding
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector
-        
+        if not vector:
+            raise RuntimeError(
+                "Refusing to store memory: embedding provider returned empty vector. "
+                "Check Ollama/provider status."
+            )
+
         initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
 
         async with get_connection() as conn:
@@ -123,6 +133,7 @@ class MemoryEngine:
                     1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE {where}
+                  AND embedding IS NOT NULL
                   AND (COALESCE(permanent, false) = true OR COALESCE(recall_count, 1) > 0)
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
@@ -132,6 +143,9 @@ class MemoryEngine:
             results = []
             ids_to_update = []
             for row in rows:
+                # Null guard — defensive; SQL filter should make this impossible
+                if row["similarity"] is None:
+                    continue
                 if row["similarity"] >= min_similarity:
                     # ═══════════════════════════════════════════════════════
                     # RULE 760 CHECK — FAMILY PRIVACY PROTECTION
@@ -305,6 +319,10 @@ class MemoryEngine:
         # Embed ONCE — reuse vector for similarity search + store/update
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector
+        if not vector:
+            raise RuntimeError(
+                "Refusing to store memory: embedding provider returned empty vector."
+            )
 
         # Find most similar existing memory using pre-computed vector
         async with get_connection() as conn:
@@ -386,6 +404,8 @@ class MemoryEngine:
     ) -> int:
         """Store a memory with a pre-computed embedding vector."""
         from ..db.models import get_config
+        if not vector:
+            raise RuntimeError("Refusing to store memory with empty vector.")
         initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
 
         async with get_connection() as conn:

@@ -309,6 +309,61 @@ def repair(fix):
         except Exception as e:
             console.print(f"   [dim]  → Skipped: {e}[/dim]")
 
+        # -- Zombie memories: rows with NULL embedding --
+        console.print("\n[bold]5. Zombie memories (NULL embedding)[/bold]")
+        try:
+            from syne.db.connection import get_connection
+            async with get_connection() as conn:
+                zombies = await conn.fetch(
+                    "SELECT id, LEFT(content, 60) AS preview FROM memory WHERE embedding IS NULL ORDER BY id"
+                )
+            if not zombies:
+                console.print("   [green]✓ No zombie memories[/green]")
+            else:
+                issues.append(f"{len(zombies)} memory row(s) with NULL embedding")
+                console.print(f"   [yellow]⚠ Found {len(zombies)} memory row(s) with NULL embedding[/yellow]")
+                for z in zombies[:10]:
+                    console.print(f"     id={z['id']}: {z['preview']}")
+                if len(zombies) > 10:
+                    console.print(f"     ... and {len(zombies) - 10} more")
+                if fix:
+                    # Re-embed via current provider
+                    try:
+                        from syne.agent import SyneAgent
+                        agent = SyneAgent(settings)
+                        await agent.start()
+                        repaired = 0
+                        failed = 0
+                        for z in zombies:
+                            try:
+                                async with get_connection() as conn:
+                                    row = await conn.fetchrow(
+                                        "SELECT content FROM memory WHERE id = $1", z["id"]
+                                    )
+                                if not row or not row["content"]:
+                                    continue
+                                emb = await agent.provider.embed(row["content"])
+                                if not emb.vector:
+                                    failed += 1
+                                    continue
+                                async with get_connection() as conn:
+                                    await conn.execute(
+                                        "UPDATE memory SET embedding = $1::vector WHERE id = $2",
+                                        str(emb.vector), z["id"],
+                                    )
+                                repaired += 1
+                            except Exception as e:
+                                console.print(f"     [yellow]id={z['id']} re-embed failed: {e}[/yellow]")
+                                failed += 1
+                        await agent.stop()
+                        if repaired:
+                            fixed.append(f"Re-embedded {repaired} zombie memories")
+                            console.print(f"   [green]  → Re-embedded {repaired} / {len(zombies)} (failed: {failed})[/green]")
+                    except Exception as e:
+                        console.print(f"   [yellow]  → Could not repair zombies: {e}[/yellow]")
+        except Exception as e:
+            console.print(f"   [dim]  → Skipped: {e}[/dim]")
+
         # -- Summary --
         console.print()
         if not issues:
