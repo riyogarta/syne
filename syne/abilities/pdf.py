@@ -354,8 +354,10 @@ class PdfAbility(Ability):
 
     # Vision fallback for image-only pages
     _VISION_MIN_TEXT_CHARS = 30  # below this, treat page as image-only
-    _VISION_MAX_PAGES = 20  # max pages to send to vision (cost/time guard)
+    _VISION_MAX_PAGES = 10  # max pages to send to vision (cost/time guard)
     _VISION_DPI = 150  # render resolution — balance quality vs size
+    _VISION_CONCURRENCY = 5  # parallel vision calls (avoid provider rate limit)
+    _VISION_OVERALL_TIMEOUT = 90  # seconds — give up if vision takes too long
 
     def handles_input_type(self, input_type: str) -> bool:
         return input_type == "document"
@@ -458,47 +460,73 @@ class PdfAbility(Ability):
         return f"{header}\n\n{full_text}{truncated}"
 
     async def _describe_pages_via_vision(self, doc, page_indices: list[int]) -> dict[int, str]:
-        """Render given PDF pages as images and send to image_analysis ability.
+        """Render PDF pages as images and send to image_analysis ability in parallel.
 
         Returns dict {page_index: description}. Pages that fail are omitted.
         Uses whatever vision provider is configured via /vision.
+        Bounded by _VISION_CONCURRENCY (parallelism) + _VISION_OVERALL_TIMEOUT.
         """
         import base64 as _b64
         from .image_analysis import ImageAnalysisAbility
 
         ia = ImageAnalysisAbility()
-        results: dict[int, str] = {}
         prompt = (
             "Transcribe all visible text in this PDF page verbatim. "
             "If there are diagrams, tables, or images, briefly describe them. "
             "Preserve the reading order top-to-bottom."
         )
 
+        # Pre-render all images sequentially (CPU-bound, fast)
+        import fitz
+        rendered: list[tuple[int, str]] = []  # (page_index, image_b64)
         for idx in page_indices:
             try:
                 page = doc.load_page(idx)
-                # Render as PNG image
                 zoom = self._VISION_DPI / 72.0
-                import fitz
                 mat = fitz.Matrix(zoom, zoom)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img_bytes = pix.tobytes("png")
                 img_b64 = _b64.b64encode(img_bytes).decode("ascii")
-
-                result = await ia.execute(
-                    params={
-                        "image_base64": img_b64,
-                        "mime_type": "image/png",
-                        "prompt": prompt,
-                    },
-                    context={},  # ImageAnalysisAbility loads config from DB
-                )
-                if result.get("success") and result.get("result"):
-                    results[idx] = str(result["result"]).strip()
-                else:
-                    logger.warning(f"Vision page {idx + 1} failed: {result.get('error', 'unknown')}")
+                rendered.append((idx, img_b64))
             except Exception as e:
-                logger.warning(f"Vision page {idx + 1} exception: {e}")
+                logger.warning(f"PDF page {idx + 1} render failed: {e}")
+
+        # Parallel vision calls with concurrency cap
+        sem = asyncio.Semaphore(self._VISION_CONCURRENCY)
+
+        async def _one(idx: int, img_b64: str) -> tuple[int, str | None]:
+            async with sem:
+                try:
+                    result = await ia.execute(
+                        params={
+                            "image_base64": img_b64,
+                            "mime_type": "image/png",
+                            "prompt": prompt,
+                        },
+                        context={},
+                    )
+                    if result.get("success") and result.get("result"):
+                        return idx, str(result["result"]).strip()
+                    logger.warning(f"Vision page {idx + 1} failed: {result.get('error', 'unknown')}")
+                except Exception as e:
+                    logger.warning(f"Vision page {idx + 1} exception: {e}")
+                return idx, None
+
+        results: dict[int, str] = {}
+        try:
+            tasks = [_one(idx, b64) for idx, b64 in rendered]
+            outputs = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=False),
+                timeout=self._VISION_OVERALL_TIMEOUT,
+            )
+            for idx, desc in outputs:
+                if desc:
+                    results[idx] = desc
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"PDF vision OCR overall timeout ({self._VISION_OVERALL_TIMEOUT}s) — "
+                f"partial results: {len(results)}/{len(rendered)} pages"
+            )
         return results
 
     # pip package name → import name mapping
