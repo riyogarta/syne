@@ -352,6 +352,11 @@ class PdfAbility(Ability):
     _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB
     _MAX_TEXT_CHARS = 100_000  # truncate extracted text to keep context size sane
 
+    # Vision fallback for image-only pages
+    _VISION_MIN_TEXT_CHARS = 30  # below this, treat page as image-only
+    _VISION_MAX_PAGES = 20  # max pages to send to vision (cost/time guard)
+    _VISION_DPI = 150  # render resolution — balance quality vs size
+
     def handles_input_type(self, input_type: str) -> bool:
         return input_type == "document"
 
@@ -393,29 +398,108 @@ class PdfAbility(Ability):
 
         try:
             doc = fitz.open(stream=content, filetype="pdf")
-            texts = []
-            for i in range(doc.page_count):
+            pages = doc.page_count
+
+            # Phase 1: extract text per page; identify image-only pages
+            per_page_text: list[str] = []
+            image_pages: list[int] = []  # 0-indexed page numbers that need vision
+            for i in range(pages):
                 page = doc.load_page(i)
                 t = page.get_text("text").strip()
-                if t:
-                    texts.append(f"--- Page {i + 1} ---\n{t}")
-            full_text = "\n\n".join(texts)
-            pages = doc.page_count
+                per_page_text.append(t)
+                if len(t) < self._VISION_MIN_TEXT_CHARS:
+                    image_pages.append(i)
+
+            # Phase 2: vision fallback for image-only pages (within budget)
+            vision_used = 0
+            vision_skipped = 0
+            if image_pages:
+                pages_to_vision = image_pages[: self._VISION_MAX_PAGES]
+                vision_skipped = len(image_pages) - len(pages_to_vision)
+                if pages_to_vision:
+                    try:
+                        descriptions = await self._describe_pages_via_vision(
+                            doc, pages_to_vision,
+                        )
+                        for idx, desc in descriptions.items():
+                            if desc:
+                                per_page_text[idx] = f"[Vision OCR]\n{desc}"
+                                vision_used += 1
+                    except Exception as e:
+                        logger.warning(f"PDF vision fallback failed: {e}")
+
             doc.close()
+
+            # Build final text
+            parts = []
+            for i, t in enumerate(per_page_text):
+                if t.strip():
+                    parts.append(f"--- Page {i + 1} ---\n{t}")
+            full_text = "\n\n".join(parts)
         except Exception as e:
             logger.warning(f"PDF pre_process: extraction failed: {e}")
             return None
 
         if not full_text.strip():
-            return f"[PDF '{filename or 'document.pdf'}' ({pages} pages): no extractable text — may be a scanned image-only PDF]"
+            return f"[PDF '{filename or 'document.pdf'}' ({pages} pages): no extractable text and vision fallback unavailable]"
 
         truncated = ""
         if len(full_text) > self._MAX_TEXT_CHARS:
             full_text = full_text[: self._MAX_TEXT_CHARS]
             truncated = f"\n\n[... truncated at {self._MAX_TEXT_CHARS} chars]"
 
-        header = f"PDF: {filename or 'document.pdf'} ({pages} pages, {len(full_text)} chars extracted)"
+        # Header with stats
+        stats = [f"{pages} pages", f"{len(full_text)} chars"]
+        if vision_used:
+            stats.append(f"{vision_used} via vision")
+        if vision_skipped:
+            stats.append(f"{vision_skipped} image pages skipped (limit {self._VISION_MAX_PAGES})")
+        header = f"PDF: {filename or 'document.pdf'} ({', '.join(stats)})"
         return f"{header}\n\n{full_text}{truncated}"
+
+    async def _describe_pages_via_vision(self, doc, page_indices: list[int]) -> dict[int, str]:
+        """Render given PDF pages as images and send to image_analysis ability.
+
+        Returns dict {page_index: description}. Pages that fail are omitted.
+        Uses whatever vision provider is configured via /vision.
+        """
+        import base64 as _b64
+        from .image_analysis import ImageAnalysisAbility
+
+        ia = ImageAnalysisAbility()
+        results: dict[int, str] = {}
+        prompt = (
+            "Transcribe all visible text in this PDF page verbatim. "
+            "If there are diagrams, tables, or images, briefly describe them. "
+            "Preserve the reading order top-to-bottom."
+        )
+
+        for idx in page_indices:
+            try:
+                page = doc.load_page(idx)
+                # Render as PNG image
+                zoom = self._VISION_DPI / 72.0
+                import fitz
+                mat = fitz.Matrix(zoom, zoom)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                img_bytes = pix.tobytes("png")
+                img_b64 = _b64.b64encode(img_bytes).decode("ascii")
+
+                result = await ia.execute(
+                    params={
+                        "image_base64": img_b64,
+                        "mime_type": "image/png",
+                        "prompt": prompt,
+                    },
+                    context={},  # ImageAnalysisAbility loads config from DB
+                )
+                if result.get("success") and result.get("result"):
+                    results[idx] = str(result["result"]).strip()
+                else:
+                    logger.warning(f"Vision page {idx + 1} failed: {result.get('error', 'unknown')}")
+            except Exception as e:
+                logger.warning(f"Vision page {idx + 1} exception: {e}")
+        return results
 
     # pip package name → import name mapping
     _DEPS = {
