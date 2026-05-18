@@ -350,7 +350,7 @@ class PdfAbility(Ability):
 
     # PDF input limits
     _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB
-    _MAX_TEXT_CHARS = 100_000  # truncate extracted text to keep context size sane
+    _MAX_TEXT_CHARS = 50_000  # ~12k tokens — safe for any LLM context + fast response
 
     # Vision fallback for image-only pages
     _VISION_MIN_TEXT_CHARS = 30  # below this, treat page as image-only

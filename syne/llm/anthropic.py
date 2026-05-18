@@ -474,7 +474,7 @@ class AnthropicProvider(LLMProvider):
                     ANTHROPIC_API_URL,
                     json=stream_body,
                     headers=headers,
-                    timeout=httpx.Timeout(30.0 if attempt > 0 else 120.0, connect=10.0),
+                    timeout=httpx.Timeout(60.0 if attempt > 0 else 240.0, connect=10.0),
                 ) as resp:
                     # ── Error handling before consuming stream ──
                     if resp.status_code in (429, 529):
