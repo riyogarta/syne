@@ -341,7 +341,7 @@ def _make_comparison_pdf(out_path: str, title: str | None = None) -> None:
 class PdfAbility(Ability):
     name = "pdf"
     description = "Create and read PDFs from text, URL, or uploaded document."
-    version = "1.6"
+    version = "1.7"
     permission = 0o770
 
     # Priority pre-processing: when user uploads a PDF, extract text automatically
@@ -352,12 +352,33 @@ class PdfAbility(Ability):
     _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB
     _MAX_TEXT_CHARS = 50_000  # ~12k tokens — safe for any LLM context + fast response
 
-    # Vision fallback for image-only pages
-    _VISION_MIN_TEXT_CHARS = 30  # below this, treat page as image-only
+    # Page classification thresholds
+    _VISION_MIN_TEXT_CHARS = 30  # below this → page treated as image-only
+    _DRAWING_MIN_VECTORS = 20  # above this → page has technical drawing (CAD-like)
+    _DRAWING_MAX_TEXT_CHARS = 800  # if also < this much text → drawing dominates
+
+    # Vision budget
     _VISION_MAX_PAGES = 10  # max pages to send to vision (cost/time guard)
     _VISION_DPI = 150  # render resolution — balance quality vs size
     _VISION_CONCURRENCY = 5  # parallel vision calls (avoid provider rate limit)
     _VISION_OVERALL_TIMEOUT = 90  # seconds — give up if vision takes too long
+
+    # Prompts (specialized per page type)
+    _PROMPT_OCR = (
+        "Transcribe all visible text in this PDF page verbatim. "
+        "If there are diagrams, tables, or images, briefly describe them. "
+        "Preserve the reading order top-to-bottom."
+    )
+    _PROMPT_DRAWING = (
+        "This page contains a technical/architectural drawing (CAD, blueprint, floor plan, schematic). "
+        "Read and report ALL of the following that are visible: "
+        "dimensions and measurements (with units), scale notation, "
+        "labels for rooms / parts / sections, "
+        "overall dimensions of the structure, layout description "
+        "(how rooms/parts are arranged relative to each other), "
+        "any annotations, notes, or revision marks. "
+        "Be precise with numbers. List items, do not narrate."
+    )
 
     def handles_input_type(self, input_type: str) -> bool:
         return input_type == "document"
@@ -402,41 +423,68 @@ class PdfAbility(Ability):
             doc = fitz.open(stream=content, filetype="pdf")
             pages = doc.page_count
 
-            # Phase 1: extract text per page; identify image-only pages
+            # Phase 1: extract text + classify each page
+            # Page modes: "text" (text-only), "image" (no text, vision OCR),
+            # "drawing" (has text + many vectors → text + vision drawing prompt)
             per_page_text: list[str] = []
-            image_pages: list[int] = []  # 0-indexed page numbers that need vision
+            per_page_mode: list[str] = []
+            per_page_vector_count: list[int] = []
             for i in range(pages):
                 page = doc.load_page(i)
                 t = page.get_text("text").strip()
                 per_page_text.append(t)
-                if len(t) < self._VISION_MIN_TEXT_CHARS:
-                    image_pages.append(i)
 
-            # Phase 2: vision fallback for image-only pages (within budget)
+                # Count vector drawing elements (cheap call)
+                vec_count = 0
+                try:
+                    vec_count = len(page.get_drawings())
+                except Exception:
+                    pass
+                per_page_vector_count.append(vec_count)
+
+                # Classify
+                if len(t) < self._VISION_MIN_TEXT_CHARS:
+                    per_page_mode.append("image")  # image-only → OCR
+                elif vec_count >= self._DRAWING_MIN_VECTORS and len(t) < self._DRAWING_MAX_TEXT_CHARS:
+                    per_page_mode.append("drawing")  # technical drawing → text + vision
+                else:
+                    per_page_mode.append("text")  # regular text page
+
+            # Phase 2: vision processing for image + drawing pages (within budget)
+            # Prioritize: drawing pages by vector count desc, then image pages
+            drawing_idx = [i for i, m in enumerate(per_page_mode) if m == "drawing"]
+            image_idx = [i for i, m in enumerate(per_page_mode) if m == "image"]
+            drawing_idx.sort(key=lambda i: per_page_vector_count[i], reverse=True)
+            vision_queue: list[tuple[int, str]] = [(i, "drawing") for i in drawing_idx] + \
+                                                  [(i, "image") for i in image_idx]
+            vision_budget = vision_queue[: self._VISION_MAX_PAGES]
+            vision_skipped = len(vision_queue) - len(vision_budget)
+
+            per_page_vision: dict[int, str] = {}
             vision_used = 0
-            vision_skipped = 0
-            if image_pages:
-                pages_to_vision = image_pages[: self._VISION_MAX_PAGES]
-                vision_skipped = len(image_pages) - len(pages_to_vision)
-                if pages_to_vision:
-                    try:
-                        descriptions = await self._describe_pages_via_vision(
-                            doc, pages_to_vision,
-                        )
-                        for idx, desc in descriptions.items():
-                            if desc:
-                                per_page_text[idx] = f"[Vision OCR]\n{desc}"
-                                vision_used += 1
-                    except Exception as e:
-                        logger.warning(f"PDF vision fallback failed: {e}")
+            if vision_budget:
+                try:
+                    per_page_vision = await self._describe_pages_via_vision(doc, vision_budget)
+                    vision_used = sum(1 for v in per_page_vision.values() if v)
+                except Exception as e:
+                    logger.warning(f"PDF vision fallback failed: {e}")
 
             doc.close()
 
-            # Build final text
+            # Build final text: text + [Drawing/Vision] block per page
             parts = []
-            for i, t in enumerate(per_page_text):
+            for i in range(pages):
+                t = per_page_text[i]
+                v = per_page_vision.get(i, "")
+                mode = per_page_mode[i]
+                section = []
                 if t.strip():
-                    parts.append(f"--- Page {i + 1} ---\n{t}")
+                    section.append(t)
+                if v.strip():
+                    label = "Drawing" if mode == "drawing" else "Vision OCR"
+                    section.append(f"[{label}]\n{v}")
+                if section:
+                    parts.append(f"--- Page {i + 1} ---\n" + "\n\n".join(section))
             full_text = "\n\n".join(parts)
         except Exception as e:
             logger.warning(f"PDF pre_process: extraction failed: {e}")
@@ -451,35 +499,43 @@ class PdfAbility(Ability):
             truncated = f"\n\n[... truncated at {self._MAX_TEXT_CHARS} chars]"
 
         # Header with stats
+        n_text = sum(1 for m in per_page_mode if m == "text")
+        n_drawing = sum(1 for m in per_page_mode if m == "drawing")
+        n_image = sum(1 for m in per_page_mode if m == "image")
         stats = [f"{pages} pages", f"{len(full_text)} chars"]
+        if n_text:
+            stats.append(f"{n_text} text")
+        if n_drawing:
+            stats.append(f"{n_drawing} drawing")
+        if n_image:
+            stats.append(f"{n_image} image")
         if vision_used:
             stats.append(f"{vision_used} via vision")
         if vision_skipped:
-            stats.append(f"{vision_skipped} image pages skipped (limit {self._VISION_MAX_PAGES})")
+            stats.append(f"{vision_skipped} skipped (vision limit {self._VISION_MAX_PAGES})")
         header = f"PDF: {filename or 'document.pdf'} ({', '.join(stats)})"
         return f"{header}\n\n{full_text}{truncated}"
 
-    async def _describe_pages_via_vision(self, doc, page_indices: list[int]) -> dict[int, str]:
+    async def _describe_pages_via_vision(self, doc, page_jobs: list[tuple[int, str]]) -> dict[int, str]:
         """Render PDF pages as images and send to image_analysis ability in parallel.
 
+        Args:
+            doc: open fitz Document
+            page_jobs: list of (page_index, mode) where mode is "drawing" or "image"
+                       (selects the vision prompt).
+
         Returns dict {page_index: description}. Pages that fail are omitted.
-        Uses whatever vision provider is configured via /vision.
         Bounded by _VISION_CONCURRENCY (parallelism) + _VISION_OVERALL_TIMEOUT.
         """
         import base64 as _b64
         from .image_analysis import ImageAnalysisAbility
 
         ia = ImageAnalysisAbility()
-        prompt = (
-            "Transcribe all visible text in this PDF page verbatim. "
-            "If there are diagrams, tables, or images, briefly describe them. "
-            "Preserve the reading order top-to-bottom."
-        )
 
         # Pre-render all images sequentially (CPU-bound, fast)
         import fitz
-        rendered: list[tuple[int, str]] = []  # (page_index, image_b64)
-        for idx in page_indices:
+        rendered: list[tuple[int, str, str]] = []  # (page_index, mode, image_b64)
+        for idx, mode in page_jobs:
             try:
                 page = doc.load_page(idx)
                 zoom = self._VISION_DPI / 72.0
@@ -487,14 +543,15 @@ class PdfAbility(Ability):
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 img_bytes = pix.tobytes("png")
                 img_b64 = _b64.b64encode(img_bytes).decode("ascii")
-                rendered.append((idx, img_b64))
+                rendered.append((idx, mode, img_b64))
             except Exception as e:
                 logger.warning(f"PDF page {idx + 1} render failed: {e}")
 
         # Parallel vision calls with concurrency cap
         sem = asyncio.Semaphore(self._VISION_CONCURRENCY)
 
-        async def _one(idx: int, img_b64: str) -> tuple[int, str | None]:
+        async def _one(idx: int, mode: str, img_b64: str) -> tuple[int, str | None]:
+            prompt = self._PROMPT_DRAWING if mode == "drawing" else self._PROMPT_OCR
             async with sem:
                 try:
                     result = await ia.execute(
@@ -507,14 +564,14 @@ class PdfAbility(Ability):
                     )
                     if result.get("success") and result.get("result"):
                         return idx, str(result["result"]).strip()
-                    logger.warning(f"Vision page {idx + 1} failed: {result.get('error', 'unknown')}")
+                    logger.warning(f"Vision page {idx + 1} ({mode}) failed: {result.get('error', 'unknown')}")
                 except Exception as e:
-                    logger.warning(f"Vision page {idx + 1} exception: {e}")
+                    logger.warning(f"Vision page {idx + 1} ({mode}) exception: {e}")
                 return idx, None
 
         results: dict[int, str] = {}
         try:
-            tasks = [_one(idx, b64) for idx, b64 in rendered]
+            tasks = [_one(idx, mode, b64) for idx, mode, b64 in rendered]
             outputs = await asyncio.wait_for(
                 asyncio.gather(*tasks, return_exceptions=False),
                 timeout=self._VISION_OVERALL_TIMEOUT,
@@ -524,7 +581,7 @@ class PdfAbility(Ability):
                     results[idx] = desc
         except asyncio.TimeoutError:
             logger.warning(
-                f"PDF vision OCR overall timeout ({self._VISION_OVERALL_TIMEOUT}s) — "
+                f"PDF vision overall timeout ({self._VISION_OVERALL_TIMEOUT}s) — "
                 f"partial results: {len(results)}/{len(rendered)} pages"
             )
         return results
