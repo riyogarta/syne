@@ -1011,12 +1011,21 @@ class Conversation:
         set_owner_dm(is_owner_dm)
 
         # Set current user context for scheduler (auto-fill created_by).
-        from .tools.scheduler import set_current_user
+        from .tools.scheduler import set_current_user, set_current_chat
         user_platform_id = self.user.get("platform_id")
         try:
             set_current_user(int(user_platform_id))
         except (TypeError, ValueError):
             set_current_user(None)
+        # Set current chat context — so manage_schedule can auto-target the
+        # current group when a reminder is created from a group conversation.
+        _chat_type = "group" if self.is_group else "direct"
+        _chat_id_for_ctx = None
+        if self.inbound and self.inbound.chat_id:
+            _chat_id_for_ctx = str(self.inbound.chat_id)
+        elif self.chat_id:
+            _chat_id_for_ctx = str(self.chat_id)
+        set_current_chat(_chat_id_for_ctx, _chat_type)
 
         current = response
         loop_stuck = False
@@ -1358,6 +1367,7 @@ class Conversation:
         # Reset context after tool execution
         set_owner_dm(False)
         set_current_user(None)
+        set_current_chat(None, None)
 
         # If final response is empty (e.g. thinking-only), retry once without thinking
         if not (current.content or "").strip():

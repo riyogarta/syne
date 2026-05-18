@@ -74,16 +74,25 @@ async def _auto_migrate_google_oauth():
         logger.debug(f"Google OAuth migration check: {e}")
 
 
-async def _scheduler_callback(task_id: int, payload: str, created_by: int):
+async def _scheduler_callback(
+    task_id: int,
+    payload: str,
+    created_by: int,
+    target_chat_id: str | None = None,
+    target_chat_type: str | None = None,
+):
     """Callback for scheduler — injects payload as message via Telegram.
-    
+
     Special payloads:
         __syne_update_check__: Check for Syne updates and notify owner.
-    
+
     Args:
         task_id: Scheduled task ID
         payload: Message payload to inject
         created_by: Telegram user ID of task creator
+        target_chat_id: Optional chat ID where task should deliver output
+            (e.g. group ID for group reminders). NULL = creator's DM.
+        target_chat_type: 'direct' or 'group' — context hint for LLM.
     """
     global _telegram_channel
     
@@ -129,8 +138,19 @@ async def _scheduler_callback(task_id: int, payload: str, created_by: int):
         # By default we do NOT echo the final LLM response back to the creator DM.
         from .db.models import get_config
         echo = await get_config('scheduler.echo_response_to_creator', False)
+        # If task has a target chat (e.g. group), wrap payload with delivery instruction
+        # so the LLM knows where to send via send_message tool.
+        effective_payload = payload
+        if target_chat_id:
+            type_hint = f" ({target_chat_type})" if target_chat_type else ""
+            effective_payload = (
+                f"Deliver the following message by calling send_message(chat_id=\"{target_chat_id}\", message=...).\n"
+                f"Target chat: {target_chat_id}{type_hint}.\n"
+                f"Do NOT reply with text — use the send_message tool.\n\n"
+                f"--- PAYLOAD ---\n{payload}"
+            )
         await _telegram_channel.process_scheduled_message(
-            chat_id, payload, task_id=task_id, echo_response=bool(echo)
+            chat_id, effective_payload, task_id=task_id, echo_response=bool(echo)
         )
     except Exception as e:
         logger.error(f"Scheduler: Error executing task {task_id}: {e}", exc_info=True)

@@ -141,13 +141,13 @@ class Scheduler:
     
     def __init__(
         self,
-        on_task_execute: Callable[[int, str, int], Awaitable[None]],
+        on_task_execute: Callable[..., Awaitable[None]],
     ):
         """Initialize scheduler.
-        
+
         Args:
             on_task_execute: Async callback when task executes.
-                Args: (task_id, payload, created_by)
+                Args: (task_id, payload, created_by, target_chat_id, target_chat_type)
                 The callback should inject payload as user message.
         """
         self._on_execute = on_task_execute
@@ -222,7 +222,8 @@ class Scheduler:
             # Get all due tasks
             due_tasks = await conn.fetch(
                 """
-                SELECT id, name, schedule_type, schedule_value, payload, created_by, end_date, next_run
+                SELECT id, name, schedule_type, schedule_value, payload, created_by, end_date, next_run,
+                       target_chat_id, target_chat_type
                 FROM scheduled_tasks
                 WHERE enabled = true
                   AND next_run <= $1
@@ -274,11 +275,14 @@ class Scheduler:
                             )
                         continue
 
-                logger.info(f"Executing scheduled task: {task_name} (id={task_id})")
+                target_chat_id = task["target_chat_id"]
+                target_chat_type = task["target_chat_type"]
+
+                logger.info(f"Executing scheduled task: {task_name} (id={task_id}) target={target_chat_id}")
 
                 try:
                     # Execute the callback
-                    await self._on_execute(task_id, payload, created_by)
+                    await self._on_execute(task_id, payload, created_by, target_chat_id, target_chat_type)
                     
                     # Update task based on type
                     if schedule_type == "once":
@@ -356,9 +360,11 @@ async def create_task(
     payload: str,
     created_by: Optional[int] = None,
     end_date: Optional[datetime] = None,
+    target_chat_id: Optional[str] = None,
+    target_chat_type: Optional[str] = None,
 ) -> dict:
     """Create a new scheduled task.
-    
+
     Args:
         name: Task name (for identification)
         schedule_type: 'once', 'interval', or 'cron'
@@ -366,36 +372,43 @@ async def create_task(
         payload: Message to inject when task runs
         created_by: Telegram user ID of creator
         end_date: Optional end date — recurring tasks auto-disable after this
-        
+        target_chat_id: Optional target chat ID where task output should be sent
+            (e.g. group ID). NULL = deliver to creator's DM.
+        target_chat_type: 'direct' or 'group' — context hint for the LLM.
+
     Returns:
         Created task dict or error dict
     """
     from .db.connection import get_connection
-    
+
     # Validate schedule type
     if schedule_type not in ("once", "interval", "cron"):
         return {"success": False, "error": f"Invalid schedule_type: {schedule_type}"}
-    
+
     # Calculate initial next_run (use configured timezone for cron)
     cron_tz = await _get_system_tz() if schedule_type == "cron" else None
     next_run = _calculate_next_run(schedule_type, schedule_value, tz=cron_tz)
     if not next_run:
         return {"success": False, "error": f"Invalid schedule_value for {schedule_type}: {schedule_value}"}
-    
+
     # Validate end_date: must be after next_run for recurring tasks
     if end_date and schedule_type != "once" and end_date < next_run:
         return {"success": False, "error": f"end_date ({end_date.isoformat()}) must be after first run ({next_run.isoformat()})"}
-    
+
     async with get_connection() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO scheduled_tasks (name, schedule_type, schedule_value, payload, created_by, next_run, end_date)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING id, name, schedule_type, schedule_value, payload, enabled, next_run, end_date, created_at
+            INSERT INTO scheduled_tasks
+                (name, schedule_type, schedule_value, payload, created_by, next_run, end_date,
+                 target_chat_id, target_chat_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING id, name, schedule_type, schedule_value, payload, enabled, next_run, end_date,
+                      target_chat_id, target_chat_type, created_at
             """,
             name, schedule_type, schedule_value, payload, created_by, next_run, end_date,
+            target_chat_id, target_chat_type,
         )
-    
+
     return {
         "success": True,
         "task": dict(row),

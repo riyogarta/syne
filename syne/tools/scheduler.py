@@ -29,6 +29,12 @@ logger = logging.getLogger("syne.tools.scheduler")
 _current_user_platform_id: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar(
     "current_user_platform_id", default=None
 )
+_current_chat_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_chat_id", default=None
+)
+_current_chat_type: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_chat_type", default=None
+)
 
 
 def set_current_user(platform_id: Optional[int]) -> None:
@@ -37,6 +43,16 @@ def set_current_user(platform_id: Optional[int]) -> None:
     Uses contextvars — safe for concurrent async contexts.
     """
     _current_user_platform_id.set(platform_id)
+
+
+def set_current_chat(chat_id: Optional[str], chat_type: Optional[str] = None) -> None:
+    """Set the current chat context for task creation.
+
+    Used to auto-fill target_chat_id when a task is created from a group —
+    so reminders fire back to the same group, not the creator's DM.
+    """
+    _current_chat_id.set(str(chat_id) if chat_id else None)
+    _current_chat_type.set(chat_type)
 
 
 async def manage_schedule_handler(
@@ -49,6 +65,7 @@ async def manage_schedule_handler(
     end_date: str = "",
     bulk_tasks: str = "",
     task_ids: str = "",
+    target_chat_id: str = "",
 ) -> str:
     """Handle manage_schedule tool calls.
     
@@ -101,6 +118,20 @@ async def manage_schedule_handler(
             except (ValueError, TypeError):
                 return f"Error: invalid end_date format '{end_date}'. Use ISO format (e.g., 2026-03-21T08:00:00+07:00)."
         
+        # Auto-fill target_chat_id from current context if not provided.
+        # If called from a group chat, default target = that group, so the
+        # reminder fires back to the same group (not creator's DM).
+        _target = target_chat_id.strip() if target_chat_id else ""
+        _target_type = None
+        if not _target:
+            ctx_chat = _current_chat_id.get()
+            ctx_type = _current_chat_type.get()
+            if ctx_chat and ctx_type == "group":
+                _target = ctx_chat
+                _target_type = "group"
+        elif _target:
+            _target_type = "group" if _target.startswith("-") else "direct"
+
         result = await create_task(
             name=name,
             schedule_type=schedule_type,
@@ -108,6 +139,8 @@ async def manage_schedule_handler(
             payload=payload,
             created_by=_current_user_platform_id.get(),
             end_date=parsed_end_date,
+            target_chat_id=_target or None,
+            target_chat_type=_target_type,
         )
         
         if not result["success"]:
@@ -274,6 +307,18 @@ async def manage_schedule_handler(
                     errors.append(f"#{i} '{t_name}': invalid end_date '{t_end}'")
                     continue
             
+            # Per-task target (optional in JSON) or auto from context
+            t_target = (t.get("target_chat_id") or "").strip()
+            t_target_type = None
+            if not t_target:
+                ctx_chat = _current_chat_id.get()
+                ctx_type = _current_chat_type.get()
+                if ctx_chat and ctx_type == "group":
+                    t_target = ctx_chat
+                    t_target_type = "group"
+            elif t_target:
+                t_target_type = "group" if t_target.startswith("-") else "direct"
+
             result = await create_task(
                 name=t_name,
                 schedule_type=t_type,
@@ -281,6 +326,8 @@ async def manage_schedule_handler(
                 payload=t_payload,
                 created_by=_current_user_platform_id.get(),
                 end_date=parsed_end,
+                target_chat_id=t_target or None,
+                target_chat_type=t_target_type,
             )
             
             if result["success"]:
@@ -394,6 +441,14 @@ MANAGE_SCHEDULE_TOOL = {
                 "description": (
                     "Comma-separated task IDs for bulk_delete. "
                     "Supports ranges: '64-131' or mixed: '64-70,75,80-90'. Max 500."
+                ),
+            },
+            "target_chat_id": {
+                "type": "string",
+                "description": (
+                    "Optional chat ID where the task should deliver output. "
+                    "Use group chat ID (starts with '-') to make a reminder fire into a group. "
+                    "If omitted and you're in a group, the current group is auto-used."
                 ),
             },
         },
