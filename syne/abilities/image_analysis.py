@@ -177,7 +177,7 @@ class ImageAnalysisAbility(Ability):
                     params={"key": api_key},
                     headers={"Content-Type": "application/json"},
                     json={
-                        "contents": [{"parts": [
+                        "contents": [{"role": "user", "parts": [
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
@@ -325,7 +325,7 @@ class ImageAnalysisAbility(Ability):
                         "Content-Type": "application/json",
                     },
                     json={
-                        "contents": [{"parts": [
+                        "contents": [{"role": "user", "parts": [
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
