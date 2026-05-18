@@ -181,7 +181,7 @@ class ImageAnalysisAbility(Ability):
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
-                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
+                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
                     },
                 )
 
@@ -245,6 +245,7 @@ class ImageAnalysisAbility(Ability):
                             "images": [b64],
                         }],
                         "stream": False,
+                        "options": {"num_predict": 4096},
                     },
                 )
 
@@ -287,7 +288,7 @@ class ImageAnalysisAbility(Ability):
                                 }},
                             ],
                         }],
-                        "max_tokens": 1024,
+                        "max_tokens": 4096,
                         "temperature": 0.4,
                     },
                 )
@@ -329,7 +330,7 @@ class ImageAnalysisAbility(Ability):
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
-                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
+                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
                     },
                 )
 
