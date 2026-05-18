@@ -284,7 +284,8 @@ CREATE INDEX IF NOT EXISTS idx_abilities_source ON abilities (source);
 INSERT INTO abilities (name, description, version, source, module_path, requires_access_level) VALUES
     ('image_gen', 'Generate images from text descriptions using AI', '1.0', 'bundled', 'syne.abilities.image_gen', 'family'),
     ('image_analysis', 'Analyze and describe images using AI vision', '1.0', 'bundled', 'syne.abilities.image_analysis', 'family'),
-    ('maps', 'Search for nearby places, get directions, and geocode addresses', '1.0', 'bundled', 'syne.abilities.maps', 'family')
+    ('maps', 'Search for nearby places, get directions, and geocode addresses', '1.0', 'bundled', 'syne.abilities.maps', 'family'),
+    ('pdf', 'Read and create PDFs (from URL, text, or uploaded document)', '1.5', 'bundled', 'syne.abilities.pdf', 'family')
 ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================

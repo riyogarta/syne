@@ -340,12 +340,82 @@ def _make_comparison_pdf(out_path: str, title: str | None = None) -> None:
 
 class PdfAbility(Ability):
     name = "pdf"
-    description = "Create and read PDFs from text or URL."
-    version = "1.5"
+    description = "Create and read PDFs from text, URL, or uploaded document."
+    version = "1.6"
     permission = 0o770
 
-    # tool-call style, not pre-processing
-    priority = False
+    # Priority pre-processing: when user uploads a PDF, extract text automatically
+    # so the LLM gets the content as text in the message context.
+    priority = True
+
+    # PDF input limits
+    _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MB
+    _MAX_TEXT_CHARS = 100_000  # truncate extracted text to keep context size sane
+
+    def handles_input_type(self, input_type: str) -> bool:
+        return input_type == "document"
+
+    async def pre_process(
+        self, input_type: str, input_data: dict, user_prompt: str,
+        config: dict | None = None,
+    ) -> str | None:
+        """Extract text from an uploaded PDF document.
+
+        Returns the extracted text (with page-count header) so the LLM can
+        process the PDF content as plain text. Returns None on non-PDF or
+        extraction failure → conversation falls back to native handling.
+        """
+        mime = (input_data.get("mime_type") or "").lower()
+        filename = input_data.get("filename") or ""
+        # Only handle PDFs — let other docs fall through
+        if "pdf" not in mime and not filename.lower().endswith(".pdf"):
+            return None
+
+        b64 = input_data.get("base64", "")
+        if not b64:
+            return None
+
+        try:
+            import base64
+            content = base64.b64decode(b64)
+        except Exception as e:
+            logger.warning(f"PDF pre_process: base64 decode failed: {e}")
+            return None
+
+        if len(content) > self._MAX_PDF_BYTES:
+            return f"[PDF too large: {len(content) / 1024 / 1024:.1f} MB, max {self._MAX_PDF_BYTES // 1024 // 1024} MB]"
+
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PDF pre_process: PyMuPDF (fitz) not installed")
+            return None
+
+        try:
+            doc = fitz.open(stream=content, filetype="pdf")
+            texts = []
+            for i in range(doc.page_count):
+                page = doc.load_page(i)
+                t = page.get_text("text").strip()
+                if t:
+                    texts.append(f"--- Page {i + 1} ---\n{t}")
+            full_text = "\n\n".join(texts)
+            pages = doc.page_count
+            doc.close()
+        except Exception as e:
+            logger.warning(f"PDF pre_process: extraction failed: {e}")
+            return None
+
+        if not full_text.strip():
+            return f"[PDF '{filename or 'document.pdf'}' ({pages} pages): no extractable text — may be a scanned image-only PDF]"
+
+        truncated = ""
+        if len(full_text) > self._MAX_TEXT_CHARS:
+            full_text = full_text[: self._MAX_TEXT_CHARS]
+            truncated = f"\n\n[... truncated at {self._MAX_TEXT_CHARS} chars]"
+
+        header = f"PDF: {filename or 'document.pdf'} ({pages} pages, {len(full_text)} chars extracted)"
+        return f"{header}\n\n{full_text}{truncated}"
 
     # pip package name → import name mapping
     _DEPS = {
@@ -396,12 +466,14 @@ class PdfAbility(Ability):
                             "make_from_text",
                             "make_from_url",
                             "read_from_url",
+                            "read_from_base64",
                             "make_comparison",
                         ],
                     },
                     "title": {"type": "string"},
                     "text": {"type": "string"},
                     "url": {"type": "string"},
+                    "pdf_base64": {"type": "string", "description": "Base64-encoded PDF (for read_from_base64)"},
                     "out_name": {"type": "string"},
                     "timeout_s": {"type": "integer", "default": 20},
                     "verify_ssl": {"type": "boolean", "default": True},
@@ -436,9 +508,11 @@ class PdfAbility(Ability):
 
         return (
             "- Status: **ready**\n"
+            "- Auto-extracts text from PDFs uploaded by users (priority pre-process)\n"
             "- Make from text: `pdf(action='make_from_text', title='...', text='...')`\n"
             "- Make from URL: `pdf(action='make_from_url', url='https://...', out_name='file.pdf')`\n"
             "- Read PDF URL: `pdf(action='read_from_url', url='https://.../file.pdf')`\n"
+            "- Read PDF base64: `pdf(action='read_from_base64', pdf_base64='...')`\n"
             "- Comparison PDF: `pdf(action='make_comparison', title='...')`"
         )
 
@@ -513,6 +587,34 @@ class PdfAbility(Ability):
                     "result": {
                         "page_count": doc.page_count,
                         "text": full_text,
+                    },
+                }
+
+            if action == "read_from_base64":
+                pdf_b64 = params.get("pdf_base64") or ""
+                if not pdf_b64:
+                    raise ValueError("pdf_base64 is required")
+                import base64
+                content = base64.b64decode(pdf_b64)
+                if len(content) > self._MAX_PDF_BYTES:
+                    raise ValueError(f"PDF too large: {len(content)} bytes")
+
+                import fitz  # PyMuPDF
+                doc = fitz.open(stream=content, filetype="pdf")
+                texts = []
+                for i in range(doc.page_count):
+                    page = doc.load_page(i)
+                    texts.append(page.get_text("text").strip())
+                full_text = "\n\n".join([t for t in texts if t])
+                pages = doc.page_count
+                doc.close()
+
+                return {
+                    "success": True,
+                    "result": {
+                        "page_count": pages,
+                        "text": full_text[: self._MAX_TEXT_CHARS],
+                        "truncated": len(full_text) > self._MAX_TEXT_CHARS,
                     },
                 }
 
