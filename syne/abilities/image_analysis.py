@@ -181,7 +181,7 @@ class ImageAnalysisAbility(Ability):
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
-                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
+                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
                     },
                 )
 
@@ -329,7 +329,7 @@ class ImageAnalysisAbility(Ability):
                             {"text": prompt},
                             {"inlineData": {"mimeType": mime, "data": b64}},
                         ]}],
-                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
+                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1024},
                     },
                 )
 
