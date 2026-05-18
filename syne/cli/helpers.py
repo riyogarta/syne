@@ -767,14 +767,26 @@ def _run_schema_migration(syne_dir: str):
         try:
             statements = _split_sql_statements(schema)
             errors = []
+            applied_alters = []
             for stmt in statements:
                 stmt = stmt.strip()
                 if not stmt or stmt.startswith("--"):
                     continue
                 try:
                     await conn.execute(stmt)
+                    # Track ALTER TABLE statements for visibility
+                    if stmt.upper().startswith("ALTER TABLE"):
+                        # Extract a short preview like "scheduled_tasks ADD COLUMN target_chat_id"
+                        preview = " ".join(stmt.split()[:7])[:80]
+                        applied_alters.append(preview)
                 except Exception as e:
-                    errors.append(f"{str(e)[:120]}")
+                    # Include statement preview in error for debugging
+                    stmt_preview = stmt.replace("\n", " ")[:80]
+                    errors.append(f"[{stmt_preview}] {str(e)[:120]}")
+            if applied_alters:
+                console.print(f"[dim]  Migrations applied: {len(applied_alters)} ALTER TABLE statement(s)[/dim]")
+                for a in applied_alters[-3:]:  # show last 3
+                    console.print(f"[dim]    {a}[/dim]")
             if errors:
                 console.print(f"[yellow]⚠️ Schema migration: {len(errors)} warning(s)[/yellow]")
                 for err in errors[:5]:

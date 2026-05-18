@@ -332,16 +332,8 @@ END $$;
 -- Add target_chat_id + target_chat_type for group-scheduled reminders.
 -- NULL target_chat_id = deliver to creator's DM (legacy).
 -- target_chat_id set = inject "send to chat X" instruction into payload at fire time.
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'scheduled_tasks' AND column_name = 'target_chat_id'
-    ) THEN
-        ALTER TABLE scheduled_tasks ADD COLUMN target_chat_id TEXT;
-        ALTER TABLE scheduled_tasks ADD COLUMN target_chat_type VARCHAR(20);
-    END IF;
-END $$;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_chat_id TEXT;
+ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_chat_type VARCHAR(20);
 
 -- ============================================================
 -- SEED DATA
