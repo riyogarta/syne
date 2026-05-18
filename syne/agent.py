@@ -71,6 +71,11 @@ class SyneAgent:
         await init_db(self.settings.database_url)
         logger.info("Database connected.")
 
+        # 1.2. Schema migration — apply any pending ALTER TABLE / new columns.
+        # Runs on EVERY service start so schema is guaranteed up to date,
+        # independent of whether `syne update` triggered it.
+        await self._run_startup_migration()
+
         # 1.5. Migrate old access levels (admin→owner, friend/pending→public)
         await migrate_access_levels()
 
@@ -149,6 +154,54 @@ class SyneAgent:
         # self._dedup_task = asyncio.create_task(self._periodic_memory_dedup())
 
         logger.info("Syne agent started.")
+
+    async def _run_startup_migration(self):
+        """Apply schema migrations at service start.
+
+        Runs schema.sql against the live DB so any pending ALTER TABLE /
+        ADD COLUMN statements are applied. Idempotent — uses IF NOT EXISTS
+        / CREATE IF NOT EXISTS patterns. Safe to run on every start.
+
+        Failures are logged but non-fatal — the service still starts even
+        if migration partially fails, since most ALTERs are additive.
+        """
+        import os as _os
+        from .db.connection import get_connection
+
+        syne_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        schema_path = _os.path.join(syne_dir, "syne", "db", "schema.sql")
+        if not _os.path.exists(schema_path):
+            logger.warning(f"Schema file not found at {schema_path} — skipping migration")
+            return
+
+        try:
+            from .cli.helpers import _split_sql_statements
+        except Exception as e:
+            logger.warning(f"Could not import SQL splitter: {e}")
+            return
+
+        try:
+            with open(schema_path) as f:
+                schema = f.read()
+            statements = _split_sql_statements(schema)
+            applied = 0
+            errors = 0
+            async with get_connection() as conn:
+                for stmt in statements:
+                    stmt = stmt.strip()
+                    if not stmt or stmt.startswith("--"):
+                        continue
+                    try:
+                        await conn.execute(stmt)
+                        if stmt.upper().startswith("ALTER TABLE"):
+                            applied += 1
+                            logger.info(f"Migration applied: {' '.join(stmt.split()[:7])[:100]}")
+                    except Exception as e:
+                        errors += 1
+                        logger.warning(f"Migration statement failed: {str(e)[:120]} | stmt={stmt[:80]}")
+            logger.info(f"Startup migration complete: {applied} ALTER TABLE applied, {errors} errors")
+        except Exception as e:
+            logger.error(f"Startup migration failed: {e}", exc_info=True)
 
     async def stop(self):
         """Stop the agent gracefully."""

@@ -15,6 +15,20 @@ def db():
     pass
 
 
+@db.command("migrate")
+def db_migrate():
+    """Apply pending schema migrations (idempotent).
+
+    Useful when `syne update` was skipped or migration silently failed.
+    Safe to run multiple times — uses IF NOT EXISTS patterns.
+    """
+    from syne.cli.shared import _get_db_url
+    from syne.cli.helpers import _run_schema_migration
+
+    syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _run_schema_migration(syne_dir)
+
+
 @db.command("init")
 def db_init():
     """Initialize database schema."""
