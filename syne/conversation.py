@@ -34,7 +34,7 @@ _TOOL_SIGNALS = {
     r"baca|read|buka|open|tulis|write|simpan|save|\bfile\b": {"file_read", "file_write"},
     r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"exec"},
     r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
-    r"ingat|remember|catat|store|hafal|note|simpan.?memori": {"memory_store"},
+    r"ingat|remember|catat|store|hafal|note|\bsimpan\b": {"memory_store"},
     r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
     r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
     r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
