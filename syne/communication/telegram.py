@@ -1226,8 +1226,18 @@ class TelegramChannel:
                         "base64": photo_b64,
                     }
 
-                # For PDF files, also include base64 for ability pre-processing
-                if mime_type == "application/pdf":
+                # Include base64 for ability pre-processing (PDF + Office docs)
+                _b64_mimes = {
+                    "application/pdf",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    "application/msword",
+                    "application/vnd.ms-excel",
+                    "application/vnd.ms-powerpoint",
+                }
+                _office_ext = filename.lower().endswith((".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"))
+                if mime_type in _b64_mimes or _office_ext:
                     doc_b64 = base64.b64encode(bytes(file_bytes)).decode("utf-8")
                     metadata["document"]["base64"] = doc_b64
 

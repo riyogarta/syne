@@ -1,9 +1,17 @@
-"""Office documents ability — create Word, Excel, PowerPoint files.
+"""Office documents ability — create and read Word, Excel, PowerPoint files.
 
-Actions:
+Create actions:
 - create_docx: Microsoft Word (.docx) from markdown-ish text
 - create_xlsx: Microsoft Excel (.xlsx) from structured sheets data
 - create_pptx: Microsoft PowerPoint (.pptx) from slide outline
+
+Read actions:
+- read_docx: Extract text from .docx (base64 or path)
+- read_xlsx: Extract sheets/rows from .xlsx (base64 or path)
+- read_pptx: Extract slides text from .pptx (base64 or path)
+
+Also auto-extracts uploaded docx/xlsx/pptx via pre_process — LLM sees
+the document content as plain text without needing to call any tool.
 
 Dependencies (lazy-installed via ensure_dependencies):
 - python-docx (Word)
@@ -48,16 +56,97 @@ def _ensure_ext(name: str, ext: str) -> str:
 
 class OfficeAbility(Ability):
     name = "office"
-    description = "Create Microsoft Office documents (Word, Excel, PowerPoint)."
-    version = "1.0"
+    description = "Create and read Microsoft Office documents (Word, Excel, PowerPoint)."
+    version = "2.0"
     permission = 0o770
-    priority = False  # tool-call style, not pre-processing
+    # Priority pre-processing: auto-extract content from uploaded .docx/.xlsx/.pptx
+    priority = True
 
     _DEPS = {
         "python-docx": "docx",
         "openpyxl": "openpyxl",
         "python-pptx": "pptx",
     }
+
+    # MIME mapping for pre_process
+    _DOCX_MIMES = {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }
+    _XLSX_MIMES = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+    }
+    _PPTX_MIMES = {
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-powerpoint",
+    }
+
+    # Read limits — truncate to keep LLM context manageable
+    _MAX_EXTRACTED_CHARS = 50_000
+    _MAX_XLSX_ROWS_PER_SHEET = 200
+    _MAX_XLSX_COLS_PER_SHEET = 50
+
+    def handles_input_type(self, input_type: str) -> bool:
+        return input_type == "document"
+
+    async def pre_process(
+        self, input_type: str, input_data: dict, user_prompt: str,
+        config: dict | None = None,
+    ) -> str | None:
+        """Auto-extract text from uploaded Office docs. Returns None for other types
+        (falls through to next handler, e.g. pdf ability)."""
+        mime = (input_data.get("mime_type") or "").lower()
+        filename = (input_data.get("filename") or "").lower()
+
+        kind = None
+        if mime in self._DOCX_MIMES or filename.endswith(".docx") or filename.endswith(".doc"):
+            kind = "docx"
+        elif mime in self._XLSX_MIMES or filename.endswith(".xlsx") or filename.endswith(".xls"):
+            kind = "xlsx"
+        elif mime in self._PPTX_MIMES or filename.endswith(".pptx") or filename.endswith(".ppt"):
+            kind = "pptx"
+        else:
+            return None  # not an Office doc — let other abilities handle
+
+        b64 = input_data.get("base64", "")
+        path = input_data.get("path", "")
+        if not b64 and not path:
+            return None
+
+        try:
+            import base64
+            if b64:
+                content = base64.b64decode(b64)
+            else:
+                with open(path, "rb") as f:
+                    content = f.read()
+        except Exception as e:
+            logger.warning(f"Office pre_process: read failed: {e}")
+            return None
+
+        try:
+            if kind == "docx":
+                text, meta = _read_docx_bytes(content)
+                header = f"Word: {filename or 'document.docx'} ({meta['paragraphs']} paragraphs, {len(text)} chars)"
+            elif kind == "xlsx":
+                text, meta = _read_xlsx_bytes(
+                    content,
+                    max_rows=self._MAX_XLSX_ROWS_PER_SHEET,
+                    max_cols=self._MAX_XLSX_COLS_PER_SHEET,
+                )
+                header = f"Excel: {filename or 'workbook.xlsx'} ({meta['sheets']} sheet(s), {len(text)} chars)"
+            else:  # pptx
+                text, meta = _read_pptx_bytes(content)
+                header = f"PowerPoint: {filename or 'slides.pptx'} ({meta['slides']} slide(s), {len(text)} chars)"
+        except Exception as e:
+            logger.warning(f"Office pre_process: extraction failed ({kind}): {e}")
+            return None
+
+        if len(text) > self._MAX_EXTRACTED_CHARS:
+            text = text[: self._MAX_EXTRACTED_CHARS] + f"\n\n[... truncated at {self._MAX_EXTRACTED_CHARS} chars]"
+
+        return f"{header}\n\n{text}" if text.strip() else f"{header}\n\n[empty document]"
 
     async def ensure_dependencies(self) -> tuple[bool, str]:
         """Install Office deps (python-docx, openpyxl, python-pptx)."""
@@ -100,7 +189,10 @@ class OfficeAbility(Ability):
                     "properties": {
                         "action": {
                             "type": "string",
-                            "enum": ["create_docx", "create_xlsx", "create_pptx"],
+                            "enum": [
+                                "create_docx", "create_xlsx", "create_pptx",
+                                "read_docx", "read_xlsx", "read_pptx",
+                            ],
                         },
                         "title": {
                             "type": "string",
@@ -132,6 +224,10 @@ class OfficeAbility(Ability):
                             ),
                         },
                         "out_name": {"type": "string", "description": "Optional output filename."},
+                        "file_base64": {
+                            "type": "string",
+                            "description": "For read_* actions: base64-encoded file bytes.",
+                        },
                     },
                     "required": ["action"],
                 },
@@ -160,9 +256,11 @@ class OfficeAbility(Ability):
 
         return (
             "- Status: **ready**\n"
-            "- Word: `office(action='create_docx', title='...', content='# Heading\\nText')`\n"
-            "- Excel: `office(action='create_xlsx', title='...', sheets='[{\"name\":\"S1\",\"headers\":[\"A\"],\"rows\":[[1]]}]')`\n"
-            "- PowerPoint: `office(action='create_pptx', title='...', slides='[{\"title\":\"S1\",\"bullets\":[\"p1\"]}]')`"
+            "- Auto-extracts content from uploaded .docx/.xlsx/.pptx (priority pre-process)\n"
+            "- Create Word: `office(action='create_docx', title='...', content='# Heading\\nText')`\n"
+            "- Create Excel: `office(action='create_xlsx', title='...', sheets='[{\"name\":\"S1\",\"headers\":[\"A\"],\"rows\":[[1]]}]')`\n"
+            "- Create PPT: `office(action='create_pptx', title='...', slides='[{\"title\":\"S1\",\"bullets\":[\"p1\"]}]')`\n"
+            "- Read base64: `office(action='read_docx'|'read_xlsx'|'read_pptx', file_base64='...')`"
         )
 
     async def execute(self, params: dict, context: dict) -> dict:
@@ -212,10 +310,138 @@ class OfficeAbility(Ability):
                 _make_pptx(out_path, title, slides)
                 return {"success": True, "result": {"file_path": out_path}, "media": out_path}
 
+            if action in ("read_docx", "read_xlsx", "read_pptx"):
+                b64 = params.get("file_base64") or ""
+                if not b64:
+                    raise ValueError("file_base64 is required")
+                import base64 as _b64
+                content = _b64.b64decode(b64)
+                if action == "read_docx":
+                    text, meta = _read_docx_bytes(content)
+                elif action == "read_xlsx":
+                    text, meta = _read_xlsx_bytes(
+                        content,
+                        max_rows=self._MAX_XLSX_ROWS_PER_SHEET,
+                        max_cols=self._MAX_XLSX_COLS_PER_SHEET,
+                    )
+                else:  # read_pptx
+                    text, meta = _read_pptx_bytes(content)
+                if len(text) > self._MAX_EXTRACTED_CHARS:
+                    text = text[: self._MAX_EXTRACTED_CHARS]
+                    meta["truncated"] = True
+                return {"success": True, "result": {**meta, "text": text}}
+
             raise ValueError(f"Unknown action: {action}")
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Readers
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _read_docx_bytes(content: bytes) -> tuple[str, dict]:
+    """Extract text from .docx bytes. Returns (text, meta)."""
+    import io
+    from docx import Document
+
+    doc = Document(io.BytesIO(content))
+    parts = []
+    para_count = 0
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if not t:
+            continue
+        style = (para.style.name or "").lower() if para.style else ""
+        # Convert heading style to markdown-ish
+        if "heading" in style:
+            level_match = re.search(r"(\d+)", style)
+            level = int(level_match.group(1)) if level_match else 1
+            parts.append(("#" * min(level, 6)) + " " + t)
+        else:
+            parts.append(t)
+        para_count += 1
+
+    # Also extract tables
+    table_count = 0
+    for tbl in doc.tables:
+        table_count += 1
+        parts.append(f"\n[Table {table_count}]")
+        for row in tbl.rows:
+            cells = [c.text.strip().replace("\n", " ") for c in row.cells]
+            parts.append(" | ".join(cells))
+
+    text = "\n\n".join(parts)
+    return text, {"paragraphs": para_count, "tables": table_count}
+
+
+def _read_xlsx_bytes(content: bytes, max_rows: int = 200, max_cols: int = 50) -> tuple[str, dict]:
+    """Extract sheets/rows from .xlsx bytes. Returns (text, meta).
+
+    Each sheet is rendered as Markdown-style table preview.
+    """
+    import io
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    parts = []
+    sheet_count = 0
+    total_rows = 0
+    for ws in wb.worksheets:
+        sheet_count += 1
+        parts.append(f"--- Sheet: {ws.title} ---")
+        rows_emitted = 0
+        truncated_rows = False
+        truncated_cols = False
+        for row in ws.iter_rows(values_only=True):
+            if rows_emitted >= max_rows:
+                truncated_rows = True
+                break
+            cells = list(row)
+            if len(cells) > max_cols:
+                cells = cells[:max_cols]
+                truncated_cols = True
+            # Skip fully empty rows
+            if all(c is None or (isinstance(c, str) and not c.strip()) for c in cells):
+                continue
+            parts.append(" | ".join("" if c is None else str(c) for c in cells))
+            rows_emitted += 1
+            total_rows += 1
+        if truncated_rows:
+            parts.append(f"[... row limit {max_rows} reached]")
+        if truncated_cols:
+            parts.append(f"[... col limit {max_cols} applied]")
+        parts.append("")  # blank line between sheets
+
+    wb.close()
+    text = "\n".join(parts).rstrip()
+    return text, {"sheets": sheet_count, "rows": total_rows}
+
+
+def _read_pptx_bytes(content: bytes) -> tuple[str, dict]:
+    """Extract slides text from .pptx bytes. Returns (text, meta)."""
+    import io
+    from pptx import Presentation
+
+    prs = Presentation(io.BytesIO(content))
+    parts = []
+    slide_count = 0
+    for slide in prs.slides:
+        slide_count += 1
+        slide_lines = [f"--- Slide {slide_count} ---"]
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                t = "".join(run.text for run in para.runs).strip()
+                if t:
+                    slide_lines.append(t)
+        parts.append("\n".join(slide_lines))
+
+    text = "\n\n".join(parts)
+    return text, {"slides": slide_count}
 
 
 # ─────────────────────────────────────────────────────────────────────────
