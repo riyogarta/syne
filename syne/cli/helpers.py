@@ -328,23 +328,42 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
     # Ability Ollama models (image_analysis, etc.)
     _ensure_ability_ollama_models(syne_dir)
 
-    # Office ability pip deps (python-docx, openpyxl, python-pptx)
-    _ensure_office_pip_deps(syne_dir)
+    # Bundled ability pip deps (pdf, office, ...)
+    _ensure_ability_pip_deps(syne_dir)
 
 
-def _ensure_office_pip_deps(syne_dir: str):
-    """Ensure python-docx, openpyxl, python-pptx are installed.
+# Single source of truth for pip deps of bundled abilities.
+# Maps import name → pip package name.
+# Browser-based (playwright) and external binaries (wacli) are NOT here —
+# those still install lazily on first ability enable.
+_ABILITY_PIP_DEPS = {
+    # pdf ability
+    "fitz": "PyMuPDF",
+    "reportlab": "reportlab",
+    "readability": "readability-lxml",
+    "bs4": "beautifulsoup4",
+    # office ability
+    "docx": "python-docx",
+    "openpyxl": "openpyxl",
+    "pptx": "python-pptx",
+}
 
-    Non-fatal: if pip install fails, ability will lazy-install on first use.
+
+def _ensure_ability_pip_deps(syne_dir: str):
+    """Install pip deps for all bundled abilities at install/update time.
+
+    Non-fatal: if pip install fails, abilities will retry lazily on first use.
+    Idempotent: skips if all modules importable.
     """
     venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
     if not os.path.exists(venv_python):
         return
 
-    # Quick check via venv python
+    # Check which import names are missing
+    import_names = list(_ABILITY_PIP_DEPS.keys())
     check_script = (
         "missing = []\n"
-        "for mod in ('docx', 'openpyxl', 'pptx'):\n"
+        f"for mod in {import_names!r}:\n"
         "    try: __import__(mod)\n"
         "    except ImportError: missing.append(mod)\n"
         "print(','.join(missing))"
@@ -359,27 +378,26 @@ def _ensure_office_pip_deps(syne_dir: str):
         return
 
     if not missing:
+        console.print("[green]✓ Ability deps already installed[/green]")
         return
 
-    # Map import name → pip package
-    pip_map = {"docx": "python-docx", "openpyxl": "openpyxl", "pptx": "python-pptx"}
-    pkgs = [pip_map[m] for m in missing if m in pip_map]
+    pkgs = [_ABILITY_PIP_DEPS[m] for m in missing if m in _ABILITY_PIP_DEPS]
     if not pkgs:
         return
 
-    console.print(f"[bold]Installing Office deps ({', '.join(pkgs)})...[/bold]")
+    console.print(f"[bold]Installing ability deps ({', '.join(pkgs)})...[/bold]")
     venv_pip = os.path.join(syne_dir, ".venv", "bin", "pip")
     try:
         result = subprocess.run(
             [venv_pip, "install", "-q", *pkgs],
-            cwd=syne_dir, timeout=600,
+            cwd=syne_dir, timeout=900,
         )
         if result.returncode == 0:
-            console.print(f"[green]✓ Office deps installed[/green]")
+            console.print(f"[green]✓ Ability deps installed: {', '.join(pkgs)}[/green]")
         else:
-            console.print(f"[yellow]⚠ Office deps install non-zero exit — ability will retry on use[/yellow]")
+            console.print(f"[yellow]⚠ Ability deps install non-zero exit — will retry lazily[/yellow]")
     except Exception as e:
-        console.print(f"[yellow]⚠ Office deps install error: {e}[/yellow]")
+        console.print(f"[yellow]⚠ Ability deps install error: {e}[/yellow]")
 
 
 def _ensure_system_deps():

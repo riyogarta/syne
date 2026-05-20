@@ -106,6 +106,13 @@ fi
 echo "Installing Syne..."
 .venv/bin/pip install -e . -q
 
+# ── 6b. Install bundled ability deps (PDF, Office) ───────
+echo "Installing ability dependencies (PDF, Office)..."
+.venv/bin/pip install -q \
+    PyMuPDF reportlab readability-lxml beautifulsoup4 \
+    python-docx openpyxl python-pptx || \
+    echo "⚠ Some ability deps failed — will retry lazily on first use"
+
 echo ""
 echo "✓ Syne installed successfully!"
 echo ""

@@ -13,7 +13,7 @@ from .shared import console, _strip_env_quotes
 from .helpers import (
     _ensure_system_deps, _ensure_docker, _ensure_ollama,
     _ensure_evaluator_model, _setup_service, _create_symlink,
-    _setup_update_check,
+    _setup_update_check, _ensure_ability_pip_deps,
 )
 
 from rich.panel import Panel
@@ -761,7 +761,12 @@ def init():
         style="green",
     ))
 
-    # 7. Setup systemd service + start
+    # 7. Install bundled ability deps (PDF, Office) into venv
+    console.print("\n[bold]Installing ability dependencies...[/bold]")
+    syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    _ensure_ability_pip_deps(syne_dir)
+
+    # 8. Setup systemd service + start
     console.print("\n[bold]Setting up systemd service...[/bold]")
     _setup_service()
 
