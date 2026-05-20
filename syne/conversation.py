@@ -1469,6 +1469,24 @@ class Conversation:
                 if not registered.instance.handles_input_type(input_type):
                     continue
 
+                # Lazy dependency install on first pre_process call.
+                # Same logic as registry.execute() — bundled abilities
+                # enabled-by-default never trigger enable() so deps would
+                # otherwise stay uninstalled until first real failure.
+                if not getattr(registered, 'deps_ensured', False):
+                    try:
+                        dep_ok, dep_msg = await registered.instance.ensure_dependencies()
+                        if dep_ok:
+                            registered.deps_ensured = True
+                            if dep_msg:
+                                logger.info(f"Ability '{registered.name}' deps: {dep_msg}")
+                        else:
+                            logger.warning(f"Ability '{registered.name}' deps not ready, skipping pre_process: {dep_msg}")
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Ability '{registered.name}' ensure_dependencies crashed: {e}")
+                        continue
+
                 try:
                     result_text = await registered.instance.pre_process(
                         input_type, input_data, ability_prompt,

@@ -33,6 +33,7 @@ class RegisteredAbility:
     permission: int = 0o700  # Linux-style 3-digit octal (owner/family/public)
     db_id: Optional[int] = None
     consecutive_failures: int = 0
+    deps_ensured: bool = False  # True once ensure_dependencies() succeeded
 
 
 class AbilityRegistry:
@@ -172,6 +173,23 @@ class AbilityRegistry:
         if not allowed:
             logger.warning(f"Permission denied: ability={name}, access_level={access_level}, perm={oct(ability.permission)}")
             return {"success": False, "error": reason}
+
+        # Lazy dependency install — runs once per process per ability.
+        # Bundled abilities are enabled-by-default in DB so enable() is
+        # never called for them; this ensures deps are installed on first use.
+        if not ability.deps_ensured:
+            try:
+                dep_ok, dep_msg = await ability.instance.ensure_dependencies()
+                if dep_ok:
+                    ability.deps_ensured = True
+                    if dep_msg:
+                        logger.info(f"Ability '{name}' deps: {dep_msg}")
+                else:
+                    logger.error(f"Ability '{name}' dependency install failed: {dep_msg}")
+                    return {"success": False, "error": f"Dependency install failed: {dep_msg}"}
+            except Exception as e:
+                logger.exception(f"ensure_dependencies() crashed for '{name}'")
+                return {"success": False, "error": f"Dependency check error: {e}"}
 
         # Validate config
         is_valid, error = await ability.instance.validate_config(ability.config)
