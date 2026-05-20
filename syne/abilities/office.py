@@ -484,13 +484,45 @@ def _read_pptx_bytes(content: bytes) -> tuple[str, dict]:
     return text, {"slides": slide_count}
 
 
+
+# ── Arabic / RTL helpers ──────────────────────────────────────────────────
+_ARABIC_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
+
+def _has_arabic(text: str) -> bool:
+    """Return True if text contains Arabic characters."""
+    return bool(_ARABIC_RE.search(text or ""))
+
+def _set_run_arabic(run) -> None:
+    """Set font to Arial and enable RTL on a python-docx Run containing Arabic."""
+    from docx.oxml.ns import qn
+    run.font.name = "Arial"
+    # Set RTL on run properties
+    rPr = run._r.get_or_add_rPr()
+    rtl = rPr.find(qn("w:rtl"))
+    if rtl is None:
+        rtl = run._r.makeelement(qn("w:rtl"), {})
+        rPr.append(rtl)
+    rtl.set(qn("w:val"), "1")
+
+def _set_paragraph_bidi(paragraph) -> None:
+    """Enable bidi on paragraph properties for proper RTL rendering."""
+    from docx.oxml.ns import qn
+    pPr = paragraph._p.get_or_add_pPr()
+    bidi = pPr.find(qn("w:bidi"))
+    if bidi is None:
+        bidi = paragraph._p.makeelement(qn("w:bidi"), {})
+        pPr.append(bidi)
+    bidi.set(qn("w:val"), "1")
+
 # ─────────────────────────────────────────────────────────────────────────
 # Builders
 # ─────────────────────────────────────────────────────────────────────────
 
 
 def _add_inline_runs(paragraph, text: str) -> None:
-    """Add text to a docx paragraph honoring **bold** and *italic* markers."""
+    """Add text to a docx paragraph honoring **bold** and *italic* markers.
+    Arabic text gets Arial font + RTL direction automatically."""
+    has_any_arabic = _has_arabic(text)
     # Split on bold first, then italic within each chunk
     parts = re.split(r"(\*\*[^*]+\*\*)", text)
     for part in parts:
@@ -499,6 +531,8 @@ def _add_inline_runs(paragraph, text: str) -> None:
         if part.startswith("**") and part.endswith("**"):
             run = paragraph.add_run(part[2:-2])
             run.bold = True
+            if _has_arabic(part):
+                _set_run_arabic(run)
             continue
         # Italic within non-bold chunk
         sub = re.split(r"(\*[^*]+\*)", part)
@@ -508,8 +542,15 @@ def _add_inline_runs(paragraph, text: str) -> None:
             if s.startswith("*") and s.endswith("*") and len(s) > 2:
                 run = paragraph.add_run(s[1:-1])
                 run.italic = True
+                if _has_arabic(s):
+                    _set_run_arabic(run)
             else:
-                paragraph.add_run(s)
+                run = paragraph.add_run(s)
+                if _has_arabic(s):
+                    _set_run_arabic(run)
+    # If any Arabic was found, set bidi on the paragraph
+    if has_any_arabic:
+        _set_paragraph_bidi(paragraph)
 
 
 def _clear_docx_body(doc) -> None:
@@ -767,6 +808,7 @@ def _set_shape_text(shape, text: str) -> None:
     """Replace a shape's text while preserving font formatting from its first run.
 
     Removes additional paragraphs/runs, keeps the first one as the style anchor.
+    Arabic text gets Arial font automatically.
     """
     if not shape.has_text_frame:
         return
@@ -785,6 +827,9 @@ def _set_shape_text(shape, text: str) -> None:
         for r in list(first_p.runs[1:]):
             r._r.getparent().remove(r._r)
         first_run.text = str(text)
+        # Arabic in PPTX: set font to Arial for proper glyph rendering
+        if _has_arabic(str(text)):
+            first_run.font.name = "Arial"
     else:
         # Empty paragraph — just set its text directly
         first_p.text = str(text)
