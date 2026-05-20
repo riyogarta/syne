@@ -100,6 +100,22 @@ def classify_error(e: Exception, model: str = "") -> str:
     if isinstance(e, NotImplementedError):
         return f"{tag}This feature is not supported by the current provider."
 
+    # 13b: Telegram delivery errors (don't blame the LLM)
+    try:
+        import telegram.error as _tg_err
+        if isinstance(e, _tg_err.TimedOut):
+            return "Message delivery timed out. Please try again."
+        if isinstance(e, _tg_err.NetworkError):
+            return "Network error while sending message. Please try again."
+        if isinstance(e, _tg_err.RetryAfter):
+            return f"Telegram rate limited the bot. Retry after {getattr(e, 'retry_after', '?')}s."
+        if isinstance(e, _tg_err.BadRequest):
+            return f"Telegram rejected the message: {str(e)[:120]}"
+        if isinstance(e, _tg_err.TelegramError):
+            return f"Telegram error: {str(e)[:120]}"
+    except ImportError:
+        pass
+
     # 14: Fallback
     type_name = type(e).__name__
     return f"{tag}Something went wrong ({type_name}). Please try again."

@@ -43,8 +43,18 @@ def _classify_error(e: Exception, model: str = "") -> str:
 
     Delegates to the channel-agnostic classify_error() and prepends the
     warning emoji for Telegram display.
+
+    Telegram-side delivery errors (TimedOut, NetworkError, etc.) are
+    handled WITHOUT the model tag — they're not the LLM's fault.
     """
     from .errors import classify_error
+    # Telegram delivery errors → drop model tag so user doesn't blame the LLM
+    try:
+        import telegram.error as _tg_err
+        if isinstance(e, _tg_err.TelegramError):
+            return f"⚠️ {classify_error(e, model='')}"
+    except ImportError:
+        pass
     return f"⚠️ {classify_error(e, model=model)}"
 
 
