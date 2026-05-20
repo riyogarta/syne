@@ -219,12 +219,31 @@ class TelegramChannel:
 
     async def start(self):
         """Start the Telegram bot."""
+        # Generous timeouts — default 5s is too tight under slow network or
+        # large media uploads. Read/write 60s, connect 15s, pool 10s.
+        from telegram.request import HTTPXRequest
+        _req = HTTPXRequest(
+            connect_timeout=15.0,
+            read_timeout=60.0,
+            write_timeout=60.0,
+            pool_timeout=10.0,
+        )
+        _media_req = HTTPXRequest(
+            connect_timeout=20.0,
+            read_timeout=180.0,  # uploads can be slow
+            write_timeout=180.0,
+            pool_timeout=10.0,
+        )
         self.app = (
             Application.builder()
             .token(self.bot_token)
             .concurrent_updates(256)
+            .request(_req)
+            .get_updates_request(_req)
             .build()
         )
+        # Use the larger-timeout HTTPXRequest for media uploads
+        self._media_req = _media_req
 
         self._register_handlers()
 
@@ -8012,6 +8031,52 @@ Or just send me a message!"""
                 return True
         return False
 
+    async def _telegram_retry(self, coro_factory, *, attempts: int = 3, base_delay: float = 1.5, op: str = "telegram_call"):
+        """Call a Telegram-bound coroutine with retry on transient errors.
+
+        Args:
+            coro_factory: zero-arg callable that returns a fresh coroutine each attempt
+                          (cannot reuse a coroutine after it raised)
+            attempts: max attempts (including the first)
+            base_delay: initial backoff, doubles each retry
+            op: short label for logs
+
+        Transient = TimedOut, NetworkError. RetryAfter honors the suggested delay.
+        Other TelegramError or non-Telegram exceptions raise immediately.
+        """
+        import asyncio
+        try:
+            import telegram.error as tg_err
+        except ImportError:
+            tg_err = None
+
+        last_exc = None
+        for attempt in range(attempts):
+            try:
+                return await coro_factory()
+            except Exception as e:
+                last_exc = e
+                if tg_err is None:
+                    raise
+                if isinstance(e, tg_err.RetryAfter):
+                    wait = float(getattr(e, "retry_after", base_delay))
+                    if attempt < attempts - 1:
+                        logger.warning(f"{op}: RetryAfter {wait}s (attempt {attempt + 1}/{attempts})")
+                        await asyncio.sleep(min(wait, 30.0))
+                        continue
+                    raise
+                if isinstance(e, (tg_err.TimedOut, tg_err.NetworkError)):
+                    if attempt < attempts - 1:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"{op}: {type(e).__name__}, retry in {delay:.1f}s ({attempt + 1}/{attempts})")
+                        await asyncio.sleep(delay)
+                        continue
+                    raise
+                # Other exceptions — don't retry
+                raise
+        if last_exc:
+            raise last_exc
+
     async def _send_response_with_media(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, handling MEDIA: paths as photos/documents.
         
@@ -8051,46 +8116,54 @@ Or just send me a message!"""
                 sent_msg = None
                 reply_params = {"message_id": reply_to_message_id} if reply_to_message_id else None
                 if ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-                    with open(media_path, "rb") as f:
-                        try:
-                            sent_msg = await bot.send_photo(
+                    async def _send_photo_with_html():
+                        with open(media_path, "rb") as fh:
+                            return await bot.send_photo(
                                 chat_id=chat_id,
-                                photo=f,
+                                photo=fh,
                                 caption=caption_html,
                                 parse_mode="HTML" if caption_html else None,
                                 reply_parameters=reply_params,
                             )
-                        except Exception:
-                            # HTML parse failed — retry without parse_mode
-                            f.seek(0)
-                            sent_msg = await bot.send_photo(
+                    async def _send_photo_plain():
+                        with open(media_path, "rb") as fh:
+                            return await bot.send_photo(
                                 chat_id=chat_id,
-                                photo=f,
+                                photo=fh,
                                 caption=caption_text or None,
                                 reply_parameters=reply_params,
                             )
+                    try:
+                        sent_msg = await self._telegram_retry(_send_photo_with_html, op="send_photo")
+                    except Exception:
+                        # HTML parse may have failed — retry without parse_mode
+                        sent_msg = await self._telegram_retry(_send_photo_plain, op="send_photo_plain")
                 else:
                     # Use InputFile with explicit basename so recipient sees
                     # a clean filename (not the full server path).
                     from telegram import InputFile
                     fname = os.path.basename(media_path)
-                    with open(media_path, "rb") as f:
-                        try:
-                            sent_msg = await bot.send_document(
+                    async def _send_doc_with_html():
+                        with open(media_path, "rb") as fh:
+                            return await bot.send_document(
                                 chat_id=chat_id,
-                                document=InputFile(f, filename=fname),
+                                document=InputFile(fh, filename=fname),
                                 caption=caption_html,
                                 parse_mode="HTML" if caption_html else None,
                                 reply_parameters=reply_params,
                             )
-                        except Exception:
-                            f.seek(0)
-                            sent_msg = await bot.send_document(
+                    async def _send_doc_plain():
+                        with open(media_path, "rb") as fh:
+                            return await bot.send_document(
                                 chat_id=chat_id,
-                                document=InputFile(f, filename=fname),
+                                document=InputFile(fh, filename=fname),
                                 caption=caption_text or None,
                                 reply_parameters=reply_params,
                             )
+                    try:
+                        sent_msg = await self._telegram_retry(_send_doc_with_html, op="send_document")
+                    except Exception:
+                        sent_msg = await self._telegram_retry(_send_doc_plain, op="send_document_plain")
                 logger.info(f"Sent media: {media_path} to {chat_id}")
                 return sent_msg
             except Exception as e:
@@ -8140,31 +8213,33 @@ Or just send me a message!"""
         last_msg = None
         for i, chunk in enumerate(chunks):
             rp = reply_params if i == 0 else None
-            try:
-                last_msg = await bot.send_message(
-                    chat_id=chat_id,
-                    text=chunk,
-                    parse_mode="HTML",
-                    reply_parameters=rp,
+
+            async def _send_html(_chunk=chunk, _rp=rp):
+                return await bot.send_message(
+                    chat_id=chat_id, text=_chunk, parse_mode="HTML", reply_parameters=_rp,
                 )
+
+            try:
+                last_msg = await self._telegram_retry(_send_html, op="send_message")
             except Exception:
-                # HTML parse failed — send as plain text (strip HTML tags)
+                # HTML parse failed — strip tags and send plain
                 import re as _re
                 import html as _html_mod
                 plain = _re.sub(r'<[^>]+>', '', chunk)
-                plain = _html_mod.unescape(plain)  # decode &amp; &gt; etc.
+                plain = _html_mod.unescape(plain)
+
+                async def _send_plain(_text=plain, _rp=rp):
+                    return await bot.send_message(
+                        chat_id=chat_id, text=_text, reply_parameters=_rp,
+                    )
                 try:
-                    last_msg = await bot.send_message(
-                        chat_id=chat_id,
-                        text=plain,
-                        reply_parameters=rp,
-                    )
+                    last_msg = await self._telegram_retry(_send_plain, op="send_message_plain")
                 except Exception:
-                    last_msg = await bot.send_message(
-                        chat_id=chat_id,
-                        text=plain[:4096],
-                        reply_parameters=rp,
-                    )
+                    async def _send_truncated(_text=plain[:4096], _rp=rp):
+                        return await bot.send_message(
+                            chat_id=chat_id, text=_text, reply_parameters=_rp,
+                        )
+                    last_msg = await self._telegram_retry(_send_truncated, op="send_message_truncated")
 
         return last_msg
 
