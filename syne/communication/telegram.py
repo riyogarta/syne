@@ -8060,11 +8060,15 @@ Or just send me a message!"""
                                 reply_parameters=reply_params,
                             )
                 else:
+                    # Use InputFile with explicit basename so recipient sees
+                    # a clean filename (not the full server path).
+                    from telegram import InputFile
+                    fname = os.path.basename(media_path)
                     with open(media_path, "rb") as f:
                         try:
                             sent_msg = await bot.send_document(
                                 chat_id=chat_id,
-                                document=f,
+                                document=InputFile(f, filename=fname),
                                 caption=caption_html,
                                 parse_mode="HTML" if caption_html else None,
                                 reply_parameters=reply_params,
@@ -8073,7 +8077,7 @@ Or just send me a message!"""
                             f.seek(0)
                             sent_msg = await bot.send_document(
                                 chat_id=chat_id,
-                                document=f,
+                                document=InputFile(f, filename=fname),
                                 caption=caption_text or None,
                                 reply_parameters=reply_params,
                             )
