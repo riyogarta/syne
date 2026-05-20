@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "syne-agent"
-version = "1.12.6"
+version = "1.12.7"
 description = "AI Agent Framework with Unlimited Memory"
 readme = "README.md"
 license = "Apache-2.0"
@@ -50,6 +50,13 @@ syne = "syne.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["syne"]
+
+# Ensure non-Python files are bundled in the wheel:
+# - SQL schema for `syne db migrate`
+# - Office templates for the office ability
+[tool.hatch.build.targets.wheel.force-include]
+"syne/db/schema.sql" = "syne/db/schema.sql"
+"syne/abilities/templates" = "syne/abilities/templates"
 
 [tool.ruff]
 target-version = "py311"
