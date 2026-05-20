@@ -493,16 +493,28 @@ def _has_arabic(text: str) -> bool:
     return bool(_ARABIC_RE.search(text or ""))
 
 def _set_run_arabic(run) -> None:
-    """Set font to Arial and enable RTL on a python-docx Run containing Arabic."""
+    """Set font to Arial (Latin + Complex Script) and enable RTL on a Run containing Arabic."""
     from docx.oxml.ns import qn
     run.font.name = "Arial"
-    # Set RTL on run properties
+    # Set Complex Script font (w:cs on w:rFonts) — this is what Word uses for Arabic glyphs
     rPr = run._r.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = run._r.makeelement(qn("w:rFonts"), {})
+        rPr.insert(0, rFonts)
+    rFonts.set(qn("w:cs"), "Arial")
+    # Enable RTL on run properties
     rtl = rPr.find(qn("w:rtl"))
     if rtl is None:
         rtl = run._r.makeelement(qn("w:rtl"), {})
         rPr.append(rtl)
     rtl.set(qn("w:val"), "1")
+    # Enable Complex Script explicitly
+    cs = rPr.find(qn("w:cs"))
+    if cs is None:
+        cs = run._r.makeelement(qn("w:cs"), {})
+        rPr.append(cs)
+    cs.set(qn("w:val"), "1")
 
 def _set_paragraph_bidi(paragraph) -> None:
     """Enable bidi on paragraph properties for proper RTL rendering."""
