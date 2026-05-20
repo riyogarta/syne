@@ -181,8 +181,10 @@ class OfficeAbility(Ability):
             "function": {
                 "name": "office",
                 "description": (
-                    "Create Microsoft Office documents. Actions: "
-                    "create_docx (Word), create_xlsx (Excel), create_pptx (PowerPoint)."
+                    "Create or read Microsoft Office documents. Create actions: "
+                    "create_docx (Word), create_xlsx (Excel), create_pptx (PowerPoint). "
+                    "Read actions: read_docx, read_xlsx, read_pptx (from base64). "
+                    "Uploaded Office files are auto-extracted via pre_process — no tool call needed."
                 ),
                 "parameters": {
                     "type": "object",
@@ -564,7 +566,7 @@ def _make_xlsx(out_path: str, sheets: list[dict]) -> None:
 
 def _make_pptx(out_path: str, title: str, slides: list[dict]) -> None:
     from pptx import Presentation
-    from pptx.util import Inches, Pt
+    from pptx.util import Pt
 
     prs = Presentation()
     # Use 16:9 default
@@ -581,18 +583,28 @@ def _make_pptx(out_path: str, title: str, slides: list[dict]) -> None:
         if i == 0 and title and not s_title:
             # Use document title as first slide
             slide = prs.slides.add_slide(title_layout)
-            slide.shapes.title.text = title
+            if slide.shapes.title:
+                slide.shapes.title.text = title
             if free_content or bullets:
                 # Subtitle from free content or first bullet
-                subtitle = slide.placeholders[1]
-                subtitle.text = free_content or " ".join(str(b) for b in bullets[:3])
+                try:
+                    subtitle = slide.placeholders[1]
+                    subtitle.text = free_content or " ".join(str(b) for b in bullets[:3])
+                except (KeyError, IndexError):
+                    pass  # layout has no subtitle placeholder
             continue
 
         # Regular content slide
         slide = prs.slides.add_slide(bullet_layout)
-        slide.shapes.title.text = s_title or f"Slide {i + 1}"
+        if slide.shapes.title:
+            slide.shapes.title.text = s_title or f"Slide {i + 1}"
 
-        body = slide.placeholders[1]
+        try:
+            body = slide.placeholders[1]
+        except (KeyError, IndexError):
+            # Fallback: add a textbox if layout has no body placeholder
+            from pptx.util import Inches as _In
+            body = slide.shapes.add_textbox(_In(0.5), _In(1.5), _In(9), _In(5))
         tf = body.text_frame
         tf.word_wrap = True
 
