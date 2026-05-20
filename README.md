@@ -421,14 +421,35 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 | Ability | Permission | Description | Requires |
 |---------|-----------|-------------|----------|
-| `image_gen` | 777 | Generate images from text (FLUX.1-schnell via Together AI) | Together AI API key |
-| `image_analysis` | 555 | Analyze and describe images (Gemini 2.0 Flash default) | Google Gemini / Together AI / OpenAI |
+| `image_gen` | 777 | Generate images from text (FLUX.1-schnell via Together AI / Imagen via Vertex / DALL-E via OpenAI) | API key per provider |
+| `image_analysis` | 555 | Analyze and describe images (Gemini 2.5 Flash default; Vertex / Ollama / OpenAI) | Provider-specific (Vertex auto, OpenAI key) |
 | `maps` | 555 | Places, directions, geocoding | Google Maps API key |
-| `pdf` | 770 | Generate PDF documents from HTML | wkhtmltopdf (auto-installed) |
+| `pdf` | 770 | **Read** PDFs (text + vision OCR for scanned/CAD pages) and **create** PDFs from text or URL | PyMuPDF, reportlab, beautifulsoup4 (auto-installed) |
+| `office` | 770 | **Create and read** Microsoft Office documents — Word (.docx), Excel (.xlsx), PowerPoint (.pptx) | python-docx, openpyxl, python-pptx (auto-installed) |
 | `website_screenshot` | 550 | Capture website screenshots | Playwright + Chromium (auto-installed) |
 | `whatsapp` | 700 | WhatsApp bridge (send/receive via wacli) | wacli binary |
 
 Each ability manages its own dependencies via `ensure_dependencies()` — external binaries and packages are auto-installed when you enable the ability.
+
+### Document Workflows
+
+The `pdf` and `office` abilities together cover most document workflows. Both **auto-extract content** when a user uploads a file via Telegram — the LLM sees the document content as plain text without needing any tool call.
+
+| Format | Read | Create | Notes |
+|---|---|---|---|
+| PDF | ✓ | ✓ | Hybrid mode: text + vision OCR for scanned/drawing pages (uses `/vision` provider) |
+| DOCX (Word) | ✓ | ✓ | Markdown-style content for create; auto-extracts paragraphs + tables on read |
+| XLSX (Excel) | ✓ | ✓ | JSON sheets array for create; renders as markdown table on read |
+| PPTX (PowerPoint) | ✓ | ✓ | JSON slides array for create; extracts per-slide text on read |
+
+Examples (LLM-callable):
+```
+office(action='create_docx', title='Laporan', content='# Ringkasan\n\nIsi paragraf.')
+office(action='create_xlsx', sheets='[{"name":"Q1","headers":["Item","Total"],"rows":[["Gaji",10000]]}]')
+office(action='create_pptx', title='Proposal', slides='[{"title":"Slide 1","bullets":["A","B"]}]')
+pdf(action='make_from_text', title='Doc', text='...')
+pdf(action='read_from_url', url='https://example.com/file.pdf')
+```
 
 ---
 
@@ -676,7 +697,8 @@ syne restore               # Restore from backup
 |  |              ABILITIES (Pluggable)                   |  |
 |  |                                                      |  |
 |  |  [image_gen]  [image_analysis]  [maps]  [pdf]        |  |
-|  |  [website_screenshot]  [whatsapp]  [custom...]       |  |
+|  |  [office]  [website_screenshot]  [whatsapp]          |  |
+|  |  [custom...]                                         |  |
 |  |                                                      |  |
 |  |  Self-Created: Syne adds new abilities at runtime    |  |
 |  +------------------------------------------------------+  |
@@ -785,7 +807,7 @@ syne/
 │   ├── tools/               # 23 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   │   ├── custom/          # User-created abilities (only writable dir)
-│   │   └── ...              # 6 bundled abilities
+│   │   └── ...              # 7 bundled abilities (image_gen, image_analysis, maps, pdf, office, website_screenshot, whatsapp)
 │   ├── db/
 │   │   ├── schema.sql       # Database schema (17 tables)
 │   │   ├── connection.py    # Async connection pool (asyncpg)
