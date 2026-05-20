@@ -40,6 +40,7 @@ _TOOL_SIGNALS = {
     r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
     r"\bwa\b|whatsapp|kirim.?wa|send.?wa": {"whatsapp"},
     r"\bpdf\b|dokumen|document": {"pdf", "send_file"},
+    r"\bword\b|\bdocx\b|\bexcel\b|\bxlsx\b|spreadsheet|powerpoint|\bpptx\b|presentasi|slide\b|office": {"office", "send_file"},
     r"screenshot|tangkap.?layar|web.?capture|snapshot": {"website_screenshot"},
     r"voice|suara|bicara|speak|tts|audio|dengar|listen": {"send_voice"},
     r"config|setting|\bpengaturan\b|konfigurasi|preference": {"update_config"},

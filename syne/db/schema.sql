@@ -285,7 +285,8 @@ INSERT INTO abilities (name, description, version, source, module_path, requires
     ('image_gen', 'Generate images from text descriptions using AI', '1.0', 'bundled', 'syne.abilities.image_gen', 'family'),
     ('image_analysis', 'Analyze and describe images using AI vision', '1.0', 'bundled', 'syne.abilities.image_analysis', 'family'),
     ('maps', 'Search for nearby places, get directions, and geocode addresses', '1.0', 'bundled', 'syne.abilities.maps', 'family'),
-    ('pdf', 'Read and create PDFs (from URL, text, or uploaded document)', '1.5', 'bundled', 'syne.abilities.pdf', 'family')
+    ('pdf', 'Read and create PDFs (from URL, text, or uploaded document)', '1.5', 'bundled', 'syne.abilities.pdf', 'family'),
+    ('office', 'Create Microsoft Office documents (Word, Excel, PowerPoint)', '1.0', 'bundled', 'syne.abilities.office', 'family')
 ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
