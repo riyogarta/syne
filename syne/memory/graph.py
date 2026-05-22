@@ -499,8 +499,13 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
 async def recall_graph(query: str, limit: int = 10) -> list[str]:
     """Query the knowledge graph for relevant entity-relation context.
 
-    Searches entities by name substring, then traverses 1-hop relations.
-    Returns formatted context lines for injection into conversation.
+    Two-step approach for performance:
+    1. Find matching entities by keyword (uses GIN trigram index if available)
+    2. Fetch relations via btree indexes on subject_id/object_id
+
+    Words shorter than 4 chars are excluded to avoid noisy matches
+    (e.g. "sah" matches thousands of entities). Entities are ranked by
+    number of matching keywords so multi-word matches surface first.
     """
     if not query or not query.strip():
         return []
@@ -509,38 +514,68 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
         async with get_connection() as conn:
             # Check if tables exist
             exists = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'kg_entities')"
+                "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+                "WHERE table_name = 'kg_entities')"
             )
             if not exists:
                 return []
 
-            # Find matching entities by word overlap
-            words = [w for w in query.lower().split() if len(w) > 2]
+            # Filter words: prefer >= 4 chars, fall back to > 2 if none remain
+            words = [w for w in query.lower().split() if len(w) >= 4]
+            if not words:
+                words = [w for w in query.lower().split() if len(w) > 2]
             if not words:
                 return []
 
-            # Build OR conditions for each word
+            # Build LIKE conditions + relevance score (more keyword matches = higher)
             conditions = []
-            params = []
+            score_parts = []
+            params: list = []
             for i, word in enumerate(words):
-                conditions.append(f"LOWER(e.name) LIKE ${ i + 1}")
+                idx = i + 1
+                conditions.append(f"LOWER(name) LIKE ${idx}")
+                score_parts.append(f"CASE WHEN LOWER(name) LIKE ${idx} THEN 1 ELSE 0 END")
                 params.append(f"%{word}%")
 
             where_clause = " OR ".join(conditions)
+            score_expr = " + ".join(score_parts)
 
-            # Get matching entities and their 1-hop relations
+            # Step 1: find top entity IDs ranked by keyword overlap
+            entity_rows = await conn.fetch(
+                f"SELECT id FROM kg_entities "
+                f"WHERE {where_clause} "
+                f"ORDER BY ({score_expr}) DESC "
+                f"LIMIT 100",
+                *params,
+            )
+            if not entity_rows:
+                return []
+
+            entity_ids = [r["id"] for r in entity_rows]
+
+            # Step 2: fetch relations via UNION (subject + object separately)
+            # Each branch uses btree index on subject_id / object_id
             rows = await conn.fetch(
-                f"""SELECT DISTINCT
-                        s.name AS subject, s.entity_type AS s_type,
-                        r.predicate,
-                        o.name AS object, o.entity_type AS o_type
-                    FROM kg_relations r
-                    JOIN kg_entities s ON r.subject_id = s.id
-                    JOIN kg_entities o ON r.object_id = o.id
-                    JOIN kg_entities e ON (e.id = s.id OR e.id = o.id)
-                    WHERE {where_clause}
-                    LIMIT ${ len(params) + 1 }""",
-                *params, limit,
+                """
+                (SELECT s.name AS subject, s.entity_type AS s_type,
+                        r.predicate, o.name AS object, o.entity_type AS o_type
+                 FROM kg_relations r
+                 JOIN kg_entities s ON r.subject_id = s.id
+                 JOIN kg_entities o ON r.object_id = o.id
+                 WHERE r.subject_id = ANY($1)
+                 LIMIT $2)
+                UNION
+                (SELECT s.name AS subject, s.entity_type AS s_type,
+                        r.predicate, o.name AS object, o.entity_type AS o_type
+                 FROM kg_relations r
+                 JOIN kg_entities s ON r.subject_id = s.id
+                 JOIN kg_entities o ON r.object_id = o.id
+                 WHERE r.object_id = ANY($1)
+                 LIMIT $2)
+                LIMIT $2
+                """,
+                entity_ids,
+                limit,
             )
 
             if not rows:

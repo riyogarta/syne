@@ -469,11 +469,27 @@ class Conversation:
         recall_limit = await _get_recall_config("memory.recall_limit", 5)
         if isinstance(recall_limit, str):
             recall_limit = int(recall_limit)
-        memories = await self.memory.recall(
-            query=recall_query or user_message,
-            limit=recall_limit,
-            user_id=self.user.get("id"),
-            requester_access_level=access_level,  # Pass access level for Rule 760
+
+        # 2b. Run memory recall + graph recall IN PARALLEL (saves ~400ms)
+        from .memory.graph import recall_graph as _recall_graph
+
+        async def _do_memory_recall():
+            return await self.memory.recall(
+                query=recall_query or user_message,
+                limit=recall_limit,
+                user_id=self.user.get("id"),
+                requester_access_level=access_level,
+            )
+
+        async def _do_graph_recall():
+            try:
+                return await _recall_graph(recall_query or user_message)
+            except Exception as e:
+                logger.debug(f"Graph recall skipped: {e}")
+                return []
+
+        memories, graph_lines = await asyncio.gather(
+            _do_memory_recall(), _do_graph_recall()
         )
 
         # 3. Conversation history
@@ -512,20 +528,15 @@ class Conversation:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
 
-        # 4b. Knowledge graph context (entity-relation traversal)
-        try:
-            from .memory.graph import recall_graph
-            graph_lines = await recall_graph(recall_query or user_message)
-            if graph_lines:
-                graph_block = "\n".join([
-                    "# Knowledge Graph",
-                    "Related entities and relationships from stored knowledge.",
-                    "",
-                ] + graph_lines)
-                messages.append(ChatMessage(role="system", content=graph_block))
-                logger.info(f"Graph: injected {len(graph_lines)} relations")
-        except Exception as e:
-            logger.debug(f"Graph recall skipped: {e}")
+        # 4b. Knowledge graph context (already fetched in parallel above)
+        if graph_lines:
+            graph_block = "\n".join([
+                "# Knowledge Graph",
+                "Related entities and relationships from stored knowledge.",
+                "",
+            ] + graph_lines)
+            messages.append(ChatMessage(role="system", content=graph_block))
+            logger.info(f"Graph: injected {len(graph_lines)} relations")
 
         # 5. Prune oversized tool results
         # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)

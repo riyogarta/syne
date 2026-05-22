@@ -2,6 +2,7 @@
 -- PostgreSQL 16+ with pgvector extension
 
 CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- ============================================================
 -- IDENTITY: Who the agent is
@@ -688,6 +689,8 @@ CREATE TABLE IF NOT EXISTS kg_entities (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type
     ON kg_entities (LOWER(name), entity_type);
 CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities (entity_type);
+CREATE INDEX IF NOT EXISTS idx_kg_entities_name_trgm
+    ON kg_entities USING gin (LOWER(name) gin_trgm_ops);
 
 CREATE TABLE IF NOT EXISTS kg_relations (
     id SERIAL PRIMARY KEY,
