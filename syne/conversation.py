@@ -750,7 +750,12 @@ class Conversation:
         
         # Additional filter: remove owner-only tools entirely in group context
         if self.is_group and should_filter_tools_for_group(self.is_group):
-            tool_schemas = filter_tools_for_group(tool_schemas)
+            # Build ability permission map so abilities aren't wrongly filtered as owner-only
+            ability_perms = {}
+            if self.abilities:
+                for ab in self.abilities._abilities.values():
+                    ability_perms[ab.name] = ab.permission
+            tool_schemas = filter_tools_for_group(tool_schemas, extra_permissions=ability_perms)
 
         # Tool routing: only send tools relevant to the user's message.
         # SKIP for scheduled tasks — payload may lack keywords (e.g. "[REMINDER]")

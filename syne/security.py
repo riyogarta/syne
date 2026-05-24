@@ -249,7 +249,7 @@ def should_filter_tools_for_group(is_group: bool) -> bool:
     return is_group
 
 
-def filter_tools_for_group(tools: list[dict]) -> list[dict]:
+def filter_tools_for_group(tools: list[dict], extra_permissions: dict[str, int] = None) -> list[dict]:
     """Filter out owner-only tools from the tool schema for group contexts.
 
     In groups, the most privileged non-owner tier is "family". Tools where
@@ -257,15 +257,17 @@ def filter_tools_for_group(tools: list[dict]) -> list[dict]:
 
     Args:
         tools: List of tools in OpenAI schema format
+        extra_permissions: Additional permission map (e.g. from abilities registry)
 
     Returns:
         Filtered list with owner-only tools removed
     """
+    extra = extra_permissions or {}
     filtered = []
     for tool in tools:
         if tool.get("type") == "function" and "function" in tool:
             func_name = tool["function"].get("name", "")
-            perm = TOOL_PERMISSIONS.get(func_name, 0o700)
+            perm = TOOL_PERMISSIONS.get(func_name) or extra.get(func_name, 0o700)
             # Keep tool if family digit > 0 (accessible to non-owner)
             if get_permission_digit(perm, "family") > 0:
                 filtered.append(tool)
