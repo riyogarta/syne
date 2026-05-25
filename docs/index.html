@@ -851,6 +851,16 @@
                         <h3>Sub-Agents</h3>
                         <p>Spawn background agents for parallel tasks. Isolated sessions, shared memory.</p>
                     </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">📎</div>
+                        <h3>Memory with File Attachments</h3>
+                        <p>Memories can carry binary files — images, PDFs, voice notes, Office docs — up to 50 MB. Description is embedded for semantic search; the file is preserved as a BYTEA blob for later retrieve or re-analysis (vision OCR for image pages, text extraction for documents).</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">📄</div>
+                        <h3>Document I/O — Word · Excel · PowerPoint · PDF</h3>
+                        <p>Auto-extract content from uploaded Office files and PDFs (text + vision OCR for scanned pages). Create new <code>.docx</code>, <code>.xlsx</code>, <code>.pptx</code> from structured input — Syne picks the right layout from the bundled skeleton template.</p>
+                    </div>
                 </div>
             </div>
         </section>
@@ -934,7 +944,7 @@
                             <div class="arch-module">Gateway <sub>remote</sub></div>
                             <div class="arch-module">Sub-agents</div>
                         </div>
-                        <div class="arch-tools">23 Core Tools: <span>exec · memory · web · config · files · voice · send · schedule · subagent · permissions</span></div>
+                        <div class="arch-tools">26 Core Tools: <span>exec · memory (search/store/get/analyze/delete + file blobs) · web · config · files · voice · send · schedule · subagent · permissions</span></div>
                     </div>
                     <div class="arch-connector">↕</div>
                     <div class="arch-layer abilities">
@@ -944,6 +954,7 @@
                             <div class="arch-module">image_analysis</div>
                             <div class="arch-module">maps</div>
                             <div class="arch-module">pdf</div>
+                            <div class="arch-module">office</div>
                             <div class="arch-module">screenshot</div>
                             <div class="arch-module">whatsapp</div>
                             <div class="arch-module" style="border-style: dashed; color: var(--text-muted);">custom…</div>
@@ -953,7 +964,7 @@
                     <div class="arch-connector">↕</div>
                     <div class="arch-layer db">
                         <div class="arch-layer-label">PostgreSQL + pgvector</div>
-                        <div class="arch-tables">17 tables — identity, memory, knowledge graph, config, and more. Everything in one database.</div>
+                        <div class="arch-tables">18 tables — identity, memory (with binary blob attachments), knowledge graph, config, and more. Everything in one database.</div>
                     </div>
                 </div>
             </div>
