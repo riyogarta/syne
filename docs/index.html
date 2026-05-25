@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Syne — AI Agent Framework with Unlimited Memory</title>
-    <meta name="description" content="Open-source AI agent framework with unlimited persistent memory. Memory-first, self-evolving, zero-cost setup.">
-    <meta name="keywords" content="AI agent, memory, open source, self-evolving, Telegram bot, CLI">
-    <meta property="og:title" content="Syne — I remember, therefore I am">
-    <meta property="og:description" content="Open-source AI agent framework with unlimited persistent memory.">
+    <title>Syne — Self-hosted personal AI assistant on Telegram with long-term memory</title>
+    <meta name="description" content="Self-hosted personal AI assistant on Telegram. PostgreSQL-native long-term memory across sessions. Runs on cheap hardware with near-zero API cost.">
+    <meta name="keywords" content="AI assistant, long-term memory, self-hosted, open source, Telegram bot, CLI, pgvector">
+    <meta property="og:title" content="Syne — Self-hosted personal AI assistant with long-term memory">
+    <meta property="og:description" content="Self-hosted personal AI assistant on Telegram. Persistent long-term memory across sessions. Runs on cheap hardware with near-zero API cost.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://github.com/riyogarta/syne">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧠</text></svg>">
@@ -779,11 +779,11 @@
                 <h1>Syne</h1>
                 <p class="hero-tagline">"I remember, therefore I am"</p>
                 <p class="hero-description">
-                    AI agent framework with <strong>unlimited persistent memory</strong>. 
-                    Self-evolving, zero-cost setup, and it never forgets.
+                    <strong>Self-hosted personal AI assistant on Telegram with persistent long-term memory.</strong>
+                    Runs on your own server. Stores everything in your own PostgreSQL. Near-zero API cost with free OAuth providers or local Ollama.
                 </p>
                 <p class="hero-etymology">
-                    Named after <a href="https://en.wikipedia.org/wiki/Mnemosyne" target="_blank">Mnemosyne</a>, 
+                    Named after <a href="https://en.wikipedia.org/wiki/Mnemosyne" target="_blank">Mnemosyne</a>,
                     the Greek goddess of memory and mother of the Muses.
                 </p>
                 <div class="hero-buttons">
@@ -807,49 +807,71 @@
         <section class="features" id="features">
             <div class="container">
                 <div class="section-header">
-                    <h2>Memory-First Architecture</h2>
-                    <p>Built from the ground up with persistent memory as the core principle, not an afterthought.</p>
+                    <h2>What Syne actually is</h2>
+                    <p>A Telegram bot you self-host. You chat with it. It remembers what you tell it to remember — across days, weeks, restarts.</p>
                 </div>
                 <div class="features-grid">
                     <div class="feature-card">
                         <div class="feature-icon">🧠</div>
-                        <h3>Unlimited Persistent Memory</h3>
-                        <p>Semantic search over millions of memories via pgvector + knowledge graph for entity-relation traversal. Two retrieval systems, one shared memory.</p>
+                        <h3>Persistent long-term memory</h3>
+                        <p>Semantic search via pgvector + a small knowledge graph for entity-relation queries. Subject to decay (non-permanent memories fade with disuse) and conflict resolution (newer, higher-source-priority entries win).</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🛡️</div>
-                        <h3>Smart Memory — Anti-Hallucination & Auto-Dedup</h3>
-                        <p>Only user-confirmed facts stored. 3-layer filter + similarity-based insert/update/skip. Non-permanent memories decay naturally — useful ones survive, irrelevant ones fade away.</p>
+                        <h3>User-confirmed memory filtering</h3>
+                        <p>A 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing <em>at write time</em>. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.</p>
                     </div>
                     <div class="feature-card">
-                        <div class="feature-icon">🧬</div>
-                        <h3>Self-Evolution</h3>
-                        <p>Creates new abilities at runtime — no restart, no redeploy. You ask, it builds.</p>
+                        <div class="feature-icon">🔐</div>
+                        <h3>Multi-tier permissions</h3>
+                        <p>Owner / family / public with Linux-style 3-digit octal per tool. Public users get nothing from memory by default — unless you explicitly open specific categories (Rule 765).</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">💬</div>
-                        <h3>No Runtime Config Files</h3>
-                        <p>No SOUL.md or CONFIG.yaml. All runtime behavior lives in PostgreSQL — change through conversation.</p>
+                        <h3>Runtime configuration in PostgreSQL</h3>
+                        <p>No <code>SOUL.md</code> or <code>CONFIG.yaml</code>. Identity, behavior, rules, and config all live in tables — change them through conversation.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">💸</div>
-                        <h3>True Zero-Cost Setup</h3>
-                        <p>Free OAuth chat + local embedding + Docker DB + Telegram. $0/month, no credit card needed.</p>
+                        <h3>Near-zero API cost</h3>
+                        <p>Resilience floor: Ollama embeddings + small local evaluator are free and self-contained. Chat via Anthropic / Google / OpenAI / Vertex with paid API keys; OAuth gray-zone options are bonus for personal use.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🤖</div>
-                        <h3>Multi-Model Freedom</h3>
-                        <p>Switch between Gemini, ChatGPT, Claude, Together AI, Ollama — mid-conversation. No redeploy.</p>
+                        <h3>Multi-provider chat</h3>
+                        <p>Switch between Gemini, ChatGPT, Claude, Together AI, Vertex, Ollama mid-conversation — per-user and per-group overrides supported. No redeploy.</p>
+                    </div>
+                </div>
+
+                <div class="section-header" style="margin-top: 4rem;">
+                    <h2>Advanced capabilities (opt-in)</h2>
+                    <p>Beyond the core assistant, Syne ships with optional extensions. These live in <code>syne/abilities/</code> and can be enabled per install.</p>
+                </div>
+                <div class="features-grid">
+                    <div class="feature-card">
+                        <div class="feature-icon">📎</div>
+                        <h3>Memory file attachments</h3>
+                        <p>Memories can carry binary files — images, PDFs, voice notes, Office docs — up to 50 MB. Description is embedded for semantic search; the file is preserved as a BYTEA blob for later retrieve or re-analysis.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">📄</div>
+                        <h3>Document I/O</h3>
+                        <p>Read & create <strong>Word</strong>, <strong>Excel</strong>, <strong>PowerPoint</strong>, and <strong>PDF</strong>. Vision OCR for scanned pages. Created files use a bundled skeleton template — Syne picks the right layout automatically.</p>
+                    </div>
+                    <div class="feature-card">
+                        <div class="feature-icon">🎙️</div>
+                        <h3>Voice in & out</h3>
+                        <p>Groq Whisper STT for inbound voice notes — transcribed and processed as text. Edge TTS for outbound voice replies (free, local). Voice notes can be saved as memory blobs for playback later.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">🧑‍💻</div>
-                        <h3>Interactive — Telegram, CLI & Remote Nodes</h3>
-                        <p>Chat via Telegram bot or terminal. Extend to multiple machines via WebSocket — each node has its own CLI, one shared memory for all.</p>
+                        <h3>Remote nodes & sub-agents</h3>
+                        <p>Extend Syne to multiple machines via WebSocket gateway — each node has its own CLI, one shared memory. Spawn background sub-agents for parallel tasks (isolated sessions, same memory).</p>
                     </div>
                     <div class="feature-card">
-                        <div class="feature-icon">🧵</div>
-                        <h3>Sub-Agents</h3>
-                        <p>Spawn background agents for parallel tasks. Isolated sessions, shared memory.</p>
+                        <div class="feature-icon">🧬</div>
+                        <h3>Self-modification <small style="font-weight: normal; color: var(--text-muted);">(off by default)</small></h3>
+                        <p>The LLM can write new abilities into <code>syne/abilities/custom/</code> at runtime. Gated behind an explicit config flag — closes the prompt-injection-to-RCE vector. See <a href="https://github.com/riyogarta/syne/blob/main/SECURITY.md" target="_blank">SECURITY.md</a>.</p>
                     </div>
                     <div class="feature-card">
                         <div class="feature-icon">📎</div>
