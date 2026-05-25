@@ -1010,8 +1010,21 @@ class TelegramChannel:
                 photo_b64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
                 logger.info(f"Photo downloaded: {len(photo_bytes)} bytes, base64: {len(photo_b64)} chars")
 
+                # Save photo to workspace/uploads/ so memory_store_file can reference it
+                uploads_dir = self.agent.workspace_uploads
+                os.makedirs(uploads_dir, exist_ok=True)
+                photo_filename = f"{photo.file_unique_id}_photo.jpg"
+                save_path = os.path.join(uploads_dir, photo_filename)
+                with open(save_path, "wb") as f:
+                    f.write(photo_bytes)
+                logger.info(f"Photo saved: {save_path} ({len(photo_bytes)} bytes)")
+
                 # Build message with image metadata for vision
-                user_text = caption if caption else "What's in this image?"
+                # Include file path so LLM knows where to find it for memory_store_file
+                if caption:
+                    user_text = f"[User sent a photo ({len(photo_bytes)} bytes), saved at: {save_path}]\n\n{caption}"
+                else:
+                    user_text = f"[User sent a photo ({len(photo_bytes)} bytes), saved at: {save_path}]"
                 inbound = await self._build_inbound(update, is_group)
                 from .inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
@@ -1021,6 +1034,8 @@ class TelegramChannel:
                     "image": {
                         "mime_type": "image/jpeg",
                         "base64": photo_b64,
+                        "path": save_path,
+                        "filename": photo_filename,
                     },
                     "inbound": inbound,
                 }

@@ -893,8 +893,7 @@ class SyneAgent:
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["fact", "preference", "event", "lesson", "decision"],
-                        "description": "Memory category",
+                        "description": "Memory category (e.g. fact, preference, event, lesson, decision, home, health, or any relevant category)",
                     },
                 },
                 "required": ["content", "category"],
@@ -944,8 +943,7 @@ class SyneAgent:
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["fact", "preference", "event", "lesson", "decision"],
-                        "description": "Memory category",
+                        "description": "Memory category (e.g. fact, preference, event, lesson, decision, home, health, or any relevant category)",
                     },
                     "file_path": {
                         "type": "string",

@@ -1181,8 +1181,14 @@ class Conversation:
                             # document = PDF/Office, image = photo, audio = voice
                             for key in ("document", "image", "audio"):
                                 src = meta.get(key)
-                                if isinstance(src, dict) and src.get("base64"):
-                                    t_args["file_base64"] = src["base64"]
+                                if isinstance(src, dict):
+                                    # Prefer file_path (disk) over base64 (memory) when available
+                                    if src.get("path"):
+                                        t_args["file_path"] = src["path"]
+                                    elif src.get("base64"):
+                                        t_args["file_base64"] = src["base64"]
+                                    else:
+                                        continue
                                     if not t_args.get("filename"):
                                         t_args["filename"] = src.get("filename") or ""
                                     if not t_args.get("mime_type"):
