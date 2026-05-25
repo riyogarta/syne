@@ -39,6 +39,8 @@ _TOOL_SIGNALS = {
     r"simpan.*file|simpan.*dokumen|simpan.*gambar|simpan.*pdf|attach|lampirkan|beserta.*file": {"memory_store_file"},
     # Retrieve previously stored attachment
     r"tampilkan.*dokumen|tampilkan.*file|tampilkan.*gambar|tampilkan.*lampiran|show.*attachment|ambil.*file|kirim.*file.*memori|kirim.*lampiran": {"memory_get_file", "memory_search"},
+    # Re-analyze stored attachment (user explicitly wants re-extraction)
+    r"baca.?ulang|analisa.?ulang|analisis.?ulang|re.?read|re.?analy[zs]e|cek.*kembali.*file|cek.*kembali.*dokumen|cek.*kembali.*gambar|lihat.*detail.*file|lihat.*lagi.*file": {"memory_analyze_file", "memory_search"},
     r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
     r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
     r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},

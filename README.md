@@ -239,8 +239,13 @@ A memory can have a **binary file attached** — image, PDF, document, anything 
 | Tool | Permission | Purpose |
 |---|---|---|
 | `memory_store_file` | 0o770 | Store memory + attached file in one call |
-| `memory_get_file` | 0o555 | Retrieve attached file, deliver as document |
+| `memory_get_file` | 0o555 | Retrieve attached file, deliver as document to user |
+| `memory_analyze_file` | 0o555 | Re-extract content for LLM analysis (PDF → text + vision OCR, Office → text, image → vision). User-triggered only. |
 | `memory_search` | 0o555 | Now indicates `📎` + filename/size per result |
+
+**Re-analysis vs Retrieve:**
+- `memory_get_file` — sends the file to user as a document. User-facing.
+- `memory_analyze_file` — re-reads the file and pipes the extracted content back to the LLM context. LLM-facing. Use when the original description isn't enough (e.g., *"cek tanggal di kontrak yang dulu kusimpan"* → LLM needs to re-read the PDF). Triggered only when the user explicitly asks for re-analysis, not on every recall.
 
 **Limits:** 50 MB per attachment (Telegram Bot API cap). Larger files get a friendly error suggesting `memory_store` (description only) instead.
 
@@ -259,6 +264,13 @@ Syne: Ada satu memori dengan lampiran:
 
 You:  Iya
 Syne: [sends kontrak.pdf as document]
+
+           [later that day]
+
+You:  Tanggal mulai sewanya kapan ya? Cek kontraknya
+Syne: [calls memory_analyze_file(42)]
+      Berdasarkan kontrak (PDF, 5 halaman): tanggal mulai sewa
+      adalah 1 Januari 2026, berakhir 31 Desember 2026.
 ```
 
 ### Memory Access Control
@@ -427,7 +439,7 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 ---
 
-## Core Tools (25)
+## Core Tools (26)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
@@ -448,7 +460,8 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 | `memory_search` | 555 | Semantic search over memories (Rule 760/765 filters by category) |
 | `memory_store` | 770 | Store new text memory |
 | `memory_store_file` | 770 | Store memory + binary file attachment (image, PDF, etc.) |
-| `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it |
+| `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it as document |
+| `memory_analyze_file` | 555 | Re-analyze a memory's attached file (PDF/Office text extract or image vision) — returns content to LLM, not media |
 | `memory_delete` | 700 | Delete memories (owner only) |
 | `manage_group` | 700 | Manage group chat settings |
 | `manage_user` | 700 | Manage user access levels |

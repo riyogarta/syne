@@ -981,6 +981,41 @@ class SyneAgent:
             permission=0o555,  # public can request if memory's category is Rule-765-allowed
         )
 
+        # Memory analyze file — re-extract / re-vision the stored blob and
+        # return the content directly to the LLM for analysis.
+        # User-triggered only ("baca ulang", "analisa ulang", "cek tanggal di").
+        self.tools.register(
+            name="memory_analyze_file",
+            description=(
+                "Re-analyze the file attached to a stored memory. "
+                "Use when the original description in the memory isn't enough — "
+                "user wants details that need re-reading the source file (specific dates, "
+                "numbers, text in images, page content, etc.). "
+                "Auto-detects MIME and routes to pdf / office / image_analysis ability. "
+                "Returns extracted text/description to the LLM, NOT to the user as media."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "integer",
+                        "description": "ID of the memory whose attached file should be analyzed",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": (
+                            "Optional analysis hint. For images, this guides vision "
+                            "(e.g. 'what's the date on the receipt?'). "
+                            "For PDF/Office, the entire content is extracted regardless of prompt."
+                        ),
+                    },
+                },
+                "required": ["memory_id"],
+            },
+            handler=self._tool_memory_analyze_file,
+            permission=0o555,  # same gate as get_file — Rule 760/765 controls actual access
+        )
+
 
         # Sub-agent spawn tool
         self.tools.register(
@@ -2136,6 +2171,128 @@ class SyneAgent:
         return (
             f"Retrieved file from memory #{memory_id} ({fname}, {size_str}).\n\n"
             f"MEDIA: {out_path}"
+        )
+
+    async def _tool_memory_analyze_file(self, memory_id: int, prompt: str = "") -> str:
+        """Tool handler: re-analyze a stored memory's attached file.
+
+        Routes to the right ability based on MIME:
+        - PDF → pdf.read_from_base64 (text + vision OCR for image pages)
+        - DOCX/XLSX/PPTX → office.read_*
+        - image/* → image_analysis (prompt-guided vision)
+
+        Returns extracted text/description directly to the LLM context —
+        NOT delivered as media to the user.
+        """
+        import base64 as _b64
+        from .db.connection import get_connection
+        from .security import check_rule_760
+
+        # Permission gate by memory category (same as get_file)
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT category FROM memory WHERE id = $1", memory_id,
+            )
+        if not row:
+            return f"Error: Memory #{memory_id} not found."
+
+        conv = self._get_active_conversation()
+        access = conv.user.get("access_level", "public") if conv else "public"
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+            access = conv.inbound.sender_access
+        allowed, reason = check_rule_760(row["category"] or "", access)
+        if not allowed:
+            return f"Error: {reason}"
+
+        blob = await self.memory.get_file(memory_id)
+        if not blob:
+            return f"Memory #{memory_id} has no attached file to analyze."
+
+        content_bytes = blob["content"]
+        mime = (blob.get("mime_type") or "").lower()
+        filename = (blob.get("filename") or "").lower()
+        b64 = _b64.b64encode(content_bytes).decode("ascii")
+
+        # Pick ability based on MIME / extension
+        def _ability(name):
+            if not self.abilities:
+                return None
+            reg = self.abilities.get(name)
+            return reg.instance if reg else None
+
+        # PDF
+        if mime == "application/pdf" or filename.endswith(".pdf"):
+            ab = _ability("pdf")
+            if not ab:
+                return "Error: 'pdf' ability not registered."
+            try:
+                result = await ab.execute(
+                    {"action": "read_from_base64", "pdf_base64": b64},
+                    {"session_id": str(getattr(conv, "session_id", "")) if conv else ""},
+                )
+            except Exception as e:
+                return f"PDF analysis failed: {e}"
+            if not result.get("success"):
+                return f"PDF analysis failed: {result.get('error', 'unknown')}"
+            r = result.get("result", {}) or {}
+            pages = r.get("page_count", "?")
+            text = r.get("text", "")
+            note = " (truncated)" if r.get("truncated") else ""
+            return f"PDF #{memory_id} content — {pages} pages{note}:\n\n{text}"
+
+        # Office documents
+        office_action = None
+        if "wordprocessingml" in mime or filename.endswith((".docx", ".doc")):
+            office_action = "read_docx"
+        elif "spreadsheetml" in mime or filename.endswith((".xlsx", ".xls")):
+            office_action = "read_xlsx"
+        elif "presentationml" in mime or filename.endswith((".pptx", ".ppt")):
+            office_action = "read_pptx"
+
+        if office_action:
+            ab = _ability("office")
+            if not ab:
+                return "Error: 'office' ability not registered."
+            try:
+                result = await ab.execute(
+                    {"action": office_action, "file_base64": b64},
+                    {"session_id": str(getattr(conv, "session_id", "")) if conv else ""},
+                )
+            except Exception as e:
+                return f"Office analysis failed: {e}"
+            if not result.get("success"):
+                return f"Office analysis failed: {result.get('error', 'unknown')}"
+            r = result.get("result", {}) or {}
+            text = r.get("text", "")
+            note = " (truncated)" if r.get("truncated") else ""
+            return f"Document #{memory_id} content{note}:\n\n{text}"
+
+        # Images
+        if mime.startswith("image/"):
+            ab = _ability("image_analysis")
+            if not ab:
+                return "Error: 'image_analysis' ability not registered."
+            analyze_prompt = prompt or "Describe this image in detail. If there is text, transcribe it."
+            try:
+                result = await ab.execute(
+                    {
+                        "image_base64": b64,
+                        "mime_type": mime or "image/jpeg",
+                        "prompt": analyze_prompt,
+                    },
+                    {"session_id": str(getattr(conv, "session_id", "")) if conv else ""},
+                )
+            except Exception as e:
+                return f"Image analysis failed: {e}"
+            if not result.get("success"):
+                return f"Image analysis failed: {result.get('error', 'unknown')}"
+            desc = result.get("result", "")
+            return f"Image #{memory_id} analysis:\n\n{desc}"
+
+        # Unknown type
+        return (
+            f"Memory #{memory_id} has a file ({mime or 'unknown type'}, "
+            f"{blob.get('filename') or 'unnamed'}) but no analyzer is available for this MIME type."
         )
 
     async def _tool_memory_delete(self, memory_ids: str) -> str:

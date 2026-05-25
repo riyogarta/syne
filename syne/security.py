@@ -47,6 +47,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "memory_store":    0o770,
     "memory_store_file": 0o770,
     "memory_get_file": 0o555,  # public can retrieve attachments in Rule-765-allowed categories
+    "memory_analyze_file": 0o555,  # same gate as get_file — Rule 760/765 enforces category access
     "memory_delete":   0o700,
     "manage_group":    0o700,
     "manage_user":     0o700,
