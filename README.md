@@ -221,6 +221,46 @@ This creates a natural selection: useful memories that keep getting recalled sur
 | **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
 | **Conversation history** | Compacted when long | No | Every message automatically | Full chat logs in `messages` table |
 
+### Memory File Attachments
+
+A memory can have a **binary file attached** — image, PDF, document, anything up to 50 MB. The file is stored as a BYTEA blob in the `memory_blobs` table, foreign-keyed to the memory row with `ON DELETE CASCADE`. The text description is embedded for semantic search; the file is preserved as-is for later retrieval.
+
+**Two use cases:**
+- **Image memories** — gambar yang tidak bisa direduksi jadi teks. Syne describes the image (via `image_analysis` ability), embeds the description, and stores the original image alongside.
+- **Source reference** — saat baca PDF/dokumen, simpan teks hasil ekstrak DAN file aslinya. User bisa minta dokumen asli kembali kapan saja.
+
+**Behavior:**
+- **Storage is explicit** — same as `memory_store`. Syne won't auto-attach files. User has to ask: *"simpan beserta filenya"* / *"save with the file"*.
+- **Retrieval is explicit** — `memory_search` results show a 📎 marker when attachment exists, but the file is NOT auto-sent. LLM tells the user "this memory has an attachment, want me to show it?". User confirms → Syne fetches the blob and sends.
+- **CASCADE on decay** — transient memories whose `recall_count` decays to 0 are deleted along with their attached blobs.
+
+**Tools:**
+
+| Tool | Permission | Purpose |
+|---|---|---|
+| `memory_store_file` | 0o770 | Store memory + attached file in one call |
+| `memory_get_file` | 0o555 | Retrieve attached file, deliver as document |
+| `memory_search` | 0o555 | Now indicates `📎` + filename/size per result |
+
+**Limits:** 50 MB per attachment (Telegram Bot API cap). Larger files get a friendly error suggesting `memory_store` (description only) instead.
+
+**Example flow:**
+
+```
+You:  [upload kontrak.pdf] simpan beserta filenya, ini kontrak sewa rumah 2026
+Syne: Stored (memory #42 with attachment kontrak.pdf, 1.2 MB).
+
+           [3 months later]
+
+You:  Cariin dokumen kontrak rumah
+Syne: Ada satu memori dengan lampiran:
+      - [fact] Kontrak sewa rumah 2026 📎 kontrak.pdf (1.2 MB)
+      Mau saya kirim filenya?
+
+You:  Iya
+Syne: [sends kontrak.pdf as document]
+```
+
 ### Memory Access Control
 
 Two security rules govern who can access memories:
@@ -387,7 +427,7 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 ---
 
-## Core Tools (23)
+## Core Tools (25)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
@@ -405,9 +445,11 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 | `manage_schedule` | 770 | Create/list/delete scheduled tasks |
 | `spawn_subagent` | 750 | Spawn background sub-agents |
 | `subagent_status` | 550 | Check sub-agent status |
-| `memory_search` | 550 | Semantic search over memories |
-| `memory_store` | 770 | Store new memories |
-| `memory_delete` | 700 | Delete memories |
+| `memory_search` | 555 | Semantic search over memories (Rule 760/765 filters by category) |
+| `memory_store` | 770 | Store new text memory |
+| `memory_store_file` | 770 | Store memory + binary file attachment (image, PDF, etc.) |
+| `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it |
+| `memory_delete` | 700 | Delete memories (owner only) |
 | `manage_group` | 700 | Manage group chat settings |
 | `manage_user` | 700 | Manage user access levels |
 | `update_config` | 700 | Change runtime configuration |
@@ -733,6 +775,7 @@ syne restore               # Restore from backup
 | `users` | Multi-user with access levels (owner/family/public/blocked) |
 | `groups` | Group chat configuration and member access |
 | `memory` | Semantic memory with pgvector embeddings |
+| `memory_blobs` | Binary file attachments for memories (CASCADE on memory delete) |
 | `sessions` | Conversation sessions |
 | `messages` | Full message history |
 | `capabilities` | Tool capability registry |
