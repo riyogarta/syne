@@ -203,6 +203,24 @@ class SyneAgent:
         except Exception as e:
             logger.error(f"Startup migration failed: {e}", exc_info=True)
 
+        # ── Versioned migrations (syne/db/migrations.py) ──
+        # Run AFTER schema.sql idempotent re-apply so the schema_version row
+        # exists in config table. Handles transformations that idempotent
+        # rerun can't safely express (backfill, rename, type change, etc.).
+        try:
+            from .db.migrations import run_migrations
+            async with get_connection() as conn:
+                result = await run_migrations(conn)
+            if result["applied"]:
+                logger.info(
+                    f"Versioned migrations applied: {result['applied']} "
+                    f"(now at v{result['final_version']})"
+                )
+            else:
+                logger.debug(f"Versioned migrations: up to date (v{result['final_version']})")
+        except Exception as e:
+            logger.error(f"Versioned migrations failed: {e}", exc_info=True)
+
     async def stop(self):
         """Stop the agent gracefully."""
         self._running = False
@@ -1818,11 +1836,27 @@ class SyneAgent:
             return "Error: ability name is required."
 
         if action == "create":
+            # Self-modification guard — OFF by default.
+            # Closes the creation vector: stranger → prompt injection →
+            # update_ability(action='create') → arbitrary code in custom/.
+            # Existing custom abilities still run; this flag only blocks NEW ones.
+            from .db.models import get_config
+            self_mod_enabled = await get_config("abilities.self_modification_enabled", False)
+            if not self_mod_enabled:
+                return (
+                    "Self-modification is disabled. To allow creating new abilities, "
+                    "the owner must explicitly enable it:\n"
+                    "  update_config(key='abilities.self_modification_enabled', value='true')\n"
+                    "This flag closes the creation vector. Existing custom abilities are "
+                    "unaffected — use update_ability(action='disable', name='X') to "
+                    "deactivate them individually if needed."
+                )
+
             if not module_path:
                 module_path = f"syne.abilities.{name}"
             if not description:
                 description = f"Self-created ability: {name}"
-            
+
             from .abilities.loader import register_dynamic_ability
             error = await register_dynamic_ability(
                 registry=self.abilities,

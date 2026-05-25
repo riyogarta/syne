@@ -1,27 +1,37 @@
 # Syne 🧠
 
-**AI Agent Framework with Unlimited Memory**
+**Self-hosted personal AI assistant on Telegram with persistent long-term memory.**
 
-*"I remember, therefore I am"*
+Runs on your own server. Stores everything in your own PostgreSQL. Near-zero API cost when paired with free OAuth providers or local Ollama. Designed for the case where you want an assistant that *remembers across sessions*, not a fresh chat each time.
 
-Named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), the Greek goddess of memory and mother of the Muses.
-
-Syne is a standalone, open-source AI agent framework built in Python. It features **PostgreSQL-native memory** with semantic search, an **ability-based architecture** for extensibility, and **self-evolution** capabilities where the agent can create new abilities for itself.
+*"I remember, therefore I am"* — named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), Greek goddess of memory.
 
 ---
 
-## Why Syne?
+## What Syne actually is
 
-Most AI assistants forget everything between sessions. They have no persistent memory, no learning, no growth. Syne is different:
+A Telegram bot you self-host. You chat with it. It remembers what you tell it to remember, across days, weeks, restarts. Built around:
 
-- **Unlimited memory** — Semantic search over millions of memories using pgvector + knowledge graph for entity-relation traversal
-- **Anti-hallucination** — 3-layer defense ensures only user-confirmed facts are stored
-- **Self-evolving** — Syne can create new abilities for itself (with your permission)
-- **No runtime config files** — No SOUL.md or CONFIG.yaml. All runtime behavior lives in PostgreSQL, changed through conversation
-- **Near-zero cost** — Chat via Google Gemini OAuth (free). Embedding + memory evaluator via Ollama (local, $0). Entire stack can run at $0/month
-- **Linux-style permissions** — 3-digit octal permissions (owner/family/public) for every tool and ability
-- **Interactive CLI** — Terminal-based chat with persistent memory and tools
-- **Remote nodes** — Extend Syne to multiple machines via WebSocket. Each node has its own CLI (`syne cli`), one shared memory for all, controlled from one Telegram bot
+- **Persistent long-term memory** — semantic search via pgvector + a small knowledge graph for entity-relation queries. Subject to decay (non-permanent memories fade with disuse) and conflict resolution (newer, higher-source-priority entries win).
+- **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
+- **Multi-tier permissions** — owner / family / public with Linux-style 3-digit octal per tool. Public users by default get nothing from memory unless you explicitly open specific categories (Rule 765).
+- **Runtime configuration in PostgreSQL** — no `SOUL.md` or `CONFIG.yaml`. Identity, behavior, rules, and config all live in tables, changeable through conversation.
+- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google / OpenAI / Together / Vertex / Codex — paid API keys for resilience, OAuth options as bonus for personal use.
+
+## Advanced capabilities (opt-in)
+
+Beyond the core assistant, Syne ships with optional extensions. They live in `syne/abilities/` and can be enabled/disabled per install:
+
+- **Document I/O** — read & create PDF, Word, Excel, PowerPoint
+- **Image generation & vision OCR** — via Vertex Imagen / Together FLUX / OpenAI DALL-E for generation; Vertex Gemini / Ollama vision for analysis
+- **Memory file attachments** — store images, PDFs, voice notes alongside their description; retrieve or re-analyze on demand (up to 50 MB per blob)
+- **Voice in & out** — Groq Whisper STT for inbound voice notes, Edge TTS for outbound voice messages
+- **Remote nodes** — extend Syne across multiple machines via WebSocket gateway
+- **Sub-agents** — spawn background workers for parallel tasks
+- **Self-modification** — the LLM can write new abilities (off by default, see [SECURITY.md](SECURITY.md))
+- **Maps, screenshots, WhatsApp bridge, and more**
+
+These are deliberately separate from the core. The headline use case is chat + memory; everything else is plumbing you can ignore until you need it.
 
 ---
 
@@ -743,7 +753,7 @@ syne restore               # Restore from backup
 |  |  [Graph]  [Gateway]                                  |  |
 |  |  (KG)    (remote)                                    |  |
 |  |                                                      |  |
-|  |  Core Tools (23):                                    |  |
+|  |  Core Tools (26):                                    |  |
 |  |  exec · db_query · memory · web · config · files     |  |
 |  |  send · schedule · reactions · voice · subagent      |  |
 |  +------------------------------------------------------+  |
@@ -766,7 +776,7 @@ syne restore               # Restore from backup
 |                                                            |
 |  +------------------------------------------------------+  |
 |  |              PostgreSQL + pgvector                   |  |
-|  |  17 tables — all state in one database              |  |
+|  |  18 tables — all state in one database              |  |
 |  |  memory · sessions · messages · config · abilities   |  |
 |  |  users · groups · identity · soul · capabilities     |  |
 |  |  rules · scheduled_tasks · subagent_runs             |  |
@@ -860,12 +870,13 @@ syne/
 │   │   ├── engine.py        # Store, recall, decay, dedup, conflict resolution
 │   │   ├── evaluator.py     # Auto-evaluate (3-layer filter)
 │   │   └── graph.py         # Knowledge graph extraction, storage, recall
-│   ├── tools/               # 23 core tools
+│   ├── tools/               # 26 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   │   ├── custom/          # User-created abilities (only writable dir)
 │   │   └── ...              # 7 bundled abilities (image_gen, image_analysis, maps, pdf, office, website_screenshot, whatsapp)
 │   ├── db/
-│   │   ├── schema.sql       # Database schema (17 tables)
+│   │   ├── schema.sql       # Database schema (18 tables)
+│   │   ├── migrations.py    # Versioned schema migrations
 │   │   ├── connection.py    # Async connection pool (asyncpg)
 │   │   ├── models.py        # Data access layer
 │   │   └── credentials.py   # Encrypted credential storage

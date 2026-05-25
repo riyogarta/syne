@@ -359,6 +359,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
+    ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),

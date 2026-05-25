@@ -1,0 +1,189 @@
+"""Versioned schema migrations.
+
+Complements the idempotent `schema.sql` (fresh-install path) with a
+single integer `schema_version` in the `config` table plus an ordered
+list of migration steps for data transformations that idempotent rerun
+can't safely express: backfill, rename, type change, ADD NOT NULL to
+populated tables, etc.
+
+Architecture:
+    schema.sql       — fresh install builds full current schema
+    MIGRATIONS list  — ordered (target_version, migration_fn, mode) tuples
+    runner           — at startup, advisory-locked, runs migrations whose
+                       target_version > current; bumps version after each
+
+Modes:
+    "transactional"     — migration_fn runs inside conn.transaction().
+                          DDL + small data ops. Crash → atomic rollback.
+                          version only bumped on commit.
+    "non_transactional" — for CREATE INDEX CONCURRENTLY, large batched
+                          backfills, etc. MUST be self-resumable (use
+                          marker columns or WHERE-clause filters that
+                          skip already-migrated rows). Caller responsible
+                          for atomicity.
+
+CRITICAL invariant — dual-path parity:
+    schema.sql (current) MUST produce a DB equivalent to:
+        schema.sql (release N) + all MIGRATIONS where target_version > N
+    A CI parity test enforces this. When you add a migration here, you
+    MUST also update schema.sql to reflect the new state.
+
+Adding a migration:
+    1. Append a tuple to MIGRATIONS with the next sequential version
+    2. Update schema.sql to include the new structure (fresh-install path)
+    3. Run the parity test to confirm both paths converge
+    4. Bump CURRENT_SCHEMA_VERSION below
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Callable, Awaitable
+
+logger = logging.getLogger("syne.db.migrations")
+
+
+# Advisory lock key — stable constant. Multiple Syne processes share this
+# so concurrent boots don't race on the migration runner. Pick any int.
+ADVISORY_LOCK_KEY = 0x53594E_45  # 'SYNE' in hex
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Migration functions
+# ─────────────────────────────────────────────────────────────────────────
+# Each takes an asyncpg connection. Transactional ones can assume they
+# run inside a BEGIN; non-transactional ones manage their own atomicity.
+
+
+# (No migrations yet — schema.sql is the source of truth for current state.
+# Future migrations get appended here as (version, fn, mode) tuples.)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Ordered migration list
+# ─────────────────────────────────────────────────────────────────────────
+# Format: (target_version, migration_fn, mode)
+#   mode ∈ {"transactional", "non_transactional"}
+
+MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
+    # (1, _example_migration, "transactional"),
+]
+
+
+# Current schema version. Equal to the last entry in MIGRATIONS (or 0
+# if no migrations exist yet). Fresh installs are seeded to this value
+# so they skip the entire MIGRATIONS list — they already match the
+# current state via schema.sql.
+CURRENT_SCHEMA_VERSION = MIGRATIONS[-1][0] if MIGRATIONS else 0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Runner
+# ─────────────────────────────────────────────────────────────────────────
+
+
+async def run_migrations(conn) -> dict:
+    """Run pending migrations against the live database.
+
+    Args:
+        conn: asyncpg connection (single, not pool — we hold the advisory
+              lock for the duration of the run).
+
+    Returns:
+        dict with 'applied' (list of versions) and 'final_version' (int).
+
+    Behavior:
+        - Acquires session-scoped advisory lock so concurrent boots wait.
+        - Reads `schema_version` from config table (default 0).
+        - For each (target, fn, mode) where target > current:
+            * "transactional" → run fn + version bump in one transaction
+            * "non_transactional" → run fn directly, bump version after
+        - Releases lock at end.
+
+    On a fresh install where `schema_version` doesn't exist yet, we
+    seed it to CURRENT_SCHEMA_VERSION (skipping all migrations) because
+    schema.sql already produced the latest state. This is detected by
+    checking if the row was just inserted vs read.
+    """
+    # Acquire lock first — any other process trying to migrate waits here.
+    await conn.execute("SELECT pg_advisory_lock($1)", ADVISORY_LOCK_KEY)
+    applied: list[int] = []
+    try:
+        # Read or initialize schema_version
+        current = await _get_or_init_schema_version(conn)
+
+        if not MIGRATIONS:
+            logger.debug(f"No migrations defined. Current version: {current}.")
+            return {"applied": [], "final_version": current}
+
+        for target_version, migration_fn, mode in MIGRATIONS:
+            if target_version <= current:
+                continue
+
+            logger.info(f"Running migration → v{target_version} (mode={mode})")
+
+            if mode == "transactional":
+                async with conn.transaction():
+                    await migration_fn(conn)
+                    await conn.execute(
+                        "UPDATE config SET value = $1::text::jsonb, updated_at = NOW() "
+                        "WHERE key = 'schema_version'",
+                        str(target_version),
+                    )
+            elif mode == "non_transactional":
+                # Migration manages its own atomicity. We only bump version
+                # after it returns successfully. If it crashes mid-way, the
+                # next boot re-runs it — it MUST be idempotent/resumable.
+                await migration_fn(conn)
+                await conn.execute(
+                    "UPDATE config SET value = $1::text::jsonb, updated_at = NOW() "
+                    "WHERE key = 'schema_version'",
+                    str(target_version),
+                )
+            else:
+                raise ValueError(f"Unknown migration mode: {mode!r}")
+
+            applied.append(target_version)
+            current = target_version
+            logger.info(f"Migration to v{target_version} complete.")
+
+        return {"applied": applied, "final_version": current}
+    finally:
+        await conn.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_KEY)
+
+
+async def _get_or_init_schema_version(conn) -> int:
+    """Read schema_version from config; seed it on fresh installs.
+
+    A fresh install just ran schema.sql which already produced the latest
+    state. So if no schema_version row exists, seed it to CURRENT — never
+    re-run all historical migrations on a fresh DB.
+    """
+    row = await conn.fetchrow(
+        "SELECT value FROM config WHERE key = 'schema_version'"
+    )
+    if row is None:
+        # Fresh install (or pre-versioning DB). Seed to current.
+        # Use INSERT ... ON CONFLICT in case another process beat us
+        # between the SELECT and INSERT (rare, but advisory lock should
+        # prevent it — defensive anyway).
+        await conn.execute(
+            """
+            INSERT INTO config (key, value, description)
+            VALUES ('schema_version', $1::text::jsonb,
+                    'Schema migration version — bumped by syne/db/migrations.py')
+            ON CONFLICT (key) DO NOTHING
+            """,
+            str(CURRENT_SCHEMA_VERSION),
+        )
+        logger.info(f"Seeded schema_version = {CURRENT_SCHEMA_VERSION} (fresh install)")
+        return CURRENT_SCHEMA_VERSION
+
+    # Parse — value is jsonb, asyncpg returns str
+    import json
+    raw = row["value"]
+    try:
+        return int(json.loads(raw)) if isinstance(raw, str) else int(raw)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        logger.warning(f"Unparseable schema_version: {raw!r}, treating as 0")
+        return 0

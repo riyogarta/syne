@@ -871,6 +871,29 @@ def _run_schema_migration(syne_dir: str):
     except Exception as e:
         console.print(f"[yellow]⚠️ Schema migration: {e}[/yellow]")
 
+    # Versioned migrations (data transformations the idempotent re-apply
+    # above can't express — backfill, rename, type change, ADD NOT NULL).
+    async def _versioned():
+        import asyncpg
+        from syne.db.migrations import run_migrations
+        conn = await asyncpg.connect(db_url)
+        try:
+            return await run_migrations(conn)
+        finally:
+            await conn.close()
+
+    try:
+        result = asyncio.run(_versioned())
+        if result["applied"]:
+            console.print(
+                f"[green]✅ Versioned migrations applied: {result['applied']} "
+                f"(now at v{result['final_version']})[/green]"
+            )
+        else:
+            console.print(f"[dim]  Versioned migrations: up to date (v{result['final_version']})[/dim]")
+    except Exception as e:
+        console.print(f"[yellow]⚠️ Versioned migration: {e}[/yellow]")
+
     # Ensure vector index after schema migration
     _ensure_vector_index(syne_dir)
 
