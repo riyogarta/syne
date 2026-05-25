@@ -34,13 +34,18 @@ _TOOL_SIGNALS = {
     r"baca|read|buka|open|tulis|write|simpan|save|\bfile\b": {"file_read", "file_write"},
     r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"exec"},
     r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
-    r"ingat|remember|catat|store|hafal|note|\bsimpan\b": {"memory_store"},
-    # Memory + file attachment — broader triggers for "simpan beserta filenya" use case
-    r"simpan.*file|simpan.*dokumen|simpan.*gambar|simpan.*pdf|attach|lampirkan|beserta.*file": {"memory_store_file"},
-    # Retrieve previously stored attachment
-    r"tampilkan.*dokumen|tampilkan.*file|tampilkan.*gambar|tampilkan.*lampiran|show.*attachment|ambil.*file|kirim.*file.*memori|kirim.*lampiran": {"memory_get_file", "memory_search"},
-    # Re-analyze stored attachment (user explicitly wants re-extraction)
-    r"baca.?ulang|analisa.?ulang|analisis.?ulang|re.?read|re.?analy[zs]e|cek.*kembali.*file|cek.*kembali.*dokumen|cek.*kembali.*gambar|lihat.*detail.*file|lihat.*lagi.*file": {"memory_analyze_file", "memory_search"},
+    # Memory store — piggyback memory_store_file too so LLM has both options.
+    # LLM picks text-only vs text+blob based on whether file is in metadata.
+    # Adding memory_store_file always when "simpan" matches is cheap (small
+    # extra schema), missing it is bad UX (user can't save attachments when
+    # they say "simpan ini").
+    r"ingat|remember|catat|store|hafal|note|\bsimpan\b": {"memory_store", "memory_store_file"},
+    # Retrieve previously stored attachment — natural phrasings included.
+    # \bfilenya\b catches "filenya?", "kirim filenya", "mana filenya".
+    # memory_search piggybacks because the LLM needs to find the right memory_id first.
+    r"tampilkan.*dokumen|tampilkan.*file|tampilkan.*gambar|tampilkan.*lampiran|show.*attachment|ambil.*file|kirim.*file.*memori|kirim.*lampiran|\bfilenya\b|mana.*file|file.*memori|unduh.*file|download.*file": {"memory_get_file", "memory_search"},
+    # Re-analyze stored attachment — natural phrasings: "cek di file X", "buka file dari memori", "isi file".
+    r"baca.?ulang|analisa.?ulang|analisis.?ulang|re.?read|re.?analy[zs]e|cek.*kembali.*file|cek.*kembali.*dokumen|cek.*kembali.*gambar|lihat.*detail.*file|lihat.*lagi.*file|cek.*di.*file|buka.*file.*memori|isi.*file": {"memory_analyze_file", "memory_search"},
     r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
     r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
     r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
@@ -111,14 +116,17 @@ def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = N
         if _re.search(pattern, msg_lower):
             needed.update(tools)
 
-    # Auto-detect media type from metadata
+    # Auto-detect media type from metadata.
+    # When the user uploads a file in this turn, memory_store_file is ALWAYS
+    # included — they may want to save it without explicitly saying "simpan
+    # beserta filenya". LLM still decides whether to call it based on intent.
     if metadata:
         if metadata.get("image"):
-            needed.update({"image_gen", "image_analysis"})
+            needed.update({"image_gen", "image_analysis", "memory_store_file"})
         if metadata.get("audio") or metadata.get("voice"):
-            needed.update({"send_voice"})
+            needed.update({"send_voice", "memory_store_file"})
         if metadata.get("document"):
-            needed.update({"file_read", "file_write", "send_file"})
+            needed.update({"file_read", "file_write", "send_file", "memory_store_file"})
 
     # Filter schemas — keep tools whose name is in needed set
     result = []
