@@ -101,7 +101,8 @@ class MemoryEngine:
         vector = embedding_resp.vector
 
         async with get_connection() as conn:
-            # Build query with optional filters
+            # Build query with optional filters. All columns prefixed with m. so
+            # that the LEFT JOIN to memory_blobs (alias b) doesn't conflict.
             conditions = ["1 = 1"]
             params = [str(vector), limit]
             param_idx = 3
@@ -110,32 +111,39 @@ class MemoryEngine:
             _cats = categories if categories else ([category] if category else None)
             if _cats:
                 if len(_cats) == 1:
-                    conditions.append(f"category = ${param_idx}")
+                    conditions.append(f"m.category = ${param_idx}")
                     params.append(_cats[0])
                 else:
-                    conditions.append(f"category = ANY(${param_idx})")
+                    conditions.append(f"m.category = ANY(${param_idx})")
                     params.append(_cats)
                 param_idx += 1
 
             if user_id is not None:
-                conditions.append(f"(user_id = ${param_idx} OR user_id IS NULL)")
+                conditions.append(f"(m.user_id = ${param_idx} OR m.user_id IS NULL)")
                 params.append(user_id)
                 param_idx += 1
 
             where = " AND ".join(conditions)
 
+            # LEFT JOIN memory_blobs is cheap (only metadata, no BYTEA content)
+            # so semantic search reveals which results have attachments.
             rows = await conn.fetch(f"""
                 SELECT
-                    id, content, category, source, importance,
-                    access_count, created_at,
-                    COALESCE(permanent, false) as permanent,
-                    COALESCE(recall_count, 1) as recall_count,
-                    1 - (embedding <=> $1::vector) as similarity
-                FROM memory
+                    m.id, m.content, m.category, m.source, m.importance,
+                    m.access_count, m.created_at,
+                    COALESCE(m.permanent, false) as permanent,
+                    COALESCE(m.recall_count, 1) as recall_count,
+                    1 - (m.embedding <=> $1::vector) as similarity,
+                    (b.memory_id IS NOT NULL) AS has_attachment,
+                    b.filename AS attachment_filename,
+                    b.mime_type AS attachment_mime,
+                    b.size_bytes AS attachment_size
+                FROM memory m
+                LEFT JOIN memory_blobs b ON b.memory_id = m.id
                 WHERE {where}
-                  AND embedding IS NOT NULL
-                  AND (COALESCE(permanent, false) = true OR COALESCE(recall_count, 1) > 0)
-                ORDER BY embedding <=> $1::vector
+                  AND m.embedding IS NOT NULL
+                  AND (COALESCE(m.permanent, false) = true OR COALESCE(m.recall_count, 1) > 0)
+                ORDER BY m.embedding <=> $1::vector
                 LIMIT $2
             """, *params)
 
@@ -448,6 +456,87 @@ class MemoryEngine:
         """Delete a memory by ID."""
         async with get_connection() as conn:
             await conn.execute("DELETE FROM memory WHERE id = $1", memory_id)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Binary attachments — memory_blobs table
+    # ─────────────────────────────────────────────────────────────────────
+
+    # 50 MB limit per blob (matches Telegram bot API cap).
+    MAX_BLOB_BYTES = 50 * 1024 * 1024
+
+    async def attach_file(
+        self,
+        memory_id: int,
+        content: bytes,
+        mime_type: str = "application/octet-stream",
+        filename: str = "",
+    ) -> None:
+        """Attach a binary file to an existing memory.
+
+        Raises ValueError if file too large or memory_id doesn't exist.
+        Overwrites any existing blob for the same memory_id.
+        """
+        if not isinstance(content, (bytes, bytearray)):
+            raise ValueError("content must be bytes")
+        size = len(content)
+        if size == 0:
+            raise ValueError("content is empty")
+        if size > self.MAX_BLOB_BYTES:
+            mb = size / 1024 / 1024
+            limit_mb = self.MAX_BLOB_BYTES / 1024 / 1024
+            raise ValueError(
+                f"File too large ({mb:.1f} MB). Maximum is {limit_mb:.0f} MB per attachment."
+            )
+
+        async with get_connection() as conn:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM memory WHERE id = $1", memory_id,
+            )
+            if not exists:
+                raise ValueError(f"Memory #{memory_id} not found")
+            await conn.execute(
+                """
+                INSERT INTO memory_blobs (memory_id, mime_type, filename, size_bytes, content)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (memory_id) DO UPDATE
+                SET mime_type = EXCLUDED.mime_type,
+                    filename = EXCLUDED.filename,
+                    size_bytes = EXCLUDED.size_bytes,
+                    content = EXCLUDED.content,
+                    created_at = NOW()
+                """,
+                memory_id, mime_type, filename, size, bytes(content),
+            )
+
+    async def get_file(self, memory_id: int) -> Optional[dict]:
+        """Retrieve attachment for a memory.
+
+        Returns dict {filename, mime_type, size_bytes, content} or None if no blob.
+        """
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT filename, mime_type, size_bytes, content
+                FROM memory_blobs
+                WHERE memory_id = $1
+                """,
+                memory_id,
+            )
+        if not row:
+            return None
+        return {
+            "filename": row["filename"],
+            "mime_type": row["mime_type"],
+            "size_bytes": row["size_bytes"],
+            "content": bytes(row["content"]),
+        }
+
+    async def has_file(self, memory_id: int) -> bool:
+        """Quick check if a memory has an attached blob."""
+        async with get_connection() as conn:
+            return bool(await conn.fetchval(
+                "SELECT 1 FROM memory_blobs WHERE memory_id = $1", memory_id,
+            ))
 
     async def count(self) -> int:
         """Get total memory count."""

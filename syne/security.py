@@ -45,6 +45,8 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "subagent_status": 0o550,
     "memory_search":   0o555,  # public can search allowed categories (Rule 765)
     "memory_store":    0o770,
+    "memory_store_file": 0o770,
+    "memory_get_file": 0o555,  # public can retrieve attachments in Rule-765-allowed categories
     "memory_delete":   0o700,
     "manage_group":    0o700,
     "manage_user":     0o700,

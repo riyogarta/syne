@@ -35,6 +35,10 @@ _TOOL_SIGNALS = {
     r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"exec"},
     r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
     r"ingat|remember|catat|store|hafal|note|\bsimpan\b": {"memory_store"},
+    # Memory + file attachment — broader triggers for "simpan beserta filenya" use case
+    r"simpan.*file|simpan.*dokumen|simpan.*gambar|simpan.*pdf|attach|lampirkan|beserta.*file": {"memory_store_file"},
+    # Retrieve previously stored attachment
+    r"tampilkan.*dokumen|tampilkan.*file|tampilkan.*gambar|tampilkan.*lampiran|show.*attachment|ambil.*file|kirim.*file.*memori|kirim.*lampiran": {"memory_get_file", "memory_search"},
     r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
     r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
     r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
@@ -1154,6 +1158,22 @@ class Conversation:
                     return await self._execute_tool_on_node(node_conn, t_name, t_args)
 
                 if self.tools.get(t_name):
+                    # Auto-inject file content for memory_store_file when user
+                    # uploaded a file in this turn. LLM can call with just
+                    # content+category; we fill file_base64/filename/mime_type
+                    # from the message metadata.
+                    if t_name == "memory_store_file":
+                        meta = self._message_metadata or {}
+                        if not t_args.get("file_base64") and not t_args.get("file_path"):
+                            for key in ("document", "image"):
+                                src = meta.get(key)
+                                if isinstance(src, dict) and src.get("base64"):
+                                    t_args["file_base64"] = src["base64"]
+                                    if not t_args.get("filename"):
+                                        t_args["filename"] = src.get("filename") or ""
+                                    if not t_args.get("mime_type"):
+                                        t_args["mime_type"] = src.get("mime_type") or ""
+                                    break
                     return await self.tools.execute(
                         t_name, t_args, access_level,
                         scheduled=is_scheduled,

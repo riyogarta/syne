@@ -902,6 +902,85 @@ class SyneAgent:
             permission=0o700,
         )
 
+        # Memory store WITH FILE — text memory + binary attachment in one go.
+        # Use when the user explicitly asks to save a file (image/PDF/document)
+        # along with its description. The description is embedded for semantic
+        # search; the file is stored as a BYTEA blob in memory_blobs and can be
+        # retrieved later via memory_get_file.
+        self.tools.register(
+            name="memory_store_file",
+            description=(
+                "Store a memory together with the attached file (image, PDF, etc.). "
+                "Use ONLY when the user explicitly asks to save the file (not just its content). "
+                "The 'content' becomes the searchable description; the file is preserved as-is."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "Description of the file — what it contains, why it's worth remembering. "
+                            "This text is embedded for semantic search."
+                        ),
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["fact", "preference", "event", "lesson", "decision"],
+                        "description": "Memory category",
+                    },
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute or relative path to the file to attach. "
+                            "Either file_path OR file_base64 must be provided."
+                        ),
+                    },
+                    "file_base64": {
+                        "type": "string",
+                        "description": (
+                            "Base64-encoded file content (alternative to file_path). "
+                            "Used when the file is in metadata, not on disk."
+                        ),
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Original filename (used when retrieving the file later)",
+                    },
+                    "mime_type": {
+                        "type": "string",
+                        "description": "MIME type (e.g., 'application/pdf', 'image/jpeg'). Auto-detected if omitted.",
+                    },
+                },
+                "required": ["content", "category"],
+            },
+            handler=self._tool_memory_store_file,
+            permission=0o770,
+        )
+
+        # Memory get file — retrieve an attached blob and deliver it.
+        # Returns a MEDIA: protocol string so the channel sends it as a file.
+        self.tools.register(
+            name="memory_get_file",
+            description=(
+                "Retrieve the file attached to a stored memory and send it to the chat. "
+                "Use when the user explicitly asks to see/show/download the file from a memory "
+                "(memory_search results indicate which memories have attachments with 📎)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "integer",
+                        "description": "ID of the memory whose attached file should be retrieved",
+                    },
+                },
+                "required": ["memory_id"],
+            },
+            handler=self._tool_memory_get_file,
+            permission=0o555,  # public can request if memory's category is Rule-765-allowed
+        )
+
 
         # Sub-agent spawn tool
         self.tools.register(
@@ -1870,7 +1949,17 @@ class SyneAgent:
         lines = []
         for mem in results:
             score = f"{mem['similarity']:.0%}"
-            lines.append(f"- [{mem['category']}] {mem['content']} (relevance: {score})")
+            attach = ""
+            if mem.get("has_attachment"):
+                fname = mem.get("attachment_filename") or "file"
+                mime = mem.get("attachment_mime") or "?"
+                size = mem.get("attachment_size") or 0
+                size_kb = size / 1024
+                size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+                attach = f" 📎 [id={mem['id']} attachment: {fname} {mime} {size_str} — use memory_get_file to retrieve]"
+            lines.append(
+                f"- [id={mem['id']}] [{mem['category']}] {mem['content']} (relevance: {score}){attach}"
+            )
         return "\n".join(lines)
 
     async def _tool_memory_store(self, content: str, category: str = "fact") -> str:
@@ -1891,6 +1980,163 @@ class SyneAgent:
                 logger.debug(f"KG extraction skipped: {e}")
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
+
+    async def _tool_memory_store_file(
+        self,
+        content: str,
+        category: str = "fact",
+        file_path: str = "",
+        file_base64: str = "",
+        filename: str = "",
+        mime_type: str = "",
+    ) -> str:
+        """Tool handler: store memory + attach binary file.
+
+        The text 'content' is embedded for semantic search; the file becomes
+        a blob in memory_blobs (CASCADE-deleted with the memory).
+        """
+        import os as _os
+        import base64 as _b64
+        import mimetypes
+
+        # Resolve file bytes
+        file_bytes: bytes = b""
+        resolved_name = filename or ""
+        resolved_mime = mime_type or ""
+
+        if file_path:
+            path = _os.path.expanduser(file_path)
+            if not _os.path.isabs(path):
+                path = _os.path.join(_os.getcwd(), path)
+            if not _os.path.isfile(path):
+                return f"Error: File not found: {file_path}"
+            with open(path, "rb") as f:
+                file_bytes = f.read()
+            if not resolved_name:
+                resolved_name = _os.path.basename(path)
+            if not resolved_mime:
+                resolved_mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        elif file_base64:
+            try:
+                file_bytes = _b64.b64decode(file_base64)
+            except Exception as e:
+                return f"Error: invalid base64: {e}"
+            if not resolved_mime and resolved_name:
+                resolved_mime = mimetypes.guess_type(resolved_name)[0] or "application/octet-stream"
+            if not resolved_mime:
+                resolved_mime = "application/octet-stream"
+        else:
+            return "Error: either file_path or file_base64 must be provided."
+
+        # Size guard with friendly message
+        size = len(file_bytes)
+        if size == 0:
+            return "Error: file is empty."
+        if size > self.memory.MAX_BLOB_BYTES:
+            mb = size / 1024 / 1024
+            limit_mb = self.memory.MAX_BLOB_BYTES / 1024 / 1024
+            return (
+                f"Error: file too large ({mb:.1f} MB). Maximum is {limit_mb:.0f} MB per attachment. "
+                f"Tip: store only the description without attaching the file (use memory_store instead)."
+            )
+
+        # Store memory (text + embedding) as permanent
+        mem_id = await self.memory.store_if_new(
+            content=content,
+            category=category,
+            source="user_confirmed",
+            permanent=True,
+        )
+        if not mem_id:
+            return "Similar memory already exists. Use memory_search + memory_delete first to replace."
+
+        # Attach the blob
+        try:
+            await self.memory.attach_file(
+                mem_id,
+                content=file_bytes,
+                mime_type=resolved_mime,
+                filename=resolved_name or f"memory_{mem_id}.bin",
+            )
+        except ValueError as e:
+            # Rollback the memory row to keep state consistent
+            try:
+                await self.memory.delete(mem_id)
+            except Exception:
+                pass
+            return f"Error attaching file: {e}"
+
+        # Trigger KG extraction (same as memory_store)
+        try:
+            import asyncio
+            from .memory.graph import extract_and_store as graph_extract
+            asyncio.create_task(graph_extract(self.provider, content, mem_id))
+        except Exception as e:
+            logger.debug(f"KG extraction skipped: {e}")
+
+        size_kb = size / 1024
+        size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        return (
+            f"Memory stored with attachment (id: {mem_id}, "
+            f"file: {resolved_name}, {resolved_mime}, {size_str})."
+        )
+
+    async def _tool_memory_get_file(self, memory_id: int) -> str:
+        """Tool handler: retrieve a memory's attached file as MEDIA: path.
+
+        Permission check via Rule 760/765 — public users can only retrieve
+        attachments from memories in the allowed public categories.
+        """
+        import os as _os
+        import tempfile
+
+        from .db.connection import get_connection
+        from .security import check_rule_760
+
+        # Permission gate by memory category
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT category FROM memory WHERE id = $1", memory_id,
+            )
+        if not row:
+            return f"Error: Memory #{memory_id} not found."
+
+        conv = self._get_active_conversation()
+        access = conv.user.get("access_level", "public") if conv else "public"
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+            access = conv.inbound.sender_access
+        allowed, reason = check_rule_760(row["category"] or "", access)
+        if not allowed:
+            return f"Error: {reason}"
+
+        # Fetch blob
+        blob = await self.memory.get_file(memory_id)
+        if not blob:
+            return f"Memory #{memory_id} has no attached file."
+
+        # Write to workspace/temp/ so the channel can pick it up via MEDIA:
+        workspace_outputs = getattr(self, "workspace_outputs", None) or _os.path.join(
+            _os.getcwd(), "workspace", "outputs",
+        )
+        temp_dir = _os.path.join(_os.path.dirname(workspace_outputs), "temp")
+        _os.makedirs(temp_dir, exist_ok=True)
+
+        # Use original filename for nicer display, prefix with memory id for uniqueness
+        fname = blob.get("filename") or f"memory_{memory_id}.bin"
+        # Sanitize
+        import re as _re
+        safe = _re.sub(r"[^a-zA-Z0-9._-]+", "_", fname)[:120] or f"memory_{memory_id}"
+        out_path = _os.path.join(temp_dir, f"mem{memory_id}_{safe}")
+        with open(out_path, "wb") as f:
+            f.write(blob["content"])
+
+        size = blob["size_bytes"] or len(blob["content"])
+        size_kb = size / 1024
+        size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+        return (
+            f"Retrieved file from memory #{memory_id} ({fname}, {size_str}).\n\n"
+            f"MEDIA: {out_path}"
+        )
 
     async def _tool_memory_delete(self, memory_ids: str) -> str:
         """Tool handler: delete memory entries by ID."""

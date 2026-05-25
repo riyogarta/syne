@@ -708,6 +708,22 @@ CREATE INDEX IF NOT EXISTS idx_kg_relations_subject ON kg_relations (subject_id)
 CREATE INDEX IF NOT EXISTS idx_kg_relations_object ON kg_relations (object_id);
 CREATE INDEX IF NOT EXISTS idx_kg_relations_predicate ON kg_relations (predicate);
 
+-- ============================================================
+-- MEMORY BLOBS: Binary attachments stored in DB
+-- ============================================================
+-- One blob per memory row. Lazy-loaded — never SELECTed during recall.
+-- CASCADE on memory delete (including transient decay → 0).
+CREATE TABLE IF NOT EXISTS memory_blobs (
+    memory_id INT PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE,
+    mime_type VARCHAR(100),
+    filename VARCHAR(255),
+    size_bytes INT,
+    content BYTEA NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_blobs_mime ON memory_blobs (mime_type);
+
 -- Graph extractor config
 INSERT INTO config (key, value, description) VALUES
     ('graph.extractor_driver', '"provider"', 'Graph extractor driver: "provider" (main LLM) or "ollama"'),
