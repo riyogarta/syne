@@ -1167,7 +1167,8 @@ class Conversation:
                     if t_name == "memory_store_file":
                         meta = self._message_metadata or {}
                         if not t_args.get("file_base64") and not t_args.get("file_path"):
-                            for key in ("document", "image"):
+                            # document = PDF/Office, image = photo, audio = voice
+                            for key in ("document", "image", "audio"):
                                 src = meta.get(key)
                                 if isinstance(src, dict) and src.get("base64"):
                                     t_args["file_base64"] = src["base64"]

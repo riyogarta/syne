@@ -1129,11 +1129,21 @@ class TelegramChannel:
                 if prefix:
                     user_message = f"{prefix}\n\n{user_message}"
                 
+                # Preserve original audio bytes so memory_store_file can attach
+                # the voice recording as a blob if the user asks to save it.
+                voice_mime = (voice.mime_type if hasattr(voice, "mime_type") else None) or "audio/ogg"
+                voice_b64 = base64.b64encode(bytes(audio_bytes)).decode("utf-8")
                 metadata = {
                     "message_id": update.message.message_id,
                     "voice_transcription": True,
                     "original_text": transcribed_text,
                     "inbound": inbound,
+                    "audio": {
+                        "base64": voice_b64,
+                        "mime_type": voice_mime,
+                        "filename": filename,
+                        "size": len(audio_bytes),
+                    },
                 }
 
                 response = await self.agent.handle_message(
