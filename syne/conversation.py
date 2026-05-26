@@ -636,6 +636,21 @@ class Conversation:
                 return await self._chat_inner(user_message, message_metadata)
             finally:
                 self._processing = False
+                # Cleanup transient upload files (Option B from design discussion).
+                # Disk staging in workspace/uploads/ is needed during the turn
+                # so tools like memory_store_file / send_file / file_read can
+                # reference it via path. After the turn, the canonical store
+                # is either memory_blobs (if user asked to save) or nowhere
+                # (transient). Either way, disk file is orphan — delete.
+                temp_paths = (message_metadata or {}).get("_temp_upload_paths") or []
+                import os as _os
+                for p in temp_paths:
+                    try:
+                        if p and _os.path.isfile(p):
+                            _os.remove(p)
+                            logger.debug(f"Cleaned up transient upload: {p}")
+                    except OSError as e:
+                        logger.warning(f"Failed to delete transient upload {p}: {e}")
         finally:
             try:
                 _my_lock.release()

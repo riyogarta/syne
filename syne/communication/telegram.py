@@ -1038,6 +1038,10 @@ class TelegramChannel:
                         "filename": photo_filename,
                     },
                     "inbound": inbound,
+                    # Conversation layer deletes these after the turn — disk is just
+                    # transient staging for tool access; memory_blobs is the canonical
+                    # store for files the user asked to save.
+                    "_temp_upload_paths": [save_path],
                 }
 
                 response = await self.agent.handle_message(
@@ -1270,6 +1274,10 @@ class TelegramChannel:
                         "size": len(file_bytes),
                     },
                     "message_id": update.message.message_id,
+                    # Conversation layer deletes these after the turn — disk is just
+                    # transient staging for tool access; memory_blobs is the canonical
+                    # store for files the user asked to save.
+                    "_temp_upload_paths": [save_path],
                 }
 
                 # For images sent as documents (uncompressed), treat as image
