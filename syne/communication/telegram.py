@@ -554,6 +554,23 @@ class TelegramChannel:
                     "has_credential": _has_credential,  # Redact in history, not in LLM
                 }
 
+                # Download media from replied message (photo/document) so LLM can see it
+                reply_media = await self._download_reply_media(update)
+                if reply_media:
+                    for key in ("image", "document"):
+                        if key in reply_media:
+                            metadata[key] = reply_media[key]
+                    reply_temps = reply_media.get("_temp_upload_paths", [])
+                    if reply_temps:
+                        metadata.setdefault("_temp_upload_paths", []).extend(reply_temps)
+                    if "image" in reply_media:
+                        rpath = reply_media["image"].get("path", "")
+                        text += f"\n\n[Attached: photo from replied message, saved at: {rpath}]"
+                    elif "document" in reply_media:
+                        rfname = reply_media["document"].get("filename", "file")
+                        rpath = reply_media["document"].get("path", "")
+                        text += f"\n\n[Attached: {rfname} from replied message, saved at: {rpath}]"
+
                 # Browse mode: route to CLI-compatible session with cwd
                 browse_cwd = self._browse_cwd.get(user.id) if not is_group else None
                 if browse_cwd:
@@ -8032,15 +8049,38 @@ Or just send me a message!"""
         """Extract reply context as raw dict for InboundContext.
         
         Returns:
-            Dict with 'sender' and 'body' keys, or None.
+            Dict with 'sender', 'body', and optionally 'has_photo'/'has_document' keys, or None.
         """
         if not update.message or not update.message.reply_to_message:
             return None
         
         reply = update.message.reply_to_message
         reply_text = reply.text or reply.caption or ""
-        if not reply_text.strip():
+        
+        # Detect media in replied message
+        has_photo = bool(reply.photo)
+        has_document = bool(reply.document)
+        has_voice = bool(reply.voice or reply.audio)
+        has_video = bool(reply.video or reply.video_note)
+        
+        # Build body with media indicators
+        body_parts = []
+        if has_photo:
+            body_parts.append("[Photo]")
+        if has_document:
+            doc_name = reply.document.file_name or "file"
+            body_parts.append(f"[Document: {doc_name}]")
+        if has_voice:
+            body_parts.append("[Voice message]")
+        if has_video:
+            body_parts.append("[Video]")
+        if reply_text.strip():
+            body_parts.append(reply_text.strip())
+        
+        if not body_parts:
             return None
+        
+        body = " ".join(body_parts)
         
         sender = "Unknown"
         if reply.from_user:
@@ -8051,10 +8091,121 @@ Or just send me a message!"""
         
         # Truncate
         max_quote = 500
-        if len(reply_text) > max_quote:
-            reply_text = reply_text[:max_quote] + "…"
+        if len(body) > max_quote:
+            body = body[:max_quote] + "…"
         
-        return {"sender": sender, "body": reply_text}
+        result = {"sender": sender, "body": body}
+        if has_photo:
+            result["has_photo"] = True
+        if has_document:
+            result["has_document"] = True
+        
+        return result
+
+    async def _download_reply_media(self, update: Update) -> dict | None:
+        """Download photo/document from replied message for LLM processing.
+        
+        Returns:
+            Dict with 'image' and/or 'document' metadata + '_temp_upload_paths', or None.
+        """
+        if not update.message or not update.message.reply_to_message:
+            return None
+        
+        import base64
+        import os
+        
+        reply = update.message.reply_to_message
+        result = {}
+        temp_paths = []
+        
+        # Photo in replied message
+        if reply.photo:
+            try:
+                photo = reply.photo[-1]  # Largest size
+                tg_file = await photo.get_file()
+                photo_bytes = await tg_file.download_as_bytearray()
+                
+                if photo_bytes and len(photo_bytes) > 0:
+                    photo_b64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
+                    uploads_dir = self.agent.workspace_uploads
+                    os.makedirs(uploads_dir, exist_ok=True)
+                    photo_filename = f"{photo.file_unique_id}_reply_photo.jpg"
+                    save_path = os.path.join(uploads_dir, photo_filename)
+                    with open(save_path, "wb") as f:
+                        f.write(photo_bytes)
+                    temp_paths.append(save_path)
+                    
+                    result["image"] = {
+                        "mime_type": "image/jpeg",
+                        "base64": photo_b64,
+                        "path": save_path,
+                        "filename": photo_filename,
+                        "from_reply": True,
+                    }
+                    logger.info(f"Reply photo downloaded: {save_path} ({len(photo_bytes)} bytes)")
+            except Exception as e:
+                logger.error(f"Error downloading reply photo: {e}")
+        
+        # Document in replied message
+        elif reply.document:
+            try:
+                doc = reply.document
+                filename = doc.file_name or "unknown_file"
+                mime_type = doc.mime_type or "application/octet-stream"
+                file_size = doc.file_size or 0
+                
+                if file_size <= 20 * 1024 * 1024:  # 20MB Telegram limit
+                    tg_file = await doc.get_file()
+                    file_bytes = await tg_file.download_as_bytearray()
+                    
+                    if file_bytes and len(file_bytes) > 0:
+                        uploads_dir = self.agent.workspace_uploads
+                        os.makedirs(uploads_dir, exist_ok=True)
+                        safe_name = filename.replace("/", "_").replace("..", "_")
+                        save_path = os.path.join(uploads_dir, f"{doc.file_unique_id}_reply_{safe_name}")
+                        with open(save_path, "wb") as f:
+                            f.write(file_bytes)
+                        temp_paths.append(save_path)
+                        
+                        doc_meta = {
+                            "path": save_path,
+                            "filename": filename,
+                            "mime_type": mime_type,
+                            "size": len(file_bytes),
+                            "from_reply": True,
+                        }
+                        
+                        # Image sent as document (uncompressed)
+                        if mime_type and mime_type.startswith("image/"):
+                            photo_b64 = base64.b64encode(bytes(file_bytes)).decode("utf-8")
+                            result["image"] = {
+                                "mime_type": mime_type,
+                                "base64": photo_b64,
+                                "path": save_path,
+                                "filename": filename,
+                                "from_reply": True,
+                            }
+                        
+                        # Include base64 for PDF/Office ability pre-processing
+                        _b64_mimes = {
+                            "application/pdf",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        }
+                        _office_ext = filename.lower().endswith((".docx", ".xlsx", ".pptx"))
+                        if mime_type in _b64_mimes or _office_ext:
+                            doc_meta["base64"] = base64.b64encode(bytes(file_bytes)).decode("utf-8")
+                        
+                        result["document"] = doc_meta
+                        logger.info(f"Reply document downloaded: {save_path} ({len(file_bytes)} bytes)")
+            except Exception as e:
+                logger.error(f"Error downloading reply document: {e}")
+        
+        if result:
+            result["_temp_upload_paths"] = temp_paths
+        
+        return result if result else None
 
     def _is_reply_to_bot(self, update: Update) -> bool:
         """Check if message is a reply to the bot."""
