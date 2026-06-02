@@ -46,6 +46,13 @@ from .retry import (
 )
 
 
+class _AnthropicStreamRetry(Exception):
+    """Sentinel raised from inside the stream loop to break out and trigger
+    the outer retry. Caught and ignored — the actual sleep + reconnect has
+    already happened at the raise site."""
+    pass
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using OAuth tokens from DB or API key.
 
@@ -586,6 +593,53 @@ class AnthropicProvider(LLMProvider):
                         # Count every event type for diagnostic dump
                         event_counts[event_type] = event_counts.get(event_type, 0) + 1
 
+                        # ── error: Anthropic sends HTTP 200 + event:error
+                        # for in-stream failures (overloaded_error, api_error,
+                        # rate_limit_error). Without parsing this we silently
+                        # return empty content and the channel shows generic
+                        # "No response received" — masking the real cause.
+                        if event_type == "error":
+                            err = data.get("error", {}) if isinstance(data, dict) else {}
+                            err_type = err.get("type", "")
+                            err_msg = err.get("message", "")
+                            logger.warning(
+                                f"Anthropic in-stream error: type={err_type!r} message={err_msg[:200]!r}"
+                            )
+                            # Retryable error types — break out of stream and let
+                            # the outer retry loop reconnect with fresh client.
+                            _retryable_stream_errors = {
+                                "overloaded_error",
+                                "api_error",
+                                "rate_limit_error",
+                                "timeout_error",
+                            }
+                            if err_type in _retryable_stream_errors:
+                                # Trigger the same backoff path as transient 429
+                                if not last_attempt:
+                                    # Close client to force fresh connection on retry
+                                    try:
+                                        if self._http_client is not None and not self._http_client.is_closed:
+                                            await self._http_client.aclose()
+                                    except Exception:
+                                        pass
+                                    self._http_client = None
+                                    delay = _backoff_delay(3000, attempt + 1)
+                                    logger.warning(
+                                        f"Anthropic stream error '{err_type}' — recreating client, "
+                                        f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})"
+                                    )
+                                    await asyncio.sleep(delay)
+                                    raise _AnthropicStreamRetry()
+                                # Last attempt — surface a real error instead of empty
+                                raise RuntimeError(
+                                    f"Anthropic stream error after {_TOTAL_ATTEMPTS} attempts: "
+                                    f"{err_type}: {err_msg[:200]}"
+                                )
+                            # Non-retryable error — raise immediately
+                            raise RuntimeError(
+                                f"Anthropic stream error: {err_type}: {err_msg[:200]}"
+                            )
+
                         # ── message_start: model + input usage ──
                         if event_type == "message_start":
                             msg_data = data.get("message", {})
@@ -659,6 +713,11 @@ class AnthropicProvider(LLMProvider):
                             u = data.get("usage", {})
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
+            except _AnthropicStreamRetry:
+                # In-stream retryable error (overloaded_error etc.) — the
+                # client close, sleep, and logging already happened at the
+                # raise site. Just continue the retry loop.
+                continue
             except (
                 httpx.ReadTimeout,
                 httpx.WriteTimeout,
