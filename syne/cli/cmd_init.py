@@ -658,8 +658,8 @@ def init():
                 active_key = "gpt-5.2"
             elif driver == "anthropic":
                 models_registry = [
-                    {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": auth, "context_window": 200000},
-                    {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-20250514", "auth": auth, "context_window": 200000},
+                    {"key": "claude-sonnet", "label": "Claude Sonnet 4.7", "driver": "anthropic", "model_id": "claude-sonnet-4-7", "auth": auth, "context_window": 200000},
+                    {"key": "claude-opus", "label": "Claude Opus 4.8", "driver": "anthropic", "model_id": "claude-opus-4-8", "auth": auth, "context_window": 200000},
                 ]
                 active_key = "claude-sonnet" if "sonnet" in model_id else "claude-opus"
             elif driver == "openai_compat":

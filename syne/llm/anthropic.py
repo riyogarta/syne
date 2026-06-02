@@ -17,17 +17,36 @@ logger = logging.getLogger("syne.llm.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_API_VERSION = "2023-06-01"
 
+# Default Claude Code CLI version sent as user-agent for OAuth requests.
+# Anthropic fingerprints stale user-agents — bump this when the official
+# Claude Code release advances. Override at runtime via config key
+# `anthropic.user_agent` so deployments can patch without a Syne release.
+DEFAULT_ANTHROPIC_USER_AGENT = "claude-cli/2.1.150"
+
 # Beta headers — matched to Pi exactly
-# interleaved-thinking is DEPRECATED for adaptive models (Opus 4.6, Sonnet 4.6)
+# interleaved-thinking is DEPRECATED for adaptive models (Opus 4.6+, Sonnet 4.6+)
 _BETA_TOOL_STREAMING = "fine-grained-tool-streaming-2025-05-14"
 _BETA_INTERLEAVED = "interleaved-thinking-2025-05-14"
 _BETA_PROMPT_CACHING = "prompt-caching-2024-07-31"
 _BETA_OAUTH_PREFIX = "claude-code-20250219,oauth-2025-04-20"
 
+# Adaptive-thinking model tags. Anthropic switched from budget_tokens to
+# `thinking: adaptive` starting with the 4.6 family; assume forward-compat
+# for 4.7, 4.8, and later until a model is explicitly known not to support it.
+_ADAPTIVE_MODEL_TAGS = (
+    "opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6",
+    "opus-4-7", "opus-4.7", "sonnet-4-7", "sonnet-4.7",
+    "opus-4-8", "opus-4.8", "sonnet-4-8", "sonnet-4.8",
+)
+
+
+def _is_adaptive_model(model_id: str) -> bool:
+    return any(t in model_id for t in _ADAPTIVE_MODEL_TAGS)
+
 
 def _build_beta_header(is_oauth: bool, model_id: str) -> str:
     """Build beta header exactly like Pi — conditional on model."""
-    adaptive = any(t in model_id for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
+    adaptive = _is_adaptive_model(model_id)
     betas = [_BETA_TOOL_STREAMING]
     if not adaptive:
         betas.append(_BETA_INTERLEAVED)
@@ -73,6 +92,9 @@ class AnthropicProvider(LLMProvider):
         self._claude_creds = None  # ClaudeCredentials instance
         # Persistent HTTP client — reuse connections like Anthropic SDK
         self._http_client: Optional[httpx.AsyncClient] = None
+        # User-agent cache — refreshed from config on each token reload
+        self._user_agent: str = DEFAULT_ANTHROPIC_USER_AGENT
+        self._ua_last_load: float = 0
 
     @property
     def name(self) -> str:
@@ -165,6 +187,19 @@ class AnthropicProvider(LLMProvider):
             "  2. Set ANTHROPIC_API_KEY environment variable"
         )
 
+    async def _get_user_agent(self) -> str:
+        now = time.time()
+        if (now - self._ua_last_load) < 60:
+            return self._user_agent
+        try:
+            from ..db.models import get_config
+            ua = await get_config("anthropic.user_agent", None)
+            self._user_agent = ua or DEFAULT_ANTHROPIC_USER_AGENT
+        except Exception:
+            self._user_agent = DEFAULT_ANTHROPIC_USER_AGENT
+        self._ua_last_load = now
+        return self._user_agent
+
     def _build_headers(self, token: str, model_id: str = "") -> dict:
         is_oauth = token.startswith("sk-ant-oat") or self._is_oauth
         headers = {
@@ -176,7 +211,7 @@ class AnthropicProvider(LLMProvider):
         }
         if is_oauth:
             headers["anthropic-dangerous-direct-browser-access"] = "true"
-            headers["user-agent"] = "claude-cli/2.1.62"
+            headers["user-agent"] = self._user_agent
             headers["x-app"] = "cli"
         return headers
 
@@ -429,9 +464,9 @@ class AnthropicProvider(LLMProvider):
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
         effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
         if effective_budget > 0:
-            # Opus 4.6 / Sonnet 4.6: adaptive thinking (model decides when/how much)
+            # Opus 4.6+ / Sonnet 4.6+: adaptive thinking (model decides when/how much)
             # Older models: budget-based thinking
-            _adaptive = any(t in model for t in ("opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"))
+            _adaptive = _is_adaptive_model(model)
             if _adaptive:
                 body["thinking"] = {"type": "adaptive"}
                 # No output_config.effort — let Claude decide entirely on its own
@@ -460,6 +495,7 @@ class AnthropicProvider(LLMProvider):
         stream_body = {**body, "stream": True}
 
         token = await self._load_token()
+        await self._get_user_agent()
         headers = self._build_headers(token, model)
 
         client = self._get_client()

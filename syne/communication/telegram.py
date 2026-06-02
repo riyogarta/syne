@@ -3144,6 +3144,7 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton("🔐 Update API Key", callback_data=f"models:apikey:{model_key}")])
         buttons.append([InlineKeyboardButton("⚙️ Parameters", callback_data=f"models:params:{model_key}")])
         buttons.append([InlineKeyboardButton("✏️ Edit Label", callback_data=f"models:edit_label:{model_key}")])
+        buttons.append([InlineKeyboardButton("🆔 Edit Model ID", callback_data=f"models:edit_model_id:{model_key}")])
         buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"models:delete_confirm:{model_key}")])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="models:main")])
 
@@ -3326,6 +3327,30 @@ Or just send me a message!"""
             await query.edit_message_text(
                 f"✏️ <b>Edit Label — {entry.get('label', model_key)}</b>\n\n"
                 f"Send the new display label.\n"
+                f"Send /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif data.startswith("models:edit_model_id:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            self._auth_state[user.id] = {
+                "type": "models_edit_model_id",
+                "model_key": model_key,
+                "chat_id": query.message.chat_id,
+            }
+            current_id = entry.get("model_id", "")
+            driver = entry.get("driver", "")
+            await query.edit_message_text(
+                f"🆔 <b>Edit Model ID — {entry.get('label', model_key)}</b>\n\n"
+                f"Current: <code>{current_id}</code>\n"
+                f"Driver: <code>{driver}</code>\n\n"
+                f"Send the new model ID (e.g. <code>claude-opus-4-8</code>).\n"
+                f"Verify the ID in your provider's docs first — invalid IDs return 404 at request time.\n\n"
                 f"Send /cancel to abort.",
                 parse_mode="HTML",
             )
@@ -3686,7 +3711,7 @@ Or just send me a message!"""
             _oauth_meta = {
                 "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
                 "codex": ("OpenAI (OAuth)", "gpt-5.2, o3-pro"),
-                "anthropic": ("Claude (OAuth)", "claude-sonnet-4-20250514, claude-opus-4-20250514"),
+                "anthropic": ("Claude (OAuth)", "claude-opus-4-8, claude-sonnet-4-7, claude-opus-4-6"),
             }
             driver_label, examples = _oauth_meta.get(driver, (driver, "model-name"))
             self._auth_state[user.id] = {
@@ -6566,6 +6591,8 @@ Or just send me a message!"""
             return await self._process_models_params(user_id, chat_id, text, state, context)
         elif auth_type == "models_edit_label":
             return await self._process_models_edit_label(user_id, chat_id, text, state, context)
+        elif auth_type == "models_edit_model_id":
+            return await self._process_models_edit_model_id(user_id, chat_id, text, state, context)
         elif auth_type == "embed_edit_label":
             return await self._process_embed_edit_label(user_id, chat_id, text, state, context)
         elif auth_type == "eval_add":
@@ -7083,6 +7110,59 @@ Or just send me a message!"""
             )
         else:
             await bot.send_message(chat_id=chat_id, text="❌ Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_models_edit_model_id(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle text input for editing a model's model_id (provider-side identifier)."""
+        bot = context.bot if context else self.app.bot
+        new_id = text.strip()
+        model_key = state.get("model_key", "")
+
+        if not new_id or " " in new_id or "\n" in new_id:
+            await bot.send_message(chat_id=chat_id, text="❌ Invalid model ID (no spaces or newlines).")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        models = await get_config("provider.models", [])
+        old_id = None
+        label = model_key
+        for m in models:
+            if m.get("key") == model_key:
+                old_id = m.get("model_id", "")
+                label = m.get("label", model_key)
+                m["model_id"] = new_id
+                break
+
+        if old_id is None:
+            await bot.send_message(chat_id=chat_id, text="❌ Model not found in registry.")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        await set_config("provider.models", models)
+
+        # If this entry is the currently active model, mirror to provider.chat_model
+        # and reload the provider so the next request uses the new ID immediately.
+        active_key = await get_config("provider.active_model", "")
+        reloaded = False
+        if active_key == model_key:
+            await set_config("provider.chat_model", new_id)
+            if self.agent:
+                try:
+                    await self.agent.reload_provider()
+                    reloaded = True
+                except Exception as e:
+                    logger.warning(f"reload_provider failed after model_id edit: {e}")
+
+        msg = (
+            f"✅ <b>{label}</b> model ID updated\n"
+            f"  Old: <code>{old_id}</code>\n"
+            f"  New: <code>{new_id}</code>"
+        )
+        if active_key == model_key:
+            msg += "\n\n⚙️ Active model — provider " + ("reloaded." if reloaded else "reload failed; /restart may be needed.")
+        await bot.send_message(chat_id=chat_id, text=msg, parse_mode="HTML")
 
         self._auth_state.pop(user_id, None)
         return True
