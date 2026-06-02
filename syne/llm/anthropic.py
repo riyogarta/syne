@@ -754,7 +754,9 @@ class AnthropicProvider(LLMProvider):
             except _AnthropicStreamRetry:
                 # In-stream retryable error (overloaded_error etc.) — the
                 # client close, sleep, and logging already happened at the
-                # raise site. Just continue the retry loop.
+                # raise site. Refresh the local `client` ref since the old
+                # one points at the just-closed AsyncClient.
+                client = self._get_client()
                 continue
             except (
                 httpx.ReadTimeout,
