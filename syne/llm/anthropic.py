@@ -477,7 +477,11 @@ class AnthropicProvider(LLMProvider):
                 }
             # Temperature incompatible with thinking (both adaptive and budget)
         else:
-            body["temperature"] = temperature
+            # Adaptive models (Opus/Sonnet 4.6+) deprecate temperature entirely,
+            # even when thinking is off (e.g. during compaction). Sending it
+            # triggers a 400 invalid_request_error.
+            if not _is_adaptive_model(model):
+                body["temperature"] = temperature
 
         # Anthropic: top_p and top_k are not allowed when thinking is enabled
         if top_p is not None and effective_budget <= 0:
