@@ -605,39 +605,41 @@ class AnthropicProvider(LLMProvider):
                             logger.warning(
                                 f"Anthropic in-stream error: type={err_type!r} message={err_msg[:200]!r}"
                             )
-                            # Retryable error types — break out of stream and let
-                            # the outer retry loop reconnect with fresh client.
-                            _retryable_stream_errors = {
-                                "overloaded_error",
-                                "api_error",
-                                "rate_limit_error",
-                                "timeout_error",
+                            # Non-retryable error types — fail fast, no point retrying.
+                            # Anthropic API documents these as user-fixable.
+                            _non_retryable = {
+                                "invalid_request_error",
+                                "authentication_error",
+                                "permission_error",
+                                "not_found_error",
                             }
-                            if err_type in _retryable_stream_errors:
-                                # Trigger the same backoff path as transient 429
-                                if not last_attempt:
-                                    # Close client to force fresh connection on retry
-                                    try:
-                                        if self._http_client is not None and not self._http_client.is_closed:
-                                            await self._http_client.aclose()
-                                    except Exception:
-                                        pass
-                                    self._http_client = None
-                                    delay = _backoff_delay(3000, attempt + 1)
-                                    logger.warning(
-                                        f"Anthropic stream error '{err_type}' — recreating client, "
-                                        f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})"
-                                    )
-                                    await asyncio.sleep(delay)
-                                    raise _AnthropicStreamRetry()
-                                # Last attempt — surface a real error instead of empty
+                            if err_type in _non_retryable:
                                 raise RuntimeError(
-                                    f"Anthropic stream error after {_TOTAL_ATTEMPTS} attempts: "
-                                    f"{err_type}: {err_msg[:200]}"
+                                    f"Anthropic API error: {err_type}: {err_msg[:200]}"
                                 )
-                            # Non-retryable error — raise immediately
+                            # Everything else (overloaded_error, api_error, rate_limit_error,
+                            # timeout_error, internal_server_error, unknown) → treat as
+                            # transient. Retry with fresh client.
+                            if not last_attempt:
+                                try:
+                                    if self._http_client is not None and not self._http_client.is_closed:
+                                        await self._http_client.aclose()
+                                except Exception:
+                                    pass
+                                self._http_client = None
+                                delay = _backoff_delay(3000, attempt + 1)
+                                logger.warning(
+                                    f"Anthropic stream error '{err_type}' — recreating client, "
+                                    f"retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})"
+                                )
+                                await asyncio.sleep(delay)
+                                raise _AnthropicStreamRetry()
+                            # Final attempt — raise a structured RuntimeError that
+                            # classify_error can match into a user-friendly message.
+                            # Include "Anthropic API" prefix as universal classifier hook.
                             raise RuntimeError(
-                                f"Anthropic stream error: {err_type}: {err_msg[:200]}"
+                                f"Anthropic API {err_type or 'stream_error'} after "
+                                f"{_TOTAL_ATTEMPTS} attempts: {err_msg[:200]}"
                             )
 
                         # ── message_start: model + input usage ──

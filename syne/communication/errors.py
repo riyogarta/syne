@@ -69,6 +69,18 @@ def classify_error(e: Exception, model: str = "") -> str:
             return f"{tag}Provider rejected the request. Try /compact or send a shorter message."
         if "overloaded" in msg.lower() or "529" in msg:
             return f"{tag}Provider is overloaded. Please try again later."
+        # Anthropic-specific in-stream error classifier — covers api_error,
+        # internal_server_error, timeout_error, and any future error types we
+        # haven't enumerated. RuntimeError raised by anthropic driver always
+        # starts with "Anthropic API" so this catches the whole family.
+        _low = msg.lower()
+        if "anthropic api" in _low:
+            if "timeout" in _low:
+                return f"{tag}Provider timed out. Please try again later."
+            if "internal_server" in _low or "api_error" in _low:
+                return f"{tag}Provider had a server error. Please try again later."
+            # Generic Anthropic stream error — still informative
+            return f"{tag}Provider returned a transient error. Please try again later."
 
     # 7-8: Database errors
     try:
