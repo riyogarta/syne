@@ -467,6 +467,10 @@ class AnthropicProvider(LLMProvider):
             usage: dict = {}
             resp_model = model
             last_attempt = attempt >= _MAX_RETRIES
+            # Diagnostic counters — capture what arrived when response is empty
+            event_counts: dict[str, int] = {}
+            block_types_seen: list[str] = []
+            stop_reason: str = ""
 
             try:
                 async with client.stream(
@@ -579,6 +583,9 @@ class AnthropicProvider(LLMProvider):
                         except json.JSONDecodeError:
                             continue
 
+                        # Count every event type for diagnostic dump
+                        event_counts[event_type] = event_counts.get(event_type, 0) + 1
+
                         # ── message_start: model + input usage ──
                         if event_type == "message_start":
                             msg_data = data.get("message", {})
@@ -591,6 +598,7 @@ class AnthropicProvider(LLMProvider):
                             idx = data.get("index", 0)
                             block = data.get("content_block", {})
                             btype = block.get("type", "")
+                            block_types_seen.append(btype)
                             active_blocks[idx] = {
                                 "type": btype,
                                 "id": block.get("id", ""),
@@ -646,6 +654,8 @@ class AnthropicProvider(LLMProvider):
                         # ── message_delta: output usage + stop reason ──
                         elif event_type == "message_delta":
                             delta = data.get("delta", {})
+                            if delta.get("stop_reason"):
+                                stop_reason = delta["stop_reason"]
                             u = data.get("usage", {})
                             usage["output_tokens"] = u.get("output_tokens", 0)
 
@@ -706,6 +716,22 @@ class AnthropicProvider(LLMProvider):
                     thinking_text += ab["text"]
                 # Don't flush partial tool_use — incomplete JSON is useless
             active_blocks.clear()
+
+            # Diagnostic: if the response is functionally empty, log what
+            # actually arrived in the SSE stream. This distinguishes:
+            #   (A) Anthropic server returned an empty stream (output_tokens=0,
+            #       no content blocks) — their problem.
+            #   (B) Our parser missed events (output_tokens > 0 but content="" —
+            #       events arrived but we didn't accumulate them) — our problem.
+            if not content_text and not tool_calls and not thinking_text:
+                logger.warning(
+                    f"Anthropic empty response — model={resp_model} "
+                    f"stop_reason={stop_reason!r} "
+                    f"output_tokens={usage.get('output_tokens', 0)} "
+                    f"input_tokens={usage.get('input_tokens', 0)} "
+                    f"events={event_counts} "
+                    f"block_types={block_types_seen}"
+                )
 
             # Success — exit retry loop
             break
