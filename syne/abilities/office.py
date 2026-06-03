@@ -747,6 +747,21 @@ def _set_table_borders(table) -> None:
         borders.append(el)
     tblPr.append(borders)
 
+def _set_cell_shading(cell, hex_color: str) -> None:
+    """Apply a solid background fill to a single table cell via OOXML w:shd."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    tcPr = cell._tc.get_or_add_tcPr()
+    existing = tcPr.find(qn("w:shd"))
+    if existing is not None:
+        tcPr.remove(existing)
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color)
+    tcPr.append(shd)
+
 def _add_docx_table(doc, block: str) -> None:
     """Render a markdown pipe-table block as a native Word table."""
     lines = [ln for ln in block.splitlines() if ln.strip()]
@@ -772,7 +787,9 @@ def _add_docx_table(doc, block: str) -> None:
     hdr_cells = table.rows[0].cells
     for i in range(ncols):
         text = header[i] if i < len(header) else ""
-        para = hdr_cells[i].paragraphs[0]
+        cell = hdr_cells[i]
+        _set_cell_shading(cell, "D9D9D9")
+        para = cell.paragraphs[0]
         _add_inline_runs(para, text)
         for run in para.runs:
             run.bold = True
