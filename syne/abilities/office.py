@@ -698,6 +698,68 @@ def _docx_add_paragraph(doc, text: str, *style_candidates: str):
     return doc.add_paragraph(text)
 
 
+def _is_pipe_table(block: str) -> bool:
+    """Detect a GitHub-style pipe table block.
+
+    Requires at least 2 lines where every non-empty line contains a pipe,
+    and the 2nd line is a separator row (e.g. |---|:--:|---|).
+    """
+    lines = [ln for ln in block.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return False
+    if not all("|" in ln for ln in lines):
+        return False
+    sep = lines[1].strip().strip("|")
+    cells = [c.strip() for c in sep.split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c) for c in cells)
+
+def _split_pipe_row(line: str) -> list[str]:
+    r"""Split a markdown table row into cell strings, honoring escaped \|."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    # Split on unescaped pipes
+    cells = re.split(r"(?<!\\)\|", s)
+    return [c.replace("\\|", "|").strip() for c in cells]
+
+def _add_docx_table(doc, block: str) -> None:
+    """Render a markdown pipe-table block as a native Word table."""
+    lines = [ln for ln in block.splitlines() if ln.strip()]
+    header = _split_pipe_row(lines[0])
+    body_rows = [_split_pipe_row(ln) for ln in lines[2:]]
+    ncols = max([len(header)] + [len(r) for r in body_rows]) if body_rows else len(header)
+
+    style = _docx_resolve_style(
+        doc, "Table Grid", "Light Grid", "Light List Accent 1", "Normal Table"
+    )
+    try:
+        table = doc.add_table(rows=1, cols=ncols, style=style) if style else doc.add_table(rows=1, cols=ncols)
+    except KeyError:
+        table = doc.add_table(rows=1, cols=ncols)
+    try:
+        table.autofit = True
+    except Exception:
+        pass
+
+    # Header row (bold)
+    hdr_cells = table.rows[0].cells
+    for i in range(ncols):
+        text = header[i] if i < len(header) else ""
+        para = hdr_cells[i].paragraphs[0]
+        _add_inline_runs(para, text)
+        for run in para.runs:
+            run.bold = True
+
+    # Body rows
+    for row in body_rows:
+        cells = table.add_row().cells
+        for i in range(ncols):
+            text = row[i] if i < len(row) else ""
+            para = cells[i].paragraphs[0]
+            _add_inline_runs(para, text)
+
 def _make_docx(out_path: str, title: str, content: str) -> None:
     from docx import Document
 
@@ -731,6 +793,11 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
             bottom.set(qn("w:color"), "999999")
             pBdr.append(bottom)
             pPr.append(pBdr)
+            continue
+
+        # Pipe table?
+        if _is_pipe_table(block):
+            _add_docx_table(doc, block)
             continue
 
         # Multi-line bullet list?
