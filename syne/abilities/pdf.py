@@ -146,6 +146,65 @@ def _md_inline_to_rl(text: str) -> str:
     return text
 
 
+def _md_is_table_row(line: str) -> bool:
+    s = line.strip()
+    return s.startswith("|") and s.count("|") >= 2
+
+
+def _md_is_table_separator(line: str) -> bool:
+    s = line.strip()
+    if "|" not in s:
+        return False
+    core = s.strip("|")
+    cells = [c.strip() for c in core.split("|")]
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{1,}:?", c or "") for c in cells)
+
+
+def _split_table_row(line: str) -> list:
+    s = line.strip()
+    # handle escaped pipes \| -> placeholder
+    s = s.replace("\\|", "\x00")
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip().replace("\x00", "|") for c in s.split("|")]
+
+
+def _make_md_table(header: list, rows: list, styles: dict):
+    from reportlab.platypus import Table, TableStyle, Paragraph
+    from reportlab.lib import colors
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.units import cm
+
+    base = styles["body"]
+    cell = ParagraphStyle("TCell", parent=base, fontSize=9, leading=12, spaceAfter=0)
+    head = ParagraphStyle("THead", parent=base, fontName="Helvetica-Bold",
+                          fontSize=9.5, leading=12, spaceAfter=0)
+
+    ncols = max(1, len(header))
+    data = [[Paragraph(_md_inline_to_rl(c), head) for c in header]]
+    for r in rows:
+        cells = (r + [""] * ncols)[:ncols]
+        data.append([Paragraph(_md_inline_to_rl(c), cell) for c in cells])
+
+    usable = 17 * cm  # A4 portrait minus ~2cm margins each side
+    col_w = usable / ncols
+    tbl = Table(data, colWidths=[col_w] * ncols, repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#999999")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EFEFEF")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return tbl
+
+
 def _md_is_block_start(line: str) -> bool:
     s = line.strip()
     if not s:
@@ -161,6 +220,8 @@ def _md_is_block_start(line: str) -> bool:
     if re.match(r"^\d+\.\s+", s):
         return True
     if s.startswith(">"):
+        return True
+    if s.startswith("|") and s.count("|") >= 2:
         return True
     return False
 
@@ -236,6 +297,18 @@ def _md_to_rl_story(text: str, styles: dict) -> list:
                 styles["quote"],
             ))
             story.append(Spacer(1, 4))
+            continue
+
+        # Table (pipe-style markdown)
+        if _md_is_table_row(line) and (i + 1) < n and _md_is_table_separator(lines[i + 1]):
+            header = _split_table_row(line)
+            i += 2  # skip header + separator
+            rows: list = []
+            while i < n and _md_is_table_row(lines[i]):
+                rows.append(_split_table_row(lines[i]))
+                i += 1
+            story.append(_make_md_table(header, rows, styles))
+            story.append(Spacer(1, 6))
             continue
 
         # Bullet list
