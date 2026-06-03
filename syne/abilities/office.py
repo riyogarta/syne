@@ -724,6 +724,29 @@ def _split_pipe_row(line: str) -> list[str]:
     cells = re.split(r"(?<!\\)\|", s)
     return [c.replace("\\|", "|").strip() for c in cells]
 
+def _set_table_borders(table) -> None:
+    """Force a visible single-line grid on a Word table via explicit OOXML.
+
+    Templates may lack a 'Table Grid' style, leaving tables borderless.
+    Injecting w:tblBorders guarantees gridlines regardless of style.
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    tblPr = table._tbl.tblPr
+    existing = tblPr.find(qn("w:tblBorders"))
+    if existing is not None:
+        tblPr.remove(existing)
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "single")
+        el.set(qn("w:sz"), "4")
+        el.set(qn("w:space"), "0")
+        el.set(qn("w:color"), "888888")
+        borders.append(el)
+    tblPr.append(borders)
+
 def _add_docx_table(doc, block: str) -> None:
     """Render a markdown pipe-table block as a native Word table."""
     lines = [ln for ln in block.splitlines() if ln.strip()]
@@ -742,6 +765,8 @@ def _add_docx_table(doc, block: str) -> None:
         table.autofit = True
     except Exception:
         pass
+
+    _set_table_borders(table)
 
     # Header row (bold)
     hdr_cells = table.rows[0].cells
@@ -762,6 +787,7 @@ def _add_docx_table(doc, block: str) -> None:
 
 def _make_docx(out_path: str, title: str, content: str) -> None:
     from docx import Document
+    from docx.shared import Pt
 
     template = _docx_template_path()
     if template:
@@ -853,6 +879,28 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
             # Last-resort fallback to python-docx built-in add_heading
             p = doc.add_heading("", level=min(level, 4))
             _add_inline_runs(p, text)
+            continue
+
+        # Blockquote (lines starting with >)
+        if all(ln.strip().startswith(">") for ln in lines if ln.strip()):
+            quote_style = _docx_resolve_style(doc, "Quote", "Intense Quote", "Body Text", "Normal")
+            for ln in lines:
+                stripped = re.sub(r"^\s*>\s?", "", ln)
+                if quote_style:
+                    try:
+                        p = doc.add_paragraph(style=quote_style)
+                    except KeyError:
+                        p = doc.add_paragraph()
+                else:
+                    p = doc.add_paragraph()
+                try:
+                    p.paragraph_format.left_indent = Pt(18)
+                except Exception:
+                    pass
+                _add_inline_runs(p, stripped)
+                if not (quote_style and "uote" in quote_style):
+                    for run in p.runs:
+                        run.italic = True
             continue
 
         # Regular paragraph (preserve internal newlines as soft breaks)
