@@ -102,6 +102,190 @@ def _extract_readable_text_from_html(html_bytes: bytes) -> str:
     return "\n".join(lines).strip()
 
 
+def _md_inline_to_rl(text: str) -> str:
+    """Convert markdown inline syntax to ReportLab Paragraph mini-HTML.
+
+    Supports: `code`, **bold**, *italic*, _italic_, ~~strike~~, [text](url).
+    HTML-special chars are escaped so raw < > & in user text don't break
+    ReportLab's mini-HTML parser.
+    """
+    # Stash code spans BEFORE escaping so their content stays verbatim
+    # and they're not re-interpreted by the bold/italic regexes.
+    code_spans: list[str] = []
+
+    def _stash_code(m: re.Match) -> str:
+        code_spans.append(m.group(1))
+        return f"\x00C{len(code_spans) - 1}\x00"
+
+    text = re.sub(r"`([^`\n]+)`", _stash_code, text)
+
+    # Escape HTML special chars on the non-code text
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # Links — [text](url). URL is already escaped by the step above.
+    text = re.sub(
+        r"\[([^\]\n]+)\]\(([^)\n\s]+)\)",
+        lambda m: f'<link href="{m.group(2)}" color="#1a73e8"><u>{m.group(1)}</u></link>',
+        text,
+    )
+    # Bold **text** — apply before single-asterisk italic
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
+    # Strikethrough ~~text~~
+    text = re.sub(r"~~([^~\n]+)~~", r"<strike>\1</strike>", text)
+    # Italic *text* and _text_ — guard against word-internal _ or *
+    text = re.sub(r"(?<![\*\w])\*([^*\n]+?)\*(?![\*\w])", r"<i>\1</i>", text)
+    text = re.sub(r"(?<![_\w])_([^_\n]+?)_(?![_\w])", r"<i>\1</i>", text)
+
+    # Restore code spans (escape their content too, but no markdown parsing)
+    def _restore_code(m: re.Match) -> str:
+        idx = int(m.group(1))
+        raw = code_spans[idx].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return f'<font face="Courier" backColor="#f3f3f3">&nbsp;{raw}&nbsp;</font>'
+
+    text = re.sub(r"\x00C(\d+)\x00", _restore_code, text)
+    return text
+
+
+def _md_is_block_start(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+    if s.startswith("#") and re.match(r"^#{1,6}\s+", s):
+        return True
+    if s.startswith("```"):
+        return True
+    if re.fullmatch(r"[-_*]{3,}", s):
+        return True
+    if re.match(r"^[-*]\s+", s):
+        return True
+    if re.match(r"^\d+\.\s+", s):
+        return True
+    if s.startswith(">"):
+        return True
+    return False
+
+
+def _md_to_rl_story(text: str, styles: dict) -> list:
+    """Parse markdown text into ReportLab flowables."""
+    from reportlab.platypus import (
+        Paragraph,
+        Spacer,
+        Preformatted,
+        ListFlowable,
+        ListItem,
+    )
+    try:
+        from reportlab.platypus.flowables import HRFlowable
+    except ImportError:  # very old reportlab
+        HRFlowable = None  # type: ignore
+
+    story: list = []
+    lines = (text or "").splitlines()
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+        s = line.strip()
+
+        # Blank line — paragraph separator, just advance
+        if not s:
+            i += 1
+            continue
+
+        # Fenced code block
+        if s.startswith("```"):
+            buf: list[str] = []
+            i += 1
+            while i < n and not lines[i].strip().startswith("```"):
+                buf.append(lines[i])
+                i += 1
+            if i < n:
+                i += 1  # skip closing fence
+            story.append(Preformatted("\n".join(buf), styles["code"]))
+            story.append(Spacer(1, 4))
+            continue
+
+        # Horizontal rule
+        if re.fullmatch(r"[-_*]{3,}", s):
+            if HRFlowable is not None:
+                story.append(HRFlowable(
+                    width="100%", thickness=0.5, color="#999999",
+                    spaceBefore=4, spaceAfter=6,
+                ))
+            i += 1
+            continue
+
+        # Heading
+        m = re.match(r"^(#{1,6})\s+(.*)$", s)
+        if m:
+            level = min(len(m.group(1)), 4)
+            style = styles.get(f"h{level}", styles["body"])
+            story.append(Paragraph(_md_inline_to_rl(m.group(2).strip()), style))
+            i += 1
+            continue
+
+        # Blockquote
+        if s.startswith(">"):
+            quote_lines: list[str] = []
+            while i < n and lines[i].strip().startswith(">"):
+                quote_lines.append(re.sub(r"^\s*>\s?", "", lines[i]))
+                i += 1
+            story.append(Paragraph(
+                _md_inline_to_rl(" ".join(ql.strip() for ql in quote_lines)),
+                styles["quote"],
+            ))
+            story.append(Spacer(1, 4))
+            continue
+
+        # Bullet list
+        if re.match(r"^[-*]\s+", s):
+            items: list[str] = []
+            while i < n and re.match(r"^\s*[-*]\s+", lines[i]):
+                items.append(re.sub(r"^\s*[-*]\s+", "", lines[i]))
+                i += 1
+            list_items = [
+                ListItem(Paragraph(_md_inline_to_rl(it.strip()), styles["body"]),
+                         leftIndent=14)
+                for it in items
+            ]
+            story.append(ListFlowable(
+                list_items, bulletType="bullet", start="•",
+                leftIndent=18, bulletFontSize=10,
+            ))
+            story.append(Spacer(1, 4))
+            continue
+
+        # Numbered list
+        if re.match(r"^\d+\.\s+", s):
+            items = []
+            while i < n and re.match(r"^\s*\d+\.\s+", lines[i]):
+                items.append(re.sub(r"^\s*\d+\.\s+", "", lines[i]))
+                i += 1
+            list_items = [
+                ListItem(Paragraph(_md_inline_to_rl(it.strip()), styles["body"]),
+                         leftIndent=14)
+                for it in items
+            ]
+            story.append(ListFlowable(
+                list_items, bulletType="1", leftIndent=18, bulletFontSize=10,
+            ))
+            story.append(Spacer(1, 4))
+            continue
+
+        # Regular paragraph — collect until blank line or next block
+        para_lines = [line]
+        i += 1
+        while i < n and lines[i].strip() and not _md_is_block_start(lines[i]):
+            para_lines.append(lines[i])
+            i += 1
+        para_text = " ".join(pl.strip() for pl in para_lines)
+        story.append(Paragraph(_md_inline_to_rl(para_text), styles["body"]))
+        story.append(Spacer(1, 4))
+
+    return story
+
+
 def _make_pdf_from_text_platypus(out_path: str, title: str | None, text: str, pagesize) -> None:
     # Lazy imports
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -118,41 +302,61 @@ def _make_pdf_from_text_platypus(out_path: str, title: str | None, text: str, pa
         title=title or "Document",
     )
 
-    styles = getSampleStyleSheet()
+    base = getSampleStyleSheet()
     body = ParagraphStyle(
-        "Body",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10.5,
-        leading=14,
-        spaceAfter=6,
+        "Body", parent=base["Normal"],
+        fontName="Helvetica", fontSize=10.5, leading=14, spaceAfter=6,
     )
     h1 = ParagraphStyle(
-        "H1",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=16,
-        leading=20,
-        spaceAfter=10,
+        "H1", parent=base["Heading1"],
+        fontName="Helvetica-Bold", fontSize=16, leading=20,
+        spaceBefore=8, spaceAfter=8,
     )
+    h2 = ParagraphStyle(
+        "H2", parent=base["Heading2"],
+        fontName="Helvetica-Bold", fontSize=13, leading=17,
+        spaceBefore=6, spaceAfter=6,
+    )
+    h3 = ParagraphStyle(
+        "H3", parent=base["Heading3"],
+        fontName="Helvetica-Bold", fontSize=11.5, leading=15,
+        spaceBefore=4, spaceAfter=4,
+    )
+    h4 = ParagraphStyle(
+        "H4", parent=base["Heading4"],
+        fontName="Helvetica-Bold", fontSize=10.5, leading=14,
+        spaceBefore=4, spaceAfter=4,
+    )
+    code = ParagraphStyle(
+        "Code", parent=base["Code"],
+        fontName="Courier", fontSize=9, leading=12,
+        leftIndent=8, rightIndent=8,
+        backColor="#f3f3f3", borderPadding=4,
+        spaceBefore=4, spaceAfter=4,
+    )
+    quote = ParagraphStyle(
+        "Quote", parent=body,
+        leftIndent=14, textColor="#555555",
+        borderColor="#cccccc", borderWidth=0,
+        spaceBefore=4, spaceAfter=4,
+    )
+    md_styles = {"body": body, "h1": h1, "h2": h2, "h3": h3, "h4": h4,
+                 "code": code, "quote": quote}
 
     story = []
     if title:
-        story.append(Paragraph(title, h1))
+        # Title is plain text — escape in case it contains < > &, no markdown.
+        safe_title = (title.replace("&", "&amp;")
+                            .replace("<", "&lt;")
+                            .replace(">", "&gt;"))
+        story.append(Paragraph(safe_title, h1))
         story.append(Spacer(1, 10))
 
     raw = (text or "").strip()
     if not raw:
         raw = "(empty)"
 
-    # Split paragraphs by blank lines; convert single newlines to <br/>
-    for para in re.split(r"\n\s*\n", raw):
-        para = para.strip()
-        if not para:
-            continue
-        para = para.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        para = para.replace("\n", "<br/>")
-        story.append(Paragraph(para, body))
+    story.extend(_md_to_rl_story(raw, md_styles))
 
     doc.build(story)
 

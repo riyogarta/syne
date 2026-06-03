@@ -531,35 +531,112 @@ def _set_paragraph_bidi(paragraph) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _add_inline_runs(paragraph, text: str) -> None:
-    """Add text to a docx paragraph honoring **bold** and *italic* markers.
-    Arabic text gets Arial font + RTL direction automatically."""
-    has_any_arabic = _has_arabic(text)
-    # Split on bold first, then italic within each chunk
-    parts = re.split(r"(\*\*[^*]+\*\*)", text)
-    for part in parts:
-        if not part:
-            continue
-        if part.startswith("**") and part.endswith("**"):
-            run = paragraph.add_run(part[2:-2])
-            run.bold = True
-            if _has_arabic(part):
-                _set_run_arabic(run)
-            continue
-        # Italic within non-bold chunk
-        sub = re.split(r"(\*[^*]+\*)", part)
-        for s in sub:
-            if not s:
+def _add_hyperlink(paragraph, label: str, url: str) -> None:
+    """Append a clickable hyperlink run to a python-docx paragraph."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    part = paragraph.part
+    r_id = part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "1A73E8")
+    rPr.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    rPr.append(underline)
+    new_run.append(rPr)
+    t = OxmlElement("w:t")
+    t.text = label
+    t.set(qn("xml:space"), "preserve")
+    new_run.append(t)
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+
+
+# Regex patterns reused across the inline tokenizer.
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_INLINE_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\n\s]+)\)")
+_INLINE_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
+_INLINE_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
+_INLINE_ITALIC_RE = re.compile(r"(?<![\*\w])\*([^*\n]+?)\*(?![\*\w])")
+_INLINE_ITALIC_UNDER_RE = re.compile(r"(?<![_\w])_([^_\n]+?)_(?![_\w])")
+
+
+def _tokenize_inline_md(text: str) -> list[tuple[str, object]]:
+    """Tokenize a string into a flat list of styled segments.
+
+    Returns: list of (kind, payload) where kind is one of
+    'text', 'bold', 'italic', 'code', 'strike', 'link'.
+    For 'link' payload is (label, url); for others it is a string.
+    """
+    tokens: list[tuple[str, object]] = [("text", text)]
+
+    def _split(kind: str, pattern: re.Pattern, extract):
+        out: list[tuple[str, object]] = []
+        for tk, payload in tokens:
+            if tk != "text":
+                out.append((tk, payload))
                 continue
-            if s.startswith("*") and s.endswith("*") and len(s) > 2:
-                run = paragraph.add_run(s[1:-1])
-                run.italic = True
-                if _has_arabic(s):
+            assert isinstance(payload, str)
+            last = 0
+            for m in pattern.finditer(payload):
+                if m.start() > last:
+                    out.append(("text", payload[last:m.start()]))
+                out.append((kind, extract(m)))
+                last = m.end()
+            if last < len(payload):
+                out.append(("text", payload[last:]))
+        tokens[:] = out
+
+    _split("code", _INLINE_CODE_RE, lambda m: m.group(1))
+    _split("link", _INLINE_LINK_RE, lambda m: (m.group(1), m.group(2)))
+    _split("bold", _INLINE_BOLD_RE, lambda m: m.group(1))
+    _split("strike", _INLINE_STRIKE_RE, lambda m: m.group(1))
+    _split("italic", _INLINE_ITALIC_RE, lambda m: m.group(1))
+    _split("italic", _INLINE_ITALIC_UNDER_RE, lambda m: m.group(1))
+    return [t for t in tokens if t[1] != ""]
+
+
+def _add_inline_runs(paragraph, text: str) -> None:
+    """Add text to a docx paragraph honoring markdown inline markers.
+
+    Supports **bold**, *italic*, _italic_, `code`, ~~strike~~, [text](url).
+    Arabic text gets Arial font + RTL direction automatically.
+    """
+    has_any_arabic = _has_arabic(text)
+    for kind, payload in _tokenize_inline_md(text):
+        if kind == "link":
+            label, url = payload  # type: ignore[misc]
+            try:
+                _add_hyperlink(paragraph, label, url)
+            except Exception:
+                # Fallback: render as plain "label (url)"
+                run = paragraph.add_run(f"{label} ({url})")
+                if _has_arabic(label):
                     _set_run_arabic(run)
-            else:
-                run = paragraph.add_run(s)
-                if _has_arabic(s):
-                    _set_run_arabic(run)
+            continue
+        assert isinstance(payload, str)
+        run = paragraph.add_run(payload)
+        if kind == "bold":
+            run.bold = True
+        elif kind == "italic":
+            run.italic = True
+        elif kind == "strike":
+            run.font.strike = True
+        elif kind == "code":
+            run.font.name = "Consolas"
+        if _has_arabic(payload):
+            _set_run_arabic(run)
+
     # If any Arabic was found, set bidi on the paragraph
     if has_any_arabic:
         _set_paragraph_bidi(paragraph)
@@ -640,6 +717,22 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
         if not block:
             continue
 
+        # Horizontal rule (---, ___, ***)
+        if re.fullmatch(r"[-_*]{3,}", block):
+            p = doc.add_paragraph()
+            pPr = p._p.get_or_add_pPr()
+            from docx.oxml.ns import qn
+            from docx.oxml import OxmlElement
+            pBdr = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "6")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "999999")
+            pBdr.append(bottom)
+            pPr.append(pBdr)
+            continue
+
         # Multi-line bullet list?
         lines = block.splitlines()
         if all(re.match(r"^[-*]\s+", ln.strip()) for ln in lines if ln.strip()):
@@ -658,6 +751,23 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
                 _add_inline_runs(p, ln)
             continue
 
+        # Multi-line numbered list?
+        if all(re.match(r"^\d+\.\s+", ln.strip()) for ln in lines if ln.strip()):
+            num_style = _docx_resolve_style(doc, "List Number", "List Paragraph", "Normal")
+            for ln in lines:
+                stripped = re.sub(r"^\s*\d+\.\s+", "", ln)
+                if not stripped:
+                    continue
+                if num_style:
+                    try:
+                        p = doc.add_paragraph(style=num_style)
+                    except KeyError:
+                        p = doc.add_paragraph()
+                else:
+                    p = doc.add_paragraph()
+                _add_inline_runs(p, stripped)
+            continue
+
         # Heading?
         m = re.match(r"^(#{1,6})\s+(.*)$", block)
         if m:
@@ -668,12 +778,14 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
             text = m.group(2).strip()
             if heading_style:
                 try:
-                    doc.add_paragraph(text, style=heading_style)
+                    p = doc.add_paragraph(style=heading_style)
+                    _add_inline_runs(p, text)
                     continue
                 except KeyError:
                     pass
             # Last-resort fallback to python-docx built-in add_heading
-            doc.add_heading(text, level=min(level, 4))
+            p = doc.add_heading("", level=min(level, 4))
+            _add_inline_runs(p, text)
             continue
 
         # Regular paragraph (preserve internal newlines as soft breaks)
@@ -816,35 +928,99 @@ def _remove_slide(prs, index: int) -> None:
     sld_id_lst.remove(sld_id)
 
 
+_MD_MARKER_RE = re.compile(r"\*\*|`[^`\n]+`|~~|\[[^\]\n]+\]\([^)\n]+\)|(?<![\w*])\*[^*\n]+\*(?![\w*])|(?<![\w_])_[^_\n]+_(?![\w_])")
+
+
 def _set_shape_text(shape, text: str) -> None:
     """Replace a shape's text while preserving font formatting from its first run.
 
     Removes additional paragraphs/runs, keeps the first one as the style anchor.
+    Inline markdown (**bold**, *italic*, `code`, ~~strike~~, [label](url)) is
+    rendered as multiple runs so it doesn't leak literal markers into the slide.
     Arabic text gets Arial font automatically.
     """
     if not shape.has_text_frame:
         return
     tf = shape.text_frame
-    # Keep first paragraph + first run as the formatting anchor
+    text = str(text)
+
     if not tf.paragraphs:
-        tf.text = str(text)
+        tf.text = text
         return
+
     first_p = tf.paragraphs[0]
     # Remove other paragraphs (their XML)
     for p in list(tf.paragraphs[1:]):
         p._p.getparent().remove(p._p)
-    # Replace text in first paragraph: keep first run's font, drop the rest
+
+    # Fast path: no markdown markers — preserve original behavior exactly
+    if not _MD_MARKER_RE.search(text):
+        if first_p.runs:
+            first_run = first_p.runs[0]
+            for r in list(first_p.runs[1:]):
+                r._r.getparent().remove(r._r)
+            first_run.text = text
+            if _has_arabic(text):
+                first_run.font.name = "Arial"
+        else:
+            first_p.text = text
+        return
+
+    # Markdown path: tokenize and emit one run per styled segment.
+    tokens = _tokenize_inline_md(text)
+
+    # Capture anchor font from the first existing run (if any) so we can copy
+    # its font name/size onto each new run. Then clear all existing runs.
+    anchor_name = None
+    anchor_size = None
     if first_p.runs:
-        first_run = first_p.runs[0]
-        for r in list(first_p.runs[1:]):
+        anchor = first_p.runs[0]
+        try:
+            anchor_name = anchor.font.name
+        except Exception:
+            anchor_name = None
+        try:
+            anchor_size = anchor.font.size
+        except Exception:
+            anchor_size = None
+        for r in list(first_p.runs):
             r._r.getparent().remove(r._r)
-        first_run.text = str(text)
-        # Arabic in PPTX: set font to Arial for proper glyph rendering
-        if _has_arabic(str(text)):
-            first_run.font.name = "Arial"
-    else:
-        # Empty paragraph — just set its text directly
-        first_p.text = str(text)
+
+    for kind, payload in tokens:
+        if kind == "link":
+            label, url = payload  # type: ignore[misc]
+            run = first_p.add_run()
+            run.text = str(label)
+            try:
+                run.hyperlink.address = str(url)
+            except Exception:
+                # Fallback: append URL in parentheses so the link is visible
+                run.text = f"{label} ({url})"
+            seg_text = str(label)
+        else:
+            seg_text = str(payload)
+            run = first_p.add_run()
+            run.text = seg_text
+            if kind == "bold":
+                run.font.bold = True
+            elif kind == "italic":
+                run.font.italic = True
+            elif kind == "code":
+                run.font.name = "Consolas"
+
+        # Apply anchor font/size unless this run set its own (code uses Consolas)
+        if kind != "code" and anchor_name:
+            try:
+                run.font.name = anchor_name
+            except Exception:
+                pass
+        if anchor_size:
+            try:
+                run.font.size = anchor_size
+            except Exception:
+                pass
+        if _has_arabic(seg_text):
+            run.font.name = "Arial"
 
 
 def _populate_cover(slide, data: dict, doc_title: str) -> None:
