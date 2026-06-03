@@ -698,6 +698,102 @@ def _docx_add_paragraph(doc, text: str, *style_candidates: str):
     return doc.add_paragraph(text)
 
 
+def _is_pipe_separator_line(line: str) -> bool:
+    """Match a markdown table separator row like |---|:--:|---:|."""
+    s = line.strip()
+    if "|" not in s:
+        return False
+    core = s.strip("|")
+    cells = [c.strip() for c in core.split("|")]
+    if not cells:
+        return False
+    return all(re.fullmatch(r":?-{1,}:?", c or "") for c in cells)
+
+
+def _parse_table_alignments(separator_line: str) -> list[str]:
+    """Return per-column alignment ('left'|'center'|'right') from the separator row."""
+    s = separator_line.strip().strip("|")
+    out: list[str] = []
+    for c in s.split("|"):
+        c = c.strip()
+        if c.startswith(":") and c.endswith(":"):
+            out.append("center")
+        elif c.endswith(":"):
+            out.append("right")
+        else:
+            out.append("left")
+    return out
+
+
+def _normalize_md_blocks(content: str) -> str:
+    """Pre-pass that protects multi-line constructs from a naive split('\\n\\n').
+
+    1. Fenced ``` code blocks: replace their internal newlines with the sentinel
+       \\x01 so the whole fence becomes a single 'block' after splitting; callers
+       detect \\x01 and unjoin.
+    2. Pipe tables: insert blank lines before/after a table run so the block
+       boundary aligns with the table boundary, even when the LLM forgets to
+       leave a blank line around the table.
+    """
+    lines = content.splitlines()
+
+    # Pass 1: collapse fenced code blocks into a single line with \x01 separators.
+    collapsed: list[str] = []
+    fence_buf: list[str] | None = None
+    for ln in lines:
+        is_fence_marker = ln.strip().startswith("```")
+        if fence_buf is None and is_fence_marker:
+            fence_buf = [ln]
+        elif fence_buf is not None and is_fence_marker:
+            fence_buf.append(ln)
+            collapsed.append("\x01".join(fence_buf))
+            fence_buf = None
+        elif fence_buf is not None:
+            fence_buf.append(ln)
+        else:
+            collapsed.append(ln)
+    if fence_buf is not None:
+        # Unclosed fence — emit as-is so the user at least sees the content.
+        collapsed.append("\x01".join(fence_buf))
+
+    # Pass 2: classify each line as belonging to a special block (table or
+    # fenced code) so we can insert blank lines around them. Fenced code is
+    # already a single \x01-joined line at this point.
+    n = len(collapsed)
+    in_special = [False] * n
+    i = 0
+    while i < n:
+        ln = collapsed[i]
+        if "\x01" in ln:  # collapsed fence — its own block
+            in_special[i] = True
+            i += 1
+            continue
+        s = ln.strip()
+        if s.startswith("|") and "|" in s and i + 1 < n and "\x01" not in collapsed[i + 1]:
+            if _is_pipe_separator_line(collapsed[i + 1].strip()):
+                in_special[i] = True
+                in_special[i + 1] = True
+                j = i + 2
+                while j < n and "\x01" not in collapsed[j] and collapsed[j].strip().startswith("|"):
+                    in_special[j] = True
+                    j += 1
+                i = j
+                continue
+        i += 1
+
+    out: list[str] = []
+    prev_special = False
+    for idx, ln in enumerate(collapsed):
+        cur = in_special[idx]
+        # Insert a blank line on any transition (in→out or out→in) to break
+        # the block boundary, so split('\n\n') isolates fences and tables.
+        if cur != prev_special and out and out[-1].strip():
+            out.append("")
+        out.append(ln)
+        prev_special = cur
+    return "\n".join(out)
+
+
 def _is_pipe_table(block: str) -> bool:
     """Detect a GitHub-style pipe table block.
 
@@ -762,12 +858,33 @@ def _set_cell_shading(cell, hex_color: str) -> None:
     shd.set(qn("w:fill"), hex_color)
     tcPr.append(shd)
 
+def _docx_apply_alignment(paragraph, alignment: str) -> None:
+    """Apply 'left' | 'center' | 'right' alignment to a paragraph."""
+    try:
+        from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+    except ImportError:
+        return
+    if alignment == "center":
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+    elif alignment == "right":
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+    else:
+        paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
+
 def _add_docx_table(doc, block: str) -> None:
-    """Render a markdown pipe-table block as a native Word table."""
+    """Render a markdown pipe-table block as a native Word table.
+
+    Column alignment is read from the separator row (:--- / :---: / ---:).
+    """
     lines = [ln for ln in block.splitlines() if ln.strip()]
     header = _split_pipe_row(lines[0])
+    aligns = _parse_table_alignments(lines[1]) if len(lines) > 1 else []
     body_rows = [_split_pipe_row(ln) for ln in lines[2:]]
     ncols = max([len(header)] + [len(r) for r in body_rows]) if body_rows else len(header)
+    # Pad alignments to ncols
+    while len(aligns) < ncols:
+        aligns.append("left")
 
     style = _docx_resolve_style(
         doc, "Table Grid", "Light Grid", "Light List Accent 1", "Normal Table"
@@ -783,7 +900,7 @@ def _add_docx_table(doc, block: str) -> None:
 
     _set_table_borders(table)
 
-    # Header row (bold)
+    # Header row (bold + shaded + aligned)
     hdr_cells = table.rows[0].cells
     for i in range(ncols):
         text = header[i] if i < len(header) else ""
@@ -793,6 +910,7 @@ def _add_docx_table(doc, block: str) -> None:
         _add_inline_runs(para, text)
         for run in para.runs:
             run.bold = True
+        _docx_apply_alignment(para, aligns[i])
 
     # Body rows
     for row in body_rows:
@@ -801,6 +919,55 @@ def _add_docx_table(doc, block: str) -> None:
             text = row[i] if i < len(row) else ""
             para = cells[i].paragraphs[0]
             _add_inline_runs(para, text)
+            _docx_apply_alignment(para, aligns[i])
+
+
+def _add_docx_code_block(doc, code_text: str) -> None:
+    """Render a fenced code block as monospace lines with light-gray shading."""
+    from docx.shared import Pt
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    code_style = _docx_resolve_style(doc, "HTML Preformatted", "No Spacing", "Normal")
+
+    for line in code_text.split("\n"):
+        if code_style:
+            try:
+                p = doc.add_paragraph(style=code_style)
+            except KeyError:
+                p = doc.add_paragraph()
+        else:
+            p = doc.add_paragraph()
+
+        pPr = p._p.get_or_add_pPr()
+        # Paragraph shading (light gray)
+        existing_shd = pPr.find(qn("w:shd"))
+        if existing_shd is not None:
+            pPr.remove(existing_shd)
+        shd = OxmlElement("w:shd")
+        shd.set(qn("w:val"), "clear")
+        shd.set(qn("w:color"), "auto")
+        shd.set(qn("w:fill"), "F3F3F3")
+        pPr.append(shd)
+        # Tight spacing so multiple code lines stay together
+        existing_sp = pPr.find(qn("w:spacing"))
+        if existing_sp is not None:
+            pPr.remove(existing_sp)
+        sp = OxmlElement("w:spacing")
+        sp.set(qn("w:after"), "0")
+        sp.set(qn("w:before"), "0")
+        sp.set(qn("w:line"), "260")
+        sp.set(qn("w:lineRule"), "auto")
+        pPr.append(sp)
+
+        # Empty line gets a single space so the shading still renders.
+        run = p.add_run(line if line else " ")
+        run.font.name = "Consolas"
+        run.font.size = Pt(10)
+        # Preserve leading/trailing whitespace inside the run
+        t = run._r.find(qn("w:t"))
+        if t is not None:
+            t.set(qn("xml:space"), "preserve")
 
 def _make_docx(out_path: str, title: str, content: str) -> None:
     from docx import Document
@@ -817,9 +984,23 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
     if title:
         _docx_add_paragraph(doc, title, "Title", "Heading 1", "Heading1")
 
-    for block in (content or "").split("\n\n"):
+    # Pre-pass: isolate fenced code blocks (\x01 separators) and pipe tables.
+    normalized = _normalize_md_blocks(content or "")
+
+    for block in normalized.split("\n\n"):
         block = block.strip()
         if not block:
+            continue
+
+        # Fenced code block — recognized by the \x01 sentinel from the pre-pass.
+        if "\x01" in block:
+            code_lines = block.split("\x01")
+            # Drop the opening/closing ``` markers
+            if code_lines and code_lines[0].strip().startswith("```"):
+                code_lines = code_lines[1:]
+            if code_lines and code_lines[-1].strip().startswith("```"):
+                code_lines = code_lines[:-1]
+            _add_docx_code_block(doc, "\n".join(code_lines))
             continue
 
         # Horizontal rule (---, ___, ***)
@@ -863,14 +1044,21 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
 
         # Multi-line numbered list?
         if all(re.match(r"^\d+\.\s+", ln.strip()) for ln in lines if ln.strip()):
-            num_style = _docx_resolve_style(doc, "List Number", "List Paragraph", "Normal")
+            num_style = _docx_resolve_style(doc, "List Number")
+            # Word auto-numbers a paragraph only when the resolved style is a
+            # proper numbered-list style. If the template lacks "List Number"
+            # we keep the "1. " / "2. " prefix in the text so the user doesn't
+            # lose the numbering entirely.
+            keep_prefix = num_style is None
+            fallback_style = _docx_resolve_style(doc, "List Paragraph", "Normal")
             for ln in lines:
-                stripped = re.sub(r"^\s*\d+\.\s+", "", ln)
+                stripped = re.sub(r"^\s*\d+\.\s+", "", ln) if not keep_prefix else ln.strip()
                 if not stripped:
                     continue
-                if num_style:
+                use_style = num_style or fallback_style
+                if use_style:
                     try:
-                        p = doc.add_paragraph(style=num_style)
+                        p = doc.add_paragraph(style=use_style)
                     except KeyError:
                         p = doc.add_paragraph()
                 else:
@@ -1155,6 +1343,116 @@ def _set_shape_text(shape, text: str) -> None:
             run.font.name = "Arial"
 
 
+def _pptx_apply_para_align(paragraph, alignment: str) -> None:
+    """Map our 'left'|'center'|'right' to python-pptx PP_ALIGN."""
+    try:
+        from pptx.enum.text import PP_ALIGN
+    except ImportError:
+        return
+    if alignment == "center":
+        paragraph.alignment = PP_ALIGN.CENTER
+    elif alignment == "right":
+        paragraph.alignment = PP_ALIGN.RIGHT
+    else:
+        paragraph.alignment = PP_ALIGN.LEFT
+
+
+def _pptx_set_cell_fill(cell, hex_color: str) -> None:
+    """Solid-color background for a python-pptx table cell."""
+    try:
+        from pptx.dml.color import RGBColor
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = RGBColor.from_string(hex_color)
+    except Exception:
+        pass
+
+
+def _pptx_render_table(slide, table_block: str, left, top, width, height) -> None:
+    """Add a native PowerPoint table for a markdown pipe-table at the given rect."""
+    lines = [ln for ln in table_block.splitlines() if ln.strip()]
+    if not lines:
+        return
+    header = _split_pipe_row(lines[0])
+    aligns = _parse_table_alignments(lines[1]) if len(lines) > 1 else []
+    body_rows = [_split_pipe_row(ln) for ln in lines[2:]]
+    ncols = max([len(header)] + [len(r) for r in body_rows]) if body_rows else len(header)
+    nrows = 1 + len(body_rows)
+    while len(aligns) < ncols:
+        aligns.append("left")
+
+    try:
+        tbl_shape = slide.shapes.add_table(nrows, max(1, ncols), left, top, width, height)
+    except Exception as e:
+        logger.warning(f"pptx add_table failed: {e}")
+        return
+    tbl = tbl_shape.table
+
+    # Header row
+    for ci in range(ncols):
+        text = header[ci] if ci < len(header) else ""
+        cell = tbl.cell(0, ci)
+        _set_shape_text(cell, text)
+        _pptx_set_cell_fill(cell, "D9D9D9")
+        for para in cell.text_frame.paragraphs:
+            for run in para.runs:
+                run.font.bold = True
+            _pptx_apply_para_align(para, aligns[ci])
+    # Body rows
+    for ri, row in enumerate(body_rows, start=1):
+        for ci in range(ncols):
+            text = row[ci] if ci < len(row) else ""
+            cell = tbl.cell(ri, ci)
+            _set_shape_text(cell, text)
+            for para in cell.text_frame.paragraphs:
+                _pptx_apply_para_align(para, aligns[ci])
+
+
+def _pptx_extract_table_from_text(text: str) -> tuple[str, str] | None:
+    """If `text` is exactly a pipe-table (optionally with blank-line padding),
+    return (table_block, ''). If a table is followed/preceded by non-table text,
+    return None so the caller can keep rendering as text."""
+    lines = (text or "").splitlines()
+    # Strip leading/trailing blank lines
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if len(lines) < 2:
+        return None
+    if not lines[0].strip().startswith("|"):
+        return None
+    if not _is_pipe_separator_line(lines[1].strip()):
+        return None
+    # Every remaining line must be a pipe row
+    if not all(ln.strip().startswith("|") for ln in lines if ln.strip()):
+        return None
+    return "\n".join(lines), ""
+
+
+def _pptx_render_text(slide, shape, text: str) -> None:
+    """Wrap _set_shape_text with pipe-table detection. If the text is a pure
+    pipe-table block, replace the placeholder shape with a table at the same
+    position; otherwise render text normally."""
+    extracted = _pptx_extract_table_from_text(text or "")
+    if extracted is None:
+        _set_shape_text(shape, text or "")
+        return
+    table_block, _ = extracted
+    # Capture shape rect, then remove the placeholder and emit table.
+    try:
+        left, top, width, height = shape.left, shape.top, shape.width, shape.height
+    except Exception:
+        # Shape has no usable position — fall back to plain text rendering.
+        _set_shape_text(shape, text or "")
+        return
+    try:
+        sp = shape._element
+        sp.getparent().remove(sp)
+    except Exception:
+        pass
+    _pptx_render_table(slide, table_block, left, top, width, height)
+
+
 def _populate_cover(slide, data: dict, doc_title: str) -> None:
     # shape[1]=title, [2]=subtitle, [3]=meta
     title = data.get("title") or doc_title or ""
@@ -1198,13 +1496,13 @@ def _populate_two_column(slide, data: dict) -> None:
         else:
             left = data.get("content") or ""
     if len(shapes) > 2:
-        _set_shape_text(shapes[2], left)
+        _pptx_render_text(slide, shapes[2], left)
     # Right: if user provided right text, replace placeholder
     right = data.get("right")
     if right and len(shapes) > 4:
         if isinstance(right, list):
             right = "\n".join(f"• {x}" for x in right)
-        _set_shape_text(shapes[4], right)
+        _pptx_render_text(slide, shapes[4], right)
 
 
 def _populate_icon_rows(slide, data: dict) -> None:

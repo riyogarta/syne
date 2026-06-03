@@ -173,27 +173,62 @@ def _split_table_row(line: str) -> list:
     return [c.strip().replace("\x00", "|") for c in s.split("|")]
 
 
-def _make_md_table(header: list, rows: list, styles: dict):
+def _parse_pdf_table_alignments(separator_line: str) -> list[str]:
+    """Return per-column alignment ('LEFT'|'CENTER'|'RIGHT') for the separator row."""
+    s = (separator_line or "").strip().strip("|")
+    out: list[str] = []
+    for c in s.split("|"):
+        c = c.strip()
+        if c.startswith(":") and c.endswith(":"):
+            out.append("CENTER")
+        elif c.endswith(":"):
+            out.append("RIGHT")
+        else:
+            out.append("LEFT")
+    return out
+
+
+def _make_md_table(header: list, rows: list, styles: dict, separator_line: str = ""):
     from reportlab.platypus import Table, TableStyle, Paragraph
     from reportlab.lib import colors
     from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import cm
 
     base = styles["body"]
-    cell = ParagraphStyle("TCell", parent=base, fontSize=9, leading=12, spaceAfter=0)
-    head = ParagraphStyle("THead", parent=base, fontName="Helvetica-Bold",
-                          fontSize=9.5, leading=12, spaceAfter=0)
-
     ncols = max(1, len(header))
-    data = [[Paragraph(_md_inline_to_rl(c), head) for c in header]]
+    aligns = _parse_pdf_table_alignments(separator_line)
+    while len(aligns) < ncols:
+        aligns.append("LEFT")
+
+    # Per-column cell styles so the inner Paragraph aligns its own text — needed
+    # because ReportLab's TableStyle ALIGN only positions atom cells, not the
+    # wrapped flowables we use here.
+    cell_styles = [
+        ParagraphStyle(
+            f"TCell{i}", parent=base, fontSize=9, leading=12, spaceAfter=0,
+            alignment={"LEFT": 0, "CENTER": 1, "RIGHT": 2}[aligns[i]],
+        )
+        for i in range(ncols)
+    ]
+    head_styles = [
+        ParagraphStyle(
+            f"THead{i}", parent=base, fontName="Helvetica-Bold",
+            fontSize=9.5, leading=12, spaceAfter=0,
+            alignment={"LEFT": 0, "CENTER": 1, "RIGHT": 2}[aligns[i]],
+        )
+        for i in range(ncols)
+    ]
+
+    header_cells = (header + [""] * ncols)[:ncols]
+    data = [[Paragraph(_md_inline_to_rl(c), head_styles[i]) for i, c in enumerate(header_cells)]]
     for r in rows:
         cells = (r + [""] * ncols)[:ncols]
-        data.append([Paragraph(_md_inline_to_rl(c), cell) for c in cells])
+        data.append([Paragraph(_md_inline_to_rl(c), cell_styles[i]) for i, c in enumerate(cells)])
 
     usable = 17 * cm  # A4 portrait minus ~2cm margins each side
     col_w = usable / ncols
     tbl = Table(data, colWidths=[col_w] * ncols, repeatRows=1)
-    tbl.setStyle(TableStyle([
+    style_cmds = [
         ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#999999")),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EFEFEF")),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -201,7 +236,11 @@ def _make_md_table(header: list, rows: list, styles: dict):
         ("RIGHTPADDING", (0, 0), (-1, -1), 5),
         ("TOPPADDING", (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-    ]))
+    ]
+    # Column-level ALIGN as belt-and-suspenders for any non-Paragraph atoms
+    for col_idx, align in enumerate(aligns):
+        style_cmds.append(("ALIGN", (col_idx, 0), (col_idx, -1), align))
+    tbl.setStyle(TableStyle(style_cmds))
     return tbl
 
 
@@ -302,12 +341,13 @@ def _md_to_rl_story(text: str, styles: dict) -> list:
         # Table (pipe-style markdown)
         if _md_is_table_row(line) and (i + 1) < n and _md_is_table_separator(lines[i + 1]):
             header = _split_table_row(line)
+            separator_line = lines[i + 1]
             i += 2  # skip header + separator
             rows: list = []
             while i < n and _md_is_table_row(lines[i]):
                 rows.append(_split_table_row(lines[i]))
                 i += 1
-            story.append(_make_md_table(header, rows, styles))
+            story.append(_make_md_table(header, rows, styles, separator_line))
             story.append(Spacer(1, 6))
             continue
 
