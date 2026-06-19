@@ -1,12 +1,58 @@
 """Memory engine — store and recall with semantic search."""
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from ..db.connection import get_connection
 from ..llm.provider import LLMProvider
 from ..security import check_rule_760
 
 logger = logging.getLogger("syne.memory.engine")
+
+
+def format_relative_time(dt, now: Optional[datetime] = None, locale: str = "id") -> str:
+    """Render a past datetime as a short relative-time phrase.
+
+    Returns a phrase like "baru saja" / "3 jam lalu" / "5 hari lalu" /
+    "2 bulan lalu" / "1 tahun lalu". Locale 'id' (default) returns Indonesian;
+    anything else returns English ("3 hours ago", etc.).
+
+    Returns "" if dt is None or not a datetime, so callers can drop the prefix
+    cleanly when no timestamp is available (e.g. legacy memories).
+    """
+    if not isinstance(dt, datetime):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    delta = now - dt
+    seconds = delta.total_seconds()
+    # Treat slight clock skew (memory stamped microseconds in the "future") as now.
+    if seconds < 60:
+        return "baru saja" if locale == "id" else "just now"
+
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes} menit lalu" if locale == "id" else f"{minutes} min ago"
+
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"{hours} jam lalu" if locale == "id" else f"{hours} hr ago"
+
+    days = int(seconds // 86400)
+    if days < 30:
+        return f"{days} hari lalu" if locale == "id" else f"{days} day{'s' if days != 1 else ''} ago"
+
+    months = int(days // 30)
+    if months < 12:
+        return f"{months} bulan lalu" if locale == "id" else f"{months} mo ago"
+
+    years = int(days // 365)
+    return f"{years} tahun lalu" if locale == "id" else f"{years} yr{'s' if years != 1 else ''} ago"
 
 
 class MemoryEngine:

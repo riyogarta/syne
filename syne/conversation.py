@@ -518,13 +518,17 @@ class Conversation:
         #    This positioning ensures the LLM "sees" memories near the question,
         #    preventing long conversation history from drowning out memory context.
         if memories:
+            from .memory.engine import format_relative_time
             memory_lines = [
                 "# Relevant Memories",
                 "Your stored facts about the owner and their world. Use these to answer questions.",
+                "Each line includes when the memory was stored so you can tell recent events from old ones.",
                 "",
             ]
             for mem in memories:
                 score = f"(confidence: {mem['similarity']:.0%})"
+                rel = format_relative_time(mem.get("created_at"))
+                when = f" [{rel}]" if rel else ""
                 # Conflict flags injected by memory engine (code-enforced)
                 conflict_status = mem.get("_conflict_status", "")
                 if conflict_status == "conflicted":
@@ -534,7 +538,7 @@ class Conversation:
                     flag = " ✅ AUTHORITATIVE"
                 else:
                     flag = ""
-                memory_lines.append(f"- [{mem['category']}] {mem['content']} {score}{flag}")
+                memory_lines.append(f"- [{mem['category']}]{when} {mem['content']} {score}{flag}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
             # Log recalled memories for debugging
             _actual_query = recall_query or user_message

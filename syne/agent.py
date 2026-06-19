@@ -2013,9 +2013,12 @@ class SyneAgent:
         if not results:
             return "No relevant memories found."
 
+        from .memory.engine import format_relative_time
         lines = []
         for mem in results:
             score = f"{mem['similarity']:.0%}"
+            rel = format_relative_time(mem.get("created_at"))
+            when = f" [{rel}]" if rel else ""
             attach = ""
             if mem.get("has_attachment"):
                 fname = mem.get("attachment_filename") or "file"
@@ -2025,7 +2028,7 @@ class SyneAgent:
                 size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
                 attach = f" 📎 [id={mem['id']} attachment: {fname} {mime} {size_str} — use memory_get_file to retrieve]"
             lines.append(
-                f"- [id={mem['id']}] [{mem['category']}] {mem['content']} (relevance: {score}){attach}"
+                f"- [id={mem['id']}] [{mem['category']}]{when} {mem['content']} (relevance: {score}){attach}"
             )
         return "\n".join(lines)
 
