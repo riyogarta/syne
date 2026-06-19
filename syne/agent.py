@@ -2014,10 +2014,15 @@ class SyneAgent:
             return "No relevant memories found."
 
         from .memory.engine import format_relative_time
+        from .db.models import get_config as _get_locale
+        try:
+            _mem_locale = await _get_locale("time.locale", "id")
+        except Exception:
+            _mem_locale = "id"
         lines = []
         for mem in results:
             score = f"{mem['similarity']:.0%}"
-            rel = format_relative_time(mem.get("created_at"))
+            rel = format_relative_time(mem.get("created_at"), locale=_mem_locale)
             when = f" [{rel}]" if rel else ""
             attach = ""
             if mem.get("has_attachment"):

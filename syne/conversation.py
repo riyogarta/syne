@@ -519,6 +519,13 @@ class Conversation:
         #    preventing long conversation history from drowning out memory context.
         if memories:
             from .memory.engine import format_relative_time
+            # Pick locale from time.locale config (same source as the time context
+            # block above). Falls back to 'id' to keep prior behavior intact when
+            # config is unreachable.
+            try:
+                _mem_locale = (await _load_time_config())['time.locale']
+            except Exception:
+                _mem_locale = 'id'
             memory_lines = [
                 "# Relevant Memories",
                 "Your stored facts about the owner and their world. Use these to answer questions.",
@@ -527,7 +534,7 @@ class Conversation:
             ]
             for mem in memories:
                 score = f"(confidence: {mem['similarity']:.0%})"
-                rel = format_relative_time(mem.get("created_at"))
+                rel = format_relative_time(mem.get("created_at"), locale=_mem_locale)
                 when = f" [{rel}]" if rel else ""
                 # Conflict flags injected by memory engine (code-enforced)
                 conflict_status = mem.get("_conflict_status", "")
