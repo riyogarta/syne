@@ -408,20 +408,28 @@ class AnthropicProvider(LLMProvider):
                     conversation.append({"role": "user", "content": pending_tool_results})
                     pending_tool_results = []
 
-                img_meta = (m.metadata or {}).get("image")
-                if img_meta:
+                # Image attachments — support both single {"image": {...}} (legacy)
+                # and {"images": [{...}, ...]} (Telegram album / multi-photo turn).
+                imgs_meta: list = []
+                _meta = m.metadata or {}
+                if isinstance(_meta.get("images"), list):
+                    imgs_meta.extend([x for x in _meta["images"] if isinstance(x, dict)])
+                if _meta.get("image"):
+                    imgs_meta.append(_meta["image"])
+                if imgs_meta:
                     content_parts = []
-                    media_type = img_meta.get("mime_type", "image/jpeg")
-                    img_data = img_meta.get("base64", "")
-                    if img_data:
-                        content_parts.append({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": img_data,
-                            }
-                        })
+                    for img_meta in imgs_meta:
+                        media_type = img_meta.get("mime_type", "image/jpeg")
+                        img_data = img_meta.get("base64", "")
+                        if img_data:
+                            content_parts.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": img_data,
+                                }
+                            })
                     if m.content:
                         content_parts.append({"type": "text", "text": m.content})
                     conversation.append({"role": m.role, "content": content_parts})

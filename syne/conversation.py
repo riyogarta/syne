@@ -124,7 +124,7 @@ def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = N
     # Auto-detect media type from metadata.
     # memory_store_file is in _CORE_TOOLS, no need to add it here.
     if metadata:
-        if metadata.get("image"):
+        if metadata.get("image") or metadata.get("images"):
             needed.update({"image_gen", "image_analysis"})
         if metadata.get("audio") or metadata.get("voice"):
             needed.update({"send_voice"})

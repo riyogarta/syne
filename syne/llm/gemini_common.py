@@ -689,14 +689,22 @@ def format_messages_for_gemini(
             if not text or not text.strip():
                 continue
             parts = [{"text": text}]
-            if msg.metadata and "image" in msg.metadata:
-                img = msg.metadata["image"]
-                parts.append({
-                    "inlineData": {
-                        "mimeType": img.get("mime_type", "image/jpeg"),
-                        "data": img.get("base64", ""),
-                    }
-                })
+            # Support both "image" (single, legacy) and "images" (list, from
+            # Telegram media-group albums).
+            if msg.metadata:
+                _imgs = []
+                _img_list = msg.metadata.get("images")
+                if isinstance(_img_list, list):
+                    _imgs.extend([x for x in _img_list if isinstance(x, dict)])
+                if msg.metadata.get("image"):
+                    _imgs.append(msg.metadata["image"])
+                for img in _imgs:
+                    parts.append({
+                        "inlineData": {
+                            "mimeType": img.get("mime_type", "image/jpeg"),
+                            "data": img.get("base64", ""),
+                        }
+                    })
             contents.append({"role": "user", "parts": parts})
 
         elif msg.role == "assistant":

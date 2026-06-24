@@ -140,6 +140,15 @@ class TelegramChannel:
         # Deduplicate inbound Telegram messages (Telegram may retry delivering the same update)
         # Format: {chat_id: deque([message_id, ...], maxlen=200)}
         self._seen_inbound: dict[int, deque[int]] = {}
+        # Telegram album / media-group buffering. Telegram delivers each photo in
+        # an album as a separate update sharing media_group_id; without buffering,
+        # only one of them would reach the LLM. Format:
+        #   {media_group_id: {photos, caption, first_update, context, ...}}
+        self._media_group_buffer: dict[str, dict] = {}
+        self._media_group_tasks: dict[str, asyncio.Task] = {}
+        # Per-group lock so concurrent _handle_photo invocations for the same
+        # media_group_id don't race on the buffer state.
+        self._media_group_locks: dict[str, asyncio.Lock] = {}
 
     async def _build_inbound(self, update: Update, is_group: bool) -> "InboundContext":
         """Build InboundContext from a Telegram Update. Used by ALL handlers.
@@ -970,8 +979,19 @@ class TelegramChannel:
         return is_mentioned, text if text else original_text
 
     async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle photo messages — download, encode, and send to LLM with vision."""
+        """Handle photo messages — download, encode, and send to LLM with vision.
+
+        Telegram delivers album/media-group photos as N separate updates that
+        share a media_group_id. If that field is set, we route to the buffered
+        album handler so the LLM sees the whole album in a single turn instead
+        of one photo per turn (with the others silently dropped).
+        """
         if not update.message:
+            return
+
+        # Album / media-group fast path — buffer and flush together.
+        if update.message.media_group_id:
+            await self._buffer_album_photo(update, context)
             return
 
         import base64
@@ -1089,6 +1109,198 @@ class TelegramChannel:
                 except Exception:
                     pass
                 await update.message.reply_text(_classify_error(e, model=_model))
+
+    # Album / media-group debounce window. After the last photo in a group
+    # arrives we wait this long before flushing, on the assumption Telegram
+    # has finished delivering the album. 1.5s is comfortable for 10-photo
+    # albums while still keeping latency low for single-photo "groups".
+    _ALBUM_DEBOUNCE_SECONDS = 1.5
+
+    async def _buffer_album_photo(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE,
+    ) -> None:
+        """Add one photo from a media-group to the buffer, (re)scheduling flush.
+
+        Each photo in a Telegram album arrives as its own update with the same
+        media_group_id. We download each one immediately (so the link to the
+        Telegram file_id doesn't expire) and append to a per-group state dict.
+        A flush task is (re)scheduled every time a new photo arrives, so the
+        timer only fires after the album has been quiet for the debounce
+        window — i.e. after the last photo lands.
+        """
+        import base64
+        import os
+
+        msg = update.message
+        group_id = msg.media_group_id
+        chat = update.effective_chat
+        user = update.effective_user
+
+        if self._is_duplicate_inbound(chat.id, msg.message_id):
+            return
+
+        lock = self._media_group_locks.setdefault(group_id, asyncio.Lock())
+        async with lock:
+            state = self._media_group_buffer.get(group_id)
+            if state is None:
+                state = {
+                    "photos": [],
+                    "caption": "",
+                    "first_update": update,
+                    "context": context,
+                    "chat_id": chat.id,
+                    "user_id": user.id,
+                    "is_group": chat.type in ("group", "supergroup"),
+                }
+                self._media_group_buffer[group_id] = state
+
+            # Download immediately — Telegram file refs are short-lived.
+            try:
+                photo = msg.photo[-1]  # largest size
+                tg_file = await photo.get_file()
+                photo_bytes = bytes(await tg_file.download_as_bytearray())
+            except Exception as e:
+                logger.error(f"Album photo download failed (group={group_id}): {e}")
+                return
+
+            if not photo_bytes:
+                logger.warning(f"Album photo empty (group={group_id})")
+                return
+
+            uploads_dir = self.agent.workspace_uploads
+            os.makedirs(uploads_dir, exist_ok=True)
+            fname = f"{photo.file_unique_id}_photo.jpg"
+            save_path = os.path.join(uploads_dir, fname)
+            with open(save_path, "wb") as f:
+                f.write(photo_bytes)
+
+            state["photos"].append({
+                "mime_type": "image/jpeg",
+                "base64": base64.b64encode(photo_bytes).decode("utf-8"),
+                "path": save_path,
+                "filename": fname,
+                "size": len(photo_bytes),
+                "message_id": msg.message_id,
+            })
+            # Telegram puts the caption on whichever photo the user typed it
+            # on (usually first). Keep the first non-empty one.
+            if not state["caption"] and msg.caption:
+                state["caption"] = msg.caption
+
+            # (Re)schedule flush — cancel any pending timer for this group.
+            pending = self._media_group_tasks.pop(group_id, None)
+            if pending and not pending.done():
+                pending.cancel()
+            self._media_group_tasks[group_id] = asyncio.create_task(
+                self._flush_album_after_delay(group_id, self._ALBUM_DEBOUNCE_SECONDS)
+            )
+
+    async def _flush_album_after_delay(self, group_id: str, delay: float) -> None:
+        """Wait `delay` seconds, then process whatever the buffer holds."""
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return  # superseded by a newer photo — let the new task flush
+        state = self._media_group_buffer.pop(group_id, None)
+        self._media_group_tasks.pop(group_id, None)
+        self._media_group_locks.pop(group_id, None)
+        if not state or not state["photos"]:
+            return
+        try:
+            await self._process_album(group_id, state)
+        except Exception as e:
+            logger.error(f"Album processing failed (group={group_id}): {e}", exc_info=True)
+
+    async def _process_album(self, group_id: str, state: dict) -> None:
+        """Run a buffered album through the agent as a single turn."""
+        update: Update = state["first_update"]
+        context = state["context"]
+        user = update.effective_user
+        chat = update.effective_chat
+        is_group = state["is_group"]
+        photos: list[dict] = state["photos"]
+        caption: str = state["caption"]
+
+        # Group-chat policy: same as single-photo path. Albums in groups only
+        # process when there's a caption (and it survives group routing) or the
+        # bot is replied-to / mentioned via the first message.
+        if is_group:
+            if caption:
+                routed = await self._process_group_message(update, context, caption)
+                if routed is None:
+                    return
+                caption = routed
+            elif not self._is_reply_to_bot(update):
+                return
+
+        if not is_group:
+            await self._ensure_user(user, is_dm=True)
+
+        total_bytes = sum(p["size"] for p in photos)
+        logger.info(
+            f"[{chat.type}] {user.first_name} ({user.id}) "
+            f"album group={group_id}: {len(photos)} photos, "
+            f"{total_bytes} bytes total — caption: {caption[:80]!r}"
+        )
+
+        paths = [p["path"] for p in photos]
+        path_list = ", ".join(paths)
+        header = f"[User sent {len(photos)} photos ({total_bytes} bytes total), saved at: {path_list}]"
+        user_text = f"{header}\n\n{caption}" if caption else header
+
+        inbound = await self._build_inbound(update, is_group)
+        from .inbound import build_user_context_prefix
+        prefix = build_user_context_prefix(inbound)
+        if prefix:
+            user_text = f"{prefix}\n\n{user_text}"
+
+        # Pass an ordered list — drivers iterate and emit one image part per item.
+        metadata = {
+            "images": [
+                {
+                    "mime_type": p["mime_type"],
+                    "base64": p["base64"],
+                    "path": p["path"],
+                    "filename": p["filename"],
+                }
+                for p in photos
+            ],
+            "inbound": inbound,
+            "_temp_upload_paths": paths,
+        }
+
+        async with _TypingIndicator(context.bot, chat.id):
+            try:
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message=user_text,
+                    display_name=self._get_display_name(user),
+                    message_metadata=metadata,
+                    is_dm=not is_group,
+                )
+            except Exception as e:
+                logger.error(f"Error handling album: {e}", exc_info=True)
+                _model = ""
+                try:
+                    _conv = self.agent.conversations._active.get(f"telegram:{chat.id}")
+                    if _conv:
+                        _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
+                except Exception:
+                    pass
+                await update.message.reply_text(_classify_error(e, model=_model))
+                return
+
+        if response:
+            response, reply_to = parse_reply_tag(response, update.message.message_id)
+            response, react_emojis = parse_react_tags(response)
+            for emoji in react_emojis:
+                await self.send_reaction(chat.id, update.message.message_id, emoji)
+            await self._send_response_with_media(
+                chat.id, response, context, reply_to_message_id=reply_to,
+            )
 
     async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle voice messages and audio files — transcribe via STT and process as text."""

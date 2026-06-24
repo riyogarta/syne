@@ -179,16 +179,21 @@ class CodexProvider(LLMProvider):
             if msg.role == "system":
                 instructions = msg.content
             elif msg.role == "user":
-                # Check for image metadata (vision)
-                if msg.metadata and msg.metadata.get("image"):
-                    img = msg.metadata["image"]
-                    content_parts = [
-                        {"type": "input_text", "text": msg.content},
-                        {
+                # Check for image metadata (vision). Supports "image" (single,
+                # legacy) and "images" (list, from Telegram media-group albums).
+                _imgs: list = []
+                _meta = msg.metadata or {}
+                if isinstance(_meta.get("images"), list):
+                    _imgs.extend([x for x in _meta["images"] if isinstance(x, dict)])
+                if _meta.get("image"):
+                    _imgs.append(_meta["image"])
+                if _imgs:
+                    content_parts = [{"type": "input_text", "text": msg.content}]
+                    for img in _imgs:
+                        content_parts.append({
                             "type": "input_image",
-                            "image_url": f"data:{img.get('mime_type', 'image/jpeg')};base64,{img['base64']}",
-                        },
-                    ]
+                            "image_url": f"data:{img.get('mime_type', 'image/jpeg')};base64,{img.get('base64', '')}",
+                        })
                     input_msgs.append({"role": "user", "content": content_parts})
                 else:
                     input_msgs.append({"role": "user", "content": msg.content})
