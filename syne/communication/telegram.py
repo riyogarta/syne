@@ -1181,6 +1181,13 @@ class TelegramChannel:
                 self._flush_album_after_delay(group_id, self._ALBUM_DEBOUNCE_SECONDS)
             )
 
+        # Capture the state reference at this point. Phase 3 compares the
+        # buffer's current entry against this captured ref with `is`; if a
+        # flush popped our state and a fresh album for the same group_id
+        # was created by a later photo, the identity check fails and the
+        # late download won't pollute that unrelated state.
+        registered_state = state
+
         # Phase 2 — download outside the lock so sibling photos can register.
         photo = msg.photo[-1]
         photo_bytes: bytes = b""
@@ -1194,7 +1201,7 @@ class TelegramChannel:
                 logger.warning(f"Album photo empty (group={group_id}, msg={msg.message_id})")
             async with lock:
                 cur = self._media_group_buffer.get(group_id)
-                if cur is not None:
+                if cur is registered_state:
                     cur["pending_downloads"] = max(0, cur["pending_downloads"] - 1)
             return
 
@@ -1208,10 +1215,11 @@ class TelegramChannel:
         # Phase 3 — register the downloaded photo back into state.
         async with lock:
             cur = self._media_group_buffer.get(group_id)
-            if cur is None:
-                # Flush already fired and popped the state. Photo arrived too
-                # late to join the turn — log and move on (file stays on disk
-                # but won't be referenced; transient_upload cleanup misses it).
+            if cur is not registered_state:
+                # Either the buffer is empty (flush popped it) or a NEW album
+                # has taken over the group_id. Either way we mustn't touch the
+                # current entry — that would either drop into a flushed turn
+                # or pollute an unrelated album.
                 logger.warning(
                     f"Album {group_id} msg={msg.message_id}: download finished "
                     f"after flush — photo dropped from turn"
@@ -1263,11 +1271,17 @@ class TelegramChannel:
                 f"({self._ALBUM_DOWNLOAD_MAX_WAIT}s) — flushing with partial photos"
             )
 
-        # Pop and process atomically.
+        # Pop state under the same lock that _buffer_album_photo uses, so we
+        # can't pop while a Phase 3 mutation is in flight. We deliberately do
+        # NOT pop the lock from _media_group_locks: a late Phase 2/3 may still
+        # hold a reference to it, and removing the dict entry would let a new
+        # album for the same group_id create a fresh lock — at which point the
+        # old in-flight handler and the new one would no longer mutually
+        # exclude. The dict grows by one Lock per album over the bot's
+        # lifetime; in the worst case that's a few KB per million albums.
         async with lock:
             state = self._media_group_buffer.pop(group_id, None)
             self._media_group_tasks.pop(group_id, None)
-        self._media_group_locks.pop(group_id, None)
 
         if not state or not state.get("photos"):
             return
