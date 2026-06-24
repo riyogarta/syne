@@ -1112,21 +1112,34 @@ class TelegramChannel:
 
     # Album / media-group debounce window. After the last photo in a group
     # arrives we wait this long before flushing, on the assumption Telegram
-    # has finished delivering the album. 1.5s is comfortable for 10-photo
-    # albums while still keeping latency low for single-photo "groups".
-    _ALBUM_DEBOUNCE_SECONDS = 1.5
+    # has finished delivering the album. Empirically the gap between photos
+    # in a single album can stretch to 2-3s on slower connections, so 3.0s
+    # buys margin without making single-photo "albums" feel sluggish.
+    _ALBUM_DEBOUNCE_SECONDS = 3.0
+    # Hard cap for waiting on in-flight downloads at flush time. Without this,
+    # one stuck download could indefinitely defer the whole turn.
+    _ALBUM_DOWNLOAD_MAX_WAIT = 15.0
 
     async def _buffer_album_photo(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE,
     ) -> None:
         """Add one photo from a media-group to the buffer, (re)scheduling flush.
 
-        Each photo in a Telegram album arrives as its own update with the same
-        media_group_id. We download each one immediately (so the link to the
-        Telegram file_id doesn't expire) and append to a per-group state dict.
-        A flush task is (re)scheduled every time a new photo arrives, so the
-        timer only fires after the album has been quiet for the debounce
-        window — i.e. after the last photo lands.
+        Two-phase to keep the debounce window honest:
+
+        Phase 1 (under lock): reserve a slot in the buffer and (re)schedule
+        the flush timer IMMEDIATELY. We do NOT download here — downloads can
+        take seconds on large photos / slow links, and doing them under the
+        lock would (a) block sibling photos in the same album from rescheduling
+        the timer and (b) effectively delay the timer scheduling by the
+        download time, making the debounce too short relative to inter-photo
+        gaps.
+
+        Phase 2 (outside lock): download the bytes, save to disk, then re-enter
+        the lock briefly just to append the result to the state. If the flush
+        timer already fired by the time we have bytes, we drop the photo with
+        a warning rather than starting a new state — the flush itself waits
+        for pending downloads (capped) before processing, so this is rare.
         """
         import base64
         import os
@@ -1139,12 +1152,14 @@ class TelegramChannel:
         if self._is_duplicate_inbound(chat.id, msg.message_id):
             return
 
+        # Phase 1 — reserve slot + (re)schedule timer.
         lock = self._media_group_locks.setdefault(group_id, asyncio.Lock())
         async with lock:
             state = self._media_group_buffer.get(group_id)
             if state is None:
                 state = {
                     "photos": [],
+                    "pending_downloads": 0,
                     "caption": "",
                     "first_update": update,
                     "context": context,
@@ -1153,40 +1168,11 @@ class TelegramChannel:
                     "is_group": chat.type in ("group", "supergroup"),
                 }
                 self._media_group_buffer[group_id] = state
-
-            # Download immediately — Telegram file refs are short-lived.
-            try:
-                photo = msg.photo[-1]  # largest size
-                tg_file = await photo.get_file()
-                photo_bytes = bytes(await tg_file.download_as_bytearray())
-            except Exception as e:
-                logger.error(f"Album photo download failed (group={group_id}): {e}")
-                return
-
-            if not photo_bytes:
-                logger.warning(f"Album photo empty (group={group_id})")
-                return
-
-            uploads_dir = self.agent.workspace_uploads
-            os.makedirs(uploads_dir, exist_ok=True)
-            fname = f"{photo.file_unique_id}_photo.jpg"
-            save_path = os.path.join(uploads_dir, fname)
-            with open(save_path, "wb") as f:
-                f.write(photo_bytes)
-
-            state["photos"].append({
-                "mime_type": "image/jpeg",
-                "base64": base64.b64encode(photo_bytes).decode("utf-8"),
-                "path": save_path,
-                "filename": fname,
-                "size": len(photo_bytes),
-                "message_id": msg.message_id,
-            })
+            state["pending_downloads"] += 1
             # Telegram puts the caption on whichever photo the user typed it
             # on (usually first). Keep the first non-empty one.
             if not state["caption"] and msg.caption:
                 state["caption"] = msg.caption
-
             # (Re)schedule flush — cancel any pending timer for this group.
             pending = self._media_group_tasks.pop(group_id, None)
             if pending and not pending.done():
@@ -1195,17 +1181,101 @@ class TelegramChannel:
                 self._flush_album_after_delay(group_id, self._ALBUM_DEBOUNCE_SECONDS)
             )
 
+        # Phase 2 — download outside the lock so sibling photos can register.
+        photo = msg.photo[-1]
+        photo_bytes: bytes = b""
+        try:
+            tg_file = await photo.get_file()
+            photo_bytes = bytes(await tg_file.download_as_bytearray())
+        except Exception as e:
+            logger.error(f"Album photo download failed (group={group_id}): {e}")
+        if not photo_bytes:
+            if not photo_bytes and getattr(msg, "photo", None):
+                logger.warning(f"Album photo empty (group={group_id}, msg={msg.message_id})")
+            async with lock:
+                cur = self._media_group_buffer.get(group_id)
+                if cur is not None:
+                    cur["pending_downloads"] = max(0, cur["pending_downloads"] - 1)
+            return
+
+        uploads_dir = self.agent.workspace_uploads
+        os.makedirs(uploads_dir, exist_ok=True)
+        fname = f"{photo.file_unique_id}_photo.jpg"
+        save_path = os.path.join(uploads_dir, fname)
+        with open(save_path, "wb") as f:
+            f.write(photo_bytes)
+
+        # Phase 3 — register the downloaded photo back into state.
+        async with lock:
+            cur = self._media_group_buffer.get(group_id)
+            if cur is None:
+                # Flush already fired and popped the state. Photo arrived too
+                # late to join the turn — log and move on (file stays on disk
+                # but won't be referenced; transient_upload cleanup misses it).
+                logger.warning(
+                    f"Album {group_id} msg={msg.message_id}: download finished "
+                    f"after flush — photo dropped from turn"
+                )
+                return
+            cur["photos"].append({
+                "mime_type": "image/jpeg",
+                "base64": base64.b64encode(photo_bytes).decode("utf-8"),
+                "path": save_path,
+                "filename": fname,
+                "size": len(photo_bytes),
+                "message_id": msg.message_id,
+            })
+            cur["pending_downloads"] = max(0, cur["pending_downloads"] - 1)
+
     async def _flush_album_after_delay(self, group_id: str, delay: float) -> None:
-        """Wait `delay` seconds, then process whatever the buffer holds."""
+        """Wait `delay` seconds, then process whatever the buffer holds.
+
+        After the debounce delay, also wait briefly for any in-flight downloads
+        in this group to complete before processing — bounded by
+        _ALBUM_DOWNLOAD_MAX_WAIT so a stuck download can't deadlock the turn.
+        """
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return  # superseded by a newer photo — let the new task flush
-        state = self._media_group_buffer.pop(group_id, None)
-        self._media_group_tasks.pop(group_id, None)
-        self._media_group_locks.pop(group_id, None)
-        if not state or not state["photos"]:
+
+        # Wait for in-flight downloads. The buffer state's pending_downloads
+        # counter is decremented at the end of each download.
+        lock = self._media_group_locks.get(group_id)
+        if lock is None:
             return
+        waited = 0.0
+        poll = 0.1
+        while waited < self._ALBUM_DOWNLOAD_MAX_WAIT:
+            async with lock:
+                state = self._media_group_buffer.get(group_id)
+                if state is None:
+                    return
+                if state.get("pending_downloads", 0) <= 0:
+                    break
+            await asyncio.sleep(poll)
+            waited += poll
+        else:
+            # Hit the wait cap — process whatever's in the state. Late
+            # downloads will hit "download finished after flush" warning.
+            logger.warning(
+                f"Album group={group_id}: download wait cap reached "
+                f"({self._ALBUM_DOWNLOAD_MAX_WAIT}s) — flushing with partial photos"
+            )
+
+        # Pop and process atomically.
+        async with lock:
+            state = self._media_group_buffer.pop(group_id, None)
+            self._media_group_tasks.pop(group_id, None)
+        self._media_group_locks.pop(group_id, None)
+
+        if not state or not state.get("photos"):
+            return
+
+        logger.info(
+            f"Album group={group_id} flushed: {len(state['photos'])} photo(s), "
+            f"caption={state['caption'][:60]!r}"
+        )
         try:
             await self._process_album(group_id, state)
         except Exception as e:
