@@ -130,7 +130,27 @@ class OpenAIProvider(LLMProvider):
                 formatted.append({"role": "system", "content": msg.content})
             elif msg.role == "user":
                 active_tool_ids = set()
-                formatted.append({"role": "user", "content": msg.content})
+                # Vision support — Chat Completions API accepts a list of content
+                # parts mixing text and image_url. Supports "image" (single,
+                # legacy) and "images" (list, from Telegram media-group albums).
+                _imgs: list = []
+                _meta = msg.metadata or {}
+                if isinstance(_meta.get("images"), list):
+                    _imgs.extend([x for x in _meta["images"] if isinstance(x, dict)])
+                if _meta.get("image"):
+                    _imgs.append(_meta["image"])
+                if _imgs:
+                    parts: list = [{"type": "text", "text": msg.content or ""}]
+                    for img in _imgs:
+                        mime = img.get("mime_type", "image/jpeg")
+                        b64 = img.get("base64", "")
+                        parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        })
+                    formatted.append({"role": "user", "content": parts})
+                else:
+                    formatted.append({"role": "user", "content": msg.content})
             elif msg.role == "assistant":
                 active_tool_ids = set()
                 entry: dict = {"role": "assistant"}

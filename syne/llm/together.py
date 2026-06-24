@@ -50,7 +50,31 @@ class TogetherProvider(LLMProvider):
     ) -> ChatResponse:
         model = model or self.chat_model
 
-        msgs = [{"role": m.role, "content": m.content} for m in messages]
+        # OpenAI-compatible Chat Completions shape — vision support routes
+        # through image_url content parts (supported by Llama-3.2-Vision,
+        # Qwen-VL, etc. on Together). Non-vision models will reject the
+        # request; that's the same failure mode as before, just earlier.
+        msgs: list[dict] = []
+        for m in messages:
+            if m.role == "user":
+                _imgs: list = []
+                _meta = m.metadata or {}
+                if isinstance(_meta.get("images"), list):
+                    _imgs.extend([x for x in _meta["images"] if isinstance(x, dict)])
+                if _meta.get("image"):
+                    _imgs.append(_meta["image"])
+                if _imgs:
+                    parts: list = [{"type": "text", "text": m.content or ""}]
+                    for img in _imgs:
+                        mime = img.get("mime_type", "image/jpeg")
+                        b64 = img.get("base64", "")
+                        parts.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"},
+                        })
+                    msgs.append({"role": "user", "content": parts})
+                    continue
+            msgs.append({"role": m.role, "content": m.content})
         body: dict = {"model": model, "messages": msgs, "temperature": temperature}
         if max_tokens:
             body["max_tokens"] = max_tokens
