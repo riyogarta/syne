@@ -8466,7 +8466,7 @@ Or just send me a message!"""
                 sender = reply.from_user.first_name or reply.from_user.username or str(reply.from_user.id)
         
         # Truncate
-        max_quote = 500
+        max_quote = 4000
         if len(body) > max_quote:
             body = body[:max_quote] + "…"
         
