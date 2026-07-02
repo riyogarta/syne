@@ -736,7 +736,7 @@ class WhatsAppAbility(Ability):
         """Process a single inbound wacli JSON message."""
         from_me = bool(msg.get("FromMe", False))
 
-        text = msg.get("Text", "").strip()
+        text = (msg.get("Text") or "").strip()
         chat_jid = msg.get("ChatJID", "")
         media_type = msg.get("MediaType")
         is_image = media_type == "image"
