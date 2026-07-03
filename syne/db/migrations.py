@@ -187,6 +187,30 @@ async def _m7_seed_cap002_rule(conn) -> None:
     )
 
 
+async def _m8_seed_sub001_rule(conn) -> None:
+    """Add SUB001 'Delegate Multi-Step Work To Sub-Agents' rule to existing installs.
+
+    Fresh installs get it via schema.sql. Sub-agent spawning is now Molt's own
+    judgment call (tool is always-on, not keyword-gated). This rule tells Molt
+    WHEN to spawn. Generic — no user-specific content. Idempotent.
+    """
+    await conn.execute(
+        "INSERT INTO rules (code, name, description, severity) VALUES ("
+        "'SUB001', 'Delegate Multi-Step Work To Sub-Agents', "
+        "'Spawning a sub-agent is YOUR judgment call from the task itself — never "
+        "wait for the user to type keywords like \"delegate\" or \"sub-agent\". "
+        "SPAWN when ANY applies: (1) the task needs 2+ dependent tool rounds where "
+        "one step''s output determines the next; (2) 3+ independent subtasks that "
+        "can run in parallel; (3) long-running work that would block the chat; "
+        "(4) heavy research/file reading that would pollute the main context. "
+        "DO NOT spawn for 1-2 direct tool calls (just run exec/db_query yourself), "
+        "pure conversation, or tasks needing mid-way user decisions (a sub-agent "
+        "runs blind, cannot ask). Each sub-agent has its own round budget "
+        "(subagents.max_rounds).', "
+        "'soft') ON CONFLICT (code) DO NOTHING"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -195,6 +219,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (5, _m5_seed_compaction_overlap, "transactional"),
     (6, _m6_seed_subagent_config, "transactional"),
     (7, _m7_seed_cap002_rule, "transactional"),
+    (8, _m8_seed_sub001_rule, "transactional"),
 ]
 
 

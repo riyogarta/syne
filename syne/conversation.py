@@ -38,6 +38,10 @@ _CORE_TOOLS = {
     "memory_analyze_file",
     "exec",
     "db_query",
+    # Sub-agent delegation is a judgment call Molt makes from task complexity,
+    # not a keyword the user must type. Always available; Molt decides when.
+    "spawn_subagent",
+    "subagent_status",
 }
 
 _TOOL_SIGNALS = {
@@ -64,7 +68,6 @@ _TOOL_SIGNALS = {
     r"\buser\b|\bmember\b|akses|access|pengguna": {"manage_user"},
     r"abilit|kemampuan|capability|fitur|feature": {"update_ability"},
     r"identity|soul|\baturan\b|\brule\b|kepribadian|personality": {"update_soul"},
-    r"subagent|background|sub.?agent|delegasi|delegate|parallel": {"spawn_subagent", "subagent_status"},
     r"\bauth\b|token|oauth|credential|login|autentikasi": {"check_auth"},
     r"\bnode\b|remote|device|perangkat": {"node_status"},
     r"database|query|\bsql\b|tabel|table|\bdb\b": {"db_query"},
