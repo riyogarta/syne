@@ -54,7 +54,7 @@ Which model judges whether a message is worth remembering.
 | Key | Default | Type |
 |-----|---------|------|
 | `memory.decay_interval` | `50` | integer |
-| `memory.decay_amount` | `1` | integer |
+| `memory.decay_amount` | `5` | integer |
 | `memory.initial_recall_count` | `5` | integer |
 | `memory.promotion_threshold` | `10` | integer |
 

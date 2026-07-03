@@ -729,7 +729,7 @@ class MemoryEngine:
         if current % interval != 0:
             return  # Not time yet
         
-        decay_amount = int(await get_config("memory.decay_amount", "1"))
+        decay_amount = int(await get_config("memory.decay_amount", "5"))
 
         async with get_connection() as conn:
             # No promotion — permanent is only set by explicit user command ("ingat").

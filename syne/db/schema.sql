@@ -362,7 +362,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '5', 'Max memories to recall per query'),
     ('memory.decay_interval', '50', 'Decay every N conversations'),
-    ('memory.decay_amount', '1', 'How much recall_count decreases per decay'),
+    ('memory.decay_amount', '5', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '5', 'Starting recall_count for new memories'),
     ('memory.promotion_threshold', '10', 'Promote non-permanent to permanent when recall_count exceeds this'),
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
