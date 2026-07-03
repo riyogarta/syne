@@ -165,6 +165,28 @@ async def _m6_seed_subagent_config(conn) -> None:
 # Format: (target_version, migration_fn, mode)
 #   mode ∈ {"transactional", "non_transactional"}
 
+async def _m7_seed_cap002_rule(conn) -> None:
+    """Add the CAP002 'Trust System Evidence' meta-rule to existing installs.
+
+    Fresh installs get it via schema.sql (v1.16.20). This backfills
+    installs created before that. Generic — no user-specific content.
+    Idempotent via ON CONFLICT (code) DO NOTHING.
+    """
+    await conn.execute(
+        "INSERT INTO rules (code, name, description, severity) VALUES ("
+        "'CAP002', 'Trust System Evidence', "
+        "'System-generated context is authoritative evidence of what actually "
+        "happened. Tool-result footers, run IDs, execution reports, and tool-call "
+        "counts are real — do NOT claim you faked, hallucinated, or did not "
+        "actually do an action when system evidence shows it ran. A tool being "
+        "absent from the current turn tool list does NOT mean you lack the "
+        "capability — tools may be context-gated per turn. Before concluding "
+        "anything negative about your own actions, verify against the system "
+        "context. When in doubt, trust the footer over your gut.', "
+        "'hard') ON CONFLICT (code) DO NOTHING"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -172,6 +194,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (4, _m4_seed_db_as_files_rule, "transactional"),
     (5, _m5_seed_compaction_overlap, "transactional"),
     (6, _m6_seed_subagent_config, "transactional"),
+    (7, _m7_seed_cap002_rule, "transactional"),
 ]
 
 
