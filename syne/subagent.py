@@ -28,6 +28,19 @@ from .security import get_subagent_access_level, filter_tools_for_subagent
 logger = logging.getLogger("syne.subagent")
 
 
+class SubAgentIncomplete(Exception):
+    """Raised when a sub-agent reaches max_rounds before finishing the task.
+
+    This is a FAILURE mode distinct from a clean error/timeout: the work was
+    cut off mid-flight. It carries the partial result so it can still be
+    persisted and delivered to the user (not discarded).
+    """
+
+    def __init__(self, partial_result: str):
+        self.partial_result = partial_result
+        super().__init__("Sub-agent reached max rounds before completing the task")
+
+
 class SubAgentManager:
     """Manages sub-agent lifecycle: spawn, monitor, deliver results."""
 
@@ -157,6 +170,10 @@ class SubAgentManager:
                 timeout=timeout,
             )
             await self._complete_run(run_id, "completed", result=result)
+
+        except SubAgentIncomplete as e:
+            logger.warning(f"Sub-agent {run_id}: incomplete (reached max rounds)")
+            await self._complete_run(run_id, "incomplete", result=e.partial_result)
 
         except asyncio.TimeoutError:
             error_msg = f"Sub-agent timed out after {timeout}s"
@@ -389,7 +406,12 @@ class SubAgentManager:
         report_lines.append(f"Tokens: {total_input_tokens} in / {total_output_tokens} out")
         report_lines.append("--- END REPORT ---")
 
-        return llm_narrative + "\n".join(report_lines)
+        result = llm_narrative + "\n".join(report_lines)
+        # Hit the round ceiling before finishing → this is an INCOMPLETE run
+        # (a failure type), not a clean completion. Carry the partial result.
+        if forced_stop:
+            raise SubAgentIncomplete(result)
+        return result
 
     def _get_tool_schemas(self, access_level: str) -> list[dict]:
         """Get tool schemas available to sub-agents (filtered)."""
@@ -456,7 +478,7 @@ class SubAgentManager:
 
         # Notify via callback
         if self._on_complete:
-            output = result if status == "completed" else f"Error: {error}"
+            output = result if status in ("completed", "incomplete") else f"Error: {error}"
             try:
                 await self._on_complete(run_id, status, output, parent_session_id)
             except Exception as e:

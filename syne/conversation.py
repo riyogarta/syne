@@ -1658,6 +1658,12 @@ class ConversationManager:
         """Called when a sub-agent finishes. Delivers result to the parent session."""
         if status == "completed":
             msg = f"✅ Sub-agent completed (run: {run_id[:8]})\n\n{result}"
+        elif status == "incomplete":
+            msg = (
+                f"⚠️ Sub-agent incomplete (run: {run_id[:8]}) — hit max rounds "
+                f"before finishing. Partial result below; continue manually or "
+                f"spawn another sub-agent.\n\n{result}"
+            )
         else:
             msg = f"❌ Sub-agent failed (run: {run_id[:8]})\n\n{result}"
 

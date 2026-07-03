@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id UUID NOT NULL DEFAULT gen_random_uuid(),
     parent_session_id INTEGER REFERENCES sessions(id),
     task TEXT NOT NULL,
-    status VARCHAR(20) DEFAULT 'running',  -- running, completed, failed
+    status VARCHAR(20) DEFAULT 'running',  -- running, completed, incomplete (hit max rounds), failed, cancelled
     result TEXT,
     error TEXT,
     model VARCHAR(100),
