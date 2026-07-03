@@ -4416,6 +4416,54 @@ Or just send me a message!"""
         else:
             await update.message.reply_text(f"Backup failed: {message}")
 
+    async def _handle_untaint_callback(self, query, data: str):
+        """Handle untaint confirmation buttons. Owner is already re-verified in
+        _handle_callback (access_level != owner is rejected before dispatch), so
+        this is the mandatory second owner check on the button click itself."""
+        if data == "untaint:cancel":
+            await query.edit_message_text("❌ Cancelled — taint unchanged.")
+            return
+
+        # data == "untaint:confirm:<session_id>"
+        parts = data.split(":")
+        if len(parts) != 3 or not parts[2].isdigit():
+            await query.edit_message_text("❌ Invalid confirmation.")
+            return
+        session_id = int(parts[2])
+
+        from ..db.connection import get_connection
+
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT tainted, taint_reason FROM sessions WHERE id = $1", session_id
+            )
+            if not row:
+                await query.edit_message_text("❌ Session not found.")
+                return
+            if not bool(row["tainted"]):
+                await query.edit_message_text("Session is already clean — nothing to reset.")
+                return
+            old_reason = row["taint_reason"] or "(no reason recorded)"
+
+            await conn.execute(
+                "UPDATE sessions SET tainted = false, taint_reason = NULL, "
+                "updated_at = NOW() WHERE id = $1",
+                session_id,
+            )
+
+        # Reset the live in-memory conversation if loaded
+        if self.agent and self.agent.conversations:
+            for key, conv in self.agent.conversations._active.items():
+                if getattr(conv, "session_id", None) == session_id:
+                    conv.tainted = False
+                    conv.taint_reason = ""
+                    break
+
+        await query.edit_message_text(
+            f"✅ Taint reset for session {session_id}.\n"
+            f"Previous reason: {old_reason}"
+        )
+
     async def _cmd_untaint(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /untaint — owner only. The ONLY path that clears session taint.
 
@@ -4455,22 +4503,17 @@ Or just send me a message!"""
                 await update.message.reply_text("Session is already clean — nothing to reset.")
                 return
 
-            await conn.execute(
-                "UPDATE sessions SET tainted = false, taint_reason = NULL, "
-                "updated_at = NOW() WHERE id = $1",
-                session_id,
-            )
-
-        # Reset the live in-memory conversation if loaded
-        key = f"telegram:{chat_id}"
-        conv = self.agent.conversations._active.get(key) if self.agent and self.agent.conversations else None
-        if conv:
-            conv.tainted = False
-            conv.taint_reason = ""
-
+        # Do NOT reset yet — require explicit owner confirmation via button.
+        # Reset is applied only in the untaint:confirm callback (owner re-verified there).
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Yes, reset", callback_data=f"untaint:confirm:{session_id}"),
+            InlineKeyboardButton("❌ Cancel", callback_data="untaint:cancel"),
+        ]])
         await update.message.reply_text(
-            f"✅ Taint reset for session {session_id}.\n"
-            f"Previous reason: {old_reason}"
+            f"⚠️ Reset taint for session {session_id}?\n"
+            f"Reason: {old_reason}\n\n"
+            f"This clears the indirect-prompt-injection guard for this session.",
+            reply_markup=buttons,
         )
 
     async def _cmd_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8233,7 +8276,10 @@ Or just send me a message!"""
             await query.edit_message_text("⚠️ Owner only.")
             return
 
-        if data.startswith("models:"):
+        if data.startswith("untaint:"):
+            await self._handle_untaint_callback(query, data)
+
+        elif data.startswith("models:"):
             await self._handle_models_callback(query, data)
 
         elif data.startswith("embed:"):

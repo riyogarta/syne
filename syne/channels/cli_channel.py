@@ -1663,9 +1663,12 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
         # Owner-only. The ONLY path that clears session taint (indirect prompt
         # injection defense). Dispatched OUTSIDE the LLM loop — NOT an LLM tool —
         # so an injected session cannot wash its own taint. Monotonic reset.
+        # Requires explicit confirmation: bare /untaint warns; /untaint yes commits.
         if user.get("access_level") != "owner":
             _write(f"  {_DIM_RED}Only the owner can reset taint.{_RESET}\n\n")
             return True
+        parts = command.split()
+        confirmed = len(parts) > 1 and parts[1].lower() in ("yes", "y", "confirm")
         from ..db.connection import get_connection
         async with get_connection() as conn:
             row = await conn.fetchrow("""
@@ -1680,6 +1683,11 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                 _write(f"  {_DIM}Session is already clean — nothing to reset.{_RESET}\n\n")
                 return True
             old_reason = row["taint_reason"] or "(no reason recorded)"
+            if not confirmed:
+                _write(f"  {_DIM_RED}⚠️ Reset taint for session {row['id']}?{_RESET}\n"
+                       f"  {_DIM}Reason: {old_reason}{_RESET}\n"
+                       f"  {_DIM}Type {_RESET}/untaint yes{_DIM} to confirm, or ignore to cancel.{_RESET}\n\n")
+                return True
             await conn.execute(
                 "UPDATE sessions SET tainted = false, taint_reason = NULL, "
                 "updated_at = NOW() WHERE id = $1",
