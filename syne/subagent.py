@@ -258,6 +258,9 @@ class SubAgentManager:
         access_level = get_subagent_access_level()  # Returns "owner" (but tools are filtered)
         logger.debug(f"Sub-agent {run_id[:8]} running with access_level={access_level} (config tools blocked)")
 
+        # Budget (fetched early so it can be injected into the prompt)
+        max_rounds = await get_config("subagents.max_rounds", 30)
+
         # System prompt for sub-agent — worker privileges
         subagent_prompt = (
             f"{self.system_prompt}\n\n"
@@ -288,6 +291,11 @@ class SubAgentManager:
             "- For long tasks: launch as background script (nohup) then STOP. "
             "Do NOT poll/monitor progress — the user can check manually.\n"
             "- Prefer doing the actual work directly over writing scripts to do it later.\n"
+            f"\n## ROUND BUDGET: You have {max_rounds} tool call round(s) total.\n"
+            "- If the task genuinely needs MORE rounds than your budget and you cannot\n"
+            "  finish, do NOT pretend it is done. Report the partial progress and end your\n"
+            "  final message with the exact marker on its own line: [[INCOMPLETE]]\n"
+            "- Only use [[INCOMPLETE]] when work genuinely remains. If you finished, do NOT use it.\n"
         )
         messages.append(ChatMessage(role="system", content=subagent_prompt))
 
@@ -323,7 +331,7 @@ class SubAgentManager:
         total_output_tokens += getattr(response, "output_tokens", 0) or 0
 
         # Tool-calling loop with round limit and inter-round delay
-        max_rounds = await get_config("subagents.max_rounds", 30)
+        # (max_rounds already fetched above for the prompt)
         round_delay = await get_config("subagents.round_delay", 2.0)  # seconds between rounds
         round_num = 0
         forced_stop = False
@@ -436,8 +444,16 @@ class SubAgentManager:
         # This is appended to the result so the completion callback delivers
         # verifiable data to the user, not just the LLM's narrative.
         llm_narrative = response.content or ""
+        # Sub-agent may voluntarily signal it ran out of budget without being
+        # engine-forced (e.g. it knew rounds were too few and gave up cleanly).
+        # Treat that marker as authoritative for INCOMPLETE status.
+        marker_incomplete = "[[INCOMPLETE]]" in llm_narrative
+        if marker_incomplete:
+            llm_narrative = llm_narrative.replace("[[INCOMPLETE]]", "").rstrip()
+        is_incomplete = forced_stop or marker_incomplete
         report_lines = ["\n\n--- EXECUTION REPORT (auto-generated, not editable by AI) ---"]
-        report_lines.append(f"Tool call rounds: {round_num}/{max_rounds}{' (FORCED STOP)' if forced_stop else ''}")
+        _round_flag = ' (FORCED STOP)' if forced_stop else (' (INCOMPLETE)' if marker_incomplete else '')
+        report_lines.append(f"Tool call rounds: {round_num}/{max_rounds}{_round_flag}")
         report_lines.append(f"Total tool calls: {len(tool_call_log)}")
         if tool_call_counts:
             for tname, counts in sorted(tool_call_counts.items()):
@@ -451,9 +467,9 @@ class SubAgentManager:
         report_lines.append("--- END REPORT ---")
 
         result = llm_narrative + "\n".join(report_lines)
-        # Hit the round ceiling before finishing → this is an INCOMPLETE run
-        # (a failure type), not a clean completion. Carry the partial result.
-        if forced_stop:
+        # INCOMPLETE if the engine forced a stop OR the sub-agent itself signalled
+        # it ran out of budget with work remaining. Either way it's resumable.
+        if is_incomplete:
             raise SubAgentIncomplete(result)
         return result
 
