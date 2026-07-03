@@ -325,7 +325,7 @@ async def _gateway_token_async(name: str):
         await close_db()
         return
 
-    console.print(f"\n[bold]Pairing Token for '{name}'[/bold] (expires in 10 minutes):\n")
+    console.print(f"\n[bold]Pairing Token for '{name}'[/bold] (expires in 5 minutes):\n")
     console.print(f"  [bold green]{token}[/bold green]\n")
     console.print(f"[dim]Use this token with 'syne node init' on the remote machine.[/dim]")
     console.print(f"[dim]The node will be accessible as '{name}' from Telegram.[/dim]")

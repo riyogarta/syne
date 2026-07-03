@@ -4793,7 +4793,7 @@ Or just send me a message!"""
                 await ensure_paired_nodes_table()
                 token = await generate_pairing_token(node_name=name)
                 await update.message.reply_text(
-                    f"<b>Pairing token for '{name}'</b> (10 min)\n\n"
+                    f"<b>Pairing token for '{name}'</b> (5 min)\n\n"
                     f"<code>{token}</code>\n\n"
                     f"Use with <code>syne node init</code> on the remote machine.",
                     parse_mode="HTML",
@@ -5068,7 +5068,7 @@ Or just send me a message!"""
                 await bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f"<b>Pairing token for '{text}'</b> (10 min)\n\n"
+                        f"<b>Pairing token for '{text}'</b> (5 min)\n\n"
                         f"<code>{token}</code>\n\n"
                         f"Use with <code>syne node init</code> on the remote machine."
                     ),

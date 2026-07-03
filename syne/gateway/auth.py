@@ -64,7 +64,7 @@ def _hash_token(token: str) -> str:
 
 
 async def generate_pairing_token(node_name: str = "") -> str:
-    """Generate a one-time pairing token (10 min TTL).
+    """Generate a one-time pairing token (5 min TTL, see PAIRING_TOKEN_TTL).
 
     Args:
         node_name: Human-friendly alias for the node (e.g. 'mypc', 'laptop').

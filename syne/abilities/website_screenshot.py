@@ -19,7 +19,7 @@ import time
 from typing import Optional
 
 from .base import Ability
-from ..security import is_url_safe
+from ..security import is_url_safe_async
 
 logger = logging.getLogger("syne.ability.website_screenshot")
 
@@ -91,7 +91,7 @@ class WebsiteScreenshotAbility(Ability):
         if not url:
             return {"success": False, "error": "url is required"}
 
-        safe, reason = is_url_safe(url)
+        safe, reason = await is_url_safe_async(url)
         if not safe:
             return {"success": False, "error": f"URL blocked: {reason}"}
 

@@ -37,7 +37,7 @@ from urllib.parse import urljoin, urlparse
 import httpx
 
 from .base import Ability
-from ..security import is_url_safe
+from ..security import is_url_safe_async
 
 logger = logging.getLogger("syne.ability.fetch_url")
 
@@ -125,15 +125,13 @@ async def _dns_is_safe(hostname: str) -> tuple[bool, str]:
 
 
 async def _validate_url(url: str) -> tuple[bool, str]:
-    """Full validation: scheme + static SSRF + DNS-rebinding guard."""
-    safe, reason = is_url_safe(url)
-    if not safe:
-        return False, reason
-    host = (urlparse(url).hostname or "").lower()
-    ok, reason = await _dns_is_safe(host)
-    if not ok:
-        return False, reason
-    return True, ""
+    """Full validation: scheme + static SSRF + DNS-rebinding guard.
+
+    Delegates to the hardened core ``is_url_safe_async`` (single source of
+    truth) which does the string pre-check, obfuscated-IP normalization, DNS
+    resolution of every IP, and the double-resolve anti-TOCTOU check.
+    """
+    return await is_url_safe_async(url)
 
 
 class FetchUrlAbility(Ability):

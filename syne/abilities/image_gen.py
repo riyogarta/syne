@@ -151,8 +151,8 @@ class ImageGenAbility(Ability):
                 if "b64_json" in image_data:
                     return base64.b64decode(image_data["b64_json"])
                 elif "url" in image_data:
-                    from ..security import is_url_safe
-                    safe, reason = is_url_safe(image_data["url"])
+                    from ..security import is_url_safe_async
+                    safe, reason = await is_url_safe_async(image_data["url"])
                     if not safe:
                         return {"success": False, "error": f"Image URL blocked: {reason}"}
                     img_resp = await client.get(image_data["url"])

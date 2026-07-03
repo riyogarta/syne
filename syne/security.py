@@ -380,23 +380,40 @@ def check_command_safety(command: str) -> tuple[bool, str]:
     if not command:
         return False, "Empty command"
     
+    import re
+
+    # Normalize BEFORE matching so trivial obfuscation can't slip past a
+    # substring check: collapse runs of whitespace ("rm  -rf   /" -> "rm -rf /").
     command_lower = command.lower().strip()
-    
+    normalized = re.sub(r'\s+', ' ', command_lower)
+
     for pattern in BLOCKED_COMMAND_PATTERNS:
-        pattern_lower = pattern.lower()
-        if pattern_lower in command_lower:
+        pattern_lower = re.sub(r'\s+', ' ', pattern.lower().strip())
+        if pattern_lower in normalized or pattern.lower() in command_lower:
             reason = f"[Security] Blocked: command contains dangerous pattern '{pattern}'"
             logger.warning(f"Blocked dangerous command: {command[:100]} (pattern: {pattern})")
             return False, reason
-    
+
+    # Extra rm robustness: catch recursive-force rm targeting root/home/cwd
+    # regardless of flag order/spacing (e.g. "rm  -r -f  /", "cd / && rm -fr .").
+    has_rf = re.search(r'\brm\b[^|;&]*\s-[a-z]*r[a-z]*f', normalized) or \
+             re.search(r'\brm\b[^|;&]*\s-[a-z]*f[a-z]*r', normalized) or \
+             (re.search(r'\brm\b', normalized) and ' -r ' in f' {normalized} ' and ' -f ' in f' {normalized} ')
+    if has_rf:
+        padded = f' {normalized} '
+        if ' / ' in padded or normalized.endswith(' /') or ' ~' in padded or \
+           re.search(r'\brm\b[^|;&]*\s(/|~|\.)(\s|$)', normalized):
+            reason = "[Security] Blocked: recursive-force rm targeting root/home/cwd"
+            logger.warning(f"Blocked dangerous command: {command[:100]} (rm -rf heuristic)")
+            return False, reason
+
     # Regex check: pipe to shell interpreters (word boundary, not substring)
-    import re
     pipe_to_shell = re.compile(r'\|\s*(sh|bash|zsh|dash|csh)\b')
-    if pipe_to_shell.search(command_lower):
+    if pipe_to_shell.search(normalized):
         reason = "[Security] Blocked: pipe to shell interpreter"
         logger.warning(f"Blocked dangerous command: {command[:100]} (pipe to shell)")
         return False, reason
-    
+
     return True, ""
 
 
@@ -733,75 +750,224 @@ def redact_content_output(text: str) -> str:
 # Block requests to internal/private IPs, localhost, metadata
 # endpoints, and non-HTTP schemes.
 
+import asyncio
 import ipaddress
+import socket
 from urllib.parse import urlparse
 
 
+# Cloud metadata / internal endpoints blocked by exact hostname match.
+_BLOCKED_HOSTS = frozenset({
+    "169.254.169.254",           # AWS/GCP/Azure metadata (IMDS)
+    "metadata.google.internal",  # GCP
+    "metadata.google.com",
+    "100.100.100.200",           # Alibaba Cloud metadata
+})
+
+
+def _ip_is_blocked(ip) -> tuple[bool, str]:
+    """Return (blocked, reason) for a parsed ipaddress object."""
+    if ip.is_private:
+        return True, f"private IP {ip}"
+    if ip.is_loopback:
+        return True, f"loopback IP {ip}"
+    if ip.is_link_local:
+        return True, f"link-local IP {ip} (cloud metadata)"
+    if ip.is_reserved:
+        return True, f"reserved IP {ip}"
+    if ip.is_multicast:
+        return True, f"multicast IP {ip}"
+    if ip.is_unspecified:
+        return True, f"unspecified IP {ip}"
+    return False, ""
+
+
+def _normalize_host_as_ip(hostname: str):
+    """Try to interpret a hostname as an IP literal in ANY numeric form.
+
+    Covers the string-level SSRF bypasses that ipaddress.ip_address() alone
+    misses:
+      - decimal   : 2130706433   -> 127.0.0.1
+      - hex       : 0x7f000001   -> 127.0.0.1
+      - octal     : 0177.0.0.1   -> 127.0.0.1
+      - short-form: 127.1        -> 127.0.0.1
+      - mixed     : 0x7f.0.0.1   -> 127.0.0.1
+
+    Returns an ipaddress object if the host is any IP literal, else None.
+    Uses socket.inet_aton (which honors the historical inet notations) and
+    inet_pton for IPv6.
+    """
+    if not hostname:
+        return None
+    # Fast path: canonical dotted / IPv6 literal.
+    try:
+        return ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    # IPv6 in brackets or bare.
+    host6 = hostname.strip("[]")
+    try:
+        packed = socket.inet_pton(socket.AF_INET6, host6)
+        return ipaddress.IPv6Address(packed)
+    except OSError:
+        pass
+    # Legacy IPv4 numeric forms (decimal / hex / octal / short-form).
+    try:
+        packed = socket.inet_aton(hostname)
+        return ipaddress.IPv4Address(packed)
+    except OSError:
+        return None
+
+
 def is_url_safe(url: str) -> tuple[bool, str]:
-    """Check if a URL is safe to fetch (no SSRF to internal networks).
-    
-    Blocks:
+    """Cheap, synchronous SSRF pre-check (string-level, no DNS).
+
+    This is a FAIL-CLOSED pre-filter. It blocks:
     - Non-HTTP(S) schemes (file://, ftp://, gopher://, etc.)
-    - Localhost / 127.x.x.x / ::1
-    - Private IP ranges (10.x, 172.16-31.x, 192.168.x)
-    - Link-local (169.254.x.x — cloud metadata)
-    - .local / .internal hostnames
-    
+    - Localhost / loopback / private / link-local / reserved IPs, including
+      obfuscated numeric forms (decimal, hex, octal, short-form).
+    - .local / .internal / .localhost hostnames
+    - Cloud-metadata endpoints (AWS/GCP/Azure/Alibaba).
+
+    NOTE: This does NOT resolve DNS. A public hostname that resolves to an
+    internal IP (DNS rebinding) is NOT caught here — callers that actually
+    open a network connection MUST use ``is_url_safe_async`` which resolves
+    and validates every IP. Keep this as a cheap first gate.
+
     Args:
         url: URL to validate
-        
+
     Returns:
         Tuple of (safe: bool, reason: str)
     """
     if not url:
         return False, "Empty URL"
-    
+
     try:
         parsed = urlparse(url)
     except Exception:
         return False, "Invalid URL"
-    
+
     # Scheme check
     if parsed.scheme not in ("http", "https"):
         return False, f"Blocked scheme: {parsed.scheme}:// (only http/https allowed)"
-    
+
     hostname = (parsed.hostname or "").lower().strip()
     if not hostname:
         return False, "No hostname in URL"
-    
+
     # Localhost variants
     if hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0", "[::1]"):
         return False, "Blocked: localhost"
-    
+
     # .local / .internal hostnames
     if hostname.endswith((".local", ".internal", ".localhost")):
         return False, f"Blocked hostname suffix: {hostname}"
-    
-    # IP address checks
-    try:
-        ip = ipaddress.ip_address(hostname)
-        if ip.is_private:
-            return False, f"Blocked: private IP {ip}"
-        if ip.is_loopback:
-            return False, f"Blocked: loopback IP {ip}"
-        if ip.is_link_local:
-            return False, f"Blocked: link-local IP {ip} (cloud metadata)"
-        if ip.is_reserved:
-            return False, f"Blocked: reserved IP {ip}"
-    except ValueError:
-        # Not an IP — hostname. Check for cloud metadata IP in hostname
-        pass
-    
-    # Cloud metadata endpoints (AWS, GCP, Azure)
-    blocked_hosts = {
-        "169.254.169.254",  # AWS/GCP metadata
-        "metadata.google.internal",  # GCP
-        "metadata.google.com",
-        "100.100.100.200",  # Alibaba Cloud metadata
-    }
-    if hostname in blocked_hosts:
+
+    # Cloud metadata endpoints (exact match, before IP normalization)
+    if hostname in _BLOCKED_HOSTS:
         return False, f"Blocked: cloud metadata endpoint {hostname}"
-    
+
+    # IP-literal check — normalize ANY numeric form first so obfuscated
+    # loopback/private addresses (2130706433, 0x7f000001, 127.1, 0177.0.0.1)
+    # cannot slip past as "just a hostname".
+    ip = _normalize_host_as_ip(hostname)
+    if ip is not None:
+        blocked, reason = _ip_is_blocked(ip)
+        if blocked:
+            return False, f"Blocked: {reason}"
+        # A public IP literal cannot be DNS-rebound, so it is safe to pass.
+        return True, ""
+
+    # Ambiguous numeric-looking hostnames that are NOT valid IPs but could be
+    # misparsed downstream: fail closed (e.g. "12345", "0xdeadbeef").
+    bare = hostname.strip("[]")
+    if bare.isdigit() or (bare.startswith("0x") and len(bare) > 2):
+        return False, f"Blocked: ambiguous numeric host {hostname}"
+
+    return True, ""
+
+
+async def _resolve_host_ips(hostname: str) -> tuple[set, str]:
+    """Resolve a hostname to a set of IP strings (runs off the event loop)."""
+    if not hostname:
+        return set(), "empty hostname"
+    loop = asyncio.get_event_loop()
+    try:
+        infos = await loop.run_in_executor(
+            None, lambda: socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
+        )
+    except Exception as e:
+        return set(), f"DNS resolution failed: {e}"
+    if not infos:
+        return set(), "no DNS records"
+    return {info[4][0].split("%")[0] for info in infos}, ""
+
+
+def _all_ips_safe(ips: set) -> tuple[bool, str]:
+    """Reject if ANY resolved IP is internal/loopback/link-local/reserved/etc."""
+    for ip_str in ips:
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        blocked, reason = _ip_is_blocked(ip)
+        if blocked:
+            return False, f"hostname resolves to blocked {reason}"
+    return True, ""
+
+
+async def is_url_safe_async(url: str) -> tuple[bool, str]:
+    """Full SSRF validation: cheap string pre-check + DNS-resolve guard.
+
+    Steps:
+    1. Run the synchronous ``is_url_safe`` string pre-check (scheme, obfuscated
+       IP literals, metadata hosts, .local suffixes).
+    2. Resolve the hostname via getaddrinfo and reject if ANY resolved IP is
+       private/loopback/link-local/reserved/multicast/unspecified. This closes
+       the DNS-rebinding gap where a public hostname points at an internal IP
+       (including decimal/hex/octal numeric hosts, which getaddrinfo canonically
+       resolves to their real address).
+    3. Double-resolve consistency check (anti-TOCTOU, option B): resolve twice
+       and require an identical IP set.
+
+    Callers that open a network connection MUST use this instead of the sync
+    pre-check alone.
+
+    Returns:
+        Tuple of (safe: bool, reason: str)
+    """
+    safe, reason = is_url_safe(url)
+    if not safe:
+        return False, reason
+
+    hostname = (urlparse(url).hostname or "").lower().strip("[]")
+
+    # If the host is already a public IP literal, DNS resolution is moot.
+    literal = _normalize_host_as_ip(hostname)
+    if literal is not None:
+        blocked, why = _ip_is_blocked(literal)
+        if blocked:
+            return False, f"Blocked: {why}"
+        return True, ""
+
+    ips1, err = await _resolve_host_ips(hostname)
+    if err:
+        return False, err
+    ok, why = _all_ips_safe(ips1)
+    if not ok:
+        return False, why
+
+    ips2, err = await _resolve_host_ips(hostname)
+    if err:
+        return False, err
+    ok, why = _all_ips_safe(ips2)
+    if not ok:
+        return False, why
+
+    if ips1 != ips2:
+        return False, "DNS result changed between resolutions (possible rebinding)"
+
     return True, ""
 
 

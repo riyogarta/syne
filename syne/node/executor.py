@@ -9,6 +9,35 @@ import subprocess
 
 logger = logging.getLogger("syne.node.executor")
 
+# Defense-in-depth: run the SAME command-safety gate locally on the node,
+# BEFORE executing anything. The server validates too, but a node is often a
+# personal laptop — if a single gateway message is spoofed/replayed, this local
+# check is the last line before RCE. If the shared security module isn't
+# importable (fully standalone node), fall back to a minimal local blocklist.
+try:
+    from ..security import check_command_safety as _check_command_safety
+except Exception:  # pragma: no cover - standalone node without full package
+    import re as _re
+
+    _LOCAL_BLOCKED = (
+        "rm -rf /", "rm -rf /*", "rm -rf ~", "mkfs", "dd if=",
+        "> /dev/sd", "> /dev/nvme", "chmod 777 /", "chmod -r 777 /",
+        ":(){ :|:& };:", "fork bomb",
+    )
+    _LOCAL_PIPE_SHELL = _re.compile(r"\|\s*(sh|bash|zsh|dash|csh)\b")
+
+    def _check_command_safety(command: str) -> tuple[bool, str]:
+        if not command:
+            return False, "Empty command"
+        # Normalize whitespace so "rm  -rf   /" can't slip past substring checks.
+        norm = _re.sub(r"\s+", " ", command.lower().strip())
+        for pat in _LOCAL_BLOCKED:
+            if pat in norm:
+                return False, f"[Security] Blocked dangerous pattern '{pat}'"
+        if _LOCAL_PIPE_SHELL.search(norm):
+            return False, "[Security] Blocked: pipe to shell interpreter"
+        return True, ""
+
 
 async def execute_tool(request_id: str, tool_name: str, args: dict) -> tuple[str, bool]:
     """Execute a tool locally on the node.
@@ -42,6 +71,12 @@ async def _exec(args: dict) -> tuple[str, bool]:
     command = args.get("command", "")
     if not command:
         return "Error: No command provided", False
+
+    # Local defense-in-depth: re-validate the command on the node itself.
+    safe, reason = _check_command_safety(command)
+    if not safe:
+        logger.warning(f"Node blocked unsafe command: {command[:100]}")
+        return f"Error: {reason}", False
 
     timeout = min(int(args.get("timeout", 120)), 300)
     cwd = args.get("cwd") or os.getcwd()

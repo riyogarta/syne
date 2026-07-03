@@ -124,8 +124,8 @@ class ImageAnalysisAbility(Ability):
         if not url:
             return b64, default_mime
 
-        from ..security import is_url_safe
-        safe, reason = is_url_safe(url)
+        from ..security import is_url_safe_async
+        safe, reason = await is_url_safe_async(url)
         if not safe:
             raise ValueError(f"URL blocked: {reason}")
 
