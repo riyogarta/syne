@@ -1399,7 +1399,7 @@ class SyneAgent:
                 return f"No sub-agent found with run_id: {run_id}"
             
             lines = [
-                f"**Sub-agent {run['run_id'][:8]}**",
+                f"**Sub-agent {str(run['run_id'])[:8]}**",
                 f"Status: {run['status']}",
                 f"Task: {run['task'][:100]}",
             ]
@@ -1422,7 +1422,7 @@ class SyneAgent:
         
         lines = [f"**Active sub-agents ({len(active)}):**"]
         for run in active:
-            lines.append(f"- {run['run_id'][:8]}: {run['task'][:60]}")
+            lines.append(f"- {str(run['run_id'])[:8]}: {run['task'][:60]}")
         return "\n".join(lines)
 
     def _get_active_conversation(self):
