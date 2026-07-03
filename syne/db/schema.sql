@@ -119,7 +119,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     message_count INT DEFAULT 0,
     token_count INT DEFAULT 0,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    tainted BOOLEAN DEFAULT false,        -- true = external/untrusted content landed in session (indirect prompt injection defense); monotonic, reset only via owner /untaint
+    taint_reason TEXT                     -- human-readable reason the session was tainted
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions (user_id);
@@ -690,6 +692,7 @@ CREATE TABLE IF NOT EXISTS kg_entities (
     aliases TEXT[] DEFAULT '{}',           -- alternative names for resolution
     description TEXT,
     embedding vector,                      -- for semantic entity resolution
+    tainted BOOLEAN DEFAULT false,         -- true = derived from tainted (external/untrusted) memory
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -707,6 +710,7 @@ CREATE TABLE IF NOT EXISTS kg_relations (
     object_id INT REFERENCES kg_entities(id) ON DELETE CASCADE,
     weight FLOAT DEFAULT 1.0,              -- confidence
     source_memory_id INT REFERENCES memory(id) ON DELETE SET NULL,
+    tainted BOOLEAN DEFAULT false,         -- true = derived from tainted (external/untrusted) memory
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(subject_id, predicate, object_id)

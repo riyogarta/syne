@@ -314,6 +314,50 @@ class Conversation:
         self._pending_tainted_exec_hash: str = ""              # sha256[:12] for matching
         self._pending_tainted_exec_at: float = 0.0             # monotonic set-time
 
+    async def _load_taint_from_db(self) -> None:
+        """Load persisted taint state from the sessions row.
+
+        Taint is monotonic and persistent (survives restart/evict). Once a
+        session was tainted by external/untrusted content, it stays tainted
+        until the owner resets it via the /untaint slash command. We OR the
+        DB value into the live flag — never clear it here.
+        """
+        try:
+            from .db.connection import get_connection
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT tainted, taint_reason FROM sessions WHERE id = $1",
+                    self.session_id,
+                )
+            if row and row["tainted"]:
+                self.tainted = True
+                if row.get("taint_reason") and not self.taint_reason:
+                    self.taint_reason = row["taint_reason"]
+        except Exception as e:
+            # Column may not exist yet on a not-yet-migrated DB — fail open
+            # (in-memory taint still works for the live session).
+            logger.debug(f"Could not load taint state for session {self.session_id}: {e}")
+
+    async def _persist_taint(self) -> None:
+        """Persist the current (tainted, taint_reason) to the sessions row.
+
+        Monotonic write: only ever sets tainted=true. The ONLY path that sets
+        it back to false is the owner-only /untaint slash command (outside the
+        LLM loop). Best-effort — a DB failure must not break the chat turn.
+        """
+        try:
+            from .db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE sessions SET tainted = true, taint_reason = $2, "
+                    "updated_at = NOW() WHERE id = $1",
+                    self.session_id, self.taint_reason or None,
+                )
+        except Exception as e:
+            logger.warning(
+                f"Failed to persist taint for session {self.session_id}: {e}"
+            )
+
     async def run_compact(self) -> Optional[dict]:
         """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
 
@@ -541,11 +585,12 @@ class Conversation:
                 return await _recall_graph(recall_query or user_message)
             except Exception as e:
                 logger.debug(f"Graph recall skipped: {e}")
-                return []
+                return [], False
 
-        memories, graph_lines = await asyncio.gather(
+        memories, graph_result = await asyncio.gather(
             _do_memory_recall(), _do_graph_recall()
         )
+        graph_lines, graph_tainted = graph_result
 
         # 3. Conversation history
         if not self._message_cache:
@@ -573,6 +618,7 @@ class Conversation:
                 logger.warning(
                     f"Session {self.session_id} tainted: {self.taint_reason}"
                 )
+                await self._persist_taint()
             # Pick locale from time.locale config (same source as the time context
             # block above). Falls back to 'id' to keep prior behavior intact when
             # config is unreachable.
@@ -612,6 +658,17 @@ class Conversation:
 
         # 4b. Knowledge graph context (already fetched in parallel above)
         if graph_lines:
+            # ─── Indirect prompt injection defense: taint on KG recall ───
+            # If ANY surfaced entity/relation was derived from tainted (external/
+            # untrusted) memory, this session inherits the taint — same as the
+            # tainted-memory recall path above. Prevents laundering via the graph.
+            if graph_tainted and not self.tainted:
+                self.tainted = True
+                self.taint_reason = "recalled tainted knowledge-graph node/relation"
+                logger.warning(
+                    f"Session {self.session_id} tainted: {self.taint_reason}"
+                )
+                await self._persist_taint()
             graph_block = "\n".join([
                 "# Knowledge Graph",
                 "Related entities and relationships from stored knowledge.",
@@ -1232,7 +1289,7 @@ class Conversation:
             # ── Phase 2: Execute tools in parallel ──
             is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
 
-            def _mark_taint_from_tool(t_name: str) -> None:
+            async def _mark_taint_from_tool(t_name: str) -> None:
                 """Set session taint if the just-completed tool pulls external content."""
                 if self.tainted:
                     return
@@ -1242,6 +1299,7 @@ class Conversation:
                     logger.warning(
                         f"Session {self.session_id} tainted: {self.taint_reason}"
                     )
+                    await self._persist_taint()
 
             async def _execute_single_tool(t_name, t_args, t_call_id):
                 """Execute one tool/ability and return ToolResult."""
@@ -1296,7 +1354,7 @@ class Conversation:
                         provider=self.provider,
                     )
                     if _tool_result.ok:
-                        _mark_taint_from_tool(t_name)
+                        await _mark_taint_from_tool(t_name)
                     return _tool_result
                 elif self.abilities and self.abilities.get(t_name):
                     cached = getattr(self, '_cached_input_data', {})
@@ -1330,7 +1388,7 @@ class Conversation:
                     }
                     ability_result = await self.abilities.execute(t_name, t_args, ability_context)
                     if ability_result.get("success"):
-                        _mark_taint_from_tool(t_name)
+                        await _mark_taint_from_tool(t_name)
                         content = ability_result.get("result", "")
                         if ability_result.get("media"):
                             media_path = ability_result["media"]
@@ -1672,6 +1730,7 @@ class Conversation:
                     logger.warning(
                         f"Session {self.session_id} tainted: {self.taint_reason}"
                     )
+                    await self._persist_taint()
                 # Ability succeeded — inject result, strip raw input
                 user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
                 metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
@@ -1989,6 +2048,12 @@ class ConversationManager:
             conv.model_params = _defaults.get(_driver, _defaults["_default"]).copy()
         # Load per-model reasoning_visible
         conv.reasoning_visible = bool(model_entry.get("reasoning_visible", False))
+
+        # ─── Restore persisted taint state (survives restart/evict) ───
+        # Taint is monotonic + persistent: if this session was tainted before,
+        # the sessions row carries the marker. Load it so a fresh in-memory
+        # Conversation object does not start "clean" and bypass the exec gate.
+        await conv._load_taint_from_db()
 
         self._active[key] = conv
         return conv

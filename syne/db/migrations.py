@@ -230,6 +230,48 @@ async def _m9_add_memory_tainted(conn) -> None:
     )
 
 
+async def _m10_add_sessions_tainted(conn) -> None:
+    """Add sessions.tainted + sessions.taint_reason for persistent taint.
+
+    Taint (indirect-prompt-injection defense) previously lived only in the
+    in-memory Conversation object and was lost on restart/evict. Persist it
+    on the session row so it survives restarts. Monotonic: only ever set to
+    TRUE by automatic taint paths; the ONLY reset path is the owner-only
+    /untaint slash command. Legacy rows default to FALSE (clean). Idempotent.
+    """
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS tainted BOOLEAN DEFAULT false"
+    )
+    await conn.execute(
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS taint_reason TEXT"
+    )
+
+
+async def _m11_add_kg_entities_tainted(conn) -> None:
+    """Add kg_entities.tainted for taint propagation through the graph.
+
+    Entities extracted from a tainted memory must carry the taint marker so
+    that when they surface in a clean session's Knowledge Graph block, the
+    session is re-tainted (prevents laundering external content via the KG).
+    Legacy rows default to FALSE. Idempotent.
+    """
+    await conn.execute(
+        "ALTER TABLE kg_entities ADD COLUMN IF NOT EXISTS tainted BOOLEAN DEFAULT false"
+    )
+
+
+async def _m12_add_kg_relations_tainted(conn) -> None:
+    """Add kg_relations.tainted for taint propagation through the graph.
+
+    Relations derived from a tainted memory carry the taint marker so that
+    recalling them into a clean session re-taints that session. Legacy rows
+    default to FALSE. Idempotent.
+    """
+    await conn.execute(
+        "ALTER TABLE kg_relations ADD COLUMN IF NOT EXISTS tainted BOOLEAN DEFAULT false"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -240,6 +282,9 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (7, _m7_seed_cap002_rule, "transactional"),
     (8, _m8_seed_sub001_rule, "transactional"),
     (9, _m9_add_memory_tainted, "transactional"),
+    (10, _m10_add_sessions_tainted, "transactional"),
+    (11, _m11_add_kg_entities_tainted, "transactional"),
+    (12, _m12_add_kg_relations_tainted, "transactional"),
 ]
 
 
