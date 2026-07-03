@@ -60,10 +60,10 @@ class SubAgentManager:
         """
         self._on_complete = callback
 
-    def set_start_callback(self, callback: Callable[[str, str, int], Awaitable[None]]):
+    def set_start_callback(self, callback: Callable[..., Awaitable[None]]):
         """Set callback for when a sub-agent starts.
 
-        callback(run_id: str, task: str, parent_session_id: int)
+        callback(run_id: str, task: str, parent_session_id: int, resumed_from: Optional[str])
         """
         self._on_start = callback
 
@@ -95,6 +95,7 @@ class SubAgentManager:
         context: Optional[str] = None,
         model: Optional[str] = None,
         provider: Optional[LLMProvider] = None,
+        resume_from: Optional[str] = None,
     ) -> dict:
         """Spawn a new sub-agent.
         
@@ -122,6 +123,38 @@ class SubAgentManager:
                 "error": f"Max concurrent sub-agents reached ({max_conc}). Wait for one to complete.",
             }
 
+        # Resume handling: continue an incomplete/failed run from its partial result
+        resumed_from = None
+        if resume_from:
+            prev = await self.get_run(resume_from)
+            if not prev:
+                return {
+                    "success": False,
+                    "error": f"Cannot resume: no sub-agent found with run_id {resume_from}.",
+                }
+            if prev["status"] not in ("incomplete", "failed"):
+                return {
+                    "success": False,
+                    "error": f"Cannot resume run {resume_from}: status is '{prev['status']}' "
+                             f"(only 'incomplete' or 'failed' runs can be resumed).",
+                }
+            resumed_from = resume_from
+            # Keep the original task for continuity; if caller gave a new task, append it.
+            original_task = prev["task"]
+            partial = prev.get("result") or prev.get("error") or "(no partial output recorded)"
+            resume_preamble = (
+                "\u2550\u2550 CONTINUING A PREVIOUS TASK \u2550\u2550\n"
+                f"Original task: {original_task}\n\n"
+                "Progress so far (partial output from the previous run):\n"
+                f"{partial}\n"
+                "\u2500\u2500\u2500\u2500\u2500\n"
+                "Continue from this point until the task is fully complete. "
+                "Do NOT restart from scratch \u2014 build on the progress above."
+            )
+            context = (resume_preamble + "\n\n" + context) if context else resume_preamble
+            if not task or not task.strip():
+                task = original_task
+
         # Create run record
         run_id = str(uuid.uuid4())
         async with get_connection() as conn:
@@ -144,7 +177,7 @@ class SubAgentManager:
         # Notify that the sub-agent has started (best-effort, non-blocking)
         if self._on_start:
             try:
-                await self._on_start(run_id, task, parent_session_id)
+                await self._on_start(run_id, task, parent_session_id, resumed_from)
             except Exception as e:
                 logger.error(f"Start callback failed for {run_id}: {e}")
 

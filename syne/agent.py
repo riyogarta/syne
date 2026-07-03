@@ -1048,6 +1048,10 @@ class SyneAgent:
                         "type": "string",
                         "description": "Optional context from current conversation to help the sub-agent",
                     },
+                    "resume_from": {
+                        "type": "string",
+                        "description": "Optional run_id of a previous incomplete/failed sub-agent to continue. The prior partial result is injected as context so the new sub-agent picks up where it left off instead of restarting.",
+                    },
                 },
                 "required": ["task"],
             },
@@ -1358,7 +1362,7 @@ class SyneAgent:
         
         return "\n".join(lines)
 
-    async def _tool_spawn_subagent(self, task: str, context: str = "", _provider=None) -> str:
+    async def _tool_spawn_subagent(self, task: str, context: str = "", resume_from: str = "", _provider=None) -> str:
         """Tool handler: spawn a sub-agent."""
         if not self.subagents:
             return "Sub-agent system not initialized."
@@ -1377,6 +1381,7 @@ class SyneAgent:
             parent_session_id=parent_session_id,
             context=context or None,
             provider=_provider,
+            resume_from=resume_from or None,
         )
         
         if result["success"]:
