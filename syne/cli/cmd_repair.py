@@ -117,8 +117,6 @@ def repair(fix):
                         "provider.chat_model": "gemini-2.5-pro",
                         "provider.embedding_model": "text-embedding-004",
                         "provider.embedding_dimensions": 768,
-                        "session.compaction_threshold": 150000,
-                        "session.max_messages": 100,
                         "subagents.enabled": True,
                         "subagents.max_concurrent": 2,
                         "subagents.timeout_seconds": 300,

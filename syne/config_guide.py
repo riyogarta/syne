@@ -93,9 +93,7 @@ Controls how fast non-permanent memories fade and when they get promoted.
 | Key | Default | Type |
 |-----|---------|------|
 | `compaction.trigger_percent` | `40` | integer (1-100, %) |
-| `session.compaction_threshold` | `80000` | integer (chars, legacy) |
 | `session.compaction_keep_recent` | `40` | integer (messages) |
-| `session.max_messages` | `100` | integer |
 | `session.history_limit` | `100` | integer (messages) |
 
 Controls when conversation history is compacted (summarized) to save context.
@@ -103,9 +101,7 @@ Controls when conversation history is compacted (summarized) to save context.
   when context usage reaches this % of the ACTIVE model's context window. Relative per-model,
   so it's safe across small (Ollama 8k) and large (Claude 200k) models. Old messages are
   soft-archived (status='compacted'), NEVER deleted — retained for semantic search & recovery.
-- `compaction_threshold` — (legacy char-based, superseded by trigger_percent).
 - `compaction_keep_recent` — number of recent messages preserved verbatim after compaction.
-- `max_messages` — soft limit before suggesting compaction.
 - `history_limit` — max messages loaded into context per turn. Only the last N messages
   are loaded from DB. If they exceed context, oldest are dropped 4 at a time. Compaction
   operates on full session in DB — not affected by this limit.

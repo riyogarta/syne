@@ -365,8 +365,6 @@ INSERT INTO config (key, value, description) VALUES
     ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
-    ('session.max_messages', '100', 'Max messages before suggesting compaction'),
-    ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('compaction.trigger_percent', '40', 'Compaction trigger: compact when context usage reaches this % of the active model context window (1-100, default 40). Single token-based trigger.'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
