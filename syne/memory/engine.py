@@ -408,10 +408,11 @@ class MemoryEngine:
                 # clean, propagate taint onto the existing row so external
                 # content cannot be laundered by matching a clean memory.
                 if tainted and not existing.get("tainted", False):
-                    await conn.execute(
-                        "UPDATE memory SET tainted = true WHERE id = $1",
-                        existing["id"],
-                    )
+                    async with get_connection() as conn2:
+                        await conn2.execute(
+                            "UPDATE memory SET tainted = true WHERE id = $1",
+                            existing["id"],
+                        )
                     logger.info(
                         f"Dedup guard: propagated taint onto existing memory "
                         f"#{existing['id']} (skipped tainted duplicate)"
