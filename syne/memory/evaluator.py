@@ -324,6 +324,7 @@ async def evaluate_and_store(
     evaluator_driver: str = "provider",
     evaluator_model: str = "qwen3:0.6b",
     speaker_name: str = "",
+    tainted: bool = False,
 ) -> Optional[int]:
     """Evaluate a message and store if worthy. Returns memory ID or None.
 
@@ -359,6 +360,7 @@ async def evaluate_and_store(
         user_id=user_id,
         importance=result["importance"],
         permanent=permanent,
+        tainted=tainted,
     )
 
     if mem_id:

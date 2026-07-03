@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS memory (
     expires_at TIMESTAMPTZ,               -- NULL = never expires
     permanent BOOLEAN DEFAULT false,      -- true = never decays (explicit "remember this")
     recall_count INTEGER DEFAULT 1,       -- conversation-based decay counter
-    kg_processed BOOLEAN DEFAULT false    -- true = KG extraction has been attempted
+    kg_processed BOOLEAN DEFAULT false,   -- true = KG extraction has been attempted
+    tainted BOOLEAN DEFAULT false         -- true = derived from external/untrusted content (indirect prompt injection defense)
 );
 
 -- HNSW vector index — created dynamically because embedding dimensions vary per provider.

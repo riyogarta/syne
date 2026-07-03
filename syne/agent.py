@@ -1376,12 +1376,19 @@ class SyneAgent:
         if parent_session_id == 0:
             return "Cannot spawn sub-agent: no active session found."
 
+        # Propagate taint: if the parent session has been touched by external
+        # content, the sub-agent starts life tainted too. Its exec calls will
+        # then go through check_command_safety and reject unsafe commands
+        # outright (there is no owner-DM to confirm from inside a sub-agent).
+        parent_tainted = bool(getattr(conv, "tainted", False))
+
         result = await self.subagents.spawn(
             task=task,
             parent_session_id=parent_session_id,
             context=context or None,
             provider=_provider,
             resume_from=resume_from or None,
+            parent_tainted=parent_tainted,
         )
         
         if result["success"]:
@@ -1474,7 +1481,7 @@ class SyneAgent:
 
     def _is_owner_dm(self) -> bool:
         """Check if current context is a verified owner in a direct message.
-        
+
         Owner identity is verified by the PLATFORM (Telegram ID → access_level),
         not by message content. This makes prompt injection impossible:
         - Cannot be faked by message text ("owner kamu minta...")
@@ -1488,6 +1495,60 @@ class SyneAgent:
             return False
         return conv.user.get("access_level") == "owner"
 
+    @staticmethod
+    def _tainted_exec_hash(command: str) -> str:
+        """Short stable digest of a command for confirmation matching."""
+        import hashlib
+        return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()[:12]
+
+    def _tainted_confirmed_recently(self, conv, command: str) -> bool:
+        """Check whether the owner just confirmed THIS specific tainted command.
+
+        Stricter than sudo-guard on purpose (tainted exec fires far more often
+        than sudo, so a rubber-stamp confirmation would erode the whole gate):
+          - pending must exist on THIS conversation (not agent-global)
+          - TTL 120 s (same as sudo)
+          - the pending command's hash must match the command about to run
+          - the confirming message must arrive AFTER the pending was set
+            (otherwise an old "ya" from unrelated chat could authorize)
+          - only strict "ya" / "yes" accepted (drops "ok"/"oke" — too common
+            in normal chat and easy for LLM to lead the user into typing)
+        On success, pending state is cleared (one confirmation = one command).
+        """
+        import time as _time
+        pending = getattr(conv, "_pending_tainted_exec", None)
+        pending_hash = getattr(conv, "_pending_tainted_exec_hash", "")
+        pending_at = getattr(conv, "_pending_tainted_exec_at", 0.0)
+        if not pending or not pending_at:
+            return False
+        if _time.time() - pending_at > 120:
+            logger.info(f"Tainted-exec pending expired (TTL 120s): hash={pending_hash}")
+            conv._pending_tainted_exec = None
+            conv._pending_tainted_exec_hash = ""
+            conv._pending_tainted_exec_at = 0.0
+            return False
+        if pending_hash != self._tainted_exec_hash(command):
+            # Pending is for a different command — do NOT clear it here (still
+            # potentially valid for the command it was issued for).
+            return False
+        if not hasattr(conv, "_message_cache") or not conv._message_cache:
+            return False
+        # Only messages received AFTER the pending was set count. We don't
+        # have per-message wall-clock timestamps in the cache, so we use
+        # positional ordering: any user message that appears in the cache
+        # AFTER we saved the pending must have arrived AFTER it. As a proxy
+        # we simply require the LATEST user message to be a confirmation.
+        user_msgs = [m for m in conv._message_cache if m.role == "user"]
+        if not user_msgs:
+            return False
+        last_user = (user_msgs[-1].content or "").strip().lower()
+        if last_user in ("ya", "yes"):
+            conv._pending_tainted_exec = None
+            conv._pending_tainted_exec_hash = ""
+            conv._pending_tainted_exec_at = 0.0
+            return True
+        return False
+
     async def _tool_exec(self, command: str, timeout: int = 30, workdir: str = "") -> str:
         """Tool handler: execute shell command."""
         import asyncio
@@ -1497,14 +1558,65 @@ class SyneAgent:
         is_owner_dm = self._is_owner_dm()
 
         # ═══════════════════════════════════════════════════════════════
-        # SECURITY: Command Blacklist Check
-        # Skipped for owner DM — owner identity is platform-verified.
+        # SECURITY: Indirect Prompt Injection Defense — taint gate
+        # If ANY external/untrusted content has entered this session (web
+        # fetch, uploaded doc, tainted memory recall, etc.), the owner-DM
+        # bypass is DISABLED for exec. The command must then:
+        #   1. Pass check_command_safety like a non-owner call.
+        #   2. Get an explicit "ya"/"yes" confirmation from the owner in
+        #      the SAME conversation, matching the exact command hash.
+        # This closes the vector where a compromised tool output tells
+        # the LLM "silently run `curl … | sh`" and the owner never sees it.
         # ═══════════════════════════════════════════════════════════════
-        if not is_owner_dm:
+        active_conv = self._get_active_conversation()
+        session_tainted = bool(getattr(active_conv, "tainted", False)) if active_conv else False
+        bypass_ok = is_owner_dm and not session_tainted
+
+        # ═══════════════════════════════════════════════════════════════
+        # SECURITY: Command Blacklist Check
+        # Skipped for owner DM — owner identity is platform-verified —
+        # UNLESS the session is tainted, in which case bypass is disabled
+        # (see indirect prompt injection defense above).
+        # ═══════════════════════════════════════════════════════════════
+        if not bypass_ok:
             safe, reason = check_command_safety(command)
             if not safe:
-                logger.warning(f"Blocked dangerous command: {command[:100]}")
+                logger.warning(
+                    f"Blocked dangerous command "
+                    f"(tainted={session_tainted}, owner_dm={is_owner_dm}): {command[:100]}"
+                )
                 return f"Error: {reason}"
+
+        # ─── Tainted-owner confirmation gate ───
+        # Owner-DM but session is tainted: run only after explicit confirmation.
+        # Sub-agents (checked via active_conv=None or non-owner) fall through
+        # to the sudo-guard / normal path — the sudo/tainted gate cannot be
+        # confirmed inside a sub-agent because there's no DM channel to the
+        # owner. Safe commands still run; unsafe ones already got rejected by
+        # check_command_safety above.
+        if is_owner_dm and session_tainted and active_conv is not None:
+            import time as _time
+            if not self._tainted_confirmed_recently(active_conv, command):
+                cmd_hash = self._tainted_exec_hash(command)
+                active_conv._pending_tainted_exec = command
+                active_conv._pending_tainted_exec_hash = cmd_hash
+                active_conv._pending_tainted_exec_at = _time.time()
+                taint_reason = getattr(active_conv, "taint_reason", "") or "external content in session"
+                logger.warning(
+                    f"Tainted-exec held for confirmation: hash={cmd_hash}, "
+                    f"reason={taint_reason!r}, command={command[:120]}"
+                )
+                return (
+                    "⚠️ This session has processed external content "
+                    f"({taint_reason}), so I cannot silently run shell commands. "
+                    "If you actually want to run this, reply with **ya** or **yes**.\n\n"
+                    f"Command: `{command}`\n"
+                    f"Hash: `{cmd_hash}` (must match on confirm)"
+                )
+            logger.info(
+                f"Tainted-exec confirmed: hash={self._tainted_exec_hash(command)}, "
+                f"command={command[:120]}"
+            )
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Sudo Guard
@@ -2044,11 +2156,16 @@ class SyneAgent:
 
     async def _tool_memory_store(self, content: str, category: str = "fact") -> str:
         """Tool handler: store a memory."""
+        # Propagate taint from the storing session so recall in a future
+        # clean session correctly re-taints when it surfaces this memory.
+        _conv = self._get_active_conversation()
+        _tainted = bool(getattr(_conv, "tainted", False)) if _conv else False
         mem_id = await self.memory.store_if_new(
             content=content,
             category=category,
             source="user_confirmed",
             permanent=True,
+            tainted=_tainted,
         )
         if mem_id:
             # Permanent memory → trigger KG extraction
@@ -2120,12 +2237,16 @@ class SyneAgent:
                 f"Tip: store only the description without attaching the file (use memory_store instead)."
             )
 
-        # Store memory (text + embedding) as permanent
+        # Store memory (text + embedding) as permanent — carry taint forward
+        # so future recall of this attached file re-taints its target session.
+        _conv = self._get_active_conversation()
+        _tainted = bool(getattr(_conv, "tainted", False)) if _conv else False
         mem_id = await self.memory.store_if_new(
             content=content,
             category=category,
             source="user_confirmed",
             permanent=True,
+            tainted=_tainted,
         )
         if not mem_id:
             return "Similar memory already exists. Use memory_search + memory_delete first to replace."

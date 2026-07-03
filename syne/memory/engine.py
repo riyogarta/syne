@@ -69,12 +69,18 @@ class MemoryEngine:
         user_id: Optional[int] = None,
         importance: float = 0.5,
         permanent: bool = False,
+        tainted: bool = False,
     ) -> int:
         """Store a memory with its embedding vector.
 
         Args:
             permanent: If True, memory never decays (explicit "remember this").
                       If False (default), memory has recall_count that decays over conversations.
+            tainted: If True, mark this memory as derived from external/untrusted
+                content. Recalling a tainted memory in a future session taints
+                that session and disables the owner-DM exec bypass. Callers should
+                pass the storing conversation's `tainted` flag so that taint
+                propagates transitively across sessions.
 
         Raises:
             RuntimeError: if embedding generation returns an empty vector. We refuse
@@ -96,10 +102,10 @@ class MemoryEngine:
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count, tainted)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8, $9)
                 RETURNING id
-            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
+            """, content, category, str(vector), source, user_id, importance, permanent, initial_count, tainted)
 
             return row["id"]
 
@@ -179,6 +185,7 @@ class MemoryEngine:
                     m.access_count, m.created_at,
                     COALESCE(m.permanent, false) as permanent,
                     COALESCE(m.recall_count, 1) as recall_count,
+                    COALESCE(m.tainted, false) as tainted,
                     1 - (m.embedding <=> $1::vector) as similarity,
                     (b.memory_id IS NOT NULL) AS has_attachment,
                     b.filename AS attachment_filename,
@@ -347,6 +354,7 @@ class MemoryEngine:
         similarity_threshold: float = None,
         conflict_threshold: float = None,
         permanent: bool = False,
+        tainted: bool = False,
     ) -> Optional[int]:
         """Store a memory with conflict resolution.
 
@@ -443,7 +451,7 @@ class MemoryEngine:
 
         # No similar memory at all — insert new (reuse vector)
         return await self._store_with_vector(
-            content, vector, category, source, user_id, importance, permanent
+            content, vector, category, source, user_id, importance, permanent, tainted
         )
 
     async def _store_with_vector(
@@ -455,6 +463,7 @@ class MemoryEngine:
         user_id: Optional[int] = None,
         importance: float = 0.5,
         permanent: bool = False,
+        tainted: bool = False,
     ) -> int:
         """Store a memory with a pre-computed embedding vector."""
         from ..db.models import get_config
@@ -464,10 +473,10 @@ class MemoryEngine:
 
         async with get_connection() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count, tainted)
+                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8, $9)
                 RETURNING id
-            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
+            """, content, category, str(vector), source, user_id, importance, permanent, initial_count, tainted)
 
             return row["id"]
 

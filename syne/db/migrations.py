@@ -211,6 +211,25 @@ async def _m8_seed_sub001_rule(conn) -> None:
     )
 
 
+async def _m9_add_memory_tainted(conn) -> None:
+    """Add memory.tainted BOOLEAN for indirect-prompt-injection defense.
+
+    A memory is "tainted" if any of the content it was derived from came
+    from an external, untrusted source (fetched web page, uploaded doc,
+    image analysis output, etc). At recall time, if ANY tainted memory
+    surfaces in a session, the session is marked tainted too and the
+    owner-DM exec bypass is disabled until the owner confirms.
+
+    Backfill: legacy rows default to FALSE (treated as clean). This is
+    permissive but matches historical behavior; new memories stored after
+    the app has upgraded will carry the correct taint bit from their
+    session context.
+    """
+    await conn.execute(
+        "ALTER TABLE memory ADD COLUMN IF NOT EXISTS tainted BOOLEAN DEFAULT false"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -220,6 +239,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (6, _m6_seed_subagent_config, "transactional"),
     (7, _m7_seed_cap002_rule, "transactional"),
     (8, _m8_seed_sub001_rule, "transactional"),
+    (9, _m9_add_memory_tainted, "transactional"),
 ]
 
 
