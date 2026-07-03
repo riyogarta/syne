@@ -390,6 +390,7 @@ class MemoryEngine:
         async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT id, content, source, importance,
+                       COALESCE(tainted, false) AS tainted,
                        1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE 1 - (embedding <=> $1::vector) >= $2
@@ -402,7 +403,19 @@ class MemoryEngine:
             sim = existing["similarity"]
 
             if sim >= similarity_threshold:
-                # Exact duplicate — skip
+                # Exact duplicate — skip storing new row. BUT taint is monotonic:
+                # if the incoming content is tainted and the existing row is
+                # clean, propagate taint onto the existing row so external
+                # content cannot be laundered by matching a clean memory.
+                if tainted and not existing.get("tainted", False):
+                    await conn.execute(
+                        "UPDATE memory SET tainted = true WHERE id = $1",
+                        existing["id"],
+                    )
+                    logger.info(
+                        f"Dedup guard: propagated taint onto existing memory "
+                        f"#{existing['id']} (skipped tainted duplicate)"
+                    )
                 logger.debug(f"Duplicate (sim={sim:.3f}), skipping: {content[:80]}")
                 return None
 
@@ -427,11 +440,24 @@ class MemoryEngine:
                     f"Updating #{old_id}."
                 )
                 return await self._update_memory(
-                    old_id, content, category, source, importance, vector=vector
+                    old_id, content, category, source, importance, vector=vector,
+                    tainted=bool(existing.get("tainted", False)) or tainted,
                 )
 
             if new_priority < old_priority:
-                # Existing memory has higher authority — don't overwrite
+                # Existing memory has higher authority — don't overwrite.
+                # But taint is monotonic: if the discarded content was tainted
+                # and the kept memory is clean, propagate taint onto it so
+                # external content can't be laundered by a higher-priority row.
+                if tainted and not existing.get("tainted", False):
+                    async with get_connection() as conn:
+                        await conn.execute(
+                            "UPDATE memory SET tainted = true WHERE id = $1", old_id
+                        )
+                    logger.info(
+                        f"Dedup guard: propagated taint onto kept memory #{old_id} "
+                        f"(discarded tainted conflicting content)"
+                    )
                 logger.info(
                     f"Conflict resolved by source priority: "
                     f"old '{old_source}'({old_priority}) > new '{source}'({new_priority}). "
@@ -446,7 +472,8 @@ class MemoryEngine:
                 f"Updating #{old_id}."
             )
             return await self._update_memory(
-                old_id, content, category, source, importance, vector=vector
+                old_id, content, category, source, importance, vector=vector,
+                tainted=bool(existing.get("tainted", False)) or tainted,
             )
 
         # No similar memory at all — insert new (reuse vector)
@@ -488,10 +515,15 @@ class MemoryEngine:
         source: str,
         importance: float,
         vector: Optional[list] = None,
+        tainted: bool = False,
     ) -> int:
         """Update an existing memory with new content and embedding.
 
         If vector is provided, reuses it instead of re-embedding.
+
+        Taint is monotonic: `tainted = existing.tainted OR tainted`. Once a
+        memory (or the content merged into it) is tainted, it stays tainted —
+        a duplicate/merge can never launder external content back to clean.
         """
         if vector is None:
             embedding_resp = await self.provider.embed(content)
@@ -501,9 +533,10 @@ class MemoryEngine:
             await conn.execute("""
                 UPDATE memory
                 SET content = $1, embedding = $2::vector, category = $3,
-                    source = $4, importance = $5, updated_at = NOW()
+                    source = $4, importance = $5, updated_at = NOW(),
+                    tainted = COALESCE(tainted, false) OR $7
                 WHERE id = $6
-            """, content, str(vector), category, source, importance, memory_id)
+            """, content, str(vector), category, source, importance, memory_id, tainted)
 
         return memory_id
 
