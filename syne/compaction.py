@@ -356,21 +356,3 @@ async def compact_session(
             f"{len(summary)} char summary. Session: {total} → {new_count} messages"
         )
         return result
-
-
-async def should_compact(session_id: int, threshold: int = 100) -> bool:
-    """Check if a session needs compaction based on message count."""
-    async with get_connection() as conn:
-        row = await conn.fetchrow(
-            "SELECT message_count FROM sessions WHERE id = $1",
-            session_id,
-        )
-        if row:
-            return row["message_count"] >= threshold
-    return False
-
-
-async def should_compact_by_chars(session_id: int, char_threshold: int = 150000) -> bool:
-    """Check if a session needs compaction based on total character count."""
-    stats = await get_session_stats(session_id)
-    return stats["total_chars"] >= char_threshold
