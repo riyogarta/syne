@@ -314,13 +314,47 @@ async def compact_session(
 
         summary = summary_response.content
 
+        # Overlap band: keep the last N% of the summarized batch ALSO as raw
+        # (active) messages, so the window transitions smoothly from the
+        # condensed summary into verbatim pre-compaction context before the
+        # kept recent tail. These overlap messages are ALSO covered by the
+        # summary (dual presence = the bridge). Percentage-based, not a fixed
+        # count. Default 0% = legacy behavior (archive the entire batch).
+        overlap_pct = await get_config("session.compaction_overlap_percent", 0)
+        try:
+            overlap_pct = float(overlap_pct)
+        except (TypeError, ValueError):
+            overlap_pct = 0.0
+        overlap_pct = max(0.0, min(100.0, overlap_pct))
+
+        overlap_n = int(len(old_rows) * overlap_pct / 100)
+        # Never retain the whole batch — at least 1 message must be archived,
+        # otherwise nothing is actually compacted.
+        overlap_n = min(overlap_n, len(old_rows) - 1)
+
+        # Char-budget guard: the retained raw overlap must never exceed half the
+        # summarizer input budget. If the tail is heavy (long messages), shrink
+        # overlap_n from the oldest side until it fits. This guarantees the
+        # overlap can't blow past the context window regardless of the % chosen.
+        if overlap_n > 0:
+            budget = max_input_chars * 0.5
+            while overlap_n > 0:
+                tail = old_rows[len(old_rows) - overlap_n:]
+                if sum(len(r["content"]) for r in tail) <= budget:
+                    break
+                overlap_n -= 1
+
+        archive_rows = old_rows[:len(old_rows) - overlap_n] if overlap_n else old_rows
+
         # Soft-archive old messages (NEVER delete — retained in DB for semantic
         # search & recovery). They are excluded from context (load_history filters
         # status='active') and from future compaction (queries above filter active).
-        old_ids = [r["id"] for r in old_rows]
-        await conn.execute(
-            "UPDATE messages SET status = 'compacted' WHERE id = ANY($1)", old_ids
-        )
+        # The last `overlap_n` messages are intentionally left active as the bridge.
+        old_ids = [r["id"] for r in archive_rows]
+        if old_ids:
+            await conn.execute(
+                "UPDATE messages SET status = 'compacted' WHERE id = ANY($1)", old_ids
+            )
 
         # Insert summary as first message in the session
         await conn.execute("""
@@ -330,7 +364,7 @@ async def compact_session(
         """, session_id, f"# Previous Conversation Summary\n{summary}")
 
         # Update session record
-        new_count = keep_recent + 1  # recent + summary
+        new_count = keep_recent + 1 + overlap_n  # recent + summary + overlap bridge
         await conn.execute("""
             UPDATE sessions
             SET summary = $2, message_count = $3, updated_at = NOW()

@@ -120,6 +120,23 @@ async def _m4_seed_db_as_files_rule(conn) -> None:
         "'hard') ON CONFLICT (code) DO NOTHING"
     )
 
+async def _m5_seed_compaction_overlap(conn) -> None:
+    """Add session.compaction_overlap_percent to existing installs.
+
+    Fresh installs get it via schema.sql (v1.16.14). This backfills older
+    installs. Default 15 = keep 15% of the summarized batch as a raw
+    verbatim bridge for smooth summary→recent transition. Char-budget
+    guarded in compact_session. Idempotent via ON CONFLICT DO NOTHING.
+    """
+    await conn.execute(
+        "INSERT INTO config (key, value, description) VALUES ("
+        "'session.compaction_overlap_percent', '15', "
+        "'Compaction overlap: keep this % of the summarized batch ALSO as raw "
+        "messages (a verbatim bridge between summary and recent tail) for smooth "
+        "transition. 0 = disabled. Char-budget guarded.') "
+        "ON CONFLICT (key) DO NOTHING"
+    )
+
 # ─────────────────────────────────────────────────────────────────────────
 # Ordered migration list
 # ─────────────────────────────────────────────────────────────────────────
@@ -131,6 +148,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (2, _m2_drop_legacy_compaction_config, "transactional"),
     (3, _m3_set_keep_recent_40, "transactional"),
     (4, _m4_seed_db_as_files_rule, "transactional"),
+    (5, _m5_seed_compaction_overlap, "transactional"),
 ]
 
 
