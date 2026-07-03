@@ -126,6 +126,17 @@ class SubAgentManager:
         # Resume handling: continue an incomplete/failed run from its partial result
         resumed_from = None
         if resume_from:
+            # Accept truncated ids (e.g. 8-char prefix shown in notifications)
+            try:
+                resolved = await self._resolve_run_id(resume_from)
+            except ValueError as e:
+                return {"success": False, "error": str(e)}
+            if not resolved:
+                return {
+                    "success": False,
+                    "error": f"Cannot resume: no sub-agent found with run_id {resume_from}.",
+                }
+            resume_from = resolved
             prev = await self.get_run(resume_from)
             if not prev:
                 return {
@@ -518,6 +529,44 @@ class SubAgentManager:
                 logger.error(f"Completion callback failed for {run_id}: {e}")
 
         logger.info(f"Sub-agent {run_id}: {status}")
+
+    async def _resolve_run_id(self, run_id: str) -> Optional[str]:
+        """Resolve a possibly-truncated run_id to the full UUID.
+
+        The run_id column is UUID; notifications display only the first 8 chars
+        for readability. A truncated value would fail a strict UUID match, so we
+        accept a prefix and expand it via the DB. Prevents the class of bug where
+        a human (or the agent) copies the shortened id shown on screen.
+
+        Returns the full run_id string, or None if no match.
+        Raises ValueError if the prefix is ambiguous (matches more than one run).
+        """
+        rid = (run_id or "").strip()
+        if not rid:
+            return None
+        async with get_connection() as conn:
+            # Full UUID -> exact match
+            if len(rid) == 36:
+                row = await conn.fetchrow(
+                    "SELECT run_id::text AS run_id FROM subagent_runs "
+                    "WHERE run_id = $1::uuid",
+                    rid,
+                )
+                return row["run_id"] if row else None
+            # Truncated prefix (e.g. 8-char id from a notification)
+            rows = await conn.fetch(
+                "SELECT run_id::text AS run_id FROM subagent_runs "
+                "WHERE run_id::text LIKE $1 ORDER BY started_at DESC",
+                rid + "%",
+            )
+            if not rows:
+                return None
+            if len(rows) > 1:
+                raise ValueError(
+                    f"Ambiguous run_id prefix '{rid}' matches {len(rows)} runs. "
+                    "Provide more characters or the full UUID."
+                )
+            return rows[0]["run_id"]
 
     async def get_run(self, run_id: str) -> Optional[dict]:
         """Get a sub-agent run by ID."""
