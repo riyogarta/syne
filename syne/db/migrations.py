@@ -101,6 +101,25 @@ async def _m3_set_keep_recent_40(conn) -> None:
     )
 
 
+async def _m4_seed_db_as_files_rule(conn) -> None:
+    """Add the generic DB_AS_FILES meta-rule to existing installs.
+
+    Fresh installs get it via schema.sql (v1.16.12). This backfills
+    installs created before that. Generic — no user-specific content.
+    Idempotent via ON CONFLICT (code) DO NOTHING.
+    """
+    await conn.execute(
+        "INSERT INTO rules (code, name, description, severity) VALUES ("
+        "'DB_AS_FILES', 'Database Is Source Of Truth', "
+        "'Syne stores all operational configuration in the DATABASE, not in files. "
+        "The tables replace the .md files other agents rely on: `rules` = rules.md, "
+        "`identity` = persona.md, `soul` = behavior/style, `memory` = notes/user.md, "
+        "`config` = settings. Before acting, READ the relevant table as the source of "
+        "truth \u2014 do not rely on memory. When unsure about a rule, identity, persona, "
+        "or configuration, query the table first.', "
+        "'hard') ON CONFLICT (code) DO NOTHING"
+    )
+
 # ─────────────────────────────────────────────────────────────────────────
 # Ordered migration list
 # ─────────────────────────────────────────────────────────────────────────
@@ -111,6 +130,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
     (3, _m3_set_keep_recent_40, "transactional"),
+    (4, _m4_seed_db_as_files_rule, "transactional"),
 ]
 
 
