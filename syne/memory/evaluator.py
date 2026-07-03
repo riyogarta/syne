@@ -368,7 +368,7 @@ async def evaluate_and_store(
         # Permanent memory → trigger KG extraction
         if permanent:
             from .graph import extract_and_store as graph_extract
-            asyncio.create_task(graph_extract(provider, result["content"], mem_id, speaker_name=speaker_name))
+            asyncio.create_task(graph_extract(provider, result["content"], mem_id, speaker_name=speaker_name, tainted=tainted))
     else:
         logger.debug(f"Duplicate memory skipped: {result['content'][:80]}")
 

@@ -156,6 +156,7 @@ async def extract_and_store(
     memory_id: int,
     speaker_name: str = "",
     _use_semaphore: bool = True,
+    tainted: bool = False,
 ) -> bool:
     """Extract entities/relations from a permanent memory and store in graph.
 
@@ -168,7 +169,7 @@ async def extract_and_store(
 
     Returns True if extraction succeeded, False otherwise.
     """
-    return await _do_extract_and_store(provider, content, memory_id, speaker_name, _use_semaphore)
+    return await _do_extract_and_store(provider, content, memory_id, speaker_name, _use_semaphore, tainted)
 
 
 async def _do_extract_and_store(
@@ -177,16 +178,17 @@ async def _do_extract_and_store(
     memory_id: int,
     speaker_name: str,
     use_semaphore: bool,
+    tainted: bool = False,
 ) -> bool:
     """Internal extraction — optionally throttled by semaphore."""
     if use_semaphore:
         async with _KG_SEMAPHORE:
-            result = await _run_extraction(provider, content, memory_id, speaker_name)
+            result = await _run_extraction(provider, content, memory_id, speaker_name, tainted)
         # Delay OUTSIDE semaphore — don't waste the slot on sleeping
         await asyncio.sleep(_KG_DELAY)
         return result
     else:
-        return await _run_extraction(provider, content, memory_id, speaker_name)
+        return await _run_extraction(provider, content, memory_id, speaker_name, tainted)
 
 
 async def _run_extraction(
@@ -194,6 +196,7 @@ async def _run_extraction(
     content: str,
     memory_id: int,
     speaker_name: str,
+    tainted: bool = False,
 ) -> bool:
     """Core extraction logic without throttling."""
     try:
@@ -222,7 +225,7 @@ async def _run_extraction(
             await _mark_kg_processed(memory_id)
             return False
 
-        await _store_graph(extracted, memory_id)
+        await _store_graph(extracted, memory_id, tainted)
         await _mark_kg_processed(memory_id)
         logger.info(
             f"Graph: stored {len(extracted.get('entities', []))} entities, "
@@ -405,13 +408,18 @@ def _try_parse_json(s: str) -> Optional[dict]:
         return None
 
 
-async def _resolve_entity(name: str, entity_type: str, description: str = "") -> int:
+async def _resolve_entity(name: str, entity_type: str, description: str = "", tainted: bool = False) -> int:
     """Find existing entity or create new one. Returns entity ID.
 
     Resolution order:
     1. Exact name + type match (case-insensitive)
     2. Alias match
     3. Create new entity
+
+    Taint is monotonic: if this extraction is tainted, the resolved entity is
+    marked tainted=true (existing rows are OR'd up, never cleared). This keeps
+    external/untrusted-derived nodes flagged so they re-taint clean sessions
+    on recall.
     """
     async with get_connection() as conn:
         # 1. Exact match
@@ -420,6 +428,10 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
             name, entity_type,
         )
         if row:
+            if tainted:
+                await conn.execute(
+                    "UPDATE kg_entities SET tainted = true WHERE id = $1", row["id"]
+                )
             return row["id"]
 
         # 2. Alias match
@@ -428,23 +440,32 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
             entity_type, name,
         )
         if row:
+            if tainted:
+                await conn.execute(
+                    "UPDATE kg_entities SET tainted = true WHERE id = $1", row["id"]
+                )
             return row["id"]
 
         # 3. Create new
         row = await conn.fetchrow(
-            """INSERT INTO kg_entities (name, entity_type, description)
-               VALUES ($1, $2, $3)
-               ON CONFLICT (LOWER(name), entity_type) DO UPDATE SET updated_at = NOW()
+            """INSERT INTO kg_entities (name, entity_type, description, tainted)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (LOWER(name), entity_type) DO UPDATE SET updated_at = NOW(),
+                   tainted = kg_entities.tainted OR EXCLUDED.tainted
                RETURNING id""",
-            name, entity_type, description or "",
+            name, entity_type, description or "", tainted,
         )
         return row["id"]
 
 
-async def _store_graph(extracted: dict, memory_id: int) -> None:
+async def _store_graph(extracted: dict, memory_id: int, tainted: bool = False) -> None:
     """Store extracted entities and relations into the graph tables.
 
     Only creates entities that are referenced in relations — no orphans.
+
+    If `tainted` is True (the source memory was tainted), every entity and
+    relation created/updated here is flagged tainted=true so recall re-taints
+    clean sessions — prevents laundering external content through the graph.
     """
     entities = extracted.get("entities", [])
     relations = extracted.get("relations", [])
@@ -470,7 +491,7 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
     for name in needed:
         info = entity_info.get(name)
         if info:
-            entity_id = await _resolve_entity(info["name"], info["type"], info["desc"])
+            entity_id = await _resolve_entity(info["name"], info["type"], info["desc"], tainted)
             entity_map[name] = entity_id
 
     # Store relations
@@ -488,15 +509,16 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
 
         async with get_connection() as conn:
             await conn.execute(
-                """INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id)
-                   VALUES ($1, $2, $3, $4)
+                """INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id, tainted)
+                   VALUES ($1, $2, $3, $4, $5)
                    ON CONFLICT (subject_id, predicate, object_id)
-                   DO UPDATE SET source_memory_id = $4, updated_at = NOW()""",
-                subj_id, predicate, obj_id, memory_id,
+                   DO UPDATE SET source_memory_id = $4, updated_at = NOW(),
+                       tainted = kg_relations.tainted OR EXCLUDED.tainted""",
+                subj_id, predicate, obj_id, memory_id, tainted,
             )
 
 
-async def recall_graph(query: str, limit: int = 10) -> list[str]:
+async def recall_graph(query: str, limit: int = 10) -> tuple[list[str], bool]:
     """Query the knowledge graph for relevant entity-relation context.
 
     Two-step approach for performance:
@@ -506,9 +528,13 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
     Words shorter than 4 chars are excluded to avoid noisy matches
     (e.g. "sah" matches thousands of entities). Entities are ranked by
     number of matching keywords so multi-word matches surface first.
+
+    Returns (lines, any_tainted). `any_tainted` is True if ANY surfaced
+    entity or relation carries the taint marker — the caller must then taint
+    the session (prevents laundering external content through the graph).
     """
     if not query or not query.strip():
-        return []
+        return [], False
 
     try:
         async with get_connection() as conn:
@@ -518,14 +544,14 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
                 "WHERE table_name = 'kg_entities')"
             )
             if not exists:
-                return []
+                return [], False
 
             # Filter words: prefer >= 4 chars, fall back to > 2 if none remain
             words = [w for w in query.lower().split() if len(w) >= 4]
             if not words:
                 words = [w for w in query.lower().split() if len(w) > 2]
             if not words:
-                return []
+                return [], False
 
             # Build LIKE conditions + relevance score (more keyword matches = higher)
             conditions = []
@@ -549,7 +575,7 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
                 *params,
             )
             if not entity_rows:
-                return []
+                return [], False
 
             entity_ids = [r["id"] for r in entity_rows]
 
@@ -558,7 +584,8 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
             rows = await conn.fetch(
                 """
                 (SELECT s.name AS subject, s.entity_type AS s_type,
-                        r.predicate, o.name AS object, o.entity_type AS o_type
+                        r.predicate, o.name AS object, o.entity_type AS o_type,
+                        (r.tainted OR s.tainted OR o.tainted) AS tainted
                  FROM kg_relations r
                  JOIN kg_entities s ON r.subject_id = s.id
                  JOIN kg_entities o ON r.object_id = o.id
@@ -566,7 +593,8 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
                  LIMIT $2)
                 UNION
                 (SELECT s.name AS subject, s.entity_type AS s_type,
-                        r.predicate, o.name AS object, o.entity_type AS o_type
+                        r.predicate, o.name AS object, o.entity_type AS o_type,
+                        (r.tainted OR s.tainted OR o.tainted) AS tainted
                  FROM kg_relations r
                  JOIN kg_entities s ON r.subject_id = s.id
                  JOIN kg_entities o ON r.object_id = o.id
@@ -579,19 +607,22 @@ async def recall_graph(query: str, limit: int = 10) -> list[str]:
             )
 
             if not rows:
-                return []
+                return [], False
 
             lines = []
+            any_tainted = False
             for row in rows:
+                if row["tainted"]:
+                    any_tainted = True
                 lines.append(
                     f"- {row['subject']} [{row['s_type']}] --{row['predicate']}--> "
                     f"{row['object']} [{row['o_type']}]"
                 )
-            return lines
+            return lines, any_tainted
 
     except Exception as e:
         logger.error(f"Graph recall failed: {e}")
-        return []
+        return [], False
 
 
 async def get_graph_stats() -> dict:

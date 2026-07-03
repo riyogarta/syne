@@ -2172,7 +2172,7 @@ class SyneAgent:
             try:
                 import asyncio
                 from .memory.graph import extract_and_store as graph_extract
-                asyncio.create_task(graph_extract(self.provider, content, mem_id))
+                asyncio.create_task(graph_extract(self.provider, content, mem_id, tainted=_tainted))
             except Exception as e:
                 logger.debug(f"KG extraction skipped: {e}")
             return f"Memory stored (id: {mem_id})"
@@ -2271,7 +2271,7 @@ class SyneAgent:
         try:
             import asyncio
             from .memory.graph import extract_and_store as graph_extract
-            asyncio.create_task(graph_extract(self.provider, content, mem_id))
+            asyncio.create_task(graph_extract(self.provider, content, mem_id, tainted=_tainted))
         except Exception as e:
             logger.debug(f"KG extraction skipped: {e}")
 
