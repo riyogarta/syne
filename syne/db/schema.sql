@@ -134,10 +134,12 @@ CREATE TABLE IF NOT EXISTS messages (
     content TEXT NOT NULL,
     metadata JSONB DEFAULT '{}',          -- tool calls, attachments, etc.
     token_count INT DEFAULT 0,
+    status VARCHAR(20) DEFAULT 'active',  -- 'active' | 'compacted' (archived, retained for search — NEVER deleted)
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_status ON messages (session_id, status, created_at);
 
 -- ============================================================
 -- SUB-AGENT RUNS: Track spawned sub-agent tasks
@@ -366,6 +368,7 @@ INSERT INTO config (key, value, description) VALUES
     ('session.max_messages', '100', 'Max messages before suggesting compaction'),
     ('session.compaction_threshold', '80000', 'Character count threshold for compaction (auto-adjusted per model)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
+    ('compaction.trigger_percent', '40', 'Compaction trigger: compact when context usage reaches this % of the active model context window (1-100, default 40). Single token-based trigger.'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
     -- Time & locale (used for injected runtime time context)
@@ -785,3 +788,8 @@ INSERT INTO config (key, value, description) VALUES
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)')
 ON CONFLICT (key) DO NOTHING;
 DELETE FROM config WHERE key = 'session.max_tool_rounds';
+
+-- Migration: compaction.trigger_percent (single token-based compaction trigger)
+INSERT INTO config (key, value, description) VALUES
+    ('compaction.trigger_percent', '40', 'Compaction trigger: compact when context usage reaches this % of the active model context window (1-100, default 40). Single token-based trigger.')
+ON CONFLICT (key) DO NOTHING;

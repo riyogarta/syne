@@ -319,7 +319,7 @@ class Conversation:
             rows = await conn.fetch("""
                 SELECT role, content, metadata
                 FROM messages
-                WHERE session_id = $1
+                WHERE session_id = $1 AND status = 'active'
                 ORDER BY created_at DESC
                 LIMIT $2
             """, self.session_id, limit)
@@ -712,26 +712,25 @@ class Conversation:
         # the response, which meant trim_context could silently drop
         # messages and cause amnesia.
         # ═══════════════════════════════════════════════════════════════
-        # Compaction gate: use REAL DB totals (not _message_cache which only has last N)
-        from .compaction import get_session_stats
-        _real_stats = await get_session_stats(self.session_id)
-        _real_msg_count = _real_stats["message_count"]
-        _real_char_total = _real_stats["total_chars"]
+        # Compaction gate: SINGLE token-based trigger, configurable via
+        # config `compaction.trigger_percent` (1-100, default 40). Compact when
+        # the context the LLM will see reaches that % of the model's context window.
+        from .db.models import get_config as _gc_cp
+        _trig_pct = await _gc_cp("compaction.trigger_percent", 40)
+        try:
+            _trig_pct = float(_trig_pct)
+        except (TypeError, ValueError):
+            _trig_pct = 40.0
+        _trig_pct = max(1.0, min(100.0, _trig_pct))
+        _threshold = _trig_pct / 100.0
 
-        # Derive thresholds from effective context (minus reserved output tokens)
-        _ctx_tokens = self.context_mgr.available
-        _msg_thresh = max(100, min(300, _ctx_tokens // 1000))
-        _chr_thresh = int(_ctx_tokens * 0.75 * 3.5)
-        count_exceeded = _real_msg_count >= _msg_thresh
-        chars_exceeded = _real_char_total >= _chr_thresh
-        # Also check if cached messages (what LLM will see) fill 90% of context
-        context_full = self._message_cache and self.context_mgr.should_compact(
+        context_full = bool(self._message_cache) and self.context_mgr.should_compact(
             self._message_cache,
-            threshold=0.90,
+            threshold=_threshold,
         )
 
-        if context_full or count_exceeded or chars_exceeded:
-            logger.info(f"Compaction triggered for session {self.session_id}: context_full={context_full}, db_msgs={_real_msg_count}/{_msg_thresh}, db_chars={_real_char_total}/{_chr_thresh}")
+        if context_full:
+            logger.info(f"Compaction triggered for session {self.session_id}: context usage >= {_trig_pct:.0f}% of model context window")
             if self._mgr and self._mgr._status_callbacks:
                 for cb in self._mgr._status_callbacks:
                     try:

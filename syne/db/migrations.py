@@ -55,8 +55,20 @@ ADVISORY_LOCK_KEY = 0x53594E_45  # 'SYNE' in hex
 # run inside a BEGIN; non-transactional ones manage their own atomicity.
 
 
-# (No migrations yet — schema.sql is the source of truth for current state.
-# Future migrations get appended here as (version, fn, mode) tuples.)
+async def _m1_messages_status(conn) -> None:
+    """Add messages.status column + index for soft-archive compaction.
+
+    Compaction no longer DELETEs old messages — it marks them
+    status='compacted' (retained in DB for semantic search, reversible).
+    Existing rows default to 'active'. Idempotent.
+    """
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active'"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_status "
+        "ON messages (session_id, status, created_at)"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -66,7 +78,7 @@ ADVISORY_LOCK_KEY = 0x53594E_45  # 'SYNE' in hex
 #   mode ∈ {"transactional", "non_transactional"}
 
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
-    # (1, _example_migration, "transactional"),
+    (1, _m1_messages_status, "transactional"),
 ]
 
 

@@ -135,7 +135,7 @@ async def get_session_stats(session_id: int) -> dict:
                 MIN(created_at) as oldest_message,
                 MAX(created_at) as newest_message
             FROM messages
-            WHERE session_id = $1
+            WHERE session_id = $1 AND status = 'active'
         """, session_id)
         return {
             "message_count": row["message_count"],
@@ -242,7 +242,7 @@ async def compact_session(
         to_summarize = total - keep_recent
         old_rows = await conn.fetch("""
             SELECT id, role, content, metadata FROM messages
-            WHERE session_id = $1
+            WHERE session_id = $1 AND status = 'active'
             ORDER BY created_at ASC
             LIMIT $2
         """, session_id, to_summarize)
@@ -314,9 +314,13 @@ async def compact_session(
 
         summary = summary_response.content
 
-        # Delete old messages
+        # Soft-archive old messages (NEVER delete — retained in DB for semantic
+        # search & recovery). They are excluded from context (load_history filters
+        # status='active') and from future compaction (queries above filter active).
         old_ids = [r["id"] for r in old_rows]
-        await conn.execute("DELETE FROM messages WHERE id = ANY($1)", old_ids)
+        await conn.execute(
+            "UPDATE messages SET status = 'compacted' WHERE id = ANY($1)", old_ids
+        )
 
         # Insert summary as first message in the session
         await conn.execute("""

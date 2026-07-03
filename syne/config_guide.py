@@ -92,13 +92,18 @@ Controls how fast non-permanent memories fade and when they get promoted.
 ### Compaction Threshold
 | Key | Default | Type |
 |-----|---------|------|
-| `session.compaction_threshold` | `80000` | integer (chars) |
+| `compaction.trigger_percent` | `40` | integer (1-100, %) |
+| `session.compaction_threshold` | `80000` | integer (chars, legacy) |
 | `session.compaction_keep_recent` | `40` | integer (messages) |
 | `session.max_messages` | `100` | integer |
 | `session.history_limit` | `100` | integer (messages) |
 
 Controls when conversation history is compacted (summarized) to save context.
-- `compaction_threshold` — character count that triggers auto-compaction.
+- `compaction.trigger_percent` — **single token-based trigger** (1-100). Compaction runs
+  when context usage reaches this % of the ACTIVE model's context window. Relative per-model,
+  so it's safe across small (Ollama 8k) and large (Claude 200k) models. Old messages are
+  soft-archived (status='compacted'), NEVER deleted — retained for semantic search & recovery.
+- `compaction_threshold` — (legacy char-based, superseded by trigger_percent).
 - `compaction_keep_recent` — number of recent messages preserved verbatim after compaction.
 - `max_messages` — soft limit before suggesting compaction.
 - `history_limit` — max messages loaded into context per turn. Only the last N messages
