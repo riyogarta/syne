@@ -85,6 +85,22 @@ async def _m2_drop_legacy_compaction_config(conn) -> None:
         "('session.compaction_threshold', 'session.max_messages')"
     )
 
+async def _m3_set_keep_recent_40(conn) -> None:
+    """Normalize session.compaction_keep_recent to 40 on live DB.
+
+    Older installs seeded this at 200 (> history_limit, and effectively
+    overridden by the dynamic `_keep` computation in conversation.py, so
+    behaviorally inert). Fresh installs already seed 40 (schema.sql,
+    v1.16.9). This migration aligns existing installs so live == seed.
+    Only touches the row if it still holds the legacy 200. Idempotent.
+    """
+    await conn.execute(
+        "UPDATE config SET value = '40'::jsonb, updated_at = NOW() "
+        "WHERE key = 'session.compaction_keep_recent' "
+        "AND value = '200'::jsonb"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Ordered migration list
 # ─────────────────────────────────────────────────────────────────────────
@@ -94,6 +110,7 @@ async def _m2_drop_legacy_compaction_config(conn) -> None:
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
+    (3, _m3_set_keep_recent_40, "transactional"),
 ]
 
 
