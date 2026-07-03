@@ -31,6 +31,7 @@ import ipaddress
 import logging
 import re
 import socket
+from html import unescape as html_unescape
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -61,34 +62,31 @@ def strip_html_tags(html: str) -> str:
     html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
     html = re.sub(r"<(?:p|div|br|h[1-6]|li|tr)[^>]*>", "\n", html, flags=re.IGNORECASE)
     html = re.sub(r"<[^>]+>", "", html)
-    for ent, ch in (
-        ("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"),
-        ("&gt;", ">"), ("&quot;", '"'), ("&#39;", "'"),
-    ):
-        html = html.replace(ent, ch)
+    # Decode ALL HTML entities (named + numeric) via stdlib.
+    html = html_unescape(html)
     html = re.sub(r"\n\s*\n+", "\n\n", html)
     html = re.sub(r" +", " ", html)
     return html.strip()
 
 
-async def _dns_is_safe(hostname: str) -> tuple[bool, str]:
-    """Resolve hostname and ensure NO resolved IP is internal (anti DNS-rebinding)."""
-    if not hostname:
-        return False, "empty hostname"
-    # If it's already a literal IP, is_url_safe already covered it; re-check anyway.
+async def _resolve_ips(hostname: str) -> tuple[set, str]:
+    """Resolve a hostname to a set of IP strings (blocking call runs off-thread)."""
     loop = asyncio.get_event_loop()
     try:
         infos = await loop.run_in_executor(
             None, lambda: socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
         )
     except Exception as e:
-        return False, f"DNS resolution failed: {e}"
+        return set(), f"DNS resolution failed: {e}"
     if not infos:
-        return False, "no DNS records"
-    for info in infos:
-        ip_str = info[4][0]
-        # strip IPv6 scope id if present
-        ip_str = ip_str.split("%")[0]
+        return set(), "no DNS records"
+    # strip IPv6 scope id if present
+    return {info[4][0].split("%")[0] for info in infos}, ""
+
+
+def _ips_all_safe(ips: set) -> tuple[bool, str]:
+    """Reject if ANY resolved IP is internal/loopback/link-local/reserved/etc."""
+    for ip_str in ips:
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:
@@ -96,6 +94,33 @@ async def _dns_is_safe(hostname: str) -> tuple[bool, str]:
         if (ip.is_private or ip.is_loopback or ip.is_link_local
                 or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
             return False, f"hostname resolves to blocked IP {ip}"
+    return True, ""
+
+
+async def _dns_is_safe(hostname: str) -> tuple[bool, str]:
+    """Resolve hostname and ensure NO resolved IP is internal (anti DNS-rebinding).
+
+    Resolves TWICE and requires an identical result set. This is a lightweight
+    guard against TOCTOU DNS rebinding (an attacker flipping DNS between the
+    validation resolve and httpx's own connect-time resolve). Not absolute, but
+    it raises the bar significantly with zero TLS-pinning risk.
+    """
+    if not hostname:
+        return False, "empty hostname"
+    ips1, err = await _resolve_ips(hostname)
+    if err:
+        return False, err
+    ok, reason = _ips_all_safe(ips1)
+    if not ok:
+        return False, reason
+    ips2, err = await _resolve_ips(hostname)
+    if err:
+        return False, err
+    ok, reason = _ips_all_safe(ips2)
+    if not ok:
+        return False, reason
+    if ips1 != ips2:
+        return False, "DNS result changed between resolutions (possible rebinding)"
     return True, ""
 
 
@@ -144,52 +169,61 @@ class FetchUrlAbility(Ability):
                 timeout=timeout,
                 follow_redirects=False,
                 headers=headers,
-                max_redirects=0,
             ) as client:
-                response = None
+                raw = b""
+                truncated = False
+                content_type = ""
+                encoding = "utf-8"
+                got_response = False
+
                 for _ in range(MAX_REDIRECTS + 1):
                     # Re-validate current hop (first hop already validated, cheap to repeat)
                     ok, reason = await _validate_url(current)
                     if not ok:
                         return {"success": False, "error": f"Redirect blocked: {reason}"}
 
-                    response = await client.get(current)
+                    # Stream so we can enforce the byte cap DURING download (anti-DoS):
+                    # a malicious server can't OOM us by sending a huge body.
+                    async with client.stream("GET", current) as response:
+                        if response.status_code in (301, 302, 303, 307, 308):
+                            loc = response.headers.get("location")
+                            if not loc:
+                                return {"success": False,
+                                        "error": "Redirect without Location header"}
+                            current = urljoin(current, loc)
+                            continue  # don't read body of a redirect
 
-                    if response.status_code in (301, 302, 303, 307, 308):
-                        loc = response.headers.get("location")
-                        if not loc:
-                            break
-                        current = urljoin(current, loc)
-                        continue
-                    break
+                        got_response = True
+
+                        if response.status_code >= 400:
+                            return {
+                                "success": False,
+                                "error": f"HTTP {response.status_code} {response.reason_phrase}",
+                            }
+
+                        content_type = (response.headers.get("content-type") or "").lower()
+                        if not any(ct in content_type for ct in _ALLOWED_CONTENT):
+                            return {
+                                "success": False,
+                                "error": f"Unsupported content-type: {content_type or 'unknown'} "
+                                         "(only html/text/json/xml allowed)",
+                            }
+
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            raw += chunk
+                            if len(raw) >= max_bytes:
+                                raw = raw[:max_bytes]
+                                truncated = True
+                                break
+
+                        encoding = response.encoding or "utf-8"
+                        break
                 else:
                     return {"success": False, "error": "Too many redirects"}
 
-                if response is None:
+                if not got_response:
                     return {"success": False, "error": "No response"}
 
-                if response.status_code >= 400:
-                    return {
-                        "success": False,
-                        "error": f"HTTP {response.status_code} {response.reason_phrase}",
-                    }
-
-                content_type = (response.headers.get("content-type") or "").lower()
-                if not any(ct in content_type for ct in _ALLOWED_CONTENT):
-                    return {
-                        "success": False,
-                        "error": f"Unsupported content-type: {content_type or 'unknown'} "
-                                 "(only html/text/json/xml allowed)",
-                    }
-
-                # Read body with a byte cap.
-                raw = response.content
-                truncated = False
-                if len(raw) > max_bytes:
-                    raw = raw[:max_bytes]
-                    truncated = True
-
-                encoding = response.encoding or "utf-8"
                 try:
                     body = raw.decode(encoding, errors="replace")
                 except (LookupError, TypeError):
