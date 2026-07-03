@@ -208,6 +208,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
+        self.app.add_handler(CommandHandler("untaint", self._cmd_untaint))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
         self.app.add_handler(CommandHandler("vision", self._cmd_vision))
         self.app.add_handler(CommandHandler("imagegen", self._cmd_imagegen))
@@ -304,6 +305,7 @@ class TelegramChannel:
             BotCommand("restore", "Restore database from backup (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
+            BotCommand("untaint", "Reset session taint (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("version", "Version info"),
             BotCommand("vision", "Switch image analysis provider (owner only)"),
@@ -4413,6 +4415,63 @@ Or just send me a message!"""
             await update.message.reply_text(f"Backup saved: {message}")
         else:
             await update.message.reply_text(f"Backup failed: {message}")
+
+    async def _cmd_untaint(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /untaint — owner only. The ONLY path that clears session taint.
+
+        Taint (indirect prompt injection defense) is monotonic: it is set to
+        true automatically whenever external/untrusted content lands in a
+        session, and is NEVER cleared automatically. This slash command is the
+        single reset path, dispatched OUTSIDE the LLM loop so an injected
+        session cannot wash its own taint. It is deliberately NOT an LLM tool.
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can reset taint.")
+            return
+
+        from ..db.connection import get_connection
+
+        chat_id = str(update.effective_chat.id)
+
+        async with get_connection() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, tainted, taint_reason FROM sessions
+                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, chat_id)
+
+            if not row:
+                await update.message.reply_text("No active session for this chat.")
+                return
+
+            session_id = row["id"]
+            was_tainted = bool(row["tainted"])
+            old_reason = row["taint_reason"] or "(no reason recorded)"
+
+            if not was_tainted:
+                await update.message.reply_text("Session is already clean — nothing to reset.")
+                return
+
+            await conn.execute(
+                "UPDATE sessions SET tainted = false, taint_reason = NULL, "
+                "updated_at = NOW() WHERE id = $1",
+                session_id,
+            )
+
+        # Reset the live in-memory conversation if loaded
+        key = f"telegram:{chat_id}"
+        conv = self.agent.conversations._active.get(key) if self.agent and self.agent.conversations else None
+        if conv:
+            conv.tainted = False
+            conv.taint_reason = ""
+
+        await update.message.reply_text(
+            f"✅ Taint reset for session {session_id}.\n"
+            f"Previous reason: {old_reason}"
+        )
 
     async def _cmd_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restore command — owner only, list backups and restore via inline buttons."""

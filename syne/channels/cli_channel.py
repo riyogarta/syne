@@ -390,7 +390,7 @@ class _MarkdownStream:
 # ── Slash commands ──
 _SLASH_COMMANDS = [
     "/help", "/models", "/status", "/memory", "/compact",
-    "/clear", "/cost", "/context", "/exit",
+    "/clear", "/cost", "/context", "/untaint", "/exit",
 ]
 
 # ── Token usage ──
@@ -1497,6 +1497,7 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                f"  /clear    — Clear conversation history\n"
                f"  /cost     — Show session token usage\n"
                f"  /context  — Show context usage\n"
+               f"  /untaint  — Reset session taint (owner only)\n"
                f"  /exit     — Exit CLI\n\n"
                f"  {_DIM}Shift+Enter or \\+Enter for new line.{_RESET}\n\n")
         return True
@@ -1656,6 +1657,40 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                         _write(f"  {_DIM_RED}Failed to create provider for {new_key}{_RESET}\n\n")
                 else:
                     _write(f"  {_DIM}Already using {models[idx].get('label', new_key)}.{_RESET}\n\n")
+        return True
+
+    elif cmd == "/untaint":
+        # Owner-only. The ONLY path that clears session taint (indirect prompt
+        # injection defense). Dispatched OUTSIDE the LLM loop — NOT an LLM tool —
+        # so an injected session cannot wash its own taint. Monotonic reset.
+        if user.get("access_level") != "owner":
+            _write(f"  {_DIM_RED}Only the owner can reset taint.{_RESET}\n\n")
+            return True
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, tainted, taint_reason FROM sessions
+                WHERE platform = 'cli' AND platform_chat_id = $1 AND status = 'active'
+                ORDER BY updated_at DESC LIMIT 1
+            """, chat_id)
+            if not row:
+                _write(f"  {_DIM}No active session for this chat.{_RESET}\n\n")
+                return True
+            if not row["tainted"]:
+                _write(f"  {_DIM}Session is already clean — nothing to reset.{_RESET}\n\n")
+                return True
+            old_reason = row["taint_reason"] or "(no reason recorded)"
+            await conn.execute(
+                "UPDATE sessions SET tainted = false, taint_reason = NULL, "
+                "updated_at = NOW() WHERE id = $1",
+                row["id"],
+            )
+        conv = agent.conversations._active.get(f"cli:{chat_id}")
+        if conv:
+            conv.tainted = False
+            conv.taint_reason = ""
+        _write(f"  {_DIM_GREEN}Taint reset for session {row['id']}.{_RESET}\n"
+               f"  {_DIM}Previous reason: {old_reason}{_RESET}\n\n")
         return True
 
     return False
