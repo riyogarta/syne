@@ -71,6 +71,20 @@ async def _m1_messages_status(conn) -> None:
     )
 
 
+async def _m2_drop_legacy_compaction_config(conn) -> None:
+    """Remove dead compaction config keys from live DB.
+
+    `session.compaction_threshold` (legacy char-based, superseded by
+    `compaction.trigger_percent`) and `session.max_messages` are no
+    longer read by any code path. Fresh installs already omit them
+    (schema.sql seed cleaned in v1.16.9); this migration purges them
+    from existing installs so live == seed. Idempotent.
+    """
+    await conn.execute(
+        "DELETE FROM config WHERE key IN "
+        "('session.compaction_threshold', 'session.max_messages')"
+    )
+
 # ─────────────────────────────────────────────────────────────────────────
 # Ordered migration list
 # ─────────────────────────────────────────────────────────────────────────
@@ -79,6 +93,7 @@ async def _m1_messages_status(conn) -> None:
 
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
+    (2, _m2_drop_legacy_compaction_config, "transactional"),
 ]
 
 
