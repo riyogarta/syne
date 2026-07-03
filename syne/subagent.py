@@ -38,6 +38,7 @@ class SubAgentManager:
         self.abilities = None      # AbilityRegistry — set by agent after init
         self._active_runs: dict[str, asyncio.Task] = {}
         self._on_complete: Optional[Callable[[str, str, str, int], Awaitable[None]]] = None
+        self._on_start: Optional[Callable[[str, str, int], Awaitable[None]]] = None
 
     def set_completion_callback(self, callback: Callable[[str, str, str, int], Awaitable[None]]):
         """Set callback for when sub-agent completes.
@@ -45,6 +46,13 @@ class SubAgentManager:
         callback(run_id: str, status: str, result_or_error: str, parent_session_id: int)
         """
         self._on_complete = callback
+
+    def set_start_callback(self, callback: Callable[[str, str, int], Awaitable[None]]):
+        """Set callback for when a sub-agent starts.
+
+        callback(run_id: str, task: str, parent_session_id: int)
+        """
+        self._on_start = callback
 
     async def is_enabled(self) -> bool:
         """Check if sub-agents are enabled."""
@@ -119,6 +127,13 @@ class SubAgentManager:
         self._active_runs[run_id] = async_task
 
         logger.info(f"Sub-agent spawned: run_id={run_id}, task='{task[:80]}'")
+
+        # Notify that the sub-agent has started (best-effort, non-blocking)
+        if self._on_start:
+            try:
+                await self._on_start(run_id, task, parent_session_id)
+            except Exception as e:
+                logger.error(f"Start callback failed for {run_id}: {e}")
 
         return {
             "success": True,

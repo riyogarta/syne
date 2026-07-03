@@ -1633,10 +1633,26 @@ class ConversationManager:
         # Wire up sub-agent completion callback
         if self.subagents:
             self.subagents.set_completion_callback(self._on_subagent_complete)
+            self.subagents.set_start_callback(self._on_subagent_start)
 
     def is_any_chat_active(self) -> bool:
         """Check if any conversation is currently processing a chat request."""
         return any(conv._processing for conv in self._active.values())
+
+    async def _on_subagent_start(self, run_id: str, task: str, parent_session_id: int):
+        """Called when a sub-agent starts. Notifies the parent session."""
+        task_preview = task[:200] + ("…" if len(task) > 200 else "")
+        msg = f"🚀 Sub-agent started (run: {run_id[:8]})\n\nTask: {task_preview}"
+
+        # Deliver via callbacks (e.g., Telegram, WhatsApp)
+        if self._delivery_callbacks:
+            for cb in self._delivery_callbacks:
+                try:
+                    await cb(msg, parent_session_id)
+                except Exception as e:
+                    logger.error(f"Failed to deliver sub-agent start via {cb}: {e}")
+        else:
+            logger.info(f"Sub-agent started (no delivery callback): {msg[:200]}")
 
     async def _on_subagent_complete(self, run_id: str, status: str, result: str, parent_session_id: int):
         """Called when a sub-agent finishes. Delivers result to the parent session."""

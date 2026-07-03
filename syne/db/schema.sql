@@ -798,3 +798,11 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('session.compaction_overlap_percent', '15', 'Compaction overlap: keep this % of the summarized batch ALSO as raw messages (a verbatim bridge between summary and recent tail) for smooth transition. 0 = disabled. Char-budget guarded.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Migration: subagents.* (DB-driven sub-agent tuning — no more hardcoded fallbacks)
+INSERT INTO config (key, value, description) VALUES
+    ('subagents.enabled', 'true', 'Enable/disable sub-agent spawning. true = allowed.'),
+    ('subagents.max_concurrent', '2', 'Max concurrent sub-agents running at once.'),
+    ('subagents.max_rounds', '100', 'Max tool-call rounds per sub-agent before forced stop (prevents runaway loops).'),
+    ('subagents.round_delay', '2.0', 'Delay in seconds between sub-agent tool-call rounds (throttle).')
+ON CONFLICT (key) DO NOTHING;

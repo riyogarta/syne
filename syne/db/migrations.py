@@ -137,6 +137,28 @@ async def _m5_seed_compaction_overlap(conn) -> None:
         "ON CONFLICT (key) DO NOTHING"
     )
 
+async def _m6_seed_subagent_config(conn) -> None:
+    """Seed subagents.* tuning keys into config for existing installs.
+
+    Fresh installs get these via schema.sql. This backfills older installs
+    so sub-agent tuning is fully DB-driven (no hidden hardcoded fallbacks).
+    max_rounds default is 100 (raised from the old code fallback of 30) to
+    let heavier tasks run longer. Idempotent via ON CONFLICT DO NOTHING.
+    """
+    await conn.execute(
+        "INSERT INTO config (key, value, description) VALUES "
+        "('subagents.enabled', 'true', "
+        "'Enable/disable sub-agent spawning. true = allowed.'), "
+        "('subagents.max_concurrent', '2', "
+        "'Max concurrent sub-agents running at once.'), "
+        "('subagents.max_rounds', '100', "
+        "'Max tool-call rounds per sub-agent before forced stop (prevents runaway loops).'), "
+        "('subagents.round_delay', '2.0', "
+        "'Delay in seconds between sub-agent tool-call rounds (throttle).') "
+        "ON CONFLICT (key) DO NOTHING"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Ordered migration list
 # ─────────────────────────────────────────────────────────────────────────
@@ -149,6 +171,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (3, _m3_set_keep_recent_40, "transactional"),
     (4, _m4_seed_db_as_files_rule, "transactional"),
     (5, _m5_seed_compaction_overlap, "transactional"),
+    (6, _m6_seed_subagent_config, "transactional"),
 ]
 
 
