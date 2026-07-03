@@ -979,6 +979,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
         if not remote_mode:
             if agent.conversations:
                 agent.conversations.add_status_callback(_cli_status_callback)
+                agent.conversations.add_delivery_callback(_cli_subagent_callback)
 
             if not yolo:
                 _always_allowed: set[str] = set()
@@ -1467,6 +1468,16 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
 
 
 async def _cli_status_callback(session_id: int, message: str):
+    _write(f"\n  {_DIM_ITALIC}{message}{_RESET}\n")
+
+
+async def _cli_subagent_callback(message: str, parent_session_id: int):
+    """Render sub-agent notifications (start/resume/complete/incomplete/fail) in the CLI.
+
+    Delivery callback signature is (message, parent_session_id) — note the
+    argument order differs from status callbacks (session_id, message).
+    CLI runs a single local session, so no per-session filtering is needed.
+    """
     _write(f"\n  {_DIM_ITALIC}{message}{_RESET}\n")
 
 
