@@ -901,6 +901,45 @@ class SyneAgent:
             handler=self._tool_memory_store,
             permission=0o770,
         )
+        # Memory update tool — overwrite an existing memory in place.
+        # Unlike memory_store (append-only), this REPLACES memory content.
+        # Because in-place overwrite of a trusted store is high blast-radius
+        # (a malicious image/doc could try to rewrite arbitrary memories), it
+        # is gated behind an explicit per-session confirmation that must come
+        # from the SAME actor who issued the command (owner cannot confirm
+        # someone else's session — the pending lives on that Conversation).
+        self.tools.register(
+            name="memory_update",
+            description=(
+                "Update (overwrite) an existing memory by ID with new content. "
+                "Unlike memory_store which appends a new memory, this replaces "
+                "the content of memory `memory_id` in place and re-embeds it. "
+                "Requires explicit 'ya'/'yes' confirmation from the same person "
+                "in this session before it commits (a diff old->new is shown). "
+                "Cannot touch protected categories (rules, credential, identity, "
+                "config, security)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "memory_id": {
+                        "type": "integer",
+                        "description": "ID of the memory to overwrite",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "New full content that replaces the old memory content",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Optional new category. Omit to keep the existing category.",
+                    },
+                },
+                "required": ["memory_id", "content"],
+            },
+            handler=self._tool_memory_update,
+            permission=0o660,  # owner + family (rw), NOT public
+        )
         # Memory delete tool
         self.tools.register(
             name="memory_delete",
@@ -2177,6 +2216,134 @@ class SyneAgent:
                 logger.debug(f"KG extraction skipped: {e}")
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
+
+    # Categories that can NEVER be overwritten via memory_update — these are
+    # trust anchors; letting injected content rewrite them would defeat the
+    # whole point of the taint gate.
+    MEMORY_UPDATE_PROTECTED = {
+        "rules", "rule", "credential", "credentials", "identity",
+        "config", "configuration", "security", "soul",
+    }
+
+    @staticmethod
+    def _memory_update_hash(memory_id: int, content: str) -> str:
+        """Stable digest binding a confirmation to THIS exact change."""
+        import hashlib
+        payload = f"{memory_id}\x00{content}".encode("utf-8", errors="replace")
+        return hashlib.sha256(payload).hexdigest()[:12]
+
+    def _memory_update_confirmed_recently(self, conv, memory_id: int, content: str) -> bool:
+        """Check that the actor of THIS session just confirmed THIS exact update.
+
+        Mirrors the tainted-exec gate but scoped to memory_update:
+          - pending lives on THIS conversation (so it is bound to the actor —
+            owner cannot confirm someone else's session)
+          - TTL 120s
+          - pending hash must match (memory_id, content) about to be written
+          - latest user message in this session must be strict 'ya'/'yes'
+        One confirmation authorizes exactly one update.
+        """
+        import time as _time
+        pending_hash = getattr(conv, "_pending_memory_update_hash", "")
+        pending_at = getattr(conv, "_pending_memory_update_at", 0.0)
+        if not pending_hash or not pending_at:
+            return False
+        if _time.time() - pending_at > 120:
+            conv._pending_memory_update_hash = ""
+            conv._pending_memory_update_at = 0.0
+            return False
+        if pending_hash != self._memory_update_hash(memory_id, content):
+            return False
+        if not getattr(conv, "_message_cache", None):
+            return False
+        user_msgs = [m for m in conv._message_cache if m.role == "user"]
+        if not user_msgs:
+            return False
+        last_user = (user_msgs[-1].content or "").strip().lower()
+        if last_user in ("ya", "yes"):
+            conv._pending_memory_update_hash = ""
+            conv._pending_memory_update_at = 0.0
+            return True
+        return False
+
+    async def _tool_memory_update(self, memory_id: int, content: str, category: str = "") -> str:
+        """Tool handler: overwrite an existing memory in place (confirmed)."""
+        import time as _time
+        from .db.connection import get_connection
+
+        content = (content or "").strip()
+        if not content:
+            return "Error: new content is empty."
+
+        # Load the target memory.
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, content, category, importance, source, permanent, tainted "
+                "FROM memory WHERE id = $1",
+                memory_id,
+            )
+        if not row:
+            return f"Error: memory id {memory_id} not found."
+
+        old_content = row["content"] or ""
+        old_category = row["category"] or "fact"
+        new_category = (category or "").strip() or old_category
+
+        # Protected-category guard (both old and new).
+        if old_category.lower() in self.MEMORY_UPDATE_PROTECTED:
+            return (
+                f"Refused: memory id {memory_id} is category '{old_category}', "
+                "which is protected and cannot be overwritten via memory_update."
+            )
+        if new_category.lower() in self.MEMORY_UPDATE_PROTECTED:
+            return (
+                f"Refused: cannot move memory into protected category "
+                f"'{new_category}' via memory_update."
+            )
+
+        conv = self._get_active_conversation()
+        if conv is None:
+            return "Error: no active conversation to confirm against."
+
+        # Confirmation gate: same-session actor must confirm THIS exact change.
+        if not self._memory_update_confirmed_recently(conv, memory_id, content):
+            cmd_hash = self._memory_update_hash(memory_id, content)
+            conv._pending_memory_update_hash = cmd_hash
+            conv._pending_memory_update_at = _time.time()
+
+            def _clip(s, n=280):
+                s = s.replace("\n", " ")
+                return s if len(s) <= n else s[:n] + "…"
+
+            cat_line = ""
+            if new_category != old_category:
+                cat_line = f"\nCategory: `{old_category}` → `{new_category}`"
+            logger.warning(
+                f"memory_update held for confirmation: id={memory_id}, "
+                f"hash={cmd_hash}"
+            )
+            return (
+                f"⚠️ Confirm memory update for id **{memory_id}** "
+                "(this OVERWRITES the old content).\n\n"
+                f"**OLD:** {_clip(old_content)}\n\n"
+                f"**NEW:** {_clip(content)}"
+                f"{cat_line}\n\n"
+                "Reply **ya** or **yes** to apply. This confirmation must come "
+                "from you, in this chat."
+            )
+
+        # Confirmed — commit. Taint is monotonic (OR of session + existing).
+        session_tainted = bool(getattr(conv, "tainted", False))
+        await self.memory._update_memory(
+            memory_id=memory_id,
+            content=content,
+            category=new_category,
+            source=row["source"] or "user_confirmed",
+            importance=float(row["importance"] or 0.5),
+            tainted=session_tainted,
+        )
+        logger.info(f"memory_update committed: id={memory_id}, category={new_category}")
+        return f"Memory id {memory_id} updated."
 
     async def _tool_memory_store_file(
         self,
