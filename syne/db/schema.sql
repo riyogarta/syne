@@ -813,3 +813,10 @@ INSERT INTO config (key, value, description) VALUES
     ('subagents.max_rounds', '100', 'Max tool-call rounds per sub-agent before forced stop (prevents runaway loops).'),
     ('subagents.round_delay', '2.0', 'Delay in seconds between sub-agent tool-call rounds (throttle).')
 ON CONFLICT (key) DO NOTHING;
+
+-- security.consent_* — ya/yes confirmation gate for destructive (op=x) tool calls
+INSERT INTO config (key, value, description) VALUES
+    ('security.consent_enabled', 'true', 'Master switch for the consent gate on op=x tool calls. When true, destructive tools (exec, file_write, memory_delete, update_*, etc.) prompt "balas ya" before running. Set false to disable the whole gate.'),
+    ('security.consent_ttl_seconds', '600', 'How long an approved consent stays cached (seconds). Default 600 = 10 min. The next identical call within this window skips the prompt.'),
+    ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.')
+ON CONFLICT (key) DO NOTHING;

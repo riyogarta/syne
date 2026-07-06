@@ -272,6 +272,31 @@ async def _m12_add_kg_relations_tainted(conn) -> None:
     )
 
 
+async def _m13_seed_consent_config(conn) -> None:
+    """Seed the security.consent_* keys so upgraded installs get them visibly.
+
+    Runtime always falls back to DEFAULT_CONSENT_ENABLED=True when the key
+    is absent, so the functional default doesn't change. This migration
+    matters because:
+      - `syne config` (v1.17.20) only shows rows present in the table, so
+        without seeds the operator can't discover the flag exists or read
+        its current value.
+      - Fresh installs (schema.sql) seed these; the migration keeps
+        upgraded installs in parity with fresh ones (dual-path invariant).
+    ON CONFLICT (key) DO NOTHING preserves any operator-customized value.
+    """
+    await conn.execute("""
+        INSERT INTO config (key, value, description) VALUES
+            ('security.consent_enabled', 'true',
+             'Master switch for the consent gate on op=x tool calls. When true, destructive tools (exec, file_write, memory_delete, update_*, etc.) prompt "balas ya" before running. Set false to disable the whole gate.'),
+            ('security.consent_ttl_seconds', '600',
+             'How long an approved consent stays cached (seconds). Default 600 = 10 min. The next identical call within this window skips the prompt.'),
+            ('security.consent_mode', '"sliding"',
+             'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.')
+        ON CONFLICT (key) DO NOTHING
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -285,6 +310,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (10, _m10_add_sessions_tainted, "transactional"),
     (11, _m11_add_kg_entities_tainted, "transactional"),
     (12, _m12_add_kg_relations_tainted, "transactional"),
+    (13, _m13_seed_consent_config, "transactional"),
 ]
 
 
