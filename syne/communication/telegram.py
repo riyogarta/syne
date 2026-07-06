@@ -209,6 +209,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
         self.app.add_handler(CommandHandler("untaint", self._cmd_untaint))
+        self.app.add_handler(CommandHandler("reset", self._cmd_reset))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
         self.app.add_handler(CommandHandler("vision", self._cmd_vision))
         self.app.add_handler(CommandHandler("imagegen", self._cmd_imagegen))
@@ -303,6 +304,7 @@ class TelegramChannel:
             BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("restore", "Restore database from backup (owner only)"),
+            BotCommand("reset", "Clear consent grants (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
             BotCommand("untaint", "Reset session taint (owner only)"),
@@ -4462,6 +4464,24 @@ Or just send me a message!"""
         await query.edit_message_text(
             f"✅ Taint reset for session {session_id}.\n"
             f"Previous reason: {old_reason}"
+        )
+
+    async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /reset — owner only. Clears all consent grants for the caller.
+
+        Consent grants (op=x exec approvals) are cached per-user and normally
+        expire after the TTL. This is the manual reset path: the next exec will
+        require ya/yes confirmation again. Dispatched OUTSIDE the LLM loop.
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can reset consent.")
+            return
+        n = self.agent._consent.revoke_user(str(user.id))
+        await update.message.reply_text(
+            f"\u2705 Consent direset \u2014 {n} grant dihapus. Exec berikutnya minta konfirmasi lagi."
         )
 
     async def _cmd_untaint(self, update: Update, context: ContextTypes.DEFAULT_TYPE):

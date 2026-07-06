@@ -137,6 +137,18 @@ class ConsentStore:
             del self._grants[k]
         return len(doomed)
 
+    def revoke_user(self, user_id: str) -> int:
+        """Drop ALL grants for a user across every session. Backs /reset.
+
+        Consent grants are remembered per-user; this clears the whole set so
+        the next op=x action re-prompts. Returns the number of grants cleared.
+        """
+        uid = str(user_id)
+        doomed = [k for k in self._grants if k[0] == uid]
+        for k in doomed:
+            del self._grants[k]
+        return len(doomed)
+
     def sweep(self) -> int:
         """Evict all expired grants. Optional housekeeping; returns count removed."""
         now = self._now()
