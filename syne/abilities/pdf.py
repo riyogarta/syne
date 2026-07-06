@@ -660,7 +660,7 @@ class PdfAbility(Ability):
     description = "Create and read PDFs from text, URL, or uploaded document."
     version = "1.7"
     permission = 0o770
-    operation = "x"  # action: produces a file
+    operation = "w"  # write: produces a local file
 
     # Priority pre-processing: when user uploads a PDF, extract text automatically
     # so the LLM gets the content as text in the message context.

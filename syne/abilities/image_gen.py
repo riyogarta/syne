@@ -23,7 +23,7 @@ class ImageGenAbility(Ability):
     name = "image_gen"
     description = "Generate images from text descriptions using AI"
     version = "2.0"
-    permission = 0o777
+    permission = 0o770
     operation = "x"  # action: generates a file
 
     async def execute(self, params: dict, context: dict) -> dict:
