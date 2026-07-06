@@ -30,6 +30,7 @@ from typing import Dict, Optional, Tuple
 
 DEFAULT_TTL_SECONDS = 600
 DEFAULT_MODE = "sliding"  # "sliding" refreshes on reuse; "fixed" expires from grant time
+DEFAULT_CONSENT_ENABLED = True  # fresh installs get consent live; override per-instance via config
 
 # key = (user_id, session_id, op, target, content_hash)
 ConsentKey = Tuple[str, str, str, str, str]

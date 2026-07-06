@@ -264,6 +264,24 @@ Controls how voice messages are transcribed.
 - **Change when**: Current provider is down, or want to use a different transcription service.
 - **Warning**: Requires a valid API key for the chosen provider.
 
+## Security & Consent
+
+### Consent Gate (op=x actions)
+| Key | Default | Type |
+|-----|---------|------|
+| `security.consent_enabled` | `true` | boolean |
+| `security.consent_ttl_seconds` | `600` | integer (seconds) |
+| `security.consent_mode` | `"sliding"` | string |
+
+Replaces the old session-taint exec lock. When ON, high-risk (op=x) tool calls
+(exec, send_*, spawn_subagent, whatsapp, image_gen) ask for one-time confirmation,
+bound to the specific action (op+target+content) and reusable within the TTL.
+- `consent_enabled` — master switch. `false` = no confirmation prompts (behavior
+  as if gate absent). Set false temporarily to test wiring side-by-side.
+- `consent_ttl_seconds` — grant lifetime. Identical repeats within this window skip re-prompt.
+- `consent_mode` — `"sliding"` (reuse refreshes clock) or `"fixed"` (expires from grant time).
+- **Warning**: grants are same-actor + in-memory; a restart clears all (fail-safe).
+
 ## Sub-Agents
 
 | Key | Default | Type |
