@@ -3467,10 +3467,20 @@ Or just send me a message!"""
         user = query.from_user
         chat = query.message.chat
 
+        logger.info(
+            f"Consent button click: verdict={verdict}, cb_hash={cb_hash}, "
+            f"user={user.id}, chat={chat.id}, chat_type={chat.type}"
+        )
+
         conv = None
         if self.agent and self.agent.conversations:
             key = f"telegram:{chat.id}"
             conv = self.agent.conversations._active.get(key)
+            logger.debug(
+                f"Consent button: cache lookup key={key!r}, "
+                f"conv={'FOUND' if conv else 'MISSING'}, "
+                f"active keys={list(self.agent.conversations._active.keys())}"
+            )
         if conv is None:
             await query.edit_message_text(
                 "⚠️ Session tidak lagi aktif. Silakan kirim ulang perintah."
@@ -3478,6 +3488,10 @@ Or just send me a message!"""
             return
 
         pending_hash = getattr(conv, "_pending_consent_hash", "") or ""
+        logger.info(
+            f"Consent button: pending_hash on conv={pending_hash!r}, "
+            f"cb_hash={cb_hash!r}, match={pending_hash == cb_hash}"
+        )
         if pending_hash != cb_hash:
             # Either already answered, expired, or a different pending has
             # taken over. Refuse rather than acting on a stale intent.
@@ -8895,6 +8909,12 @@ Or just send me a message!"""
             _consent_hash = None
         if _consent_hash:
             text = strip_consent_marker(text)
+            if not text or not text.strip():
+                # LLM produced nothing meaningful around the marker — send at
+                # least a minimal ask so the owner sees the buttons anchored
+                # to something. Without this, an empty text would fail
+                # bot.send_message and the buttons would never appear.
+                text = "⚠️ Consent required — pilih di bawah."
             html_text_c = markdown_to_telegram_html(text)
             reply_params_c = {"message_id": reply_to_message_id} if reply_to_message_id else None
             markup = InlineKeyboardMarkup([[

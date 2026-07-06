@@ -671,9 +671,18 @@ class Conversation:
         pending_hash = self._pending_consent_hash
         pending_at = self._pending_consent_at
         if not pending_kind or not pending_tool or not pending_at:
+            logger.debug(
+                f"Consent bypass skip (no pending): kind={pending_kind}, "
+                f"tool={pending_tool}, at={pending_at}"
+            )
             return None
         # TTL 120s — same as sudo-guard, keeps confirm windows uniform.
-        if _time.time() - pending_at > 120:
+        _age = _time.time() - pending_at
+        if _age > 120:
+            logger.info(
+                f"Consent bypass: pending expired (age={_age:.1f}s > 120s), "
+                f"tool={pending_tool}, hash={pending_hash}"
+            )
             self._clear_pending_consent()
             return None
 
@@ -682,7 +691,14 @@ class Conversation:
         )
         token = last_reply_token(user_message)
         if token not in ("ya", "yes"):
+            logger.debug(
+                f"Consent bypass skip: token={token!r} (raw={user_message[:80]!r})"
+            )
             return None
+        logger.info(
+            f"Consent bypass firing: tool={pending_tool}, hash={pending_hash}, "
+            f"token={token!r}, session={self.session_id}"
+        )
 
         # Feature flag last so a lingering pending on a consent-off instance
         # doesn't accidentally intercept legit user text.
@@ -1232,26 +1248,53 @@ class Conversation:
         # Attach any media collected during tool calls to the final response
         final_response = response.content
 
-        # ─── Ensure consent buttons survive to the channel adapter ─────────
+        # ─── Ensure the consent prompt + buttons reach the channel ─────────
         # If any tool call in this turn hit the consent gate, we now have a
-        # pending consent on the conversation. The registry gave the LLM the
-        # "balas ya" prompt (which ends with [[CONSENT_BUTTONS:hash=…]]) as
-        # the tool_result, but the LLM's final text is free to paraphrase,
-        # translate, or drop the marker entirely — and if it does, the
-        # Telegram adapter has no way to know to attach the Yes/No inline
-        # buttons. Guarantee the marker is present by appending it here
-        # whenever a pending consent exists and the response doesn't
-        # already carry the marker for this hash. Non-marker-aware channels
-        # (CLI, plain stdout) render the trailer as a visible line —
-        # harmless, and it doubles as an audit trail.
+        # pending consent on the conversation. The registry handed the LLM
+        # the "balas ya" prompt (with the [[CONSENT_BUTTONS:hash=…]] marker
+        # the Telegram adapter scans for) as the tool_result, but the LLM's
+        # final text is free to paraphrase, translate, or drop the marker
+        # entirely — and if it does, the adapter has no way to know to
+        # attach the Yes/No inline buttons. Worse, the LLM sometimes
+        # returns an empty final text after a held tool call, which would
+        # send NOTHING at all to the user.
+        #
+        # Guarantee both the prompt content AND the marker are present
+        # whenever there is a pending consent: regenerate the canonical
+        # prompt from the pending state when the LLM's own text is empty
+        # or clearly missing the confirmation ask; otherwise just append
+        # the marker so the adapter can find it.
         _pending_hash_for_buttons = self._pending_consent_hash
         if _pending_hash_for_buttons:
+            from .consent import format_consent_prompt, CONSENT_BUTTON_MARKER
             _marker = f"[[CONSENT_BUTTONS:hash={_pending_hash_for_buttons}]]"
-            if _marker not in (final_response or ""):
-                if final_response and not final_response.endswith("\n"):
-                    final_response = f"{final_response}\n\n{_marker}"
+            _fresh_prompt = format_consent_prompt(
+                self._pending_consent_tool or "",
+                self._pending_consent_args or {},
+                _pending_hash_for_buttons,
+            )
+            _resp = (final_response or "").strip()
+            # If the LLM produced (roughly) nothing, or nothing that hints at
+            # the confirmation ask, replace the response with the canonical
+            # prompt (which already ends with the marker). Otherwise just
+            # ensure the marker is at the end.
+            _looks_like_ask = (
+                _resp
+                and (
+                    "ya" in _resp.lower()
+                    or "yes" in _resp.lower()
+                    or "consent" in _resp.lower()
+                    or "konfirm" in _resp.lower()
+                    or CONSENT_BUTTON_MARKER in _resp
+                )
+            )
+            if not _resp or not _looks_like_ask:
+                final_response = _fresh_prompt
+            elif CONSENT_BUTTON_MARKER not in _resp:
+                if not _resp.endswith("\n"):
+                    final_response = f"{_resp}\n\n{_marker}"
                 else:
-                    final_response = f"{final_response or ''}{_marker}"
+                    final_response = f"{_resp}{_marker}"
 
         if self._pending_media:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
