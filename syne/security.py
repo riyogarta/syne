@@ -58,6 +58,42 @@ TOOL_PERMISSIONS: dict[str, int] = {
 }
 
 
+
+# Operation type each tool performs — determines WHICH rwx bit is required.
+#   "r" = read-only (query/fetch/view)  -> needs bit 4
+#   "w" = write/modify data             -> needs bit 2
+#   "x" = action (exec/send/spawn)      -> needs bit 1
+# A caller's octal digit must have the matching bit set, else access denied.
+TOOL_OPERATIONS: dict[str, str] = {
+    "web_search":        "r",
+    "web_fetch":         "r",
+    "exec":              "x",
+    "db_query":          "r",
+    "file_read":         "r",
+    "file_write":        "w",
+    "read_source":       "r",
+    "send_message":      "x",
+    "send_file":         "x",
+    "send_voice":        "x",
+    "send_reaction":     "x",
+    "manage_schedule":   "x",
+    "spawn_subagent":    "x",
+    "subagent_status":   "r",
+    "memory_search":     "r",
+    "memory_store":      "w",
+    "memory_store_file": "w",
+    "memory_update":     "w",
+    "memory_get_file":   "r",
+    "memory_analyze_file": "r",
+    "memory_delete":     "w",
+    "manage_group":      "x",
+    "manage_user":       "x",
+    "update_config":     "w",
+    "update_ability":    "w",
+    "update_soul":       "w",
+    "check_auth":        "r",
+}
+
 def get_permission_digit(permission: int, access_level: str) -> int:
     """Extract the relevant octal digit for an access level.
 
@@ -95,13 +131,21 @@ def has_permission(digit: int, flag: str) -> bool:
     return False
 
 
-def check_tool_access(tool_name: str, access_level: str, permission: int = None) -> tuple[bool, str]:
-    """Check if a user can use a tool based on permission bits.
+def check_tool_access(tool_name: str, access_level: str, permission: int = None,
+                      operation: str = None) -> tuple[bool, str]:
+    """Check if a user can use a tool based on Linux-style rwx permission bits.
+
+    Unlike a naive ``digit != 0`` check, this honours the r/w/x semantics:
+    a tool that performs a write (w) requires bit 2, an action (x) requires
+    bit 1, a read (r) requires bit 4. This makes 0o444 (r--) genuinely
+    different from 0o555 (r-x): the former cannot invoke an action tool.
 
     Args:
         tool_name: Name of the tool
         access_level: "owner", "family", "public", or "blocked"
         permission: Override permission (if None, look up from TOOL_PERMISSIONS)
+        operation: Operation type "r"/"w"/"x" (if None, look up from
+                   TOOL_OPERATIONS; unknown tools default to "x" = strictest)
 
     Returns:
         Tuple of (allowed, reason)
@@ -112,10 +156,22 @@ def check_tool_access(tool_name: str, access_level: str, permission: int = None)
     if permission is None:
         permission = TOOL_PERMISSIONS.get(tool_name, 0o700)
 
+    if operation is None:
+        operation = TOOL_OPERATIONS.get(tool_name, "x")  # unknown -> strictest
+
     digit = get_permission_digit(permission, access_level)
     if digit == 0:
         logger.warning(f"Permission denied: {tool_name} (perm={oct(permission)}) for {access_level}")
         return False, f"Permission denied: '{tool_name}' is not available for {access_level} users."
+
+    if not has_permission(digit, operation):
+        flag_name = {"r": "read", "w": "write", "x": "execute"}.get(operation, operation)
+        logger.warning(
+            f"Permission denied: {tool_name} needs '{operation}' ({flag_name}) "
+            f"but {access_level} has digit {digit} (perm={oct(permission)})"
+        )
+        return False, (f"Permission denied: '{tool_name}' requires {flag_name} access, "
+                       f"not granted to {access_level} users.")
     return True, ""
 
 

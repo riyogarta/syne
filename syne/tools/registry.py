@@ -4,7 +4,7 @@ import logging
 from typing import Callable, Optional
 from dataclasses import dataclass, field
 
-from ..security import check_tool_access, TOOL_PERMISSIONS
+from ..security import check_tool_access, TOOL_PERMISSIONS, TOOL_OPERATIONS
 
 logger = logging.getLogger("syne.tools.registry")
 
@@ -28,6 +28,7 @@ class Tool:
     parameters: dict                    # JSON Schema for parameters
     handler: Callable                   # async function to execute
     permission: int = 0o700             # Linux-style 3-digit octal (owner/family/public)
+    operation: str = "x"                # rwx op type: "r" read, "w" write, "x" action
     enabled: bool = True
     scrub_level: str = "aggressive"     # "aggressive" | "safe" | "none"
     # aggressive: full regex scrub (Cookie, PEM, querystring, etc.)
@@ -60,6 +61,7 @@ class ToolRegistry:
         handler: Callable,
         permission: int = 0o700,
         scrub_level: str = "aggressive",
+        operation: str = None,
     ):
         """Register a new tool.
 
@@ -72,12 +74,15 @@ class ToolRegistry:
                 "safe" — high-confidence patterns only (for code/content output)
                 "none" — tool has its own dedicated scrubber
         """
+        if operation is None:
+            operation = TOOL_OPERATIONS.get(name, "x")  # unknown -> strictest
         self._tools[name] = Tool(
             name=name,
             description=description,
             parameters=parameters,
             handler=handler,
             permission=permission,
+            operation=operation,
             scrub_level=scrub_level,
         )
         self._schema_cache.clear()
@@ -101,7 +106,7 @@ class ToolRegistry:
 
         return [
             tool for tool in self._tools.values()
-            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission)[0]
+            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission, tool.operation)[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
@@ -133,7 +138,7 @@ class ToolRegistry:
             return ToolResult(f"Error: Tool '{name}' is disabled.", ok=False, error_type="permission")
 
         # Permission check
-        allowed, reason = check_tool_access(name, access_level, tool.permission)
+        allowed, reason = check_tool_access(name, access_level, tool.permission, tool.operation)
         if not allowed:
             logger.warning(f"Permission denied: tool={name}, access_level={access_level}, perm={oct(tool.permission)}")
             return ToolResult(f"Error: {reason}", ok=False, error_type="permission")

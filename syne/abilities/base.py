@@ -51,6 +51,9 @@ class Ability(ABC):
     description: str
     version: str = "1.0"
     permission: int = 0o700  # Linux-style 3-digit octal (owner/family/public), default owner-only
+    # Operation type for rwx gating: "r" read-only, "w" write/modify, "x" action.
+    # Determines which permission bit is required. Default "x" (strictest).
+    operation: str = "x"
 
     # Set to False to opt-out of ability-first pre-processing.
     # Default True = this ability is always tried first before LLM native.

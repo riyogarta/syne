@@ -106,7 +106,7 @@ class AbilityRegistry:
             return []
         return [
             ability for ability in self._abilities.values()
-            if ability.enabled and check_tool_access(ability.name, access_level, ability.permission)[0]
+            if ability.enabled and check_tool_access(ability.name, access_level, ability.permission, getattr(ability.instance, 'operation', 'x'))[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
@@ -169,7 +169,7 @@ class AbilityRegistry:
 
         # Permission check
         access_level = context.get("access_level", "public")
-        allowed, reason = check_tool_access(name, access_level, ability.permission)
+        allowed, reason = check_tool_access(name, access_level, ability.permission, getattr(ability.instance, 'operation', 'x'))
         if not allowed:
             logger.warning(f"Permission denied: ability={name}, access_level={access_level}, perm={oct(ability.permission)}")
             return {"success": False, "error": reason}

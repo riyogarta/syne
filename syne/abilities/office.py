@@ -88,6 +88,7 @@ class OfficeAbility(Ability):
     description = "Create and read Microsoft Office documents (Word, Excel, PowerPoint)."
     version = "2.0"
     permission = 0o770
+    operation = "x"  # action: produces a file
     # Priority pre-processing: auto-extract content from uploaded .docx/.xlsx/.pptx
     priority = True
 

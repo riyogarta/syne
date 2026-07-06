@@ -54,6 +54,7 @@ class WhatsAppAbility(Ability):
     description = "WhatsApp text messaging bridge via wacli"
     version = "1.0"
     permission = 0o700
+    operation = "x"  # action: sends messages
     priority = False  # Not a pre-processing ability
 
     def __init__(self):

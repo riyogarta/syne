@@ -139,6 +139,7 @@ class FetchUrlAbility(Ability):
     description = "Fetch a web URL and extract its readable text content (SSRF-hardened)"
     version = "1.0"
     permission = 0o444  # read-access for owner/family/public
+    operation = "r"  # read-only: fetches web text
 
     async def execute(self, params: dict, context: dict) -> dict:
         url = (params.get("url") or "").strip()
