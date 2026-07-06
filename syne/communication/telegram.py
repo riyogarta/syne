@@ -192,6 +192,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
+        self.app.add_handler(CommandHandler("consent", self._cmd_consent))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("models", self._cmd_models))
@@ -2036,6 +2037,7 @@ class TelegramChannel:
 /memory — Show memory stats
 /compact — Compact conversation history
 /autocapture — Toggle auto memory capture (on/off)
+/consent — Toggle consent gate for destructive tools (on/off)
 /models — Manage LLM models
 /embedding — Manage embedding models
 /evaluator — Manage evaluator model
@@ -3351,6 +3353,52 @@ Or just send me a message!"""
                 "📝 Auto-capture **OFF**\nMemory only stored on explicit request.",
                 parse_mode="Markdown",
             )
+
+    async def _cmd_consent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /consent command — toggle the consent gate on/off with inline buttons."""
+        user = update.effective_user
+
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can change consent settings.")
+            return
+
+        args = update.message.text.split(maxsplit=1)
+        toggle = args[1].strip().lower() if len(args) > 1 else None
+
+        if toggle is None:
+            current = await get_config("security.consent_enabled", True)
+            state = "ON" if current else "OFF"
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="consent_toggle:on"),
+                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="consent_toggle:off"),
+            ]
+            await update.message.reply_text(
+                f"🔒 **Consent gate:** {state}\n"
+                f"ON = destructive tools ask before running.\n"
+                f"OFF = tools run immediately (owner DM only — safe here since you're platform-verified).",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+            return
+
+        if toggle not in ("on", "off"):
+            await update.message.reply_text("❌ Use: `on` or `off`", parse_mode="Markdown")
+            return
+
+        enabled = toggle == "on"
+        await set_config("security.consent_enabled", enabled)
+        state_word = "ON" if enabled else "OFF"
+        detail = (
+            "Destructive tools now ask before running."
+            if enabled
+            else "Destructive tools now run immediately without asking."
+        )
+        await update.message.reply_text(
+            f"🔒 Consent gate **{state_word}**\n{detail}",
+            parse_mode="Markdown",
+        )
 
     async def _cmd_identity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /identity command."""
@@ -8380,6 +8428,26 @@ Or just send me a message!"""
             msg = "📝 **Auto-capture:** ON ⚠️" if enabled else "📝 **Auto-capture:** OFF"
             await query.edit_message_text(
                 msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+
+        elif data.startswith("consent_toggle:"):
+            toggle = data.split(":", 1)[1]
+            enabled = toggle == "on"
+            await set_config("security.consent_enabled", enabled)
+            state = "ON" if enabled else "OFF"
+            detail = (
+                "Destructive tools ask before running."
+                if enabled
+                else "Destructive tools run immediately without asking."
+            )
+            buttons = [
+                InlineKeyboardButton(f"{'✅ ' if enabled else ''}ON", callback_data="consent_toggle:on"),
+                InlineKeyboardButton(f"{'✅ ' if not enabled else ''}OFF", callback_data="consent_toggle:off"),
+            ]
+            await query.edit_message_text(
+                f"🔒 **Consent gate:** {state}\n{detail}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
