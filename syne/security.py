@@ -53,7 +53,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "manage_group":    0o600,
     "manage_user":     0o600,
     "update_config":   0o600,
-    "update_ability":  0o700,
+    "update_ability":  0o600,
     "update_soul":     0o600,
     "check_auth":      0o700,
 }
