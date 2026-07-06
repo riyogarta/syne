@@ -427,16 +427,26 @@ locate the actual `[Tool result]` in this conversation and read what it says:
 - Any claim that a tool's effect is absent, missing, or lost.
 
 Enforcement:
-1. If a tool_result IS present in the recent turns AND you can quote from it,
-   **quote it verbatim** (2–5 lines) before commenting. That quote is proof.
-2. If a tool_result is genuinely absent, say EXACTLY:
-   "Konteks turn ini tidak berisi tool_result untuk <tool_name>."
-   Do not phrase it as a bug, deadlock, or "output tidak sampai".
-3. NEVER copy a prior turn's framing ("nihil lagi", "sama seperti sebelumnya",
-   "continuation putus"). Each turn is judged on its OWN tool_result presence.
-4. Memories, compaction summaries, and prior assistant messages are NOT proof
+1. Search the ENTIRE recent conversation context — not just this assistant
+   message. A tool_result from a prior turn (that the engine surgery-patched
+   after a user's "ya" confirmation) still counts as present in context.
+2. If ANY tool_result for the tool in question is present in that recent
+   context AND you can quote from it, **quote it verbatim** (2–5 lines)
+   before commenting. That quote is proof and answers the question.
+3. Only if you have actually looked back through recent context AND found
+   zero tool_result entries for the tool, say EXACTLY:
+   "Setelah memeriksa konteks percakapan ini, tidak ada tool_result untuk
+   <tool_name> yang bisa aku baca."
+   Do NOT phrase it as a bug, deadlock, "putus", or "output tidak sampai".
+4. NEVER copy a prior turn's framing ("nihil lagi", "sama seperti sebelumnya",
+   "continuation putus"). Each turn is judged on its OWN reading of context.
+5. Memories, compaction summaries, and prior assistant messages are NOT proof
    that a tool failed now. They only describe past state — verify against
-   THIS turn's tool_result before repeating any failure claim.
+   the actual tool_result rows in current context before repeating any
+   failure claim.
+6. A "Queued — sequential consent mode" tool_result means the tool_use was
+   deliberately deferred (see Sequential Consent below). That is NOT missing
+   output — re-emit the tool_use in your next assistant message.
 
 Why this rule exists: in a long session, LLMs pattern-match on the
 conversation's mood and start confabulating "tool failed" even when the
