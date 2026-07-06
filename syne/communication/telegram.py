@@ -3547,6 +3547,33 @@ Or just send me a message!"""
             logger.error(f"Consent button dispatch failed: {e}", exc_info=True)
             response = f"⚠️ Gagal menjalankan aksi setelah consent: {e}"
 
+        # Belt-and-suspenders: if bypass's LLM continuation held ANOTHER
+        # gate (multi-step case: cmd_A approved → LLM plans cmd_B → gate
+        # holds), the response SHOULD carry a fresh CONSENT_BUTTONS marker
+        # from _chat_inner's marker injection. If for any reason the marker
+        # is missing (LLM paraphrased around it and neither the append nor
+        # the replace path fired, or the response was returned by an
+        # alternate code path), re-attach the canonical prompt for the
+        # currently-pending consent so the owner still gets Yes/No buttons.
+        new_pending_hash = getattr(conv, "_pending_consent_hash", "") or ""
+        _CBM = "[[CONSENT_BUTTONS:hash="
+        if new_pending_hash and new_pending_hash != cb_hash and _CBM not in (response or ""):
+            from ..consent import format_consent_prompt
+            fresh_prompt = format_consent_prompt(
+                getattr(conv, "_pending_consent_tool", "") or "",
+                getattr(conv, "_pending_consent_args", {}) or {},
+                new_pending_hash,
+            )
+            logger.info(
+                f"Consent callback: response missing marker for new pending "
+                f"{new_pending_hash!r}; re-attaching canonical prompt "
+                f"(tool={getattr(conv, '_pending_consent_tool', '')})"
+            )
+            if response and response.strip():
+                response = f"{response.rstrip()}\n\n{fresh_prompt}"
+            else:
+                response = fresh_prompt
+
         if response:
             response, reply_to = parse_reply_tag(response, query.message.message_id)
             response, react_emojis = parse_react_tags(response)

@@ -1307,38 +1307,28 @@ class Conversation:
         )
         if _pending_hash_for_buttons:
             from .consent import format_consent_prompt, CONSENT_BUTTON_MARKER
-            _marker = f"[[CONSENT_BUTTONS:hash={_pending_hash_for_buttons}]]"
             _fresh_prompt = format_consent_prompt(
                 self._pending_consent_tool or "",
                 self._pending_consent_args or {},
                 _pending_hash_for_buttons,
             )
             _resp = (final_response or "").strip()
-            # If the LLM produced (roughly) nothing, or nothing that hints at
-            # the confirmation ask, replace the response with the canonical
-            # prompt (which already ends with the marker). Otherwise just
-            # ensure the marker is at the end.
-            _looks_like_ask = (
-                _resp
-                and (
-                    "ya" in _resp.lower()
-                    or "yes" in _resp.lower()
-                    or "consent" in _resp.lower()
-                    or "konfirm" in _resp.lower()
-                    or CONSENT_BUTTON_MARKER in _resp
-                )
-            )
-            if not _resp or not _looks_like_ask:
+            # Rule: if there is ANY pending consent at end-of-turn, the outgoing
+            # message MUST carry the canonical Yes/No prompt so the owner has a
+            # way to approve. Two cases:
+            #   1. LLM's own final text is empty OR doesn't already contain the
+            #      marker → append the canonical prompt (with marker) at the
+            #      end. No heuristics — the guarantee has to be bulletproof.
+            #   2. LLM already emitted the marker verbatim → leave as-is.
+            if CONSENT_BUTTON_MARKER in _resp:
+                logger.info("Consent marker: LLM's response already contains marker, keeping as-is")
+            elif not _resp:
                 final_response = _fresh_prompt
-                logger.info(f"Consent marker: replaced empty/off-topic response with fresh_prompt (marker included)")
-            elif CONSENT_BUTTON_MARKER not in _resp:
-                if not _resp.endswith("\n"):
-                    final_response = f"{_resp}\n\n{_marker}"
-                else:
-                    final_response = f"{_resp}{_marker}"
-                logger.info(f"Consent marker: appended marker to LLM's response")
+                logger.info("Consent marker: replaced empty response with canonical prompt")
             else:
-                logger.info(f"Consent marker: LLM's response already contains marker, keeping as-is")
+                sep = "" if _resp.endswith("\n") else "\n\n"
+                final_response = f"{_resp}{sep}{_fresh_prompt}"
+                logger.info("Consent marker: appended canonical prompt to LLM's response")
 
         if self._pending_media:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
