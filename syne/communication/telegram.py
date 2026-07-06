@@ -8927,17 +8927,23 @@ Or just send me a message!"""
 
         # Universal outbound processing (path strip + narration strip + cleanup)
         _marker_in_pre = "[[CONSENT_BUTTONS:hash=" in (text or "")
+        _pre_len = len(text or "")
+        _pre_preview = (text or "")[:200].replace("\n", " ⏎ ")
         text = process_outbound(text)
         _marker_in_post = "[[CONSENT_BUTTONS:hash=" in (text or "")
-        if _marker_in_pre or _marker_in_post:
-            logger.info(
-                f"_send_response marker trace: pre_outbound={_marker_in_pre}, "
-                f"post_outbound={_marker_in_post}, text_len={len(text or '')}"
-            )
+        _post_len = len(text or "")
+        logger.info(
+            f"_send_response outbound: chat={chat_id}, pre_len={_pre_len}, "
+            f"post_len={_post_len}, marker_pre={_marker_in_pre}, "
+            f"marker_post={_marker_in_post}, pre_preview={_pre_preview!r}"
+        )
 
         # Guard: empty text after processing — don't send empty message to Telegram
         if not text or not text.strip():
-            logger.warning(f"Empty response after outbound processing for chat {chat_id}, skipping send")
+            logger.warning(
+                f"_send_response EMPTY after outbound for chat {chat_id}, skipping send. "
+                f"Pre-outbound preview: {_pre_preview!r}"
+            )
             return None
 
         # ─── Consent buttons ────────────────────────────────────────────────
@@ -8999,6 +9005,7 @@ Or just send me a message!"""
         # Only apply reply_to on the FIRST chunk
         reply_params = {"message_id": reply_to_message_id} if reply_to_message_id else None
         last_msg = None
+        logger.info(f"_send_response splitting into {len(chunks)} chunk(s) for chat {chat_id}")
         for i, chunk in enumerate(chunks):
             rp = reply_params if i == 0 else None
 
@@ -9009,7 +9016,12 @@ Or just send me a message!"""
 
             try:
                 last_msg = await self._telegram_retry(_send_html, op="send_message")
-            except Exception:
+                logger.info(f"_send_response chunk {i+1}/{len(chunks)} sent OK (HTML) to chat {chat_id}")
+            except Exception as html_exc:
+                logger.warning(
+                    f"_send_response chunk {i+1}/{len(chunks)} HTML send FAILED for chat {chat_id}: "
+                    f"{type(html_exc).__name__}: {html_exc} — trying plain text"
+                )
                 # HTML parse failed — strip tags and send plain
                 import re as _re
                 import html as _html_mod
@@ -9022,12 +9034,24 @@ Or just send me a message!"""
                     )
                 try:
                     last_msg = await self._telegram_retry(_send_plain, op="send_message_plain")
-                except Exception:
+                    logger.info(f"_send_response chunk {i+1}/{len(chunks)} sent OK (plain) to chat {chat_id}")
+                except Exception as plain_exc:
+                    logger.error(
+                        f"_send_response chunk {i+1}/{len(chunks)} plain send FAILED for chat {chat_id}: "
+                        f"{type(plain_exc).__name__}: {plain_exc} — trying truncated"
+                    )
                     async def _send_truncated(_text=plain[:4096], _rp=rp):
                         return await bot.send_message(
                             chat_id=chat_id, text=_text, reply_parameters=_rp,
                         )
-                    last_msg = await self._telegram_retry(_send_truncated, op="send_message_truncated")
+                    try:
+                        last_msg = await self._telegram_retry(_send_truncated, op="send_message_truncated")
+                        logger.info(f"_send_response chunk {i+1}/{len(chunks)} sent OK (truncated) to chat {chat_id}")
+                    except Exception as trunc_exc:
+                        logger.error(
+                            f"_send_response chunk {i+1}/{len(chunks)} truncated send FAILED for chat {chat_id}: "
+                            f"{type(trunc_exc).__name__}: {trunc_exc} — GIVING UP, user will see nothing"
+                        )
 
         return last_msg
 

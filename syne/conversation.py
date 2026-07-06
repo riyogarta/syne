@@ -856,13 +856,18 @@ class Conversation:
             llm_response = await self._chat_inner(user_message, message_metadata=None)
             if llm_response:
                 _has_marker = "[[CONSENT_BUTTONS:hash=" in llm_response
+                _preview = llm_response[:200].replace("\n", " ⏎ ")
                 logger.info(
                     f"Consent bypass continuation returned {len(llm_response)} chars, "
                     f"contains_marker={_has_marker}, "
-                    f"post_pending_hash={self._pending_consent_hash!r}"
+                    f"post_pending_hash={self._pending_consent_hash!r}, "
+                    f"preview={_preview!r}"
                 )
                 return llm_response
-            logger.warning("Consent bypass continuation returned empty response")
+            logger.warning(
+                "Consent bypass continuation returned empty response — "
+                "falling back to canned reply with raw output"
+            )
         except Exception as e:
             logger.error(
                 f"Consent bypass continuation failed: {e}", exc_info=True
