@@ -3495,7 +3495,7 @@ Or just send me a message!"""
                 pass
             try:
                 await query.edit_message_text(
-                    f"{original_text}\n\n❌ Ditolak — aksi tidak dijalankan."
+                    f"{original_text}\n\n❌ Declined — action not executed."
                 )
             except Exception:
                 pass
@@ -3509,7 +3509,7 @@ Or just send me a message!"""
         # chat() with "ya" so the deterministic bypass runs cmd + resumes LLM.
         try:
             await query.edit_message_text(
-                f"{original_text}\n\n✅ Ya — menjalankan…"
+                f"{original_text}\n\n✅ Yes — running…"
             )
         except Exception:
             pass
@@ -8898,8 +8898,8 @@ Or just send me a message!"""
             html_text_c = markdown_to_telegram_html(text)
             reply_params_c = {"message_id": reply_to_message_id} if reply_to_message_id else None
             markup = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Ya", callback_data=f"consent:yes:{_consent_hash}"),
-                InlineKeyboardButton("❌ Tidak", callback_data=f"consent:no:{_consent_hash}"),
+                InlineKeyboardButton("✅ Yes", callback_data=f"consent:yes:{_consent_hash}"),
+                InlineKeyboardButton("❌ No", callback_data=f"consent:no:{_consent_hash}"),
             ]])
             bot_c = context.bot if context else self.app.bot
             try:
