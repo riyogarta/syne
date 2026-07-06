@@ -374,7 +374,13 @@ async def check_and_hold(
 def format_consent_prompt(
     tool_name: str, args: Optional[dict], hash_hex: str,
 ) -> str:
-    """User-facing prompt shown when a call is held pending consent."""
+    """User-facing prompt shown when a call is held pending consent.
+
+    Ends with a machine-readable marker `[[CONSENT_BUTTONS:hash=…]]` that
+    channel adapters (Telegram, etc.) can detect and replace with inline
+    Yes/No buttons. Channels that don't recognize the marker (CLI, plain
+    stdout) leave it as visible text — harmless.
+    """
     import json
     args_preview = ""
     try:
@@ -383,7 +389,35 @@ def format_consent_prompt(
         args_preview = str(args)[:300]
     return (
         f"⚠️ Aksi `{tool_name}` butuh konfirmasi (consent). "
-        "Balas *ya* atau *yes* untuk mengizinkan.\n\n"
+        "Balas *ya* / *yes* atau klik tombol di bawah untuk mengizinkan.\n\n"
         f"Args: `{args_preview}`\n"
-        f"Hash: `{hash_hex}`"
+        f"Hash: `{hash_hex}`\n"
+        f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
     )
+
+
+CONSENT_BUTTON_MARKER = "[[CONSENT_BUTTONS:hash="
+
+
+def extract_consent_hash(text: str) -> Optional[str]:
+    """If `text` carries a CONSENT_BUTTONS marker, return the hash. Else None.
+
+    Channels use this to decide whether to attach Yes/No buttons before
+    sending — see the Telegram adapter's _send_response.
+    """
+    if not text or CONSENT_BUTTON_MARKER not in text:
+        return None
+    start = text.rfind(CONSENT_BUTTON_MARKER) + len(CONSENT_BUTTON_MARKER)
+    end = text.find("]]", start)
+    if end == -1:
+        return None
+    return text[start:end].strip() or None
+
+
+def strip_consent_marker(text: str) -> str:
+    """Remove the CONSENT_BUTTONS marker line from a message body."""
+    if not text or CONSENT_BUTTON_MARKER not in text:
+        return text
+    lines = text.splitlines()
+    kept = [ln for ln in lines if CONSENT_BUTTON_MARKER not in ln]
+    return "\n".join(kept).rstrip()

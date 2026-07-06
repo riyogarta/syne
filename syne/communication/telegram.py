@@ -3448,6 +3448,100 @@ Or just send me a message!"""
 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
+    async def _handle_consent_callback(self, query, data: str, context: ContextTypes.DEFAULT_TYPE):
+        """Handle consent:yes:<hash> and consent:no:<hash> buttons.
+
+        - Yes → route through Conversation.chat() with user_message="ya" so
+          the deterministic bypass fires: grant + run + resume LLM turn.
+        - No → clear pending consent on the conversation and edit the button
+          message to a "cancelled" note. The tool call stays un-executed.
+        Owner/family are both allowed to click their own pending consent —
+        the pending state is per-conversation, and the LLM's original
+        access check already gated who could invoke the tool.
+        """
+        parts = data.split(":", 2)
+        if len(parts) < 3:
+            await query.edit_message_text("❌ Invalid consent callback.")
+            return
+        _, verdict, cb_hash = parts
+        user = query.from_user
+        chat = query.message.chat
+
+        conv = None
+        if self.agent and self.agent.conversations:
+            key = f"telegram:{chat.id}"
+            conv = self.agent.conversations._active.get(key)
+        if conv is None:
+            await query.edit_message_text(
+                "⚠️ Session tidak lagi aktif. Silakan kirim ulang perintah."
+            )
+            return
+
+        pending_hash = getattr(conv, "_pending_consent_hash", "") or ""
+        if pending_hash != cb_hash:
+            # Either already answered, expired, or a different pending has
+            # taken over. Refuse rather than acting on a stale intent.
+            await query.edit_message_text(
+                "⚠️ Consent ini sudah kadaluarsa atau sudah dibalas."
+            )
+            return
+
+        original_text = query.message.text or query.message.caption or ""
+
+        if verdict == "no":
+            try:
+                conv._clear_pending_consent()
+            except Exception:
+                pass
+            try:
+                await query.edit_message_text(
+                    f"{original_text}\n\n❌ Ditolak — aksi tidak dijalankan."
+                )
+            except Exception:
+                pass
+            return
+
+        if verdict != "yes":
+            await query.edit_message_text("❌ Verdict tidak dikenal.")
+            return
+
+        # Yes → mark the button message as answered, then route through
+        # chat() with "ya" so the deterministic bypass runs cmd + resumes LLM.
+        try:
+            await query.edit_message_text(
+                f"{original_text}\n\n✅ Ya — menjalankan…"
+            )
+        except Exception:
+            pass
+
+        logger.info(
+            f"Consent 'yes' via button: session={conv.session_id}, hash={cb_hash}, "
+            f"user={user.id}"
+        )
+
+        try:
+            response = await self.agent.handle_message(
+                platform="telegram",
+                chat_id=str(chat.id),
+                user_name=user.first_name or str(user.id),
+                user_platform_id=str(user.id),
+                message="ya",
+                display_name=self._get_display_name(user),
+                is_dm=chat.type not in ("group", "supergroup"),
+            )
+        except Exception as e:
+            logger.error(f"Consent button dispatch failed: {e}", exc_info=True)
+            response = f"⚠️ Gagal menjalankan aksi setelah consent: {e}"
+
+        if response:
+            response, reply_to = parse_reply_tag(response, query.message.message_id)
+            response, react_emojis = parse_react_tags(response)
+            for emoji in react_emojis:
+                await self.send_reaction(chat.id, query.message.message_id, emoji)
+            await self._send_response_with_media(
+                chat.id, response, context, reply_to_message_id=reply_to,
+            )
+
     async def _handle_models_callback(self, query, data: str):
         """Handle all models:* callback routing."""
         user = query.from_user
@@ -8187,7 +8281,16 @@ Or just send me a message!"""
         data = query.data or ""
         user = query.from_user
 
-        # Auth check — owner only
+        # ─── Consent buttons run before the owner-only gate ─────────────────
+        # A consent-required tool call might have been initiated by a family
+        # user in DM (e.g. send_message with family perm). The click must be
+        # answered by whoever the pending state is for; access_level is
+        # re-checked inside the handler.
+        if data.startswith("consent:"):
+            await self._handle_consent_callback(query, data, context)
+            return
+
+        # Auth check — owner only for the rest of the callback surface
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
         if access_level != "owner":
@@ -8756,16 +8859,16 @@ Or just send me a message!"""
 
     async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, splitting if too long for Telegram.
-        
+
         Converts LLM markdown to Telegram HTML for reliable rendering.
         Falls back to plain text if HTML parsing fails.
-        
+
         Args:
             chat_id: Telegram chat ID
             text: Response text (markdown from LLM)
             context: Telegram context (optional — uses self.app.bot if None)
             reply_to_message_id: Optional message ID to reply/quote to
-        
+
         Returns:
             The last sent Message object, or None if send failed.
         """
@@ -8778,10 +8881,47 @@ Or just send me a message!"""
         if not text or not text.strip():
             logger.warning(f"Empty response after outbound processing for chat {chat_id}, skipping send")
             return None
-        
+
+        # ─── Consent buttons ────────────────────────────────────────────────
+        # If the outgoing text carries the [[CONSENT_BUTTONS:hash=…]] marker
+        # (added by consent.format_consent_prompt when the gate holds a
+        # tool call), strip the marker and send with inline Yes / No buttons.
+        # A single button send bypasses the normal splitting/HTML pipeline —
+        # the prompt is short by construction, no chance to exceed 4096 chars.
+        try:
+            from ..consent import extract_consent_hash, strip_consent_marker
+            _consent_hash = extract_consent_hash(text)
+        except Exception:
+            _consent_hash = None
+        if _consent_hash:
+            text = strip_consent_marker(text)
+            html_text_c = markdown_to_telegram_html(text)
+            reply_params_c = {"message_id": reply_to_message_id} if reply_to_message_id else None
+            markup = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Ya", callback_data=f"consent:yes:{_consent_hash}"),
+                InlineKeyboardButton("❌ Tidak", callback_data=f"consent:no:{_consent_hash}"),
+            ]])
+            bot_c = context.bot if context else self.app.bot
+            try:
+                return await bot_c.send_message(
+                    chat_id=chat_id,
+                    text=html_text_c,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    reply_parameters=reply_params_c,
+                )
+            except Exception as e:
+                logger.warning(f"Consent button send failed, falling back to plain text: {e}")
+                return await bot_c.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    reply_markup=markup,
+                    reply_parameters=reply_params_c,
+                )
+
         # Get bot instance — from context if available, otherwise from app
         bot = context.bot if context else self.app.bot
-        
+
         # Convert markdown to Telegram HTML (platform-specific formatting)
         html_text = markdown_to_telegram_html(text)
         
