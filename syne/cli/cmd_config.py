@@ -71,18 +71,25 @@ def _render_value(v) -> str:
 
 
 @cli.group(invoke_without_command=True)
-@click.argument("prefix", required=False)
 @click.pass_context
-def config(ctx, prefix):
+def config(ctx):
     """View or modify configuration stored in the DB.
 
-    Without a subcommand:
-      syne config             list ALL config keys
-      syne config <prefix>    list keys starting with <prefix>
+    Usage:
+      syne config                    list ALL config keys
+      syne config list [prefix]      list keys, optionally filtered by prefix
+      syne config get <key>          print single value
+      syne config set <key> <value>  upsert (value auto-parsed: bool/int/JSON/str)
+      syne config delete <key>       remove a key
     """
     if ctx.invoked_subcommand is not None:
         return
 
+    # No subcommand → list all
+    _run_list(None)
+
+
+def _run_list(prefix):
     async def _list():
         from syne.config import load_settings
         from syne.db.connection import init_db, close_db
@@ -116,6 +123,13 @@ def config(ctx, prefix):
         console.print(table)
 
     asyncio.run(_list())
+
+
+@config.command("list")
+@click.argument("prefix", required=False)
+def config_list(prefix):
+    """List config keys, optionally filtered by prefix."""
+    _run_list(prefix)
 
 
 @config.command("get")
