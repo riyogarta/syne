@@ -32,6 +32,26 @@ CRITICAL RULES:
 - Preserve ALL specific details: names, numbers, dates, data, preferences, facts mentioned.
 - Include the TONE and FLOW of the conversation, not just tasks.
 
+CRITICAL — BUG / FAILURE / COMPLAINT NARRATIVES:
+Debugging state is EPHEMERAL. If the transcript contains bug reports, failure
+claims, "output tidak sampai", "continuation putus", "tombol tidak muncul",
+"muter-muter", or similar, apply this rule:
+- If a later message in the transcript shows the issue was FIXED, RESOLVED, or
+  DEMONSTRATED WORKING → record it in `## Resolved Issues` with the fix and
+  do NOT restate it as an active problem anywhere else.
+- If the issue was ABANDONED (user gave up, changed direction, or turned the
+  feature off) → record in `## Resolved Issues` as "abandoned" — do NOT carry
+  it forward as an open bug.
+- ONLY put issues in `## Open Issues` when the transcript shows the user
+  ended the conversation still actively wanting them fixed AND no fix has
+  been demonstrated yet.
+- NEVER preserve frustration expressions ("kzl", "goblok", "capek",
+  exclamation floods) as facts. They describe the moment, not durable state.
+
+The next-turn LLM MUST NOT wake up believing a previously-fixed or abandoned
+bug is still active. Preserving stale bug narratives as if they were current
+is the #1 cause of Syne hallucinating that tools are broken when they work.
+
 Use this format:
 
 ## Conversation Summary
@@ -48,6 +68,12 @@ Use this format:
 - What was completed
 - What is in progress
 - What needs to be done next
+
+## Resolved Issues
+- [Issues that were fixed / abandoned during this window, with brief resolution note. Future turns must treat these as CLOSED.]
+
+## Open Issues
+- [ONLY issues the user was still actively pursuing when the window ended. Empty section is fine and expected.]
 
 ## Important Context
 - [Anything needed to continue naturally — ongoing topics, user's mood/preferences, unresolved questions]
@@ -66,6 +92,18 @@ Update the summary with new information. RULES:
 
 CRITICAL: Do NOT attribute assistant suggestions as user preferences — only include what the user actually said or confirmed.
 
+CRITICAL — BUG STATE MIGRATION:
+When updating the summary, actively re-evaluate the `## Open Issues` section:
+- If the NEW messages show a previously-open issue was fixed, verified working,
+  or abandoned → MOVE it from Open Issues to `## Resolved Issues` with a
+  one-line resolution note. Do NOT leave it in Open Issues.
+- If the NEW messages show a stale bug narrative was actually a hallucination
+  (assistant claimed a tool failed but the tool_result was actually present)
+  → MOVE it to Resolved Issues as "resolved: was hallucination, tool worked".
+- NEVER copy an Open Issue forward to the new summary unchanged unless the
+  NEW messages show the user still actively pursuing it AND no fix has
+  landed. Stale open bugs poison future turns.
+
 Use this format:
 
 ## Conversation Summary
@@ -81,6 +119,12 @@ Use this format:
 - What was completed
 - What is in progress
 - What needs to be done next
+
+## Resolved Issues
+- [Everything previously resolved, PLUS any Open Issues that got resolved/abandoned in the new window]
+
+## Open Issues
+- [ONLY issues still active at the end of the new window. Empty section is fine and expected — do not fill it with stale carryovers.]
 
 ## Important Context
 - [Preserve and update ongoing context]

@@ -132,3 +132,96 @@ def memory_add(content, category):
         await close_db()
 
     asyncio.run(_add())
+
+
+@memory.command("delete")
+@click.argument("memory_id", type=int)
+def memory_delete(memory_id):
+    """Delete a single memory by ID."""
+    async def _delete():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id, category, content FROM memory WHERE id = $1",
+                memory_id,
+            )
+            if not row:
+                console.print(f"[yellow]Memory #{memory_id} not found.[/yellow]")
+                await close_db()
+                return
+
+            preview = row["content"][:120] + ("..." if len(row["content"]) > 120 else "")
+            console.print(f"\n[bold]Memory #{row['id']}[/bold] [{row['category'] or 'none'}]")
+            console.print(f"  {preview}\n")
+
+            deleted = await conn.execute("DELETE FROM memory WHERE id = $1", memory_id)
+            console.print(f"[green]✓ Deleted memory #{memory_id}[/green] ({deleted})")
+
+        await close_db()
+
+    asyncio.run(_delete())
+
+
+@memory.command("prune")
+@click.argument("pattern")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+def memory_prune(pattern, yes):
+    """Bulk-delete memories whose content matches a case-insensitive SQL LIKE pattern.
+
+    Use '%' as a wildcard. Examples:
+      syne memory prune '%consent%bug%'
+      syne memory prune '%nihil%'
+      syne memory prune '%output tidak sampai%'
+
+    Intended for cleaning up session-hallucination artifacts (bug narratives,
+    complaints, "putus"/"kejegal" entries) that pollute future recall. This
+    matches the DO-NOT-STORE rules the evaluator now enforces going forward.
+    """
+    async def _prune():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, category, content FROM memory WHERE content ILIKE $1 ORDER BY id",
+                pattern,
+            )
+            if not rows:
+                console.print(f"[yellow]No memories match pattern: {pattern!r}[/yellow]")
+                await close_db()
+                return
+
+            t = Table(title=f"Match: {pattern!r} ({len(rows)} memories)")
+            t.add_column("ID", justify="right")
+            t.add_column("Category")
+            t.add_column("Content")
+            for r in rows:
+                preview = r["content"][:100] + ("..." if len(r["content"]) > 100 else "")
+                t.add_row(str(r["id"]), r["category"] or "", preview)
+            console.print(t)
+
+            if not yes:
+                confirm = click.confirm(
+                    f"\nDelete these {len(rows)} memories? This cannot be undone.",
+                    default=False,
+                )
+                if not confirm:
+                    console.print("[yellow]Aborted — no memories deleted.[/yellow]")
+                    await close_db()
+                    return
+
+            ids = [r["id"] for r in rows]
+            await conn.execute("DELETE FROM memory WHERE id = ANY($1::bigint[])", ids)
+            console.print(f"[green]✓ Deleted {len(ids)} memories.[/green]")
+
+        await close_db()
+
+    asyncio.run(_prune())

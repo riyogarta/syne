@@ -33,6 +33,15 @@ DO NOT STORE:
 - Technical troubleshooting steps ("run sudo apt install X", "restart the service")
 - One-time confirmations ("that works now", "send_file confirmed working")
 - Scheduler/cron task details (times, reminders) — these belong in the scheduler, not memory
+- **Bug reports, complaints, or failure narratives about Syne itself**
+  ("consent putus", "output tidak sampai", "continuation broken", "tombol tidak
+  muncul", "muter-muter", "deadlock", "goblok", "kejegal terus"). These are
+  session-scoped debugging state — they belong in commit messages and issue
+  trackers, NOT in long-term memory. Storing them causes future turns to
+  hallucinate the same bug still exists even after it was fixed.
+- **Any assistant self-critique or admission of failure** ("aku salah",
+  "muter di titik yang sama", "bug ini masih ada"). Same reason.
+- **Frustration expressions** ("capek", "kzl", "!!!!!!"). Not durable facts.
 
 IMPORTANT — conflict resolution:
 When the user states something that UPDATES previous info (e.g. "I moved to Bandung" when we stored "lives in Jakarta"), extract the LATEST fact. The storage engine will automatically find and update the old memory. Just extract the new content accurately.
@@ -76,6 +85,21 @@ User: "Run sudo apt install ca-certificates"
 → SKIP
 
 User: "Send me a reminder at 3:17 for sahur"
+→ SKIP
+
+User: "Bug consent masih ada, output nggak sampai"
+→ SKIP
+
+User: "Molt hallucinate lagi, sama seperti sebelumnya"
+→ SKIP
+
+User: "Tombol tidak muncul, sudah muter-muter belasan kali"
+→ SKIP
+
+User: "Kzl, continuation putus terus"
+→ SKIP
+
+User: "Ah goblok, sama saja"
 → SKIP"""
 
 

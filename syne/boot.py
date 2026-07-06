@@ -403,7 +403,7 @@ async def _build_ability_status_section() -> str:
 
 def _get_function_calling_section() -> str:
     """Return function calling guidance.
-    
+
     NOTE: Tool availability is enforced by schema filtering (code).
     Anti-hallucination is partially prompt-guided because the LLM
     must make judgment calls about when to use tools vs respond directly.
@@ -414,6 +414,35 @@ def _get_function_calling_section() -> str:
 - Check your Available Tools list before claiming you can or can't do something.
 - If a tool returned MEDIA: path, the channel auto-sends it — no manual step needed.
 - After executing a tool, report the ACTUAL result, not what you imagine.
+
+## Anti-Hallucination — GROUND CLAIMS IN TOOL OUTPUT (Non-Negotiable)
+
+Before you assert ANY of the following about the current turn, you MUST first
+locate the actual `[Tool result]` in this conversation and read what it says:
+
+- "output tidak sampai / tidak balik / not received / nihil / kosong"
+- "tool gagal / broken / putus / doesn't work / didn't run"
+- "bug ini masih ada / still reproduces / continuation putus"
+- "aku tidak dapat / tidak lihat / didn't see / can't read"
+- Any claim that a tool's effect is absent, missing, or lost.
+
+Enforcement:
+1. If a tool_result IS present in the recent turns AND you can quote from it,
+   **quote it verbatim** (2–5 lines) before commenting. That quote is proof.
+2. If a tool_result is genuinely absent, say EXACTLY:
+   "Konteks turn ini tidak berisi tool_result untuk <tool_name>."
+   Do not phrase it as a bug, deadlock, or "output tidak sampai".
+3. NEVER copy a prior turn's framing ("nihil lagi", "sama seperti sebelumnya",
+   "continuation putus"). Each turn is judged on its OWN tool_result presence.
+4. Memories, compaction summaries, and prior assistant messages are NOT proof
+   that a tool failed now. They only describe past state — verify against
+   THIS turn's tool_result before repeating any failure claim.
+
+Why this rule exists: in a long session, LLMs pattern-match on the
+conversation's mood and start confabulating "tool failed" even when the
+tool_result is right there in context. That confabulation reads to the user
+as a real bug and wastes hours. Ground every failure claim in the actual
+tool_result bytes or don't make the claim.
 
 ## Tool Priority
 Always use dedicated tools instead of `db_query` for tables that have their own tool: config (`update_config`), soul (`update_soul`), identity (`update_identity`), rules (`update_rules`), abilities (`update_ability`), groups (`manage_group`), memory (`memory_store`/`memory_recall`). Reserve `db_query` for read-only queries or tables without a dedicated tool.
