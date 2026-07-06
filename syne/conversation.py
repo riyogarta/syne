@@ -842,7 +842,15 @@ class Conversation:
                     "tool_name": pending_tool,
                     "tool_call_id": synth_id,
                 }
-                await self.save_message("tool", result_str, metadata=tool_meta)
+                # Same undeniable marker as the surgery success path — the
+                # anti-hallucination directive lets the LLM key off this
+                # exact string as proof the tool ran.
+                _tagged = (
+                    f"[✓ EXECUTED — actual tool output, delivered after user consent]\n"
+                    f"{result_str}\n"
+                    f"[✓ END OF ACTUAL OUTPUT]"
+                )
+                await self.save_message("tool", _tagged, metadata=tool_meta)
                 logger.info(
                     f"Consent bypass: surgery failed → synthesized paired "
                     f"assistant(tool_use)+tool(result) at tail with id={synth_id} "
@@ -946,13 +954,25 @@ class Conversation:
 
         target_msg = self._message_cache[target_idx]
         old_content = target_msg.content or ""
-        target_msg.content = actual_result
+        # Prepend an unmistakable header so the next-turn LLM CANNOT paraphrase
+        # 'output tidak ada' — the tool_result content literally says the
+        # opposite, verbatim, at the top. The anti-hallucination directive
+        # in the system prompt references this exact string as proof that
+        # execution happened.
+        _tagged_result = (
+            f"[✓ EXECUTED — actual tool output, delivered after user consent]\n"
+            f"{actual_result}\n"
+            f"[✓ END OF ACTUAL OUTPUT]"
+        )
+        target_msg.content = _tagged_result
         _tool_call_id_preview = (target_msg.metadata or {}).get("tool_call_id", "<missing>")
         logger.info(
             f"patch_held_tool_result: PATCHED cache[{target_idx}] tool={tool_name} "
             f"hash={expected_hash!r} tool_call_id={_tool_call_id_preview!r} "
-            f"old_len={len(old_content)} new_len={len(actual_result)}"
+            f"old_len={len(old_content)} new_len={len(_tagged_result)}"
         )
+        # Use tagged version for the DB write below.
+        actual_result = _tagged_result
 
         # Mirror to DB. Use the metadata's tool_call_id (if present) plus
         # role + session to pinpoint the row. Fall back to matching by

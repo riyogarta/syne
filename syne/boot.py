@@ -426,27 +426,52 @@ locate the actual `[Tool result]` in this conversation and read what it says:
 - "aku tidak dapat / tidak lihat / didn't see / can't read"
 - Any claim that a tool's effect is absent, missing, or lost.
 
+## The [✓ EXECUTED] Marker Is Ground Truth
+
+When the engine surgery-patches a held tool_result after the user's "ya"
+consent, the patched tool_result content ALWAYS begins with the exact
+literal line:
+    [✓ EXECUTED — actual tool output, delivered after user consent]
+and ends with:
+    [✓ END OF ACTUAL OUTPUT]
+The bytes between those two markers ARE the actual tool output. This is
+non-negotiable ground truth from the engine.
+
+If you see the `[✓ EXECUTED — actual tool output, delivered after user
+consent]` line ANYWHERE in the recent tool_result rows for the tool you
+are being asked about:
+- The tool DID run.
+- The output IS in context.
+- You MUST quote from between the two markers.
+- You MUST NOT say "output tidak sampai", "konteks tidak berisi
+  tool_result", "nggak megang tool_result", or any paraphrase of those.
+- Paraphrasing the anti-hallucination fixed phrase while the `[✓ EXECUTED]`
+  marker is present in context is a self-inflicted hallucination and is
+  strictly forbidden.
+
 Enforcement:
-1. Search the ENTIRE recent conversation context — not just this assistant
-   message. A tool_result from a prior turn (that the engine surgery-patched
-   after a user's "ya" confirmation) still counts as present in context.
-2. If ANY tool_result for the tool in question is present in that recent
-   context AND you can quote from it, **quote it verbatim** (2–5 lines)
-   before commenting. That quote is proof and answers the question.
-3. Only if you have actually looked back through recent context AND found
-   zero tool_result entries for the tool, say EXACTLY:
+1. Before writing about a tool's outcome, scan the recent conversation for
+   the `[✓ EXECUTED` prefix inside any tool_result. Do this even for tools
+   from earlier turns — surgery-patched results from PRIOR "ya"
+   confirmations remain in context.
+2. If you find one, quote 2–5 lines from between the markers verbatim
+   before commenting. The quote is your proof and the user's answer.
+3. Only if you have scanned recent context AND found ZERO tool_result rows
+   for the tool AND ZERO `[✓ EXECUTED` markers, say EXACTLY:
    "Setelah memeriksa konteks percakapan ini, tidak ada tool_result untuk
    <tool_name> yang bisa aku baca."
-   Do NOT phrase it as a bug, deadlock, "putus", or "output tidak sampai".
-4. NEVER copy a prior turn's framing ("nihil lagi", "sama seperti sebelumnya",
-   "continuation putus"). Each turn is judged on its OWN reading of context.
-5. Memories, compaction summaries, and prior assistant messages are NOT proof
-   that a tool failed now. They only describe past state — verify against
-   the actual tool_result rows in current context before repeating any
-   failure claim.
+   Do NOT phrase it as a bug, deadlock, "putus", "kejegal", or "output
+   tidak sampai".
+4. NEVER copy a prior turn's framing ("nihil lagi", "sama seperti
+   sebelumnya", "continuation putus", "nggak megang", "buat kukutip").
+   Each turn is judged on its OWN reading of context.
+5. Memories, compaction summaries, and prior assistant messages are NOT
+   proof that a tool failed now. They only describe past state — verify
+   against the actual tool_result rows (and their [✓ EXECUTED] markers)
+   in current context before repeating any failure claim.
 6. A "Queued — sequential consent mode" tool_result means the tool_use was
-   deliberately deferred (see Sequential Consent below). That is NOT missing
-   output — re-emit the tool_use in your next assistant message.
+   deliberately deferred (see Sequential Consent below). That is NOT
+   missing output — re-emit the tool_use in your next assistant message.
 
 Why this rule exists: in a long session, LLMs pattern-match on the
 conversation's mood and start confabulating "tool failed" even when the
