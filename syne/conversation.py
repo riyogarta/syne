@@ -815,7 +815,7 @@ class Conversation:
         if not _patched:
             # Fallback path — record the actual result at least once so a
             # future /memory search or manual audit can still see it. The
-            # tool_call_id here is synthetic; Anthropic's sanitizer WILL
+            # tool_call_id here is synthetic; provider sanitizers WILL
             # drop it on subsequent turns because there's no matching
             # tool_use, but that's a diagnostic degradation, not a
             # correctness bug for the current turn.
@@ -828,13 +828,45 @@ class Conversation:
             except Exception as e:
                 logger.warning(f"Consent bypass: save_message('tool') failed: {e}")
 
-        # ─── LLM is deliberately NOT invoked here ───────────────────────────
-        # The whole point of the deterministic bypass is that "ya" replays
-        # the pending call and returns — the LLM does not get to react to
-        # the confirmation, hallucinate a different follow-up, or (worst
-        # case) recurse into another gate hold. If the owner wants Syne to
-        # do a follow-up step, they say so in their next message; the LLM
-        # will see the actual result in transcript on that next turn.
+        # ─── LLM continuation ───────────────────────────────────────────────
+        # This is what makes multi-step workflows finish. After surgery,
+        # the transcript now shows:
+        #     Assistant: [tool_use cat file.py, id=abc]
+        #     Tool:      [ACTUAL output] (id=abc, properly paired)
+        #     Assistant: [previous "waiting for consent" text]
+        #     User:      "ya"
+        # A fresh _chat_inner turn feeds this to the LLM. It sees the real
+        # cmd1 output (not the stale "balas ya" prompt — that's what
+        # _patch_held_tool_result overwrote) and can plan cmd2 naturally.
+        # Each subsequent op=x call still hits the consent gate on its own
+        # — but the LLM won't re-issue cmd1 because from its point of view
+        # cmd1 already succeeded.
+        #
+        # We prime _last_saved_hash so _chat_inner's internal
+        # save_message("user", user_message) is deduplicated with the
+        # "ya" bypass just saved. Fallback to canned response if the
+        # continuation crashes.
+        import hashlib as _hashlib, json as _json
+        _ya_hash = _hashlib.md5(
+            f"user:{user_message}:".encode()
+        ).hexdigest()
+        self._last_saved_hash = _ya_hash
+
+        try:
+            llm_response = await self._chat_inner(user_message, message_metadata=None)
+            if llm_response:
+                logger.info(
+                    f"Consent bypass continuation returned {len(llm_response)} chars"
+                )
+                return llm_response
+            logger.warning("Consent bypass continuation returned empty response")
+        except Exception as e:
+            logger.error(
+                f"Consent bypass continuation failed: {e}", exc_info=True
+            )
+
+        # Fallback: LLM turn crashed or returned nothing — at least surface
+        # the raw tool output so the owner still sees what actually ran.
         head = f"✅ Consent granted (`{pending_hash}`). Ran: `{pending_tool}`"
         return f"{head}\n\n{result_str}"
 
@@ -928,19 +960,6 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
-        # ─── Deterministic consent-confirmation bypass ───
-        # If this turn is a valid ya/yes reply to a pending consent prompt,
-        # grant + execute the pending command directly and return WITHOUT
-        # invoking the LLM. This is the whole point of the bypass — it
-        # replays the exact pending call the owner approved, and does not
-        # give the LLM a chance to re-plan, hallucinate, or (as observed
-        # in production before v1.17.26) recurse into another gate hold
-        # that spirals into an infinite prompt loop. Runs OUTSIDE the lock:
-        # it's short, self-contained, and does its own DB writes.
-        _bypass_response = await self._maybe_execute_pending_consent(user_message)
-        if _bypass_response is not None:
-            return _bypass_response
-
         # Wait for lock with timeout — prevents permanent queue if previous request hangs
         locked = self._lock.locked()
         if locked:
@@ -964,6 +983,19 @@ class Conversation:
             self._message_metadata = message_metadata
             self._processing = True
             try:
+                # ─── Deterministic consent-confirmation bypass ───
+                # Runs INSIDE the lock so bypass's tool dispatch + LLM
+                # continuation are serialized with any concurrent chat()
+                # calls on this session. The bypass will either:
+                #   - replay the pending call, feed the actual output back
+                #     to the LLM via _chat_inner("ya"), and return the LLM's
+                #     continuation response, OR
+                #   - short-circuit (no pending, TTL expired, wrong token,
+                #     etc.) → we fall through to the normal LLM path with
+                #     `user_message` as the input.
+                _bypass_response = await self._maybe_execute_pending_consent(user_message)
+                if _bypass_response is not None:
+                    return _bypass_response
                 return await self._chat_inner(user_message, message_metadata)
             finally:
                 self._processing = False
