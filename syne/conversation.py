@@ -78,6 +78,17 @@ _TOOL_SIGNALS = {
 }
 
 
+# Tools/abilities that pull UNTRUSTED external content into the turn. When any
+# of these runs mid-turn, the turn is tainted → the consent gate stops skipping
+# for owner/family. Provenance defense: content fetched from web/file/image
+# must never silently drive a destructive act. See _detect_untrusted (input
+# side) and the taint-set after tool/ability dispatch (mid-turn side).
+_UNTRUSTED_TOOLS = frozenset({
+    "web_search", "fetch_url", "website_screenshot", "image_analysis",
+    "file_read", "pdf", "office",
+})
+
+
 _NON_ANTHROPIC_GUARDRAILS = """
 
 # Accuracy & Tool Discipline (CRITICAL — VIOLATIONS = WRONG ANSWERS)
@@ -290,6 +301,38 @@ class Conversation:
         self._pending_consent_args: dict = {}                  # full args dict
         self._pending_consent_hash: str = ""                   # sha256[:12] of payload
         self._pending_consent_at: float = 0.0                  # set-time
+        # Per-turn provenance taint. True when the current turn's INPUT carries
+        # untrusted external content (image / uploaded file / URL in text) OR an
+        # untrusted tool (web_search, fetch_url, file_read, pdf/office read,
+        # image_analysis, website_screenshot) runs mid-turn. Read by the consent
+        # gate: a CLEAN turn from owner/family skips the gate (conscious direct
+        # command); a tainted turn still requires the Yes button so injection
+        # from web/file/image content cannot silently trigger a destructive act.
+        self._turn_untrusted: bool = False
+
+    @staticmethod
+    def _detect_untrusted(user_message, message_metadata) -> bool:
+        """Provenance check on a turn's INPUT: does it carry untrusted external
+        content the owner did not consciously type?
+
+        True when EITHER:
+          - metadata carries an attachment of ANY kind: image(s), an uploaded
+            document/file (any extension — pdf, docx, xls, csv, txt, md, ...),
+            detected via the `image`/`images`/`document` keys or the
+            `_temp_upload_paths` staging list; OR
+          - the text contains a URL (http(s):// or www.).
+
+        Voice/audio is the owner's own transcribed speech — a conscious command,
+        NOT untrusted — so it is deliberately excluded.
+        """
+        meta = message_metadata or {}
+        if (meta.get("image") or meta.get("images") or meta.get("document")
+                or meta.get("_temp_upload_paths")):
+            return True
+        import re as _re
+        if _re.search(r'https?://|www\.', user_message or '', _re.IGNORECASE):
+            return True
+        return False
 
     async def run_compact(self) -> Optional[dict]:
         """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
@@ -1003,6 +1046,11 @@ class Conversation:
             self._pending_media: list[str] = []
             self._cached_input_data: dict = {}  # For ability-first retry via tool call
             self._message_metadata = message_metadata
+            # Provenance taint: seed from this turn's INPUT (image / uploaded
+            # file / URL). May also flip True later if an untrusted tool runs
+            # mid-turn (see taint-set after tool/ability dispatch). The consent
+            # gate reads this to decide whether owner/family skip applies.
+            self._turn_untrusted = self._detect_untrusted(user_message, message_metadata)
             self._processing = True
             try:
                 # ─── Deterministic consent-confirmation bypass ───
@@ -1691,6 +1739,12 @@ class Conversation:
                                     if not t_args.get("mime_type"):
                                         t_args["mime_type"] = src.get("mime_type") or ""
                                     break
+                    # Provenance taint (mid-turn): an untrusted tool pulling
+                    # external content into context flips the turn tainted, so
+                    # any exec/file_write that follows in THIS turn re-arms the
+                    # consent gate even if the user's own input was clean.
+                    if t_name in _UNTRUSTED_TOOLS:
+                        self._turn_untrusted = True
                     _tool_result = await self.tools.execute(
                         t_name, t_args, access_level,
                         scheduled=is_scheduled,
@@ -1733,6 +1787,12 @@ class Conversation:
                         "conv": self,
                         "scheduled": is_scheduled,
                     }
+                    # Provenance taint (mid-turn): untrusted abilities (fetch_url,
+                    # website_screenshot, image_analysis, pdf/office read) flip
+                    # the turn tainted before dispatch, re-arming the consent
+                    # gate for any destructive action later in this turn.
+                    if t_name in _UNTRUSTED_TOOLS:
+                        self._turn_untrusted = True
                     ability_result = await self.abilities.execute(t_name, t_args, ability_context)
                     if ability_result.get("success"):
                         content = ability_result.get("result", "")

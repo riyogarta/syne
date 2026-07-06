@@ -272,6 +272,26 @@ async def check_and_hold(
         if not needs_consent(access_level, permission):
             return ("allow", None)
 
+        # ── Provenance skip (owner/family, clean turn) ───────────────────────
+        # needs_consent() said the caller's own class digit has the x bit
+        # (any of 7/5/3/1) — normally the gate fires. But a CLEAN turn from a
+        # trusted caller (owner OR family) is a conscious, direct command and
+        # should run without friction. "Clean" = conv._turn_untrusted is False:
+        # the turn's input carried no image/file/URL AND no untrusted tool
+        # (web_search/fetch_url/file_read/pdf/office/image_analysis/
+        # website_screenshot) ran mid-turn.
+        #
+        # A TAINTED turn keeps the gate: the Yes button becomes proof of
+        # conscious approval that content injected from a web page, an uploaded
+        # file, or an image cannot forge (it cannot press a Telegram button).
+        # This is enforced by code + platform, not by the model's discipline.
+        if access_level in ("owner", "family") and conv is not None \
+                and not getattr(conv, "_turn_untrusted", False):
+            _log.debug(
+                f"consent skip (clean turn): tool={tool_name}, level={access_level}"
+            )
+            return ("allow", None)
+
         if _send_family_should_skip(tool_name, args, conv, scheduled):
             _log.debug(
                 f"consent skip (send_* hybrid): tool={tool_name}, "
