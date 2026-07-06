@@ -39,6 +39,7 @@ def _show_help():
         "Data": [
             ("identity", "View or set agent identity"),
             ("prompt", "Show current system prompt"),
+            ("config", "List/get/set DB config (e.g. syne config set foo bar)"),
             ("memory stats", "Show memory statistics"),
             ("memory search", "Search memories by similarity"),
             ("memory add", "Manually add a memory"),
@@ -80,6 +81,7 @@ from . import cmd_service  # noqa: E402, F401
 from . import cmd_update  # noqa: E402, F401
 from . import cmd_uninstall  # noqa: E402, F401
 from . import cmd_backup  # noqa: E402, F401
+from . import cmd_config  # noqa: E402, F401
 try:
     from . import cmd_node  # noqa: E402, F401
 except ImportError:

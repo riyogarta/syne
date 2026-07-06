@@ -600,6 +600,37 @@ async def set_config(key: str, value, description: Optional[str] = None):
             """, key, json_value)
 
 
+async def delete_config(key: str) -> bool:
+    """Remove a config key. Returns True if a row was deleted."""
+    async with get_connection() as conn:
+        result = await conn.execute("DELETE FROM config WHERE key = $1", key)
+        # asyncpg returns e.g. "DELETE 1" or "DELETE 0"
+        return result.split()[-1] != "0"
+
+
+async def list_config(prefix: Optional[str] = None) -> list[dict]:
+    """List all config entries, optionally filtered by a key prefix."""
+    async with get_connection() as conn:
+        if prefix:
+            rows = await conn.fetch(
+                "SELECT key, value, description FROM config WHERE key LIKE $1 ORDER BY key",
+                f"{prefix}%",
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT key, value, description FROM config ORDER BY key"
+            )
+        import json as _json
+        return [
+            {
+                "key": r["key"],
+                "value": _json.loads(r["value"]) if isinstance(r["value"], str) else r["value"],
+                "description": r["description"],
+            }
+            for r in rows
+        ]
+
+
 async def migrate_access_levels():
     """One-time migration: collapse 5-tier access levels to 3-tier.
 
