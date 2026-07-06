@@ -1594,6 +1594,42 @@ class Conversation:
             if loop_stuck:
                 break  # Skip Phase 2 & 3
 
+            # ── Phase 1.5: Serialize gate-triggering calls ──
+            # If the LLM emitted multiple tool_uses in ONE assistant message and
+            # more than one would trigger the consent gate (op=x), executing
+            # them all in parallel breaks the single-pending-consent model:
+            # `_pending_consent_hash` gets overwritten on each check_and_hold
+            # so only the LAST held call is reachable via the Yes button, and
+            # the LLM's continuation ends up seeing a mix of "actual output"
+            # and stale "balas ya" prompts. The observable failure is the LLM
+            # confusing itself: user asks for cmd1+cmd2+cmd3, only cmd3 (last)
+            # gets a button, cmd1/cmd2 never do.
+            #
+            # Enforce serial: keep the FIRST gate-triggering call (it holds
+            # the gate + sets pending as usual). Every subsequent gate call
+            # in the same batch is intercepted before registry dispatch and
+            # gets a "queued" ToolResult that the LLM will see and re-emit
+            # on the next turn after the user confirms the first one. Non-
+            # gate-triggering calls (read-only) still run in parallel — no
+            # reason to serialize them.
+            from .security import needs_consent as _needs_consent
+            _first_gate_seen = False
+            _queued_indices: set = set()
+            for _idx, (_pname, _pargs, _pcid, _pl) in enumerate(parsed_calls):
+                _ptool = self.tools.get(_pname)
+                if _ptool is None:
+                    continue  # abilities routed elsewhere; skip for this check
+                if not _needs_consent(access_level, _ptool.permission):
+                    continue  # read-only — no serialization needed
+                if not _first_gate_seen:
+                    _first_gate_seen = True  # this one goes through as usual
+                    continue
+                _queued_indices.add(_idx)
+                logger.info(
+                    f"Serialize gate: queueing tool_use[{_idx}] {_pname} "
+                    f"(prior gate-triggering call in same batch will run first)"
+                )
+
             # ── Phase 2: Execute tools in parallel ──
             is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
 
@@ -1699,9 +1735,28 @@ class Conversation:
                 else:
                     return ToolResult(f"Error: Unknown tool or ability '{t_name}'", ok=False, error_type="not_found")
 
+            async def _queued_gate_result():
+                """Placeholder ToolResult for a gate-triggering tool that was
+                queued behind another gate call in the same batch. Explains to
+                the LLM what to do next so it re-emits the tool_use after the
+                first gate is confirmed."""
+                return ToolResult(
+                    "Queued — sequential consent mode.\n\n"
+                    "This tool call was NOT executed. Another gate-triggering "
+                    "tool call in the same turn was placed at the head of the "
+                    "queue and is awaiting the user's Yes/No. After the user "
+                    "confirms that first call and its actual output appears, "
+                    "re-emit THIS tool_use in your next assistant message and "
+                    "it will be gated normally.\n\n"
+                    "Do NOT claim this call succeeded or failed — it simply "
+                    "hasn't run yet.",
+                    ok=True,
+                )
+
             tasks = [
-                _execute_single_tool(name, args, tc_id)
-                for name, args, tc_id, _ in parsed_calls
+                _queued_gate_result() if _i in _queued_indices
+                else _execute_single_tool(name, args, tc_id)
+                for _i, (name, args, tc_id, _) in enumerate(parsed_calls)
             ]
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 

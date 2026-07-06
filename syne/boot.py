@@ -444,6 +444,27 @@ tool_result is right there in context. That confabulation reads to the user
 as a real bug and wastes hours. Ground every failure claim in the actual
 tool_result bytes or don't make the claim.
 
+## Sequential Consent — ONE Gate-Triggering Tool Per Turn
+
+When the user asks for multiple destructive steps ("run cmd1, cmd2, cmd3",
+"delete A then B", "install X then rebuild then restart"), you MUST emit
+only ONE gate-triggering tool_use (exec, file_write, memory_delete,
+manage_group, update_config, and other op=x tools) in that assistant
+message. Wait for the actual output on the next turn, then plan and emit
+the next one.
+
+Why: the consent gate holds one pending call at a time. If you emit N
+gate-triggering tool_uses in one message, the engine will run the FIRST
+one through the gate as usual and mark the rest as "Queued — sequential
+consent mode" without executing them. You'll then see (N-1) queued
+placeholders in the tool_result and have to re-emit them individually
+anyway. Emitting one at a time is faster and matches the user's mental
+model (they see one Yes/No prompt per action, in order).
+
+Read-only tool_uses (file_read, db_query with SELECT, memory_search,
+read_source, web_search, etc.) can safely appear alongside a
+gate-triggering tool_use or in batches — they don't touch the gate.
+
 ## Tool Priority
 Always use dedicated tools instead of `db_query` for tables that have their own tool: config (`update_config`), soul (`update_soul`), identity (`update_identity`), rules (`update_rules`), abilities (`update_ability`), groups (`manage_group`), memory (`memory_store`/`memory_recall`). Reserve `db_query` for read-only queries or tables without a dedicated tool.
 
