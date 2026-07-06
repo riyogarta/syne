@@ -813,20 +813,45 @@ class Conversation:
             logger.warning(f"Consent bypass: patch_held_tool_result failed: {e}")
 
         if not _patched:
-            # Fallback path — record the actual result at least once so a
-            # future /memory search or manual audit can still see it. The
-            # tool_call_id here is synthetic; provider sanitizers WILL
-            # drop it on subsequent turns because there's no matching
-            # tool_use, but that's a diagnostic degradation, not a
-            # correctness bug for the current turn.
-            tool_meta = {
-                "tool_name": pending_tool,
-                "tool_call_id": f"consent_bypass_{pending_hash}",
+            # Fallback: surgery couldn't find the held row to overwrite.
+            # Appending an orphan tool_result at the tail of the transcript
+            # gets dropped by Anthropic's sanitizer (immediate-adjacency rule)
+            # → LLM sees no output → hallucination ("konteks tidak berisi
+            # tool_result untuk exec"). Synthesize a COMPLETE
+            # assistant(tool_use) + tool_result PAIR at the tail. They're
+            # adjacent so the sanitizer keeps them, and the next-turn LLM
+            # sees the actual output regardless of why surgery failed.
+            synth_id = f"consent_bypass_{pending_hash}"
+            synth_assistant_meta = {
+                "tool_calls": [{
+                    "id": synth_id,
+                    "name": pending_tool,
+                    "args": pending_args,
+                }],
             }
             try:
+                # Anthropic tolerates a tool-use-only assistant turn. Use a
+                # single space for content to sidestep any provider that
+                # rejects zero-length assistant content.
+                await self.save_message(
+                    "assistant",
+                    " ",
+                    metadata=synth_assistant_meta,
+                )
+                tool_meta = {
+                    "tool_name": pending_tool,
+                    "tool_call_id": synth_id,
+                }
                 await self.save_message("tool", result_str, metadata=tool_meta)
+                logger.info(
+                    f"Consent bypass: surgery failed → synthesized paired "
+                    f"assistant(tool_use)+tool(result) at tail with id={synth_id} "
+                    f"so sanitizer keeps them"
+                )
             except Exception as e:
-                logger.warning(f"Consent bypass: save_message('tool') failed: {e}")
+                logger.warning(
+                    f"Consent bypass: synthetic pair save failed: {e}"
+                )
 
         # ─── LLM continuation ───────────────────────────────────────────────
         # This is what makes multi-step workflows finish. After surgery,
