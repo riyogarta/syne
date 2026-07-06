@@ -1341,13 +1341,14 @@ class Conversation:
             #   2. LLM already emitted the marker verbatim → leave as-is.
             if CONSENT_BUTTON_MARKER in _resp:
                 logger.info("Consent marker: LLM's response already contains marker, keeping as-is")
-            elif not _resp:
-                final_response = _fresh_prompt
-                logger.info("Consent marker: replaced empty response with canonical prompt")
             else:
-                sep = "" if _resp.endswith("\n") else "\n\n"
-                final_response = f"{_resp}{sep}{_fresh_prompt}"
-                logger.info("Consent marker: appended canonical prompt to LLM's response")
+                # Pending consent at end-of-turn: the outgoing message MUST be
+                # ONLY the canonical Yes/No prompt. Any LLM narration around a
+                # held gate ("held - hash - type yes") is noise and gets
+                # DISCARDED entirely - not appended. The system speaks for the
+                # gate; the LLM does not.
+                final_response = _fresh_prompt
+                logger.info("Consent marker: discarded LLM narration, using canonical prompt only")
 
         if self._pending_media:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)

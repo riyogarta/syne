@@ -388,10 +388,8 @@ def format_consent_prompt(
     except Exception:
         args_preview = str(args)[:300]
     return (
-        f"⚠️ Aksi `{tool_name}` butuh konfirmasi (consent). "
-        "Balas *ya* / *yes* atau klik tombol di bawah untuk mengizinkan.\n\n"
-        f"Args: `{args_preview}`\n"
-        f"Hash: `{hash_hex}`\n"
+        f"⚠️ `{tool_name}` needs confirmation.\n"
+        f"`{args_preview}`\n"
         f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
     )
 
