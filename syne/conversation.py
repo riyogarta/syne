@@ -893,24 +893,41 @@ class Conversation:
         # Walk cache in reverse for the first tool-role hit whose metadata
         # names our tool AND whose content still carries the hash marker
         # (i.e. it was the held prompt, not a real prior tool_result).
+        # STRICT: require the SPECIFIC pending hash to be in body. A generic
+        # marker match would clobber a stale held row from a different pending.
         target_idx = None
+        _tool_rows_seen = 0
         for i in range(len(self._message_cache) - 1, -1, -1):
             m = self._message_cache[i]
             if m.role != "tool":
                 continue
+            _tool_rows_seen += 1
             meta_name = (m.metadata or {}).get("tool_name", "")
             if meta_name != tool_name:
                 continue
             body = m.content or ""
-            if expected_hash in body or CONSENT_BUTTON_MARKER in body:
+            if expected_hash in body:
                 target_idx = i
                 break
         if target_idx is None:
+            logger.warning(
+                f"patch_held_tool_result: NO MATCH for tool={tool_name} "
+                f"expected_hash={expected_hash!r} in {len(self._message_cache)} cache msgs "
+                f"({_tool_rows_seen} tool rows scanned). LLM will see synthetic-ID "
+                f"orphan tool_result that the sanitizer WILL drop — this is why "
+                f"'output tidak sampai ke LLM'."
+            )
             return False
 
         target_msg = self._message_cache[target_idx]
         old_content = target_msg.content or ""
         target_msg.content = actual_result
+        _tool_call_id_preview = (target_msg.metadata or {}).get("tool_call_id", "<missing>")
+        logger.info(
+            f"patch_held_tool_result: PATCHED cache[{target_idx}] tool={tool_name} "
+            f"hash={expected_hash!r} tool_call_id={_tool_call_id_preview!r} "
+            f"old_len={len(old_content)} new_len={len(actual_result)}"
+        )
 
         # Mirror to DB. Use the metadata's tool_call_id (if present) plus
         # role + session to pinpoint the row. Fall back to matching by
