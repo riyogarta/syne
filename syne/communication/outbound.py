@@ -110,23 +110,32 @@ def extract_media(text: str) -> tuple[str, Optional[str]]:
         text: Response text (may contain MEDIA: path)
 
     Returns:
-        Tuple of (text_without_media, media_path_or_None)
+        Tuple of (text_without_media, media_path_or_None).
+        If the MEDIA: candidate path does NOT exist on disk, the original text
+        is returned UNCHANGED — never lose user-facing content because of a
+        stray or hallucinated MEDIA: reference.
     """
-    media_path = None
+    if not text:
+        return text, None
 
+    # Locate the MEDIA: split candidate WITHOUT mutating `text` yet.
     if "\n\nMEDIA: " in text:
         parts = text.rsplit("\n\nMEDIA: ", 1)
-        text = parts[0].strip()
-        media_path = parts[1].strip()
+        text_before = parts[0].strip()
+        candidate = parts[1].strip()
     elif text.startswith("MEDIA: "):
-        media_path = text[7:].strip()
-        text = ""
+        text_before = ""
+        candidate = text[7:].strip()
+    else:
+        return text, None
 
-    # Validate media path exists
-    if media_path and not os.path.isfile(media_path):
-        media_path = None
-
-    return text, media_path
+    # Only consume the split if the file actually exists. Otherwise this is
+    # the LLM echoing "MEDIA:" in prose, or a hallucinated / stale reference;
+    # returning the truncated `text_before` would silently swallow content
+    # (this used to look like "send succeeded but user saw nothing").
+    if candidate and os.path.isfile(candidate):
+        return text_before, candidate
+    return text, None
 
 
 # ============================================================
