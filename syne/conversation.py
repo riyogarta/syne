@@ -1674,20 +1674,31 @@ class Conversation:
             from .security import needs_consent as _needs_consent
             _first_gate_seen = False
             _queued_indices: set = set()
-            for _idx, (_pname, _pargs, _pcid, _pl) in enumerate(parsed_calls):
-                _ptool = self.tools.get(_pname)
-                if _ptool is None:
-                    continue  # abilities routed elsewhere; skip for this check
-                if not _needs_consent(access_level, _ptool.permission):
-                    continue  # read-only — no serialization needed
-                if not _first_gate_seen:
-                    _first_gate_seen = True  # this one goes through as usual
-                    continue
-                _queued_indices.add(_idx)
-                logger.info(
-                    f"Serialize gate: queueing tool_use[{_idx}] {_pname} "
-                    f"(prior gate-triggering call in same batch will run first)"
-                )
+            # Provenance skip mirrors consent.check_and_hold: on a CLEAN turn
+            # (owner/family, not tainted) the gate does NOT fire, so there is
+            # no single-pending-consent constraint to protect — serializing
+            # would spuriously queue legit parallel exec/file_write calls and
+            # make the LLM think they "hadn't run yet". Only serialize when the
+            # gate will actually hold something this turn.
+            _gate_will_skip = (
+                access_level in ("owner", "family")
+                and not getattr(self, "_turn_untrusted", False)
+            )
+            if not _gate_will_skip:
+                for _idx, (_pname, _pargs, _pcid, _pl) in enumerate(parsed_calls):
+                    _ptool = self.tools.get(_pname)
+                    if _ptool is None:
+                        continue  # abilities routed elsewhere; skip for this check
+                    if not _needs_consent(access_level, _ptool.permission):
+                        continue  # read-only — no serialization needed
+                    if not _first_gate_seen:
+                        _first_gate_seen = True  # this one goes through as usual
+                        continue
+                    _queued_indices.add(_idx)
+                    logger.info(
+                        f"Serialize gate: queueing tool_use[{_idx}] {_pname} "
+                        f"(prior gate-triggering call in same batch will run first)"
+                    )
 
             # ── Phase 2: Execute tools in parallel ──
             is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
