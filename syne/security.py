@@ -55,22 +55,28 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "memory_store":       0o660,  # owner + family
     "memory_store_file":  0o660,
 
+    # Communication + orchestration — additive by nature (create new
+    # message / new schedule item / new sub-agent run). No gate: these
+    # are Syne's own response mechanisms, not user-visible actions the
+    # owner needs to re-approve. Cross-chat injection risk is handled by
+    # channel-level policy, not the consent gate.
+    "send_message":       0o660,  # owner + family
+    "send_file":          0o660,
+    "send_voice":         0o660,
+    "send_reaction":      0o666,  # public too — for group reactions
+    "spawn_subagent":     0o660,  # Syne-only in practice; users can't call directly
+    "manage_schedule":    0o660,  # add/update/delete schedule entry — additive-ish
+
     # ─── Action / destructive (rwx = 7, includes x bit → gate fires) ──
     "exec":               0o700,  # owner only
     "file_write":         0o700,  # owner only — can overwrite anywhere
     "memory_delete":      0o700,  # owner only
+    "memory_update":      0o770,  # owner + family
     "manage_group":       0o700,
     "manage_user":        0o700,
     "update_config":      0o700,
     "update_ability":     0o700,
     "update_soul":        0o700,
-    "send_message":       0o770,  # owner + family
-    "send_file":          0o770,
-    "send_voice":         0o770,
-    "spawn_subagent":     0o770,
-    "manage_schedule":    0o770,
-    "memory_update":      0o770,
-    "send_reaction":      0o771,  # public too (--x, group reactions)
 }
 
 
