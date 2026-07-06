@@ -32,6 +32,10 @@ DEFAULT_TTL_SECONDS = 600
 DEFAULT_MODE = "sliding"  # "sliding" refreshes on reuse; "fixed" expires from grant time
 DEFAULT_CONSENT_ENABLED = True  # fresh installs get consent live; override per-instance via config
 
+# Aliases -- keep both naming styles importable so wiring code can't miss.
+DEFAULT_CONSENT_TTL = DEFAULT_TTL_SECONDS
+DEFAULT_CONSENT_MODE = DEFAULT_MODE
+
 # key = (user_id, session_id, op, target, content_hash)
 ConsentKey = Tuple[str, str, str, str, str]
 
