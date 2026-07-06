@@ -813,53 +813,17 @@ class Conversation:
             logger.warning(f"Consent bypass: patch_held_tool_result failed: {e}")
 
         if not _patched:
-            # Fallback: surgery couldn't find the held row to overwrite.
-            # Appending an orphan tool_result at the tail of the transcript
-            # gets dropped by Anthropic's sanitizer (immediate-adjacency rule)
-            # → LLM sees no output → hallucination ("konteks tidak berisi
-            # tool_result untuk exec"). Synthesize a COMPLETE
-            # assistant(tool_use) + tool_result PAIR at the tail. They're
-            # adjacent so the sanitizer keeps them, and the next-turn LLM
-            # sees the actual output regardless of why surgery failed.
-            synth_id = f"consent_bypass_{pending_hash}"
-            synth_assistant_meta = {
-                "tool_calls": [{
-                    "id": synth_id,
-                    "name": pending_tool,
-                    "args": pending_args,
-                }],
-            }
-            try:
-                # Anthropic tolerates a tool-use-only assistant turn. Use a
-                # single space for content to sidestep any provider that
-                # rejects zero-length assistant content.
-                await self.save_message(
-                    "assistant",
-                    " ",
-                    metadata=synth_assistant_meta,
-                )
-                tool_meta = {
-                    "tool_name": pending_tool,
-                    "tool_call_id": synth_id,
-                }
-                # Same undeniable marker as the surgery success path — the
-                # anti-hallucination directive lets the LLM key off this
-                # exact string as proof the tool ran.
-                _tagged = (
-                    f"[✓ EXECUTED — actual tool output, delivered after user consent]\n"
-                    f"{result_str}\n"
-                    f"[✓ END OF ACTUAL OUTPUT]"
-                )
-                await self.save_message("tool", _tagged, metadata=tool_meta)
-                logger.info(
-                    f"Consent bypass: surgery failed → synthesized paired "
-                    f"assistant(tool_use)+tool(result) at tail with id={synth_id} "
-                    f"so sanitizer keeps them"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Consent bypass: synthetic pair save failed: {e}"
-                )
+            # Surgery couldn't find the held row. With the assistant(tool_use)
+            # now correctly persisted during the tool loop, this branch should
+            # be extremely rare (missed only when compaction archived the
+            # source row between hold and bypass). Log for observability.
+            logger.warning(
+                f"Consent bypass: surgery failed to locate held row for "
+                f"tool={pending_tool} hash={pending_hash!r}. Continuation "
+                f"will run without the actual output paired to the LLM's "
+                f"original tool_use — the LLM will likely re-issue the "
+                f"tool_use next turn."
+            )
 
         # ─── LLM continuation ───────────────────────────────────────────────
         # This is what makes multi-step workflows finish. After surgery,
@@ -954,25 +918,13 @@ class Conversation:
 
         target_msg = self._message_cache[target_idx]
         old_content = target_msg.content or ""
-        # Prepend an unmistakable header so the next-turn LLM CANNOT paraphrase
-        # 'output tidak ada' — the tool_result content literally says the
-        # opposite, verbatim, at the top. The anti-hallucination directive
-        # in the system prompt references this exact string as proof that
-        # execution happened.
-        _tagged_result = (
-            f"[✓ EXECUTED — actual tool output, delivered after user consent]\n"
-            f"{actual_result}\n"
-            f"[✓ END OF ACTUAL OUTPUT]"
-        )
-        target_msg.content = _tagged_result
+        target_msg.content = actual_result
         _tool_call_id_preview = (target_msg.metadata or {}).get("tool_call_id", "<missing>")
         logger.info(
             f"patch_held_tool_result: PATCHED cache[{target_idx}] tool={tool_name} "
             f"hash={expected_hash!r} tool_call_id={_tool_call_id_preview!r} "
-            f"old_len={len(old_content)} new_len={len(_tagged_result)}"
+            f"old_len={len(old_content)} new_len={len(actual_result)}"
         )
-        # Use tagged version for the DB write below.
-        actual_result = _tagged_result
 
         # Mirror to DB. Use the metadata's tool_call_id (if present) plus
         # role + session to pinpoint the row. Fall back to matching by
@@ -1578,10 +1530,23 @@ class Conversation:
 
         while current.tool_calls and _time.monotonic() < _loop_deadline:
 
+            # Persist the assistant tool_use turn — NOT just add to context.
+            # Skipping save_message here was the source of every "output tidak
+            # sampai ke LLM" bug: without a persisted assistant(tool_use), the
+            # tool_result row below has no preceding tool_use in DB/cache. On
+            # the NEXT turn, Anthropic's sanitizer sees an orphaned
+            # tool_result and drops it. The next-turn LLM literally never
+            # sees the tool's output regardless of surgery or markers.
+            _assistant_meta = {"tool_calls": current.tool_calls}
+            await self.save_message(
+                "assistant",
+                current.content or "",
+                metadata=_assistant_meta,
+            )
             context.append(ChatMessage(
                 role="assistant",
                 content=current.content or "",
-                metadata={"tool_calls": current.tool_calls},
+                metadata=_assistant_meta,
             ))
 
             tool_calls_list = current.tool_calls
