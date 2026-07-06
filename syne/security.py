@@ -29,33 +29,41 @@ logger = logging.getLogger("syne.security")
 # "blocked" users are denied before any permission check.
 
 TOOL_PERMISSIONS: dict[str, int] = {
+    # Read-only tools — need bit 4 (r). Public bits set where Rule 760/765 handles the actual gating.
     "web_search":      0o555,
     "web_fetch":       0o555,
-    "exec":            0o700,
     "db_query":        0o400,
     "file_read":       0o400,
-    "file_write":      0o600,
     "read_source":     0o400,
-    "send_message":    0o770,
-    "send_file":       0o770,
-    "send_voice":      0o770,
-    "send_reaction":   0o771,
-    "manage_schedule": 0o770,
-    "spawn_subagent":  0o750,
     "subagent_status": 0o550,
     "memory_search":   0o555,  # public can search allowed categories (Rule 765)
-    "memory_store":    0o770,
-    "memory_store_file": 0o770,
     "memory_get_file": 0o555,  # public can retrieve attachments in Rule-765-allowed categories
     "memory_analyze_file": 0o555,  # same gate as get_file — Rule 760/765 enforces category access
-    "memory_update":   0o660,
-    "memory_delete":   0o600,
-    "manage_group":    0o600,
-    "manage_user":     0o600,
-    "update_config":   0o600,
-    "update_ability":  0o600,
-    "update_soul":     0o600,
     "check_auth":      0o700,
+
+    # Additive-write tools — need bit 2 (w) for the writing class.
+    "memory_store":      0o770,
+    "memory_store_file": 0o770,
+
+    # Action / destructive tools — need bit 1 (x). All go through consent gate.
+    # Class digits below are set so the intended callers still have BOTH the
+    # r bit (to introspect what they're about to change) AND the x bit (to
+    # perform the mutation) — i.e. 7 (rwx) not 1 (x-only).
+    "exec":            0o700,  # owner only
+    "file_write":      0o700,  # owner only — can overwrite any writable path
+    "send_message":    0o770,  # owner + family
+    "send_file":       0o770,
+    "send_voice":      0o770,
+    "send_reaction":   0o771,  # public too, for group-chat reactions
+    "spawn_subagent":  0o750,  # owner rwx, family r-x
+    "manage_schedule": 0o770,
+    "memory_update":   0o770,  # owner + family (was 0o660 — missed x when op was w)
+    "memory_delete":   0o700,  # owner only (was 0o600)
+    "manage_group":    0o700,  # owner only (was 0o600)
+    "manage_user":     0o700,  # owner only (was 0o600)
+    "update_config":   0o700,  # owner only (was 0o600)
+    "update_ability":  0o700,  # owner only (was 0o600)
+    "update_soul":     0o700,  # owner only (was 0o600)
 }
 
 
@@ -65,77 +73,69 @@ TOOL_PERMISSIONS: dict[str, int] = {
 #   "w" = write/modify data             -> needs bit 2
 #   "x" = action (exec/send/spawn)      -> needs bit 1
 # A caller's octal digit must have the matching bit set, else access denied.
-# Consent gate triggers on any tool/ability with op="x" (execute — inherently
-# risky action). Some op="w" tools ALSO trigger it because their write is
-# destructive to state the user might not be able to reverse (deleting memory,
-# overwriting files, rewriting live config/soul/ability code). Op="w" tools
-# NOT in this set (memory_store, memory_store_file, pdf create, office create,
-# etc.) create new state rather than mutating irrecoverable state, so no gate.
-DESTRUCTIVE_TOOLS: set[str] = {
-    # Filesystem write can overwrite critical files (venv, ssh keys, etc.).
-    "file_write",
-    # Data destruction / mutation.
-    "memory_delete",
-    "memory_update",
-    # Config / policy / behavior surface — a bad write here changes future
-    # sessions and can lock out the owner.
-    "update_config",
-    "update_ability",
-    "update_soul",
-    # Live entity mutation (add/remove/promote users; move groups).
-    "manage_group",
-    "manage_user",
-    "manage_schedule",
-}
-
-
 def needs_consent(tool_name: str, operation: str) -> bool:
     """Return True if a tool call must go through the ya/yes consent gate.
 
-    The gate fires when either:
-      - `operation == 'x'` — the tool performs an action with side effects
-        outside Syne (shell, external send, spawn); OR
-      - `operation == 'w'` AND `tool_name` is in DESTRUCTIVE_TOOLS — the
-        tool mutates state the user cannot easily reverse.
+    Single rule: `operation == 'x'` triggers the gate. That's it.
 
-    Read-only (`r`) tools and additive writes (memory_store, pdf create, etc.)
-    return False so the LLM can call them without prompting.
+    The rwx classification IS the destructive-flag. Semantics used here:
+      - r → read state (no gate)
+      - w → additive create/append that leaves prior state intact (no gate)
+      - x → action: destructive write, external side effect, mutation, spawn,
+            or anything else the user could not easily undo (gate).
+
+    If a tool can overwrite a file, delete a memory, mutate live config, or
+    send data outside Syne, classify it op="x" and it will be gated. If a
+    tool only creates new state (a fresh document, a brand-new memory) it
+    can safely stay op="w" and skip the gate.
+
+    Consequence: the way to make a tool "consent-required" is to declare its
+    operation="x" in TOOL_OPERATIONS (or on the ability class). No separate
+    whitelist to maintain — one classification, one truth.
     """
-    if operation == "x":
-        return True
-    if operation == "w" and tool_name in DESTRUCTIVE_TOOLS:
-        return True
-    return False
+    return operation == "x"
 
 
 TOOL_OPERATIONS: dict[str, str] = {
+    # ── r: read-only, no state change ────────────────────────────────────
     "web_search":        "r",
     "web_fetch":         "r",
-    "exec":              "x",
     "db_query":          "r",
     "file_read":         "r",
-    "file_write":        "w",
     "read_source":       "r",
-    "send_message":      "x",
+    "subagent_status":   "r",
+    "memory_search":     "r",
+    "memory_get_file":   "r",
+    "memory_analyze_file": "r",
+    "check_auth":        "r",
+
+    # ── w: additive create only — leaves prior state intact ──────────────
+    # These insert new rows / new blobs / new schedule items. They cannot
+    # overwrite or delete anything the LLM was not itself just handed by
+    # the current turn's user. If a future implementation ever gains an
+    # "update-if-exists" branch it MUST be reclassified to "x".
+    "memory_store":      "w",
+    "memory_store_file": "w",
+
+    # ── x: action — destructive write, mutation, or external side effect ─
+    # Any tool below can either overwrite/delete state the user did not
+    # explicitly hand over this turn, or reach outside Syne entirely.
+    # Consequently these are ALL routed through the consent gate.
+    "exec":              "x",  # shell — external side effect
+    "file_write":        "x",  # can overwrite any writable path (e.g. ~/.ssh/*)
+    "send_message":      "x",  # message to any chat (send_* family; hybrid rule)
     "send_file":         "x",
     "send_voice":        "x",
     "send_reaction":     "x",
-    "manage_schedule":   "w",
-    "spawn_subagent":    "x",
-    "subagent_status":   "r",
-    "memory_search":     "r",
-    "memory_store":      "w",
-    "memory_store_file": "w",
-    "memory_update":     "w",
-    "memory_get_file":   "r",
-    "memory_analyze_file": "r",
-    "memory_delete":     "w",
-    "manage_group":      "w",
-    "manage_user":       "w",
-    "update_config":     "w",
-    "update_ability":    "w",
-    "update_soul":       "w",
-    "check_auth":        "r",
+    "spawn_subagent":    "x",  # spawns background worker
+    "memory_update":     "x",  # mutates existing memory content
+    "memory_delete":     "x",  # removes a memory row
+    "manage_schedule":   "x",  # can overwrite/cancel existing schedules
+    "manage_group":      "x",  # can add/remove members, change alias
+    "manage_user":       "x",  # can add/remove/promote users
+    "update_config":     "x",  # rewrites live config keys
+    "update_ability":    "x",  # can disable/rewrite ability behavior
+    "update_soul":       "x",  # can rewrite personality/boundaries
 }
 
 def get_permission_digit(permission: int, access_level: str) -> int:

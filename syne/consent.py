@@ -245,6 +245,8 @@ async def check_and_hold(
 
     The gate policy:
       1. `needs_consent(tool_name, op)` False → allow.
+         (Single rule: op == "x". If a tool is destructive or has side
+         effects it must be declared operation="x" — see security.py.)
       2. Hybrid skip for send_* family (scheduled or same-chat) → allow.
       3. Feature flag `security.consent_enabled` False → allow (kill switch).
       4. No active conv (e.g. subagent path with no DM channel) → held with
