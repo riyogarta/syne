@@ -1650,49 +1650,17 @@ class SyneAgent:
         # ═══════════════════════════════════════════════════════════════
         active_conv = self._get_active_conversation()
         session_tainted = bool(getattr(active_conv, "tainted", False)) if active_conv else False
-        # Session-taint exec gate REMOVED (replaced by consent-system, in progress).
-        # Owner-DM bypass no longer disabled by taint. Provenance flag kept dormant.
+        # Session-taint exec gate REMOVED (replaced by consent-system).
+        # Owner-DM bypass no longer disabled by taint. Provenance flag kept
+        # dormant. The consent gate ITSELF has moved to tools/registry so it
+        # applies uniformly to every op=x tool and every destructive op=w
+        # tool — see security.needs_consent + consent.check_and_hold. Nothing
+        # exec-specific happens here anymore beyond the shell safety check.
         bypass_ok = is_owner_dm
-
-        # ── Consent gate (feature-flagged; scope: exec only) ──────────────
-        # One saklar: security.consent_enabled. When True, exec asks for a
-        # strict 'ya'/'yes' confirmation bound to (user, session, this command).
-        # Identical repeats within TTL reuse the grant (no re-prompt). When
-        # False, this whole block is skipped — behavior identical to gate absent.
-        consent_enabled = await get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
-        if consent_enabled and active_conv:
-            sid = str(getattr(active_conv, "session_id", "") or "")
-            uid = str(active_conv.user.get("id", "")) if getattr(active_conv, "user", None) else ""
-            self._consent.ttl_seconds = int(await get_config("security.consent_ttl_seconds", DEFAULT_TTL_SECONDS))
-            self._consent.mode = await get_config("security.consent_mode", DEFAULT_MODE)
-            ckey = make_key(uid, sid, op="exec", target="shell", payload=command)
-            if self._consent.is_granted(ckey):
-                pass  # reuse within TTL — no prompt
-            elif self._consent_confirmed(active_conv, command):
-                self._consent.grant(ckey)  # user said ya/yes → grant + proceed
-            else:
-                import time as _time
-                # Store the FULL pending payload (not just hash) so the
-                # deterministic bypass in conversation.chat() can re-execute
-                # the command directly on a valid ya/yes reply — no need for
-                # the LLM to re-issue the tool call. This closes the
-                # hallucination window where the LLM either forgets to
-                # re-call, calls with slightly different args, or gets
-                # injected instructions telling it to skip the re-issue.
-                active_conv._pending_consent_op = "exec"
-                active_conv._pending_consent_command = command
-                active_conv._pending_consent_timeout = int(timeout) if timeout else 30
-                active_conv._pending_consent_workdir = workdir or ""
-                active_conv._pending_consent_hash = content_hash(command)
-                active_conv._pending_consent_at = _time.time()
-                return ("⚠️ Aksi exec butuh konfirmasi (consent). Balas *ya* untuk mengizinkan:\n"
-                        f"```\n{command[:300]}\n```")
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Command Blacklist Check
-        # Skipped for owner DM — owner identity is platform-verified —
-        # UNLESS the session is tainted, in which case bypass is disabled
-        # (see indirect prompt injection defense above).
+        # Skipped for owner DM — owner identity is platform-verified.
         # ═══════════════════════════════════════════════════════════════
         if not bypass_ok:
             safe, reason = check_command_safety(command)

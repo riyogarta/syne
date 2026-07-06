@@ -169,10 +169,33 @@ class AbilityRegistry:
 
         # Permission check
         access_level = context.get("access_level", "public")
-        allowed, reason = check_tool_access(name, access_level, ability.permission, getattr(ability.instance, 'operation', 'x'))
+        op = getattr(ability.instance, 'operation', 'x')
+        allowed, reason = check_tool_access(name, access_level, ability.permission, op)
         if not allowed:
             logger.warning(f"Permission denied: ability={name}, access_level={access_level}, perm={oct(ability.permission)}")
             return {"success": False, "error": reason}
+
+        # ─── Consent gate (generic, op=x + destructive op=w) ───────────────
+        # Same choke point as tools/registry so abilities aren't a side door.
+        # image_gen / whatsapp (op=x) are the immediate targets; op=w abilities
+        # (pdf, office, image analysis results) are not destructive and stay
+        # unchallenged since they aren't in DESTRUCTIVE_TOOLS.
+        conv = context.get("conv")
+        _agent = None
+        if conv is not None and getattr(conv, "_mgr", None) is not None:
+            _agent = getattr(conv._mgr, "_agent", None)
+        scheduled = bool(context.get("scheduled", False))
+        from ..consent import check_and_hold as _consent_gate
+        gate_action, gate_prompt = await _consent_gate(
+            conv=conv, agent=_agent,
+            tool_name=name, args=params, op=op,
+            scheduled=scheduled, kind="ability",
+        )
+        if gate_action == "held":
+            # Present the prompt as the ability's result so the LLM shows it
+            # to the owner. success=True so the tool-result plumbing surfaces
+            # the message rather than triggering an error/retry loop.
+            return {"success": True, "result": gate_prompt or ""}
 
         # Lazy dependency install — runs once per process per ability.
         # Bundled abilities are enabled-by-default in DB so enable() is

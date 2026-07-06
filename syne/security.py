@@ -65,6 +65,49 @@ TOOL_PERMISSIONS: dict[str, int] = {
 #   "w" = write/modify data             -> needs bit 2
 #   "x" = action (exec/send/spawn)      -> needs bit 1
 # A caller's octal digit must have the matching bit set, else access denied.
+# Consent gate triggers on any tool/ability with op="x" (execute — inherently
+# risky action). Some op="w" tools ALSO trigger it because their write is
+# destructive to state the user might not be able to reverse (deleting memory,
+# overwriting files, rewriting live config/soul/ability code). Op="w" tools
+# NOT in this set (memory_store, memory_store_file, pdf create, office create,
+# etc.) create new state rather than mutating irrecoverable state, so no gate.
+DESTRUCTIVE_TOOLS: set[str] = {
+    # Filesystem write can overwrite critical files (venv, ssh keys, etc.).
+    "file_write",
+    # Data destruction / mutation.
+    "memory_delete",
+    "memory_update",
+    # Config / policy / behavior surface — a bad write here changes future
+    # sessions and can lock out the owner.
+    "update_config",
+    "update_ability",
+    "update_soul",
+    # Live entity mutation (add/remove/promote users; move groups).
+    "manage_group",
+    "manage_user",
+    "manage_schedule",
+}
+
+
+def needs_consent(tool_name: str, operation: str) -> bool:
+    """Return True if a tool call must go through the ya/yes consent gate.
+
+    The gate fires when either:
+      - `operation == 'x'` — the tool performs an action with side effects
+        outside Syne (shell, external send, spawn); OR
+      - `operation == 'w'` AND `tool_name` is in DESTRUCTIVE_TOOLS — the
+        tool mutates state the user cannot easily reverse.
+
+    Read-only (`r`) tools and additive writes (memory_store, pdf create, etc.)
+    return False so the LLM can call them without prompting.
+    """
+    if operation == "x":
+        return True
+    if operation == "w" and tool_name in DESTRUCTIVE_TOOLS:
+        return True
+    return False
+
+
 TOOL_OPERATIONS: dict[str, str] = {
     "web_search":        "r",
     "web_fetch":         "r",

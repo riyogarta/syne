@@ -178,3 +178,203 @@ class ConsentStore:
 
     def __len__(self) -> int:
         return len(self._grants)
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# High-level gate — single entry point used by both tool and ability
+# dispatch layers. Keeps consent policy in one place; the two registries
+# just call in and honor the returned action.
+# ─────────────────────────────────────────────────────────────────────────
+
+_SEND_FAMILY: frozenset = frozenset({
+    "send_message", "send_file", "send_voice", "send_reaction",
+})
+
+
+def canonical_payload(tool_name: str, args: Optional[dict]) -> str:
+    """Stable string for hashing/logging that binds the grant to (tool, args).
+
+    Dict ordering is normalized so ``exec(command='ls', timeout=30)`` and
+    ``exec(timeout=30, command='ls')`` produce the same payload hash.
+    """
+    import json
+    try:
+        args_str = json.dumps(args or {}, sort_keys=True, default=str, ensure_ascii=False)
+    except Exception:
+        args_str = str(args)
+    return f"{tool_name}:{args_str}"
+
+
+def _send_family_should_skip(
+    tool_name: str, args: Optional[dict], conv, scheduled: bool,
+) -> bool:
+    """Hybrid rule for the send_* family only. Skip the gate when the send is
+    either scheduled (no interactive user to confirm) or same-chat (target
+    equals the session's own chat, so the send is just a routed reply).
+
+    Cross-chat interactive sends still hit the gate — this is exactly where an
+    injection could ask Syne to exfiltrate data to an attacker-controlled chat.
+    """
+    if tool_name not in _SEND_FAMILY:
+        return False
+    if scheduled:
+        return True
+    if conv is None:
+        return False
+    target = str((args or {}).get("chat_id", "") or "")
+    current = str(getattr(conv, "chat_id", "") or "")
+    if target and current and target == current:
+        return True
+    return False
+
+
+async def check_and_hold(
+    conv,
+    agent,
+    tool_name: str,
+    args: Optional[dict],
+    op: str,
+    scheduled: bool = False,
+    kind: str = "tool",
+):
+    """Consent gate. Single entry used by tools/registry and abilities/registry.
+
+    Returns a 2-tuple:
+        ("allow", None)      — no gate applies OR already granted → dispatch
+        ("held",  prompt)    — caller must return `prompt` to the LLM/user
+
+    The gate policy:
+      1. `needs_consent(tool_name, op)` False → allow.
+      2. Hybrid skip for send_* family (scheduled or same-chat) → allow.
+      3. Feature flag `security.consent_enabled` False → allow (kill switch).
+      4. No active conv (e.g. subagent path with no DM channel) → held with
+         explicit deny message so caller can turn it into a refusal.
+      5. Grant already exists in ConsentStore for the exact payload → allow
+         (sliding TTL refreshes on read).
+      6. Recent user reply is a strict "ya"/"yes" matching the pending hash
+         → grant + allow (LLM-mediated path, kept as belt to the deterministic
+         bypass in conversation.chat()).
+      7. Otherwise → set pending state on conv, return "balas ya" prompt.
+
+    IMPORTANT: this runs in the dispatch hot path. It must never raise; any
+    unexpected error is logged and turned into ("allow", None) so a broken
+    consent module doesn't accidentally block ALL tool traffic. Fail-open on
+    the gate is acceptable here because permission gating (check_tool_access)
+    still ran BEFORE this and rejected class-level violations.
+    """
+    import logging
+    _log = logging.getLogger("syne.consent.gate")
+    try:
+        from .security import needs_consent  # local import to avoid cycles
+        if not needs_consent(tool_name, op):
+            return ("allow", None)
+
+        if _send_family_should_skip(tool_name, args, conv, scheduled):
+            _log.debug(
+                f"consent skip (send_* hybrid): tool={tool_name}, "
+                f"scheduled={scheduled}, target={((args or {}).get('chat_id') or '')}"
+            )
+            return ("allow", None)
+
+        # Feature flag
+        try:
+            from .db.models import get_config as _get_config
+            enabled = await _get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
+        except Exception:
+            enabled = DEFAULT_CONSENT_ENABLED
+        if not enabled:
+            return ("allow", None)
+
+        # No conv or no agent: non-interactive path (sub-agent, scheduled cron,
+        # test harness). The consent gate is a defense for INTERACTIVE LLM-
+        # driven sessions where a human is present to approve. Programmatic
+        # callers have their own safety mechanisms:
+        #   - Sub-agent already runs check_command_safety in _execute_tool.
+        #   - Scheduled tasks were pre-authorized at setup time.
+        #   - Tests are explicitly aware.
+        # Allowing here preserves those workflows; blocking would break them
+        # (a nightly cron cannot type "ya").
+        if conv is None or agent is None:
+            _log.debug(
+                f"consent skip (non-interactive): tool={tool_name}, "
+                f"conv={conv is not None}, agent={agent is not None}"
+            )
+            return ("allow", None)
+
+        # Build grant key + configure store TTL/mode from config.
+        uid = str((getattr(conv, "user", {}) or {}).get("id", ""))
+        sid = str(getattr(conv, "session_id", "") or "")
+        payload = canonical_payload(tool_name, args)
+        ckey = make_key(uid, sid, op=op, target=tool_name, payload=payload)
+
+        store = getattr(agent, "_consent", None)
+        if store is None:
+            # Consent module wired but store not initialized — fail-safe closed.
+            _log.error(f"consent: agent has no _consent store; refusing {tool_name}")
+            return ("held", f"Error: consent store unavailable for {tool_name}")
+
+        try:
+            store.ttl_seconds = int(await _get_config(
+                "security.consent_ttl_seconds", DEFAULT_TTL_SECONDS
+            ))
+            _mode_raw = await _get_config("security.consent_mode", DEFAULT_MODE)
+            store.mode = _mode_raw if _mode_raw in ("sliding", "fixed") else DEFAULT_MODE
+        except Exception:
+            pass  # keep existing store settings
+
+        # Fast path: existing grant.
+        if store.is_granted(ckey):
+            return ("allow", None)
+
+        # LLM-mediated fallback: if the deterministic bypass in
+        # conversation.chat() didn't fire (e.g., a chained tool call happens
+        # BEFORE the next user turn), still honor a prior "ya" that matches
+        # THIS exact payload.
+        confirm_fn = getattr(agent, "_consent_confirmed", None)
+        if callable(confirm_fn):
+            try:
+                if confirm_fn(conv, payload):
+                    store.grant(ckey)
+                    return ("allow", None)
+            except Exception as e:
+                _log.warning(f"consent: _consent_confirmed raised: {e}")
+
+        # Set pending state on the CONVERSATION (per-conv, not agent-global —
+        # avoids the same latent race the sudo-guard has on concurrent sessions).
+        import time as _time
+        conv._pending_consent_kind = kind
+        conv._pending_consent_op = op
+        conv._pending_consent_tool = tool_name
+        conv._pending_consent_args = dict(args or {})
+        conv._pending_consent_hash = content_hash(payload)
+        conv._pending_consent_at = _time.time()
+
+        prompt = format_consent_prompt(tool_name, args, op, conv._pending_consent_hash)
+        _log.warning(
+            f"consent held: tool={tool_name}, op={op}, "
+            f"hash={conv._pending_consent_hash}, session={sid}"
+        )
+        return ("held", prompt)
+
+    except Exception as e:
+        # Fail-open on unexpected gate error — see docstring rationale.
+        _log.exception(f"consent gate crashed on {tool_name}: {e}")
+        return ("allow", None)
+
+
+def format_consent_prompt(
+    tool_name: str, args: Optional[dict], op: str, hash_hex: str,
+) -> str:
+    """User-facing prompt shown when a call is held pending consent."""
+    import json
+    args_preview = ""
+    try:
+        args_preview = json.dumps(args or {}, ensure_ascii=False)[:300]
+    except Exception:
+        args_preview = str(args)[:300]
+    return (
+        f"⚠️ Aksi `{tool_name}` (op={op}) butuh konfirmasi (consent). "
+        "Balas *ya* atau *yes* untuk mengizinkan.\n\n"
+        f"Args: `{args_preview}`\n"
+        f"Hash: `{hash_hex}`"
+    )

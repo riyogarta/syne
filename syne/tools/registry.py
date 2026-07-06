@@ -128,8 +128,22 @@ class ToolRegistry:
         self._schema_cache[access_level] = result
         return result
 
-    async def execute(self, name: str, arguments: dict, access_level: str = "public", scheduled: bool = False, provider=None) -> "ToolResult":
-        """Execute a tool by name. Returns ToolResult with error classification."""
+    async def execute(
+        self,
+        name: str,
+        arguments: dict,
+        access_level: str = "public",
+        scheduled: bool = False,
+        provider=None,
+        conv=None,
+    ) -> "ToolResult":
+        """Execute a tool by name. Returns ToolResult with error classification.
+
+        `conv` (Conversation) is used only for the consent gate: it carries the
+        pending-consent state and the reference back to the agent (with the
+        ConsentStore). Callers without a conversation (tests, background jobs)
+        can pass None — the gate falls back accordingly.
+        """
         tool = self.get(name)
         if not tool:
             return ToolResult(f"Error: Tool '{name}' not found.", ok=False, error_type="not_found")
@@ -137,7 +151,7 @@ class ToolRegistry:
         if not tool.enabled:
             return ToolResult(f"Error: Tool '{name}' is disabled.", ok=False, error_type="permission")
 
-        # Permission check
+        # Permission check (rwx class + op bit)
         allowed, reason = check_tool_access(name, access_level, tool.permission, tool.operation)
         if not allowed:
             logger.warning(f"Permission denied: tool={name}, access_level={access_level}, perm={oct(tool.permission)}")
@@ -152,6 +166,25 @@ class ToolRegistry:
                     return ToolResult(msg, ok=False, error_type="permission")
             except Exception as e:
                 logger.error(f"Approval callback error: {e}")
+
+        # ─── Consent gate (generic, op=x + destructive op=w) ───────────────
+        # Single choke point: any op=x tool and any op=w tool listed in
+        # DESTRUCTIVE_TOOLS goes through consent.check_and_hold. Held → return
+        # the prompt as a tool result so the LLM shows it to the owner.
+        from ..consent import check_and_hold as _consent_gate
+        _agent = None
+        if conv is not None and getattr(conv, "_mgr", None) is not None:
+            _agent = getattr(conv._mgr, "_agent", None)
+        gate_action, gate_prompt = await _consent_gate(
+            conv=conv, agent=_agent,
+            tool_name=name, args=arguments, op=tool.operation,
+            scheduled=scheduled,
+        )
+        if gate_action == "held":
+            # Not a permission error and not retryable — a legitimate user-action
+            # prompt. Use ok=True so the LLM surfaces it as the tool's normal
+            # output rather than triggering error-recovery / retry logic.
+            return ToolResult(gate_prompt or "", ok=True)
 
         try:
             call_args = {**arguments}
