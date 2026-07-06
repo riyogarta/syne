@@ -289,6 +289,7 @@ class TelegramChannel:
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("clear", "Clear current conversation"),
             BotCommand("compact", "Compact conversation history"),
+            BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
