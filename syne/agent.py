@@ -1582,13 +1582,27 @@ class SyneAgent:
         user_msgs = [m for m in conv._message_cache if m.role == "user"]
         if not user_msgs:
             return False
-        last_user = (user_msgs[-1].content or "").strip().lower()
+        last_user = self._last_reply_token(user_msgs[-1].content or "")
         if last_user in ("ya", "yes"):
             conv._pending_tainted_exec = None
             conv._pending_tainted_exec_hash = ""
             conv._pending_tainted_exec_at = 0.0
             return True
         return False
+
+    @staticmethod
+    def _last_reply_token(content: str) -> str:
+        """Extract the user's actual reply token from a message.
+
+        Channels prepend an 'untrusted metadata' block (conversation_label, etc.)
+        to every user message. A naive ``.strip().lower()`` therefore never equals
+        "ya"/"yes" because the content starts with that block. We take the LAST
+        non-empty line (the human's actual typed text) and normalize it.
+        """
+        if not content:
+            return ""
+        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        return (lines[-1].lower() if lines else "")
 
     def _consent_confirmed(self, conv, command: str) -> bool:
         """STRICT consent confirm for exec: only 'ya'/'yes', bound to THIS
@@ -1610,7 +1624,7 @@ class SyneAgent:
         user_msgs = [m for m in conv._message_cache if m.role == "user"]
         if not user_msgs:
             return False
-        last_user = (user_msgs[-1].content or "").strip().lower()
+        last_user = self._last_reply_token(user_msgs[-1].content or "")
         if last_user in ("ya", "yes"):
             conv._pending_consent_hash = ""
             conv._pending_consent_at = 0.0
@@ -2284,7 +2298,7 @@ class SyneAgent:
         user_msgs = [m for m in conv._message_cache if m.role == "user"]
         if not user_msgs:
             return False
-        last_user = (user_msgs[-1].content or "").strip().lower()
+        last_user = self._last_reply_token(user_msgs[-1].content or "")
         if last_user in ("ya", "yes"):
             conv._pending_memory_update_hash = ""
             conv._pending_memory_update_at = 0.0
