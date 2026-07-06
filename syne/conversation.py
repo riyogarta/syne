@@ -855,8 +855,11 @@ class Conversation:
         try:
             llm_response = await self._chat_inner(user_message, message_metadata=None)
             if llm_response:
+                _has_marker = "[[CONSENT_BUTTONS:hash=" in llm_response
                 logger.info(
-                    f"Consent bypass continuation returned {len(llm_response)} chars"
+                    f"Consent bypass continuation returned {len(llm_response)} chars, "
+                    f"contains_marker={_has_marker}, "
+                    f"post_pending_hash={self._pending_consent_hash!r}"
                 )
                 return llm_response
             logger.warning("Consent bypass continuation returned empty response")
@@ -1297,6 +1300,11 @@ class Conversation:
         # or clearly missing the confirmation ask; otherwise just append
         # the marker so the adapter can find it.
         _pending_hash_for_buttons = self._pending_consent_hash
+        logger.info(
+            f"Consent marker check: pending_hash={_pending_hash_for_buttons!r}, "
+            f"pending_tool={self._pending_consent_tool!r}, "
+            f"final_response_len={len(final_response or '')}"
+        )
         if _pending_hash_for_buttons:
             from .consent import format_consent_prompt, CONSENT_BUTTON_MARKER
             _marker = f"[[CONSENT_BUTTONS:hash={_pending_hash_for_buttons}]]"
@@ -1322,11 +1330,15 @@ class Conversation:
             )
             if not _resp or not _looks_like_ask:
                 final_response = _fresh_prompt
+                logger.info(f"Consent marker: replaced empty/off-topic response with fresh_prompt (marker included)")
             elif CONSENT_BUTTON_MARKER not in _resp:
                 if not _resp.endswith("\n"):
                     final_response = f"{_resp}\n\n{_marker}"
                 else:
                     final_response = f"{_resp}{_marker}"
+                logger.info(f"Consent marker: appended marker to LLM's response")
+            else:
+                logger.info(f"Consent marker: LLM's response already contains marker, keeping as-is")
 
         if self._pending_media:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)

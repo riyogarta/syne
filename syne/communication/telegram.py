@@ -8795,8 +8795,18 @@ Or just send me a message!"""
         bot = context.bot if context else self.app.bot
 
         # Use communication sub-core for universal processing
+        _marker_in_input = "[[CONSENT_BUTTONS:hash=" in (text or "")
         caption_text, media_path = extract_media(text)
+        _marker_after_extract = "[[CONSENT_BUTTONS:hash=" in (caption_text or "")
         caption_text = process_outbound(caption_text)
+        _marker_after_outbound = "[[CONSENT_BUTTONS:hash=" in (caption_text or "")
+        if _marker_in_input or _marker_after_extract or _marker_after_outbound:
+            logger.info(
+                f"_send_response_with_media marker trace: input={_marker_in_input}, "
+                f"after_extract_media={_marker_after_extract}, "
+                f"after_outbound={_marker_after_outbound}, "
+                f"media_path={media_path!r}"
+            )
 
         if media_path and os.path.isfile(media_path):
             try:
@@ -8889,7 +8899,14 @@ Or just send me a message!"""
         from .formatting import markdown_to_telegram_html
 
         # Universal outbound processing (path strip + narration strip + cleanup)
+        _marker_in_pre = "[[CONSENT_BUTTONS:hash=" in (text or "")
         text = process_outbound(text)
+        _marker_in_post = "[[CONSENT_BUTTONS:hash=" in (text or "")
+        if _marker_in_pre or _marker_in_post:
+            logger.info(
+                f"_send_response marker trace: pre_outbound={_marker_in_pre}, "
+                f"post_outbound={_marker_in_post}, text_len={len(text or '')}"
+            )
 
         # Guard: empty text after processing — don't send empty message to Telegram
         if not text or not text.strip():
@@ -8907,6 +8924,10 @@ Or just send me a message!"""
             _consent_hash = extract_consent_hash(text)
         except Exception:
             _consent_hash = None
+        logger.info(
+            f"_send_response consent detection: hash={_consent_hash!r}, "
+            f"chat={chat_id}"
+        )
         if _consent_hash:
             text = strip_consent_marker(text)
             if not text or not text.strip():
