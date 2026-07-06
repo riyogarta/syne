@@ -208,7 +208,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("update", self._cmd_update))
         self.app.add_handler(CommandHandler("updatedev", self._cmd_updatedev))  # hidden
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
-        self.app.add_handler(CommandHandler("untaint", self._cmd_untaint))
         self.app.add_handler(CommandHandler("reset", self._cmd_reset))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
         self.app.add_handler(CommandHandler("vision", self._cmd_vision))
@@ -307,7 +306,6 @@ class TelegramChannel:
             BotCommand("reset", "Clear consent grants (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
-            BotCommand("untaint", "Reset session taint (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("version", "Version info"),
             BotCommand("vision", "Switch image analysis provider (owner only)"),
@@ -4418,54 +4416,6 @@ Or just send me a message!"""
         else:
             await update.message.reply_text(f"Backup failed: {message}")
 
-    async def _handle_untaint_callback(self, query, data: str):
-        """Handle untaint confirmation buttons. Owner is already re-verified in
-        _handle_callback (access_level != owner is rejected before dispatch), so
-        this is the mandatory second owner check on the button click itself."""
-        if data == "untaint:cancel":
-            await query.edit_message_text("❌ Cancelled — taint unchanged.")
-            return
-
-        # data == "untaint:confirm:<session_id>"
-        parts = data.split(":")
-        if len(parts) != 3 or not parts[2].isdigit():
-            await query.edit_message_text("❌ Invalid confirmation.")
-            return
-        session_id = int(parts[2])
-
-        from ..db.connection import get_connection
-
-        async with get_connection() as conn:
-            row = await conn.fetchrow(
-                "SELECT tainted, taint_reason FROM sessions WHERE id = $1", session_id
-            )
-            if not row:
-                await query.edit_message_text("❌ Session not found.")
-                return
-            if not bool(row["tainted"]):
-                await query.edit_message_text("Session is already clean — nothing to reset.")
-                return
-            old_reason = row["taint_reason"] or "(no reason recorded)"
-
-            await conn.execute(
-                "UPDATE sessions SET tainted = false, taint_reason = NULL, "
-                "updated_at = NOW() WHERE id = $1",
-                session_id,
-            )
-
-        # Reset the live in-memory conversation if loaded
-        if self.agent and self.agent.conversations:
-            for key, conv in self.agent.conversations._active.items():
-                if getattr(conv, "session_id", None) == session_id:
-                    conv.tainted = False
-                    conv.taint_reason = ""
-                    break
-
-        await query.edit_message_text(
-            f"✅ Taint reset for session {session_id}.\n"
-            f"Previous reason: {old_reason}"
-        )
-
     async def _cmd_reset(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /reset — owner only. Clears all consent grants for the caller.
 
@@ -4482,58 +4432,6 @@ Or just send me a message!"""
         n = self.agent._consent.revoke_user(str(user.id))
         await update.message.reply_text(
             f"\u2705 Consent direset \u2014 {n} grant dihapus. Exec berikutnya minta konfirmasi lagi."
-        )
-
-    async def _cmd_untaint(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /untaint — owner only. The ONLY path that clears session taint.
-
-        Taint (indirect prompt injection defense) is monotonic: it is set to
-        true automatically whenever external/untrusted content lands in a
-        session, and is NEVER cleared automatically. This slash command is the
-        single reset path, dispatched OUTSIDE the LLM loop so an injected
-        session cannot wash its own taint. It is deliberately NOT an LLM tool.
-        """
-        user = update.effective_user
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("Only the owner can reset taint.")
-            return
-
-        from ..db.connection import get_connection
-
-        chat_id = str(update.effective_chat.id)
-
-        async with get_connection() as conn:
-            row = await conn.fetchrow("""
-                SELECT id, tainted, taint_reason FROM sessions
-                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
-                ORDER BY updated_at DESC LIMIT 1
-            """, chat_id)
-
-            if not row:
-                await update.message.reply_text("No active session for this chat.")
-                return
-
-            session_id = row["id"]
-            was_tainted = bool(row["tainted"])
-            old_reason = row["taint_reason"] or "(no reason recorded)"
-
-            if not was_tainted:
-                await update.message.reply_text("Session is already clean — nothing to reset.")
-                return
-
-        # Do NOT reset yet — require explicit owner confirmation via button.
-        # Reset is applied only in the untaint:confirm callback (owner re-verified there).
-        buttons = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Yes, reset", callback_data=f"untaint:confirm:{session_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="untaint:cancel"),
-        ]])
-        await update.message.reply_text(
-            f"⚠️ Reset taint for session {session_id}?\n"
-            f"Reason: {old_reason}\n\n"
-            f"This clears the indirect-prompt-injection guard for this session.",
-            reply_markup=buttons,
         )
 
     async def _cmd_restore(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8296,10 +8194,7 @@ Or just send me a message!"""
             await query.edit_message_text("⚠️ Owner only.")
             return
 
-        if data.startswith("untaint:"):
-            await self._handle_untaint_callback(query, data)
-
-        elif data.startswith("models:"):
+        if data.startswith("models:"):
             await self._handle_models_callback(query, data)
 
         elif data.startswith("embed:"):

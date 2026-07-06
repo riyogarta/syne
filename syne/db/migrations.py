@@ -272,6 +272,28 @@ async def _m12_add_kg_relations_tainted(conn) -> None:
     )
 
 
+async def _m14_drop_tainted_columns(conn) -> None:
+    """Retire the session/memory-taint mechanism (superseded by consent gate).
+
+    The taint mechanism marked sessions/memories/graph rows that had touched
+    external/untrusted content, then blocked the owner-DM exec bypass while
+    the flag was set. The consent gate (v1.17.x) replaces this with a
+    per-action ya/yes prompt tied to the tool's op=x classification — a
+    finer-grained defense that doesn't require session-wide state.
+
+    Drop the four columns added by _m9/_m10/_m11/_m12. IF EXISTS makes this
+    idempotent and safe on installs that never had the columns (schema.sql
+    of the same release omits them from the fresh-install path).
+    """
+    for table, col in (
+        ("memory", "tainted"),
+        ("sessions", "tainted"),
+        ("kg_entities", "tainted"),
+        ("kg_relations", "tainted"),
+    ):
+        await conn.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {col}")
+
+
 async def _m13_seed_consent_config(conn) -> None:
     """Seed the security.consent_* keys so upgraded installs get them visibly.
 
@@ -311,6 +333,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (11, _m11_add_kg_entities_tainted, "transactional"),
     (12, _m12_add_kg_relations_tainted, "transactional"),
     (13, _m13_seed_consent_config, "transactional"),
+    (14, _m14_drop_tainted_columns, "transactional"),
 ]
 
 

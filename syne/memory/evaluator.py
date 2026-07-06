@@ -324,7 +324,6 @@ async def evaluate_and_store(
     evaluator_driver: str = "provider",
     evaluator_model: str = "qwen3:0.6b",
     speaker_name: str = "",
-    tainted: bool = False,
 ) -> Optional[int]:
     """Evaluate a message and store if worthy. Returns memory ID or None.
 
@@ -360,7 +359,6 @@ async def evaluate_and_store(
         user_id=user_id,
         importance=result["importance"],
         permanent=permanent,
-        tainted=tainted,
     )
 
     if mem_id:
@@ -368,7 +366,7 @@ async def evaluate_and_store(
         # Permanent memory → trigger KG extraction
         if permanent:
             from .graph import extract_and_store as graph_extract
-            asyncio.create_task(graph_extract(provider, result["content"], mem_id, speaker_name=speaker_name, tainted=tainted))
+            asyncio.create_task(graph_extract(provider, result["content"], mem_id, speaker_name=speaker_name))
     else:
         logger.debug(f"Duplicate memory skipped: {result['content'][:80]}")
 

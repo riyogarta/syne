@@ -96,7 +96,6 @@ class SubAgentManager:
         model: Optional[str] = None,
         provider: Optional[LLMProvider] = None,
         resume_from: Optional[str] = None,
-        parent_tainted: bool = False,
     ) -> dict:
         """Spawn a new sub-agent.
         
@@ -180,7 +179,7 @@ class SubAgentManager:
         effective_provider = provider or self.provider
         timeout = await self.timeout_seconds()
         async_task = asyncio.create_task(
-            self._run_subagent(run_id, task, context, model, timeout, effective_provider, parent_tainted)
+            self._run_subagent(run_id, task, context, model, timeout, effective_provider)
         )
         self._active_runs[run_id] = async_task
 
@@ -207,12 +206,11 @@ class SubAgentManager:
         model: Optional[str],
         timeout: int,
         provider: Optional[LLMProvider] = None,
-        parent_tainted: bool = False,
     ):
         """Execute a sub-agent task in the background."""
         try:
             result = await asyncio.wait_for(
-                self._execute_task(run_id, task, context, model, provider, parent_tainted),
+                self._execute_task(run_id, task, context, model, provider),
                 timeout=timeout,
             )
             await self._complete_run(run_id, "completed", result=result)
@@ -238,7 +236,6 @@ class SubAgentManager:
         context: Optional[str],
         model: Optional[str],
         provider: Optional[LLMProvider] = None,
-        parent_tainted: bool = False,
     ) -> str:
         """Execute a sub-agent task with full tool-calling loop.
 
@@ -393,13 +390,8 @@ class SubAgentManager:
                 logger.info(f"Sub-agent {run_id[:8]} tool call (round {round_num + 1}/{max_rounds}): {name}({args})")
                 parsed.append((name, args, tool_call_id))
 
-            # Execute tools in parallel. `parent_tainted` propagates the
-            # session-taint from the spawning conversation so exec still
-            # goes through check_command_safety here — sub-agents inherit
-            # owner privileges and would otherwise silently bypass the
-            # safety gate for any external content the parent already
-            # ingested.
-            tasks = [self._execute_tool(n, a, access_level, parent_tainted) for n, a, _ in parsed]
+            # Execute tools in parallel.
+            tasks = [self._execute_tool(n, a, access_level) for n, a, _ in parsed]
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for i, raw in enumerate(raw_results):
@@ -492,34 +484,13 @@ class SubAgentManager:
         return filter_tools_for_subagent(schemas)
 
     async def _execute_tool(
-        self, name: str, args: dict, access_level: str, parent_tainted: bool = False,
+        self, name: str, args: dict, access_level: str,
     ) -> str:
         """Execute a tool or ability by name, with sub-agent safety checks."""
-        from .security import is_tool_allowed_for_subagent, check_command_safety
+        from .security import is_tool_allowed_for_subagent
 
         if not is_tool_allowed_for_subagent(name):
             return f"Error: Tool '{name}' is not available to sub-agents."
-
-        # ─── Tainted parent → gate exec even for sub-agents ───
-        # Sub-agents run with access_level="owner" (see _execute_task) so
-        # they would normally hit the owner-bypass path in agent._tool_exec.
-        # That bypass is DISABLED here when the spawning session was tainted:
-        # sub-agents have no DM channel to the owner to confirm anything, so
-        # unsafe commands are rejected outright rather than held. Safe
-        # commands still run so legitimate work continues.
-        if parent_tainted and name == "exec":
-            command = args.get("command", "") if isinstance(args, dict) else ""
-            safe, reason = check_command_safety(command)
-            if not safe:
-                logger.warning(
-                    f"Sub-agent exec blocked (parent tainted, unsafe cmd): {command[:100]}"
-                )
-                return (
-                    f"Error: {reason} "
-                    "(sub-agent inherited tainted context from parent — "
-                    "unsafe commands are rejected because the owner is not "
-                    "reachable here to confirm)"
-                )
 
         # Try core tools first
         if self.tools and self.tools.get(name):

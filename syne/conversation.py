@@ -157,27 +157,6 @@ try:
 except ImportError:
     _NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
 
-# ─── Indirect prompt injection defense ───
-# Tools/abilities whose output pulls text from an external, untrusted source.
-# When ANY of these completes in a session, the conversation is marked tainted:
-# subsequent `exec` calls must go through the safety check + confirmation gate
-# even for the owner (see agent._tool_exec).
-#
-# Rationale for each:
-#   - web_fetch / web_search / fetch_url  → arbitrary web content
-#   - image_analysis                      → describes attacker-supplied image
-#   - website_screenshot                  → renders attacker page + captions
-#   - memory_analyze_file                 → analyzes uploaded document
-#   - memory_get_file                     → returns raw content of a stored blob
-# memory_search itself is NOT here — recall already sets taint if any
-# individual result carries the tainted bit (see auto-recall block above).
-_TAINTING_TOOLS = frozenset({
-    "web_fetch", "web_search",
-    "fetch_url",
-    "image_analysis", "website_screenshot",
-    "memory_analyze_file", "memory_get_file",
-})
-
 # ── Time context helpers (module-level, not recreated per call) ──
 
 _TIME_CFG_KEYS = ['system.timezone', 'time.locale', 'time.format.full']
@@ -299,20 +278,6 @@ class Conversation:
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
-        # ─── Indirect prompt injection defense (per-conversation taint) ───
-        # Set to True after any external/untrusted content lands in this
-        # session (web fetch output, uploaded document, tainted memory recall,
-        # etc). Sticky: once true, stays true for the rest of the session.
-        # See agent._tool_exec for the gate that consults this flag.
-        self.tainted: bool = False
-        self.taint_reason: str = ""
-        # Pending tainted-exec confirmation state — lives on the conversation
-        # (NOT the agent) so concurrent conversations don't clobber each other.
-        # The sudo-guard on SyneAgent has this same latent race; we deliberately
-        # scope the tainted-exec state per-conv to avoid inheriting it.
-        self._pending_tainted_exec: Optional[str] = None       # full command string
-        self._pending_tainted_exec_hash: str = ""              # sha256[:12] for matching
-        self._pending_tainted_exec_at: float = 0.0             # monotonic set-time
         # Consent-system pending state — populated by consent.check_and_hold
         # when a tool/ability call is held pending confirmation. The
         # deterministic bypass at the top of chat() checks these on every turn
@@ -325,50 +290,6 @@ class Conversation:
         self._pending_consent_args: dict = {}                  # full args dict
         self._pending_consent_hash: str = ""                   # sha256[:12] of payload
         self._pending_consent_at: float = 0.0                  # set-time
-
-    async def _load_taint_from_db(self) -> None:
-        """Load persisted taint state from the sessions row.
-
-        Taint is monotonic and persistent (survives restart/evict). Once a
-        session was tainted by external/untrusted content, it stays tainted
-        until the owner resets it via the /untaint slash command. We OR the
-        DB value into the live flag — never clear it here.
-        """
-        try:
-            from .db.connection import get_connection
-            async with get_connection() as conn:
-                row = await conn.fetchrow(
-                    "SELECT tainted, taint_reason FROM sessions WHERE id = $1",
-                    self.session_id,
-                )
-            if row and row["tainted"]:
-                self.tainted = True
-                if row.get("taint_reason") and not self.taint_reason:
-                    self.taint_reason = row["taint_reason"]
-        except Exception as e:
-            # Column may not exist yet on a not-yet-migrated DB — fail open
-            # (in-memory taint still works for the live session).
-            logger.debug(f"Could not load taint state for session {self.session_id}: {e}")
-
-    async def _persist_taint(self) -> None:
-        """Persist the current (tainted, taint_reason) to the sessions row.
-
-        Monotonic write: only ever sets tainted=true. The ONLY path that sets
-        it back to false is the owner-only /untaint slash command (outside the
-        LLM loop). Best-effort — a DB failure must not break the chat turn.
-        """
-        try:
-            from .db.connection import get_connection
-            async with get_connection() as conn:
-                await conn.execute(
-                    "UPDATE sessions SET tainted = true, taint_reason = $2, "
-                    "updated_at = NOW() WHERE id = $1",
-                    self.session_id, self.taint_reason or None,
-                )
-        except Exception as e:
-            logger.warning(
-                f"Failed to persist taint for session {self.session_id}: {e}"
-            )
 
     async def run_compact(self) -> Optional[dict]:
         """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
@@ -597,12 +518,11 @@ class Conversation:
                 return await _recall_graph(recall_query or user_message)
             except Exception as e:
                 logger.debug(f"Graph recall skipped: {e}")
-                return [], False
+                return []
 
-        memories, graph_result = await asyncio.gather(
+        memories, graph_lines = await asyncio.gather(
             _do_memory_recall(), _do_graph_recall()
         )
-        graph_lines, graph_tainted = graph_result
 
         # 3. Conversation history
         if not self._message_cache:
@@ -614,23 +534,6 @@ class Conversation:
         #    preventing long conversation history from drowning out memory context.
         if memories:
             from .memory.engine import format_relative_time
-            # ─── Indirect prompt injection defense: taint on recall ───
-            # If any recalled memory carries the `tainted` bit (i.e. it was
-            # stored while its source session was already tainted), the current
-            # session inherits that taint. This is how taint crosses session
-            # boundaries — the memory table carries the marker forward.
-            _tainted_hits = [m for m in memories if m.get("tainted")]
-            if _tainted_hits and not self.tainted:
-                _first = _tainted_hits[0]
-                self.tainted = True
-                self.taint_reason = (
-                    f"recalled tainted memory id={_first.get('id')} "
-                    f"({len(_tainted_hits)} of {len(memories)} recalls tainted)"
-                )
-                logger.warning(
-                    f"Session {self.session_id} tainted: {self.taint_reason}"
-                )
-                await self._persist_taint()
             # Pick locale from time.locale config (same source as the time context
             # block above). Falls back to 'id' to keep prior behavior intact when
             # config is unreachable.
@@ -670,17 +573,6 @@ class Conversation:
 
         # 4b. Knowledge graph context (already fetched in parallel above)
         if graph_lines:
-            # ─── Indirect prompt injection defense: taint on KG recall ───
-            # If ANY surfaced entity/relation was derived from tainted (external/
-            # untrusted) memory, this session inherits the taint — same as the
-            # tainted-memory recall path above. Prevents laundering via the graph.
-            if graph_tainted and not self.tainted:
-                self.tainted = True
-                self.taint_reason = "recalled tainted knowledge-graph node/relation"
-                logger.warning(
-                    f"Session {self.session_id} tainted: {self.taint_reason}"
-                )
-                await self._persist_taint()
             graph_block = "\n".join([
                 "# Knowledge Graph",
                 "Related entities and relationships from stored knowledge.",
@@ -1234,11 +1126,6 @@ class Conversation:
             eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
             # Use original text (without context prefix) for memory evaluation
             eval_text = (message_metadata or {}).get("original_text", user_message)
-            # Capture taint state at evaluation time. This is critical: if the
-            # session has been tainted by external content, any auto-captured
-            # fact MUST persist that bit so future recalls re-taint their
-            # target sessions.
-            eval_tainted = bool(self.tainted)
             async def _deferred_evaluate():
                 try:
                     result = await evaluate_and_store(
@@ -1249,7 +1136,6 @@ class Conversation:
                         evaluator_driver=eval_driver,
                         evaluator_model=eval_model,
                         speaker_name=self.user.get("display_name") or self.user.get("name", ""),
-                        tainted=eval_tainted,
                     )
                     logger.debug(f"Evaluator done: {'stored #' + str(result) if result else 'skipped'}")
                 except Exception as e:
@@ -1464,18 +1350,6 @@ class Conversation:
             # ── Phase 2: Execute tools in parallel ──
             is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
 
-            async def _mark_taint_from_tool(t_name: str) -> None:
-                """Set session taint if the just-completed tool pulls external content."""
-                if self.tainted:
-                    return
-                if t_name in _TAINTING_TOOLS:
-                    self.tainted = True
-                    self.taint_reason = f"tool '{t_name}' returned external content"
-                    logger.warning(
-                        f"Session {self.session_id} tainted: {self.taint_reason}"
-                    )
-                    await self._persist_taint()
-
             async def _execute_single_tool(t_name, t_args, t_call_id):
                 """Execute one tool/ability and return ToolResult."""
                 # Auto-inject chat_id for send_reaction if not provided by LLM
@@ -1529,8 +1403,6 @@ class Conversation:
                         provider=self.provider,
                         conv=self,
                     )
-                    if _tool_result.ok:
-                        await _mark_taint_from_tool(t_name)
                     return _tool_result
                 elif self.abilities and self.abilities.get(t_name):
                     cached = getattr(self, '_cached_input_data', {})
@@ -1569,7 +1441,6 @@ class Conversation:
                     }
                     ability_result = await self.abilities.execute(t_name, t_args, ability_context)
                     if ability_result.get("success"):
-                        await _mark_taint_from_tool(t_name)
                         content = ability_result.get("result", "")
                         if ability_result.get("media"):
                             media_path = ability_result["media"]
@@ -1898,20 +1769,6 @@ class Conversation:
                     continue
 
             if result_text:
-                # ─── Taint: pre-processed upload = external content in user turn ───
-                # A PDF/Office document (or image analysis) whose extracted text is
-                # about to be injected into the user turn is a classic indirect
-                # injection vector. Mark the session tainted BEFORE the LLM sees it.
-                if not self.tainted:
-                    self.tainted = True
-                    self.taint_reason = (
-                        f"pre_process injected external {input_type} content "
-                        f"via ability '{registered.name}'"
-                    )
-                    logger.warning(
-                        f"Session {self.session_id} tainted: {self.taint_reason}"
-                    )
-                    await self._persist_taint()
                 # Ability succeeded — inject result, strip raw input
                 user_message = f"{user_message}\n\n[{spec['label']} result: {result_text}]"
                 metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
@@ -2229,12 +2086,6 @@ class ConversationManager:
             conv.model_params = _defaults.get(_driver, _defaults["_default"]).copy()
         # Load per-model reasoning_visible
         conv.reasoning_visible = bool(model_entry.get("reasoning_visible", False))
-
-        # ─── Restore persisted taint state (survives restart/evict) ───
-        # Taint is monotonic + persistent: if this session was tainted before,
-        # the sessions row carries the marker. Load it so a fresh in-memory
-        # Conversation object does not start "clean" and bypass the exec gate.
-        await conv._load_taint_from_db()
 
         self._active[key] = conv
         return conv

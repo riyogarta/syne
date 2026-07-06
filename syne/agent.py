@@ -1417,19 +1417,12 @@ class SyneAgent:
         if parent_session_id == 0:
             return "Cannot spawn sub-agent: no active session found."
 
-        # Propagate taint: if the parent session has been touched by external
-        # content, the sub-agent starts life tainted too. Its exec calls will
-        # then go through check_command_safety and reject unsafe commands
-        # outright (there is no owner-DM to confirm from inside a sub-agent).
-        parent_tainted = bool(getattr(conv, "tainted", False))
-
         result = await self.subagents.spawn(
             task=task,
             parent_session_id=parent_session_id,
             context=context or None,
             provider=_provider,
             resume_from=resume_from or None,
-            parent_tainted=parent_tainted,
         )
         
         if result["success"]:
@@ -1537,60 +1530,6 @@ class SyneAgent:
         return conv.user.get("access_level") == "owner"
 
     @staticmethod
-    def _tainted_exec_hash(command: str) -> str:
-        """Short stable digest of a command for confirmation matching."""
-        import hashlib
-        return hashlib.sha256(command.encode("utf-8", errors="replace")).hexdigest()[:12]
-
-    def _tainted_confirmed_recently(self, conv, command: str) -> bool:
-        """Check whether the owner just confirmed THIS specific tainted command.
-
-        Stricter than sudo-guard on purpose (tainted exec fires far more often
-        than sudo, so a rubber-stamp confirmation would erode the whole gate):
-          - pending must exist on THIS conversation (not agent-global)
-          - TTL 120 s (same as sudo)
-          - the pending command's hash must match the command about to run
-          - the confirming message must arrive AFTER the pending was set
-            (otherwise an old "ya" from unrelated chat could authorize)
-          - only strict "ya" / "yes" accepted (drops "ok"/"oke" — too common
-            in normal chat and easy for LLM to lead the user into typing)
-        On success, pending state is cleared (one confirmation = one command).
-        """
-        import time as _time
-        pending = getattr(conv, "_pending_tainted_exec", None)
-        pending_hash = getattr(conv, "_pending_tainted_exec_hash", "")
-        pending_at = getattr(conv, "_pending_tainted_exec_at", 0.0)
-        if not pending or not pending_at:
-            return False
-        if _time.time() - pending_at > 120:
-            logger.info(f"Tainted-exec pending expired (TTL 120s): hash={pending_hash}")
-            conv._pending_tainted_exec = None
-            conv._pending_tainted_exec_hash = ""
-            conv._pending_tainted_exec_at = 0.0
-            return False
-        if pending_hash != self._tainted_exec_hash(command):
-            # Pending is for a different command — do NOT clear it here (still
-            # potentially valid for the command it was issued for).
-            return False
-        if not hasattr(conv, "_message_cache") or not conv._message_cache:
-            return False
-        # Only messages received AFTER the pending was set count. We don't
-        # have per-message wall-clock timestamps in the cache, so we use
-        # positional ordering: any user message that appears in the cache
-        # AFTER we saved the pending must have arrived AFTER it. As a proxy
-        # we simply require the LATEST user message to be a confirmation.
-        user_msgs = [m for m in conv._message_cache if m.role == "user"]
-        if not user_msgs:
-            return False
-        last_user = self._last_reply_token(user_msgs[-1].content or "")
-        if last_user in ("ya", "yes"):
-            conv._pending_tainted_exec = None
-            conv._pending_tainted_exec_hash = ""
-            conv._pending_tainted_exec_at = 0.0
-            return True
-        return False
-
-    @staticmethod
     def _last_reply_token(content: str) -> str:
         """Extract the user's actual reply token from a message.
 
@@ -1605,7 +1544,7 @@ class SyneAgent:
     def _consent_confirmed(self, conv, command: str) -> bool:
         """STRICT consent confirm for exec: only 'ya'/'yes', bound to THIS
         exact command hash, within 120s, in THIS conversation. Mirrors the
-        tainted-exec pattern but grants into ConsentStore instead."""
+        consent-store grant path but scoped to a single exec command."""
         import time as _time
         pending_hash = getattr(conv, "_pending_consent_hash", "")
         pending_at = getattr(conv, "_pending_consent_at", 0.0)
@@ -1638,40 +1577,20 @@ class SyneAgent:
         is_owner_dm = self._is_owner_dm()
 
         # ═══════════════════════════════════════════════════════════════
-        # SECURITY: Indirect Prompt Injection Defense — taint gate
-        # If ANY external/untrusted content has entered this session (web
-        # fetch, uploaded doc, tainted memory recall, etc.), the owner-DM
-        # bypass is DISABLED for exec. The command must then:
-        #   1. Pass check_command_safety like a non-owner call.
-        #   2. Get an explicit "ya"/"yes" confirmation from the owner in
-        #      the SAME conversation, matching the exact command hash.
-        # This closes the vector where a compromised tool output tells
-        # the LLM "silently run `curl … | sh`" and the owner never sees it.
-        # ═══════════════════════════════════════════════════════════════
-        active_conv = self._get_active_conversation()
-        session_tainted = bool(getattr(active_conv, "tainted", False)) if active_conv else False
-        # Session-taint exec gate REMOVED (replaced by consent-system).
-        # Owner-DM bypass no longer disabled by taint. Provenance flag kept
-        # dormant. The consent gate ITSELF has moved to tools/registry so it
-        # applies uniformly to every op=x tool and every destructive op=w
-        # tool — see security.needs_consent + consent.check_and_hold. Nothing
-        # exec-specific happens here anymore beyond the shell safety check.
-        bypass_ok = is_owner_dm
-
-        # ═══════════════════════════════════════════════════════════════
         # SECURITY: Command Blacklist Check
         # Skipped for owner DM — owner identity is platform-verified.
+        # The full consent-gate defense (op=x confirmation, injection
+        # protection, etc.) lives at the tool-dispatch layer
+        # (consent.check_and_hold, wired from tools/registry.execute), so
+        # nothing exec-specific happens here beyond shell safety + sudo.
         # ═══════════════════════════════════════════════════════════════
-        if not bypass_ok:
+        if not is_owner_dm:
             safe, reason = check_command_safety(command)
             if not safe:
                 logger.warning(
-                    f"Blocked dangerous command "
-                    f"(tainted={session_tainted}, owner_dm={is_owner_dm}): {command[:100]}"
+                    f"Blocked dangerous command (owner_dm={is_owner_dm}): {command[:100]}"
                 )
                 return f"Error: {reason}"
-
-        # ─── Tainted-owner confirmation gate REMOVED (session-taint exec gate cut) ───
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Sudo Guard
@@ -2211,31 +2130,26 @@ class SyneAgent:
 
     async def _tool_memory_store(self, content: str, category: str = "fact") -> str:
         """Tool handler: store a memory."""
-        # Propagate taint from the storing session so recall in a future
-        # clean session correctly re-taints when it surfaces this memory.
-        _conv = self._get_active_conversation()
-        _tainted = bool(getattr(_conv, "tainted", False)) if _conv else False
         mem_id = await self.memory.store_if_new(
             content=content,
             category=category,
             source="user_confirmed",
             permanent=True,
-            tainted=_tainted,
         )
         if mem_id:
             # Permanent memory → trigger KG extraction
             try:
                 import asyncio
                 from .memory.graph import extract_and_store as graph_extract
-                asyncio.create_task(graph_extract(self.provider, content, mem_id, tainted=_tainted))
+                asyncio.create_task(graph_extract(self.provider, content, mem_id))
             except Exception as e:
                 logger.debug(f"KG extraction skipped: {e}")
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
 
     # Categories that can NEVER be overwritten via memory_update — these are
-    # trust anchors; letting injected content rewrite them would defeat the
-    # whole point of the taint gate.
+    # trust anchors; the consent gate remains the runtime defense against
+    # malicious rewrites reaching them.
     MEMORY_UPDATE_PROTECTED = {
         "rules", "rule", "credential", "credentials", "identity",
         "config", "configuration", "security", "soul",
@@ -2251,7 +2165,8 @@ class SyneAgent:
     def _memory_update_confirmed_recently(self, conv, memory_id: int, content: str) -> bool:
         """Check that the actor of THIS session just confirmed THIS exact update.
 
-        Mirrors the tainted-exec gate but scoped to memory_update:
+        Same confirmation-in-conversation pattern used by the exec consent
+        gate but scoped to memory_update:
           - pending lives on THIS conversation (so it is bound to the actor —
             owner cannot confirm someone else's session)
           - TTL 120s
@@ -2294,7 +2209,7 @@ class SyneAgent:
         # Load the target memory.
         async with get_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT id, content, category, importance, source, permanent, tainted "
+                "SELECT id, content, category, importance, source, permanent "
                 "FROM memory WHERE id = $1",
                 memory_id,
             )
@@ -2348,15 +2263,13 @@ class SyneAgent:
                 "from you, in this chat."
             )
 
-        # Confirmed — commit. Taint is monotonic (OR of session + existing).
-        session_tainted = bool(getattr(conv, "tainted", False))
+        # Confirmed — commit.
         await self.memory._update_memory(
             memory_id=memory_id,
             content=content,
             category=new_category,
             source=row["source"] or "user_confirmed",
             importance=float(row["importance"] or 0.5),
-            tainted=session_tainted,
         )
         logger.info(f"memory_update committed: id={memory_id}, category={new_category}")
         return f"Memory id {memory_id} updated."
@@ -2420,16 +2333,12 @@ class SyneAgent:
                 f"Tip: store only the description without attaching the file (use memory_store instead)."
             )
 
-        # Store memory (text + embedding) as permanent — carry taint forward
-        # so future recall of this attached file re-taints its target session.
-        _conv = self._get_active_conversation()
-        _tainted = bool(getattr(_conv, "tainted", False)) if _conv else False
+        # Store memory (text + embedding) as permanent.
         mem_id = await self.memory.store_if_new(
             content=content,
             category=category,
             source="user_confirmed",
             permanent=True,
-            tainted=_tainted,
         )
         if not mem_id:
             return "Similar memory already exists. Use memory_search + memory_delete first to replace."
@@ -2454,7 +2363,7 @@ class SyneAgent:
         try:
             import asyncio
             from .memory.graph import extract_and_store as graph_extract
-            asyncio.create_task(graph_extract(self.provider, content, mem_id, tainted=_tainted))
+            asyncio.create_task(graph_extract(self.provider, content, mem_id))
         except Exception as e:
             logger.debug(f"KG extraction skipped: {e}")
 
