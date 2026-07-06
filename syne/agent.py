@@ -1609,7 +1609,9 @@ class SyneAgent:
         # ═══════════════════════════════════════════════════════════════
         active_conv = self._get_active_conversation()
         session_tainted = bool(getattr(active_conv, "tainted", False)) if active_conv else False
-        bypass_ok = is_owner_dm and not session_tainted
+        # Session-taint exec gate REMOVED (replaced by consent-system, in progress).
+        # Owner-DM bypass no longer disabled by taint. Provenance flag kept dormant.
+        bypass_ok = is_owner_dm
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Command Blacklist Check
@@ -1626,36 +1628,7 @@ class SyneAgent:
                 )
                 return f"Error: {reason}"
 
-        # ─── Tainted-owner confirmation gate ───
-        # Owner-DM but session is tainted: run only after explicit confirmation.
-        # Sub-agents (checked via active_conv=None or non-owner) fall through
-        # to the sudo-guard / normal path — the sudo/tainted gate cannot be
-        # confirmed inside a sub-agent because there's no DM channel to the
-        # owner. Safe commands still run; unsafe ones already got rejected by
-        # check_command_safety above.
-        if is_owner_dm and session_tainted and active_conv is not None:
-            import time as _time
-            if not self._tainted_confirmed_recently(active_conv, command):
-                cmd_hash = self._tainted_exec_hash(command)
-                active_conv._pending_tainted_exec = command
-                active_conv._pending_tainted_exec_hash = cmd_hash
-                active_conv._pending_tainted_exec_at = _time.time()
-                taint_reason = getattr(active_conv, "taint_reason", "") or "external content in session"
-                logger.warning(
-                    f"Tainted-exec held for confirmation: hash={cmd_hash}, "
-                    f"reason={taint_reason!r}, command={command[:120]}"
-                )
-                return (
-                    "⚠️ This session has processed external content "
-                    f"({taint_reason}), so I cannot silently run shell commands. "
-                    "If you actually want to run this, reply with **ya** or **yes**.\n\n"
-                    f"Command: `{command}`\n"
-                    f"Hash: `{cmd_hash}` (must match on confirm)"
-                )
-            logger.info(
-                f"Tainted-exec confirmed: hash={self._tainted_exec_hash(command)}, "
-                f"command={command[:120]}"
-            )
+        # ─── Tainted-owner confirmation gate REMOVED (session-taint exec gate cut) ───
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Sudo Guard
