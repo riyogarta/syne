@@ -769,42 +769,141 @@ class Conversation:
             logger.error(f"Consent bypass dispatch failed: {e}", exc_info=True)
             result_str = f"Error running action after consent: {e}"
 
-        # Save as tool-role message so future LLM turns see the bypass in-band.
-        tool_meta = {
-            "tool_name": pending_tool,
-            "tool_call_id": f"consent_bypass_{pending_hash}",
-        }
+        # ─── Transcript surgery ────────────────────────────────────────────
+        # When the gate held earlier, the tool loop saved the "balas ya"
+        # PROMPT as the tool_result for the LLM's original tool_use (with
+        # the LLM-issued tool_call_id, adjacent to the tool_use). We now
+        # OVERWRITE that same row with the ACTUAL result. Two wins:
+        #   1. Anthropic's sanitizer (which drops orphan tool_results whose
+        #      tool_use_id doesn't match a preceding tool_use) keeps this
+        #      pair — the LLM will see the real output on the next turn
+        #      instead of the stale "balas ya" prompt.
+        #   2. No infinite re-invocation loop: the LLM never re-issues the
+        #      same tool because from its point of view the tool already
+        #      ran with a real result.
+        # We locate the row by walking _message_cache in reverse for the
+        # first tool-role message whose metadata.tool_name matches the
+        # pending tool. The "balas ya" prompt is almost always the most
+        # recent tool message for this tool name at this point in the
+        # session (bypass ran less than TTL seconds after the hold), so
+        # this heuristic is robust in practice. If no match is found we
+        # fall back to appending a fresh tool message.
+        _patched = False
         try:
-            await self.save_message("tool", result_str, metadata=tool_meta)
+            _patched = await self._patch_held_tool_result(
+                pending_tool, pending_hash, result_str,
+            )
         except Exception as e:
-            logger.warning(f"Consent bypass: save_message('tool') failed: {e}")
+            logger.warning(f"Consent bypass: patch_held_tool_result failed: {e}")
 
-        # ─── Continuation: hand back to the LLM turn so it can plan next steps
-        # If the owner asked Syne to do "1, 2, 3" and only #1 hit the consent
-        # gate, we've now run #1 deterministically. Kick the LLM turn so it
-        # sees the actual result in transcript and can decide whether to fire
-        # more tool calls (which will each get their own gate check).
-        #
-        # Prime _last_saved_hash so _chat_inner's inner save_message("user",
-        # user_message) short-circuits via dedup (we already saved "ya" up
-        # above). Otherwise the "ya" would appear twice in the transcript.
-        import hashlib as _hashlib, json as _json
-        _ya_hash = _hashlib.md5(
-            f"user:{user_message}:{_json.dumps(None, sort_keys=True) if None else ''}".encode()
-        ).hexdigest()
-        self._last_saved_hash = _ya_hash
+        if not _patched:
+            # Fallback path — record the actual result at least once so a
+            # future /memory search or manual audit can still see it. The
+            # tool_call_id here is synthetic; Anthropic's sanitizer WILL
+            # drop it on subsequent turns because there's no matching
+            # tool_use, but that's a diagnostic degradation, not a
+            # correctness bug for the current turn.
+            tool_meta = {
+                "tool_name": pending_tool,
+                "tool_call_id": f"consent_bypass_{pending_hash}",
+            }
+            try:
+                await self.save_message("tool", result_str, metadata=tool_meta)
+            except Exception as e:
+                logger.warning(f"Consent bypass: save_message('tool') failed: {e}")
 
-        try:
-            llm_response = await self._chat_inner(user_message, message_metadata=None)
-            if llm_response:
-                return llm_response
-        except Exception as e:
-            logger.error(f"Consent bypass continuation failed: {e}", exc_info=True)
-
-        # Fallback: LLM turn crashed or returned empty — surface the raw
-        # tool output so the owner still sees what happened.
+        # ─── LLM is deliberately NOT invoked here ───────────────────────────
+        # The whole point of the deterministic bypass is that "ya" replays
+        # the pending call and returns — the LLM does not get to react to
+        # the confirmation, hallucinate a different follow-up, or (worst
+        # case) recurse into another gate hold. If the owner wants Syne to
+        # do a follow-up step, they say so in their next message; the LLM
+        # will see the actual result in transcript on that next turn.
         head = f"✅ Consent granted (`{pending_hash}`). Ran: `{pending_tool}`"
         return f"{head}\n\n{result_str}"
+
+    async def _patch_held_tool_result(
+        self, tool_name: str, expected_hash: str, actual_result: str,
+    ) -> bool:
+        """Rewrite the most recent held-prompt tool_result for `tool_name`
+        to the actual replay output — both in DB and in _message_cache.
+
+        Returns True if a row was patched. Returns False if no candidate
+        was found (caller falls back to appending a new tool message).
+        Only matches messages whose content contains the pending hash so
+        we can't clobber a legitimate real tool_result by accident.
+        """
+        from .consent import CONSENT_BUTTON_MARKER
+        # Walk cache in reverse for the first tool-role hit whose metadata
+        # names our tool AND whose content still carries the hash marker
+        # (i.e. it was the held prompt, not a real prior tool_result).
+        target_idx = None
+        for i in range(len(self._message_cache) - 1, -1, -1):
+            m = self._message_cache[i]
+            if m.role != "tool":
+                continue
+            meta_name = (m.metadata or {}).get("tool_name", "")
+            if meta_name != tool_name:
+                continue
+            body = m.content or ""
+            if expected_hash in body or CONSENT_BUTTON_MARKER in body:
+                target_idx = i
+                break
+        if target_idx is None:
+            return False
+
+        target_msg = self._message_cache[target_idx]
+        old_content = target_msg.content or ""
+        target_msg.content = actual_result
+
+        # Mirror to DB. Use the metadata's tool_call_id (if present) plus
+        # role + session to pinpoint the row. Fall back to matching by
+        # exact old content within this session.
+        tool_call_id = (target_msg.metadata or {}).get("tool_call_id") or ""
+        try:
+            from .db.connection import get_connection
+            async with get_connection() as conn:
+                if tool_call_id:
+                    await conn.execute(
+                        """
+                        UPDATE messages
+                        SET content = $1
+                        WHERE id = (
+                            SELECT id FROM messages
+                            WHERE session_id = $2
+                              AND role = 'tool'
+                              AND (metadata->>'tool_call_id') = $3
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                        """,
+                        actual_result, self.session_id, tool_call_id,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE messages
+                        SET content = $1
+                        WHERE id = (
+                            SELECT id FROM messages
+                            WHERE session_id = $2
+                              AND role = 'tool'
+                              AND content = $3
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                        """,
+                        actual_result, self.session_id, old_content,
+                    )
+        except Exception as e:
+            # DB write failed — cache is already patched, so the CURRENT
+            # session sees the fix. Only future reloads would see stale
+            # content. Log loudly so operators notice.
+            logger.error(
+                f"patch_held_tool_result: DB update failed for session "
+                f"{self.session_id}, tool={tool_name}: {e}"
+            )
+        return True
 
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Process a user message and return agent response.
@@ -813,6 +912,19 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
+        # ─── Deterministic consent-confirmation bypass ───
+        # If this turn is a valid ya/yes reply to a pending consent prompt,
+        # grant + execute the pending command directly and return WITHOUT
+        # invoking the LLM. This is the whole point of the bypass — it
+        # replays the exact pending call the owner approved, and does not
+        # give the LLM a chance to re-plan, hallucinate, or (as observed
+        # in production before v1.17.26) recurse into another gate hold
+        # that spirals into an infinite prompt loop. Runs OUTSIDE the lock:
+        # it's short, self-contained, and does its own DB writes.
+        _bypass_response = await self._maybe_execute_pending_consent(user_message)
+        if _bypass_response is not None:
+            return _bypass_response
+
         # Wait for lock with timeout — prevents permanent queue if previous request hangs
         locked = self._lock.locked()
         if locked:
@@ -836,16 +948,6 @@ class Conversation:
             self._message_metadata = message_metadata
             self._processing = True
             try:
-                # ─── Deterministic consent-confirmation bypass ───
-                # If this turn is a valid ya/yes reply to a pending consent
-                # prompt, grant + execute the pending command directly. The
-                # bypass itself then hands control back to _chat_inner so the
-                # LLM can plan any remaining steps (cmd2/cmd3 after cmd1).
-                # Runs inside the lock so bypass's internal _chat_inner call
-                # is serialized with the rest of the turn.
-                _bypass_response = await self._maybe_execute_pending_consent(user_message)
-                if _bypass_response is not None:
-                    return _bypass_response
                 return await self._chat_inner(user_message, message_metadata)
             finally:
                 self._processing = False
