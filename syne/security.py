@@ -29,44 +29,48 @@ logger = logging.getLogger("syne.security")
 # "blocked" users are denied before any permission check.
 
 TOOL_PERMISSIONS: dict[str, int] = {
-    # ─── Read-only (bit r = 4, digit 4) ────────────────────────────────
+    # Convention: each granted class gets a Linux-idiomatic digit — 4 (r--),
+    # 6 (rw-), 7 (rwx) — not a minimal-bit digit. The x bit's PRESENCE in a
+    # digit is what triggers the consent gate; the r/w bits alongside it
+    # simply follow the standard Linux pattern for "class has full access
+    # to what this tool offers". This reads more naturally: 0o700 = "owner
+    # only, full access, destructive"; 0o660 = "owner + family, safe write".
+
+    # ─── Read-only (r bit = 4) ─────────────────────────────────────────
     "web_search":         0o444,  # public via Rule 765; r-only, no side effect
     "web_fetch":          0o444,
     "db_query":           0o400,  # owner only
     "file_read":          0o400,
     "read_source":        0o400,
-    "subagent_status":    0o440,  # owner + family, r-only
+    "subagent_status":    0o440,  # owner + family
     "memory_search":      0o444,  # public via Rule 765
-    "memory_get_file":    0o444,  # public via Rule 765
-    "memory_analyze_file": 0o444,  # public via Rule 765
-    "check_auth":         0o400,  # owner introspects own auth
+    "memory_get_file":    0o444,
+    "memory_analyze_file": 0o444,
+    "check_auth":         0o400,
 
-    # ─── Additive write (bit w = 2, digit 2) ───────────────────────────
-    # These insert new rows / blobs / schedules only — no update-if-exists,
-    # no delete. If any of them ever gains destructive branching it MUST be
-    # bumped to include the x bit (see the destructive block below).
-    "memory_store":       0o220,  # owner + family
-    "memory_store_file":  0o220,
+    # ─── Additive write (rw bits = 6) ──────────────────────────────────
+    # These insert new rows / blobs only — no update-if-exists, no delete.
+    # If any ever gains destructive branching it MUST bump to include the
+    # x bit (see the destructive block below).
+    "memory_store":       0o660,  # owner + family
+    "memory_store_file":  0o660,
 
-    # ─── Action / destructive (bit x = 1, digit 1) ─────────────────────
-    # Any tool with an x bit set in ANY digit is routed through the consent
-    # gate for that class of caller. Owner digit=1 means "owner can perform
-    # the x action" — enough for the gate to fire; no need to also set r/w.
-    "exec":               0o100,  # owner only
-    "file_write":         0o100,  # owner only — can overwrite anywhere
-    "send_message":       0o110,  # owner + family
-    "send_file":          0o110,
-    "send_voice":         0o110,
-    "send_reaction":      0o111,  # public too (group reactions)
-    "spawn_subagent":     0o110,  # owner + family
-    "manage_schedule":    0o110,
-    "memory_update":      0o110,
-    "memory_delete":      0o100,
-    "manage_group":       0o100,
-    "manage_user":        0o100,
-    "update_config":      0o100,
-    "update_ability":     0o100,
-    "update_soul":        0o100,
+    # ─── Action / destructive (rwx = 7, includes x bit → gate fires) ──
+    "exec":               0o700,  # owner only
+    "file_write":         0o700,  # owner only — can overwrite anywhere
+    "memory_delete":      0o700,  # owner only
+    "manage_group":       0o700,
+    "manage_user":        0o700,
+    "update_config":      0o700,
+    "update_ability":     0o700,
+    "update_soul":        0o700,
+    "send_message":       0o770,  # owner + family
+    "send_file":          0o770,
+    "send_voice":         0o770,
+    "spawn_subagent":     0o770,
+    "manage_schedule":    0o770,
+    "memory_update":      0o770,
+    "send_reaction":      0o771,  # public too (--x, group reactions)
 }
 
 
