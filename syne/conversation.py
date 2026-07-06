@@ -1231,6 +1231,28 @@ class Conversation:
 
         # Attach any media collected during tool calls to the final response
         final_response = response.content
+
+        # ─── Ensure consent buttons survive to the channel adapter ─────────
+        # If any tool call in this turn hit the consent gate, we now have a
+        # pending consent on the conversation. The registry gave the LLM the
+        # "balas ya" prompt (which ends with [[CONSENT_BUTTONS:hash=…]]) as
+        # the tool_result, but the LLM's final text is free to paraphrase,
+        # translate, or drop the marker entirely — and if it does, the
+        # Telegram adapter has no way to know to attach the Yes/No inline
+        # buttons. Guarantee the marker is present by appending it here
+        # whenever a pending consent exists and the response doesn't
+        # already carry the marker for this hash. Non-marker-aware channels
+        # (CLI, plain stdout) render the trailer as a visible line —
+        # harmless, and it doubles as an audit trail.
+        _pending_hash_for_buttons = self._pending_consent_hash
+        if _pending_hash_for_buttons:
+            _marker = f"[[CONSENT_BUTTONS:hash={_pending_hash_for_buttons}]]"
+            if _marker not in (final_response or ""):
+                if final_response and not final_response.endswith("\n"):
+                    final_response = f"{final_response}\n\n{_marker}"
+                else:
+                    final_response = f"{final_response or ''}{_marker}"
+
         if self._pending_media:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
             import re
