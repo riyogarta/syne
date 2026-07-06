@@ -28,6 +28,7 @@ from .context import ContextManager
 from .conversation import ConversationManager
 from .subagent import SubAgentManager
 from .security import check_command_safety, check_rule_removal
+from .consent import ConsentStore, make_key, content_hash, DEFAULT_TTL_SECONDS, DEFAULT_MODE, DEFAULT_CONSENT_ENABLED
 
 logger = logging.getLogger("syne.agent")
 
@@ -49,6 +50,7 @@ class SyneAgent:
         self._pending_sudo_at: float = 0.0  # timestamp when pending was set
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
         self.gateway = None  # Set by main.py if gateway is enabled
+        self._consent = ConsentStore(ttl_seconds=DEFAULT_TTL_SECONDS, mode=DEFAULT_MODE)  # consent-system grant cache
 
         # Workspace directory — central location for all generated/uploaded files
         project_root = str(Path(__file__).resolve().parent.parent)
@@ -1588,6 +1590,33 @@ class SyneAgent:
             return True
         return False
 
+    def _consent_confirmed(self, conv, command: str) -> bool:
+        """STRICT consent confirm for exec: only 'ya'/'yes', bound to THIS
+        exact command hash, within 120s, in THIS conversation. Mirrors the
+        tainted-exec pattern but grants into ConsentStore instead."""
+        import time as _time
+        pending_hash = getattr(conv, "_pending_consent_hash", "")
+        pending_at = getattr(conv, "_pending_consent_at", 0.0)
+        if not pending_hash or not pending_at:
+            return False
+        if _time.time() - pending_at > 120:
+            conv._pending_consent_hash = ""
+            conv._pending_consent_at = 0.0
+            return False
+        if pending_hash != content_hash(command):
+            return False  # different command — keep pending for its own cmd
+        if not getattr(conv, "_message_cache", None):
+            return False
+        user_msgs = [m for m in conv._message_cache if m.role == "user"]
+        if not user_msgs:
+            return False
+        last_user = (user_msgs[-1].content or "").strip().lower()
+        if last_user in ("ya", "yes"):
+            conv._pending_consent_hash = ""
+            conv._pending_consent_at = 0.0
+            return True
+        return False
+
     async def _tool_exec(self, command: str, timeout: int = 30, workdir: str = "") -> str:
         """Tool handler: execute shell command."""
         import asyncio
@@ -1612,6 +1641,29 @@ class SyneAgent:
         # Session-taint exec gate REMOVED (replaced by consent-system, in progress).
         # Owner-DM bypass no longer disabled by taint. Provenance flag kept dormant.
         bypass_ok = is_owner_dm
+
+        # ── Consent gate (feature-flagged; scope: exec only) ──────────────
+        # One saklar: security.consent_enabled. When True, exec asks for a
+        # strict 'ya'/'yes' confirmation bound to (user, session, this command).
+        # Identical repeats within TTL reuse the grant (no re-prompt). When
+        # False, this whole block is skipped — behavior identical to gate absent.
+        consent_enabled = await get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
+        if consent_enabled and active_conv:
+            sid = str(getattr(active_conv, "session_id", "") or "")
+            uid = str(active_conv.user.get("id", "")) if getattr(active_conv, "user", None) else ""
+            self._consent.ttl_seconds = int(await get_config("security.consent_ttl_seconds", DEFAULT_TTL_SECONDS))
+            self._consent.mode = await get_config("security.consent_mode", DEFAULT_MODE)
+            ckey = make_key(uid, sid, op="exec", target="shell", payload=command)
+            if self._consent.is_granted(ckey):
+                pass  # reuse within TTL — no prompt
+            elif self._consent_confirmed(active_conv, command):
+                self._consent.grant(ckey)  # user said ya/yes → grant + proceed
+            else:
+                import time as _time
+                active_conv._pending_consent_hash = content_hash(command)
+                active_conv._pending_consent_at = _time.time()
+                return ("⚠️ Aksi exec butuh konfirmasi (consent). Balas *ya* untuk mengizinkan:\n"
+                        f"```\n{command[:300]}\n```")
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Command Blacklist Check
