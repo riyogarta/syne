@@ -3582,16 +3582,21 @@ Or just send me a message!"""
             f"user={user.id}"
         )
 
+        # Keep the typing indicator alive while the approved tool runs and
+        # the LLM resumes its turn, so the owner has visible feedback that
+        # work is in progress after pressing Yes (not a dead-looking chat).
+        _bot_typing = context.bot if context else self.app.bot
         try:
-            response = await self.agent.handle_message(
-                platform="telegram",
-                chat_id=str(chat.id),
-                user_name=user.first_name or str(user.id),
-                user_platform_id=str(user.id),
-                message="ya",
-                display_name=self._get_display_name(user),
-                is_dm=chat.type not in ("group", "supergroup"),
-            )
+            async with _TypingIndicator(_bot_typing, chat.id):
+                response = await self.agent.handle_message(
+                    platform="telegram",
+                    chat_id=str(chat.id),
+                    user_name=user.first_name or str(user.id),
+                    user_platform_id=str(user.id),
+                    message="ya",
+                    display_name=self._get_display_name(user),
+                    is_dm=chat.type not in ("group", "supergroup"),
+                )
         except Exception as e:
             logger.error(f"Consent button dispatch failed: {e}", exc_info=True)
             response = f"⚠️ Gagal menjalankan aksi setelah consent: {e}"
