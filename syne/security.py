@@ -32,7 +32,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "web_search":      0o555,
     "web_fetch":       0o555,
     "exec":            0o700,
-    "db_query":        0o700,
+    "db_query":        0o400,
     "file_read":       0o500,
     "file_write":      0o700,
     "read_source":     0o500,
