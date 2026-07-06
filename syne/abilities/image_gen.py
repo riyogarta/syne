@@ -23,8 +23,9 @@ class ImageGenAbility(Ability):
     name = "image_gen"
     description = "Generate images from text descriptions using AI"
     version = "2.0"
-    permission = 0o770
-    operation = "x"  # action: generates a file
+    # 0o110 — owner + family; both digits have x bit → consent gate fires
+    # (calls external API + spends money + writes new image file).
+    permission = 0o110
 
     async def execute(self, params: dict, context: dict) -> dict:
         prompt = params.get("prompt", "")

@@ -14,8 +14,9 @@ class MapsAbility(Ability):
     name = "maps"
     description = "Search for nearby places (restaurants, cafes, etc.), get driving/walking directions between locations, and convert addresses to coordinates or vice versa"
     version = "1.0"
-    permission = 0o555
-    operation = "r"  # read-only: geocode/search
+    # 0o444 — everyone may invoke; r-only (geocode/search). Was 0o555 which
+    # had spurious x bit under the new gate rule.
+    permission = 0o444
 
     def _get_api_key(self, context: dict) -> str | None:
         config = context.get("config", {})

@@ -138,8 +138,8 @@ class FetchUrlAbility(Ability):
     name = "fetch_url"
     description = "Fetch a web URL and extract its readable text content (SSRF-hardened)"
     version = "1.0"
-    permission = 0o444  # read-access for owner/family/public
-    operation = "r"  # read-only: fetches web text
+    # 0o444 — everyone may invoke; r-only. Already correct under new rule.
+    permission = 0o444
 
     async def execute(self, params: dict, context: dict) -> dict:
         url = (params.get("url") or "").strip()

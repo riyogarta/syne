@@ -106,7 +106,7 @@ class AbilityRegistry:
             return []
         return [
             ability for ability in self._abilities.values()
-            if ability.enabled and check_tool_access(ability.name, access_level, ability.permission, getattr(ability.instance, 'operation', 'x'))[0]
+            if ability.enabled and check_tool_access(ability.name, access_level, ability.permission)[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
@@ -167,19 +167,20 @@ class AbilityRegistry:
         if not ability.enabled:
             return {"success": False, "error": f"Ability '{name}' is disabled."}
 
-        # Permission check
+        # Permission check — caller's own class digit must be non-zero.
         access_level = context.get("access_level", "public")
-        op = getattr(ability.instance, 'operation', 'x')
-        allowed, reason = check_tool_access(name, access_level, ability.permission, op)
+        allowed, reason = check_tool_access(name, access_level, ability.permission)
         if not allowed:
             logger.warning(f"Permission denied: ability={name}, access_level={access_level}, perm={oct(ability.permission)}")
             return {"success": False, "error": reason}
 
-        # ─── Consent gate (generic, op=x + destructive op=w) ───────────────
+        # ─── Consent gate ───────────────────────────────────────────────────
         # Same choke point as tools/registry so abilities aren't a side door.
-        # image_gen / whatsapp (op=x) are the immediate targets; op=w abilities
-        # (pdf, office, image analysis results) are not destructive and stay
-        # unchallenged since they aren't in DESTRUCTIVE_TOOLS.
+        # Ability's permission octal is the single source of truth: if the
+        # caller's own class digit has the x bit set, the gate fires. Under
+        # the new rule, image_gen / whatsapp are the abilities that need
+        # confirmation; pdf / office / image_analysis (additive/read) stay
+        # unchallenged.
         conv = context.get("conv")
         _agent = None
         if conv is not None and getattr(conv, "_mgr", None) is not None:
@@ -188,7 +189,8 @@ class AbilityRegistry:
         from ..consent import check_and_hold as _consent_gate
         gate_action, gate_prompt = await _consent_gate(
             conv=conv, agent=_agent,
-            tool_name=name, args=params, op=op,
+            tool_name=name, args=params,
+            access_level=access_level, permission=ability.permission,
             scheduled=scheduled, kind="ability",
         )
         if gate_action == "held":

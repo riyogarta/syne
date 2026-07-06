@@ -233,7 +233,8 @@ async def check_and_hold(
     agent,
     tool_name: str,
     args: Optional[dict],
-    op: str,
+    access_level: str,
+    permission: int,
     scheduled: bool = False,
     kind: str = "tool",
 ):
@@ -244,9 +245,9 @@ async def check_and_hold(
         ("held",  prompt)    — caller must return `prompt` to the LLM/user
 
     The gate policy:
-      1. `needs_consent(tool_name, op)` False → allow.
-         (Single rule: op == "x". If a tool is destructive or has side
-         effects it must be declared operation="x" — see security.py.)
+      1. `needs_consent(access_level, permission)` False → allow.
+         (Rule: caller's own class digit has the x bit set. Octal is the
+         single source of truth — no auxiliary op mapping. See security.py.)
       2. Hybrid skip for send_* family (scheduled or same-chat) → allow.
       3. Feature flag `security.consent_enabled` False → allow (kill switch).
       4. No active conv (e.g. subagent path with no DM channel) → held with
@@ -268,7 +269,7 @@ async def check_and_hold(
     _log = logging.getLogger("syne.consent.gate")
     try:
         from .security import needs_consent  # local import to avoid cycles
-        if not needs_consent(tool_name, op):
+        if not needs_consent(access_level, permission):
             return ("allow", None)
 
         if _send_family_should_skip(tool_name, args, conv, scheduled):
@@ -303,11 +304,16 @@ async def check_and_hold(
             )
             return ("allow", None)
 
-        # Build grant key + configure store TTL/mode from config.
+        # Build grant key + configure store TTL/mode from config. The `op`
+        # dimension of the key is fixed to "x" here — the very fact we
+        # reached this point means needs_consent said yes, i.e. the caller's
+        # digit has the x bit set. Baking "x" into the key means a later
+        # rule change that hides the x bit for a class won't collide with
+        # earlier grants.
         uid = str((getattr(conv, "user", {}) or {}).get("id", ""))
         sid = str(getattr(conv, "session_id", "") or "")
         payload = canonical_payload(tool_name, args)
-        ckey = make_key(uid, sid, op=op, target=tool_name, payload=payload)
+        ckey = make_key(uid, sid, op="x", target=tool_name, payload=payload)
 
         store = getattr(agent, "_consent", None)
         if store is None:
@@ -345,16 +351,17 @@ async def check_and_hold(
         # avoids the same latent race the sudo-guard has on concurrent sessions).
         import time as _time
         conv._pending_consent_kind = kind
-        conv._pending_consent_op = op
+        conv._pending_consent_op = "x"
         conv._pending_consent_tool = tool_name
         conv._pending_consent_args = dict(args or {})
         conv._pending_consent_hash = content_hash(payload)
         conv._pending_consent_at = _time.time()
 
-        prompt = format_consent_prompt(tool_name, args, op, conv._pending_consent_hash)
+        prompt = format_consent_prompt(tool_name, args, conv._pending_consent_hash)
         _log.warning(
-            f"consent held: tool={tool_name}, op={op}, "
-            f"hash={conv._pending_consent_hash}, session={sid}"
+            f"consent held: tool={tool_name}, "
+            f"hash={conv._pending_consent_hash}, session={sid}, "
+            f"perm={oct(permission)}, access={access_level}"
         )
         return ("held", prompt)
 
@@ -365,7 +372,7 @@ async def check_and_hold(
 
 
 def format_consent_prompt(
-    tool_name: str, args: Optional[dict], op: str, hash_hex: str,
+    tool_name: str, args: Optional[dict], hash_hex: str,
 ) -> str:
     """User-facing prompt shown when a call is held pending consent."""
     import json
@@ -375,7 +382,7 @@ def format_consent_prompt(
     except Exception:
         args_preview = str(args)[:300]
     return (
-        f"⚠️ Aksi `{tool_name}` (op={op}) butuh konfirmasi (consent). "
+        f"⚠️ Aksi `{tool_name}` butuh konfirmasi (consent). "
         "Balas *ya* atau *yes* untuk mengizinkan.\n\n"
         f"Args: `{args_preview}`\n"
         f"Hash: `{hash_hex}`"

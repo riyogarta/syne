@@ -53,8 +53,9 @@ class WhatsAppAbility(Ability):
     name = "whatsapp"
     description = "WhatsApp text messaging bridge via wacli"
     version = "1.0"
-    permission = 0o700
-    operation = "x"  # action: sends messages
+    # 0o100 — owner only. Owner digit has x bit → consent gate fires
+    # (sends outbound messages via wacli — external side effect).
+    permission = 0o100
     priority = False  # Not a pre-processing ability
 
     def __init__(self):

@@ -87,8 +87,9 @@ class OfficeAbility(Ability):
     name = "office"
     description = "Create and read Microsoft Office documents (Word, Excel, PowerPoint)."
     version = "2.0"
-    permission = 0o770
-    operation = "w"  # write: produces a local file
+    # 0o220 — owner + family, w-only (additive: creates new docx/xlsx/pptx,
+    # never overwrites existing files). Was 0o770 which had x bit.
+    permission = 0o220
     # Priority pre-processing: auto-extract content from uploaded .docx/.xlsx/.pptx
     priority = True
 

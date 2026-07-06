@@ -659,8 +659,10 @@ class PdfAbility(Ability):
     name = "pdf"
     description = "Create and read PDFs from text, URL, or uploaded document."
     version = "1.7"
-    permission = 0o770
-    operation = "w"  # write: produces a local file
+    # 0o220 — owner + family, w-only (additive: creates new PDF, never
+    # overwrites existing user files). Was 0o770 (rwx) which would have
+    # incorrectly triggered the consent gate.
+    permission = 0o220
 
     # Priority pre-processing: when user uploads a PDF, extract text automatically
     # so the LLM gets the content as text in the message context.

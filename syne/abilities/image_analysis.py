@@ -26,8 +26,9 @@ class ImageAnalysisAbility(Ability):
     name = "image_analysis"
     description = "Analyze and describe images using AI vision"
     version = "2.0"
-    permission = 0o555
-    operation = "r"  # read-only: image -> text
+    # 0o444 — everyone may invoke; r-only (image → text), no side effect.
+    # Was 0o555 which had x bit set — spurious under the new gate rule.
+    permission = 0o444
 
     def handles_input_type(self, input_type: str) -> bool:
         return input_type == "image"

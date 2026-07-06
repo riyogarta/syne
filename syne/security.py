@@ -29,114 +29,64 @@ logger = logging.getLogger("syne.security")
 # "blocked" users are denied before any permission check.
 
 TOOL_PERMISSIONS: dict[str, int] = {
-    # Read-only tools — need bit 4 (r). Public bits set where Rule 760/765 handles the actual gating.
-    "web_search":      0o555,
-    "web_fetch":       0o555,
-    "db_query":        0o400,
-    "file_read":       0o400,
-    "read_source":     0o400,
-    "subagent_status": 0o550,
-    "memory_search":   0o555,  # public can search allowed categories (Rule 765)
-    "memory_get_file": 0o555,  # public can retrieve attachments in Rule-765-allowed categories
-    "memory_analyze_file": 0o555,  # same gate as get_file — Rule 760/765 enforces category access
-    "check_auth":      0o700,
+    # ─── Read-only (bit r = 4, digit 4) ────────────────────────────────
+    "web_search":         0o444,  # public via Rule 765; r-only, no side effect
+    "web_fetch":          0o444,
+    "db_query":           0o400,  # owner only
+    "file_read":          0o400,
+    "read_source":        0o400,
+    "subagent_status":    0o440,  # owner + family, r-only
+    "memory_search":      0o444,  # public via Rule 765
+    "memory_get_file":    0o444,  # public via Rule 765
+    "memory_analyze_file": 0o444,  # public via Rule 765
+    "check_auth":         0o400,  # owner introspects own auth
 
-    # Additive-write tools — need bit 2 (w) for the writing class.
-    "memory_store":      0o770,
-    "memory_store_file": 0o770,
+    # ─── Additive write (bit w = 2, digit 2) ───────────────────────────
+    # These insert new rows / blobs / schedules only — no update-if-exists,
+    # no delete. If any of them ever gains destructive branching it MUST be
+    # bumped to include the x bit (see the destructive block below).
+    "memory_store":       0o220,  # owner + family
+    "memory_store_file":  0o220,
 
-    # Action / destructive tools — need bit 1 (x). All go through consent gate.
-    # Class digits below are set so the intended callers still have BOTH the
-    # r bit (to introspect what they're about to change) AND the x bit (to
-    # perform the mutation) — i.e. 7 (rwx) not 1 (x-only).
-    "exec":            0o700,  # owner only
-    "file_write":      0o700,  # owner only — can overwrite any writable path
-    "send_message":    0o770,  # owner + family
-    "send_file":       0o770,
-    "send_voice":      0o770,
-    "send_reaction":   0o771,  # public too, for group-chat reactions
-    "spawn_subagent":  0o750,  # owner rwx, family r-x
-    "manage_schedule": 0o770,
-    "memory_update":   0o770,  # owner + family (was 0o660 — missed x when op was w)
-    "memory_delete":   0o700,  # owner only (was 0o600)
-    "manage_group":    0o700,  # owner only (was 0o600)
-    "manage_user":     0o700,  # owner only (was 0o600)
-    "update_config":   0o700,  # owner only (was 0o600)
-    "update_ability":  0o700,  # owner only (was 0o600)
-    "update_soul":     0o700,  # owner only (was 0o600)
+    # ─── Action / destructive (bit x = 1, digit 1) ─────────────────────
+    # Any tool with an x bit set in ANY digit is routed through the consent
+    # gate for that class of caller. Owner digit=1 means "owner can perform
+    # the x action" — enough for the gate to fire; no need to also set r/w.
+    "exec":               0o100,  # owner only
+    "file_write":         0o100,  # owner only — can overwrite anywhere
+    "send_message":       0o110,  # owner + family
+    "send_file":          0o110,
+    "send_voice":         0o110,
+    "send_reaction":      0o111,  # public too (group reactions)
+    "spawn_subagent":     0o110,  # owner + family
+    "manage_schedule":    0o110,
+    "memory_update":      0o110,
+    "memory_delete":      0o100,
+    "manage_group":       0o100,
+    "manage_user":        0o100,
+    "update_config":      0o100,
+    "update_ability":     0o100,
+    "update_soul":        0o100,
 }
 
 
-
-# Operation type each tool performs — determines WHICH rwx bit is required.
-#   "r" = read-only (query/fetch/view)  -> needs bit 4
-#   "w" = write/modify data             -> needs bit 2
-#   "x" = action (exec/send/spawn)      -> needs bit 1
-# A caller's octal digit must have the matching bit set, else access denied.
-def needs_consent(tool_name: str, operation: str) -> bool:
+def needs_consent(access_level: str, permission: int) -> bool:
     """Return True if a tool call must go through the ya/yes consent gate.
 
-    Single rule: `operation == 'x'` triggers the gate. That's it.
+    Single rule: does the CALLER's own class digit include the x bit?
+    A digit of 1, 3, 5, or 7 (any odd digit) has the x bit set — that
+    means the caller is invoking an action that can execute / mutate /
+    destroy state, and the gate must fire. Digits 0, 2, 4, 6 have no x
+    bit, so the caller can either not invoke (0) or is limited to read
+    (4) / additive-write (2) which don't need consent.
 
-    The rwx classification IS the destructive-flag. Semantics used here:
-      - r → read state (no gate)
-      - w → additive create/append that leaves prior state intact (no gate)
-      - x → action: destructive write, external side effect, mutation, spawn,
-            or anything else the user could not easily undo (gate).
-
-    If a tool can overwrite a file, delete a memory, mutate live config, or
-    send data outside Syne, classify it op="x" and it will be gated. If a
-    tool only creates new state (a fresh document, a brand-new memory) it
-    can safely stay op="w" and skip the gate.
-
-    Consequence: the way to make a tool "consent-required" is to declare its
-    operation="x" in TOOL_OPERATIONS (or on the ability class). No separate
-    whitelist to maintain — one classification, one truth.
+    No auxiliary TOOL_OPERATIONS mapping is needed: the octal itself
+    encodes both the class matrix AND the op semantics. If a tool should
+    be gated for a class, set that class's x bit in its permission.
     """
-    return operation == "x"
+    digit = get_permission_digit(permission, access_level)
+    return bool(digit & 1)
 
-
-TOOL_OPERATIONS: dict[str, str] = {
-    # ── r: read-only, no state change ────────────────────────────────────
-    "web_search":        "r",
-    "web_fetch":         "r",
-    "db_query":          "r",
-    "file_read":         "r",
-    "read_source":       "r",
-    "subagent_status":   "r",
-    "memory_search":     "r",
-    "memory_get_file":   "r",
-    "memory_analyze_file": "r",
-    "check_auth":        "r",
-
-    # ── w: additive create only — leaves prior state intact ──────────────
-    # These insert new rows / new blobs / new schedule items. They cannot
-    # overwrite or delete anything the LLM was not itself just handed by
-    # the current turn's user. If a future implementation ever gains an
-    # "update-if-exists" branch it MUST be reclassified to "x".
-    "memory_store":      "w",
-    "memory_store_file": "w",
-
-    # ── x: action — destructive write, mutation, or external side effect ─
-    # Any tool below can either overwrite/delete state the user did not
-    # explicitly hand over this turn, or reach outside Syne entirely.
-    # Consequently these are ALL routed through the consent gate.
-    "exec":              "x",  # shell — external side effect
-    "file_write":        "x",  # can overwrite any writable path (e.g. ~/.ssh/*)
-    "send_message":      "x",  # message to any chat (send_* family; hybrid rule)
-    "send_file":         "x",
-    "send_voice":        "x",
-    "send_reaction":     "x",
-    "spawn_subagent":    "x",  # spawns background worker
-    "memory_update":     "x",  # mutates existing memory content
-    "memory_delete":     "x",  # removes a memory row
-    "manage_schedule":   "x",  # can overwrite/cancel existing schedules
-    "manage_group":      "x",  # can add/remove members, change alias
-    "manage_user":       "x",  # can add/remove/promote users
-    "update_config":     "x",  # rewrites live config keys
-    "update_ability":    "x",  # can disable/rewrite ability behavior
-    "update_soul":       "x",  # can rewrite personality/boundaries
-}
 
 def get_permission_digit(permission: int, access_level: str) -> int:
     """Extract the relevant octal digit for an access level.
@@ -175,47 +125,46 @@ def has_permission(digit: int, flag: str) -> bool:
     return False
 
 
-def check_tool_access(tool_name: str, access_level: str, permission: int = None,
-                      operation: str = None) -> tuple[bool, str]:
-    """Check if a user can use a tool based on Linux-style rwx permission bits.
+def check_tool_access(
+    tool_name: str,
+    access_level: str,
+    permission: int = None,
+    operation: str = None,  # kept for backward-compat; ignored (see docstring)
+) -> tuple[bool, str]:
+    """Check if a user can invoke a tool.
 
-    Unlike a naive ``digit != 0`` check, this honours the r/w/x semantics:
-    a tool that performs a write (w) requires bit 2, an action (x) requires
-    bit 1, a read (r) requires bit 4. This makes 0o444 (r--) genuinely
-    different from 0o555 (r-x): the former cannot invoke an action tool.
+    Simplified: the caller's own class digit must be non-zero. That's the
+    whole access decision. The specific r/w/x bit that's set decides what
+    the caller is allowed to do WITH the tool (read, write, or the
+    destructive x action) — which is later consumed by needs_consent() to
+    decide whether the ya/yes gate must fire. There's no separate
+    TOOL_OPERATIONS mapping anymore; the octal is the single source of
+    truth.
 
     Args:
-        tool_name: Name of the tool
+        tool_name: Name of the tool (used only for error/logging text)
         access_level: "owner", "family", "public", or "blocked"
         permission: Override permission (if None, look up from TOOL_PERMISSIONS)
-        operation: Operation type "r"/"w"/"x" (if None, look up from
-                   TOOL_OPERATIONS; unknown tools default to "x" = strictest)
+        operation: DEPRECATED and ignored. Kept to keep old callers passing
+                   TOOL_OPERATIONS.get(...) working during the transition.
 
     Returns:
         Tuple of (allowed, reason)
     """
+    del operation  # explicitly ignored
+
     if access_level == "blocked":
-        return False, f"Access denied: blocked users cannot use any tools."
+        return False, "Access denied: blocked users cannot use any tools."
 
     if permission is None:
         permission = TOOL_PERMISSIONS.get(tool_name, 0o700)
 
-    if operation is None:
-        operation = TOOL_OPERATIONS.get(tool_name, "x")  # unknown -> strictest
-
     digit = get_permission_digit(permission, access_level)
     if digit == 0:
-        logger.warning(f"Permission denied: {tool_name} (perm={oct(permission)}) for {access_level}")
-        return False, f"Permission denied: '{tool_name}' is not available for {access_level} users."
-
-    if not has_permission(digit, operation):
-        flag_name = {"r": "read", "w": "write", "x": "execute"}.get(operation, operation)
         logger.warning(
-            f"Permission denied: {tool_name} needs '{operation}' ({flag_name}) "
-            f"but {access_level} has digit {digit} (perm={oct(permission)})"
+            f"Permission denied: {tool_name} (perm={oct(permission)}) for {access_level}"
         )
-        return False, (f"Permission denied: '{tool_name}' requires {flag_name} access, "
-                       f"not granted to {access_level} users.")
+        return False, f"Permission denied: '{tool_name}' is not available for {access_level} users."
     return True, ""
 
 

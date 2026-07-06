@@ -4,7 +4,7 @@ import logging
 from typing import Callable, Optional
 from dataclasses import dataclass, field
 
-from ..security import check_tool_access, TOOL_PERMISSIONS, TOOL_OPERATIONS
+from ..security import check_tool_access, TOOL_PERMISSIONS
 
 logger = logging.getLogger("syne.tools.registry")
 
@@ -27,8 +27,11 @@ class Tool:
     description: str
     parameters: dict                    # JSON Schema for parameters
     handler: Callable                   # async function to execute
-    permission: int = 0o700             # Linux-style 3-digit octal (owner/family/public)
-    operation: str = "x"                # rwx op type: "r" read, "w" write, "x" action
+    # Linux-style 3-digit octal (owner/family/public). Each digit's r/w/x
+    # bits declare BOTH what that class can invoke AND how (read/additive-
+    # write/destructive-action). The x bit is what triggers the consent
+    # gate — see security.needs_consent.
+    permission: int = 0o700
     enabled: bool = True
     scrub_level: str = "aggressive"     # "aggressive" | "safe" | "none"
     # aggressive: full regex scrub (Cookie, PEM, querystring, etc.)
@@ -61,28 +64,30 @@ class ToolRegistry:
         handler: Callable,
         permission: int = 0o700,
         scrub_level: str = "aggressive",
-        operation: str = None,
+        operation: str = None,  # deprecated no-op, kept for source compat
     ):
         """Register a new tool.
 
         Args:
             permission: Linux-style 3-digit octal (owner/family/public).
-                Each digit encodes rwx: r=4(read), w=2(write), x=1(action).
-                Example: 0o750 = owner(rwx), family(r-x), public(---).
+                Each digit encodes rwx: r=4 (read), w=2 (write), x=1 (action).
+                Example: 0o110 — owner + family may perform the action; the
+                x bit in either digit triggers the consent gate for that
+                class of caller.
             scrub_level: Credential scrubbing level for tool output.
                 "aggressive" — full regex scrub (default, safest)
                 "safe" — high-confidence patterns only (for code/content output)
                 "none" — tool has its own dedicated scrubber
+            operation: DEPRECATED and ignored. The octal is now the sole
+                source of truth for both access class AND op semantics.
         """
-        if operation is None:
-            operation = TOOL_OPERATIONS.get(name, "x")  # unknown -> strictest
+        del operation  # explicit no-op
         self._tools[name] = Tool(
             name=name,
             description=description,
             parameters=parameters,
             handler=handler,
             permission=permission,
-            operation=operation,
             scrub_level=scrub_level,
         )
         self._schema_cache.clear()
@@ -106,7 +111,7 @@ class ToolRegistry:
 
         return [
             tool for tool in self._tools.values()
-            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission, tool.operation)[0]
+            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission)[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:
@@ -151,8 +156,8 @@ class ToolRegistry:
         if not tool.enabled:
             return ToolResult(f"Error: Tool '{name}' is disabled.", ok=False, error_type="permission")
 
-        # Permission check (rwx class + op bit)
-        allowed, reason = check_tool_access(name, access_level, tool.permission, tool.operation)
+        # Permission check — caller's own class digit must be non-zero.
+        allowed, reason = check_tool_access(name, access_level, tool.permission)
         if not allowed:
             logger.warning(f"Permission denied: tool={name}, access_level={access_level}, perm={oct(tool.permission)}")
             return ToolResult(f"Error: {reason}", ok=False, error_type="permission")
@@ -167,17 +172,19 @@ class ToolRegistry:
             except Exception as e:
                 logger.error(f"Approval callback error: {e}")
 
-        # ─── Consent gate (generic, op=x + destructive op=w) ───────────────
-        # Single choke point: any op=x tool and any op=w tool listed in
-        # DESTRUCTIVE_TOOLS goes through consent.check_and_hold. Held → return
-        # the prompt as a tool result so the LLM shows it to the owner.
+        # ─── Consent gate ───────────────────────────────────────────────────
+        # Single choke point: if the caller's own class digit has the x bit
+        # set, the consent gate fires. No auxiliary op mapping needed — the
+        # octal itself is the source of truth. Held → return prompt as an
+        # ok=True result so the LLM surfaces the "balas ya" message to owner.
         from ..consent import check_and_hold as _consent_gate
         _agent = None
         if conv is not None and getattr(conv, "_mgr", None) is not None:
             _agent = getattr(conv._mgr, "_agent", None)
         gate_action, gate_prompt = await _consent_gate(
             conv=conv, agent=_agent,
-            tool_name=name, args=arguments, op=tool.operation,
+            tool_name=name, args=arguments,
+            access_level=access_level, permission=tool.permission,
             scheduled=scheduled,
         )
         if gate_action == "held":
