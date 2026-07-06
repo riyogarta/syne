@@ -1594,15 +1594,13 @@ class SyneAgent:
     def _last_reply_token(content: str) -> str:
         """Extract the user's actual reply token from a message.
 
-        Channels prepend an 'untrusted metadata' block (conversation_label, etc.)
-        to every user message. A naive ``.strip().lower()`` therefore never equals
-        "ya"/"yes" because the content starts with that block. We take the LAST
-        non-empty line (the human's actual typed text) and normalize it.
+        Thin wrapper preserved for callers still routing through the agent.
+        Real implementation lives in consent.last_reply_token so the
+        deterministic-bypass path in conversation.chat() sees identical
+        parsing without a cross-import to agent.py.
         """
-        if not content:
-            return ""
-        lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
-        return (lines[-1].lower() if lines else "")
+        from .consent import last_reply_token as _lrt
+        return _lrt(content)
 
     def _consent_confirmed(self, conv, command: str) -> bool:
         """STRICT consent confirm for exec: only 'ya'/'yes', bound to THIS
@@ -1674,6 +1672,17 @@ class SyneAgent:
                 self._consent.grant(ckey)  # user said ya/yes → grant + proceed
             else:
                 import time as _time
+                # Store the FULL pending payload (not just hash) so the
+                # deterministic bypass in conversation.chat() can re-execute
+                # the command directly on a valid ya/yes reply — no need for
+                # the LLM to re-issue the tool call. This closes the
+                # hallucination window where the LLM either forgets to
+                # re-call, calls with slightly different args, or gets
+                # injected instructions telling it to skip the re-issue.
+                active_conv._pending_consent_op = "exec"
+                active_conv._pending_consent_command = command
+                active_conv._pending_consent_timeout = int(timeout) if timeout else 30
+                active_conv._pending_consent_workdir = workdir or ""
                 active_conv._pending_consent_hash = content_hash(command)
                 active_conv._pending_consent_at = _time.time()
                 return ("⚠️ Aksi exec butuh konfirmasi (consent). Balas *ya* untuk mengizinkan:\n"

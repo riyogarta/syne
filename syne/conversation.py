@@ -313,6 +313,18 @@ class Conversation:
         self._pending_tainted_exec: Optional[str] = None       # full command string
         self._pending_tainted_exec_hash: str = ""              # sha256[:12] for matching
         self._pending_tainted_exec_at: float = 0.0             # monotonic set-time
+        # Consent-system pending state — populated by agent._tool_exec when it
+        # returns a "balas ya" prompt. The deterministic bypass at the top of
+        # chat() checks these on every turn and, if the user replied ya/yes,
+        # grants + runs the pending payload WITHOUT invoking the LLM. Immune
+        # to LLM hallucination/injection: the LLM never sees or decides on
+        # the confirmation itself.
+        self._pending_consent_op: Optional[str] = None         # "exec" | future ops
+        self._pending_consent_command: Optional[str] = None    # full payload
+        self._pending_consent_timeout: int = 30
+        self._pending_consent_workdir: str = ""
+        self._pending_consent_hash: str = ""
+        self._pending_consent_at: float = 0.0
 
     async def _load_taint_from_db(self) -> None:
         """Load persisted taint state from the sessions row.
@@ -725,6 +737,134 @@ class Conversation:
         logger.debug(f"chat_kwargs from model_params: {kwargs}")
         return kwargs
 
+    def _clear_pending_consent(self) -> None:
+        """Drop any pending consent state on this conversation."""
+        self._pending_consent_op = None
+        self._pending_consent_command = None
+        self._pending_consent_timeout = 30
+        self._pending_consent_workdir = ""
+        self._pending_consent_hash = ""
+        self._pending_consent_at = 0.0
+
+    async def _maybe_execute_pending_consent(
+        self, user_message: str,
+    ) -> Optional[str]:
+        """Deterministic consent-confirmation bypass.
+
+        If a pending consent exists on this conversation AND the current user
+        message is a strict "ya"/"yes" (after stripping channel metadata), we:
+          1. Grant the ConsentStore key for this exact payload.
+          2. Dispatch the pending command via the tool registry directly.
+          3. Save the turn (user reply + tool result) to the transcript.
+          4. Return the result to the caller.
+
+        The LLM is NEVER invoked for this turn. That's the whole point — the
+        confirmation decision must not depend on model interpretation of the
+        user's reply. Returns None (no bypass) when:
+          - no pending consent
+          - pending is older than 120 s (matches the confirm TTL used elsewhere)
+          - reply is not exactly ya/yes
+          - security.consent_enabled is False
+          - the agent/tool wiring is unavailable (fail-safe: never fail-open,
+            drop the pending and hand back to LLM path)
+        """
+        import time as _time
+
+        pending_op = self._pending_consent_op
+        pending_cmd = self._pending_consent_command
+        pending_at = self._pending_consent_at
+        if not pending_op or not pending_cmd or not pending_at:
+            return None
+        # TTL 120s — same as sudo-guard, keeps confirm windows uniform.
+        if _time.time() - pending_at > 120:
+            self._clear_pending_consent()
+            return None
+
+        from .consent import last_reply_token, make_key, DEFAULT_CONSENT_ENABLED
+        token = last_reply_token(user_message)
+        if token not in ("ya", "yes"):
+            return None
+
+        # Feature flag last, so an accidentally-lingering pending on a
+        # consent-off instance doesn't intercept a legit user message.
+        try:
+            from .db.models import get_config as _get_config
+            enabled = await _get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
+        except Exception:
+            enabled = DEFAULT_CONSENT_ENABLED
+        if not enabled:
+            return None
+
+        agent = getattr(self._mgr, "_agent", None) if self._mgr else None
+        if agent is None:
+            logger.error(
+                f"Consent bypass: no agent ref via manager for session {self.session_id}; "
+                "clearing pending and falling back to LLM path"
+            )
+            self._clear_pending_consent()
+            return None
+
+        access_level = self.user.get("access_level", "public")
+
+        # Persist the user's "ya" so the transcript reflects reality even
+        # though the LLM never processed this turn. Do it BEFORE running the
+        # command so that an exec crash doesn't lose the confirmation record.
+        try:
+            await self.save_message("user", user_message)
+        except Exception as e:
+            logger.warning(f"Consent bypass: save_message('user') failed: {e}")
+
+        if pending_op == "exec":
+            from .consent import make_key
+            sid = str(self.session_id)
+            uid = str(self.user.get("id", ""))
+            ckey = make_key(uid, sid, op="exec", target="shell", payload=pending_cmd)
+            # Grant BEFORE dispatch so agent._tool_exec's is_granted() check
+            # short-circuits to the run path.
+            agent._consent.grant(ckey)
+            cmd_hash = self._pending_consent_hash
+            cmd_timeout = self._pending_consent_timeout or 30
+            cmd_workdir = self._pending_consent_workdir or ""
+            # Clear pending BEFORE running so a slow exec + a second incoming
+            # "ya" can't double-fire.
+            self._clear_pending_consent()
+            logger.info(
+                f"Consent bypass: granting + running exec hash={cmd_hash} "
+                f"(session={self.session_id}, user={uid})"
+            )
+            try:
+                tool_result = await self.tools.execute(
+                    "exec",
+                    {"command": pending_cmd, "timeout": cmd_timeout, "workdir": cmd_workdir},
+                    access_level,
+                    provider=self.provider,
+                )
+                result_str = str(tool_result)
+            except Exception as e:
+                logger.error(f"Consent bypass: exec dispatch failed: {e}", exc_info=True)
+                result_str = f"Error running command after consent: {e}"
+
+            # Save as a tool-role message so subsequent LLM turns see the
+            # bypass in-band (not as an out-of-nowhere assistant reply).
+            tool_meta = {
+                "tool_name": "exec",
+                "tool_call_id": f"consent_bypass_{cmd_hash}",
+            }
+            try:
+                await self.save_message("tool", result_str, metadata=tool_meta)
+            except Exception as e:
+                logger.warning(f"Consent bypass: save_message('tool') failed: {e}")
+
+            head = f"✅ Consent granted (`{cmd_hash}`). Ran: `{pending_cmd[:200]}`"
+            return f"{head}\n\n{result_str}"
+
+        # Unknown op — treat as no-bypass so the LLM path can decide.
+        logger.warning(
+            f"Consent bypass: unknown pending op {pending_op!r}; clearing"
+        )
+        self._clear_pending_consent()
+        return None
+
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Process a user message and return agent response.
 
@@ -732,6 +872,16 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
+        # ─── Deterministic consent-confirmation bypass ───
+        # If this turn is a valid ya/yes reply to a pending consent prompt,
+        # grant + execute the pending command directly. The LLM is not
+        # consulted — that's the whole point. Immune to LLM hallucination,
+        # injected "user said ok" claims, or the LLM simply forgetting to
+        # re-issue the tool call.
+        _bypass_response = await self._maybe_execute_pending_consent(user_message)
+        if _bypass_response is not None:
+            return _bypass_response
+
         # Wait for lock with timeout — prevents permanent queue if previous request hangs
         locked = self._lock.locked()
         if locked:

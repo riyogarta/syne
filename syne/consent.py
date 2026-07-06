@@ -49,6 +49,25 @@ def content_hash(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8", errors="replace")).hexdigest()[:12]
 
 
+def last_reply_token(content: str) -> str:
+    """Extract the user's actual reply token from a raw message body.
+
+    Channels prepend an "untrusted metadata" block (conversation_label, sender
+    info, group name, etc.) to every user message. A naive ``.strip().lower()``
+    therefore never equals "ya"/"yes" because the content starts with that
+    block. We take the LAST non-empty line — the human's actual typed text —
+    and lowercase it.
+
+    This lives in consent.py (not agent.py) because both the LLM-mediated
+    confirmation path and the deterministic bypass in conversation.chat()
+    need identical parsing. Duplicating it in two places invites drift.
+    """
+    if not content:
+        return ""
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    return (lines[-1].lower() if lines else "")
+
+
 def make_key(
     user_id: str,
     session_id: str,
