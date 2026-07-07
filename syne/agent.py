@@ -1556,9 +1556,16 @@ class SyneAgent:
         if not conv or not getattr(conv, "_message_cache", None):
             return False
         user_msgs = [m for m in conv._message_cache[-6:] if m.role == "user"]
+        # Channels prepend an untrusted-metadata block to every user message,
+        # so a naive .strip().lower() never equals "ya". Use last_reply_token
+        # (the shared parser) to pull the human actual last line. This is the
+        # same fix consent.py documents. agent.py was still doing the naive
+        # compare, which silently swallowed every confirmation whose message
+        # carried a metadata preamble.
+        from .consent import last_reply_token as _lrt
         for msg in reversed(user_msgs[-3:]):
-            content = (msg.content or "").strip().lower()
-            if content in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
+            token = _lrt(msg.content or "")
+            if token in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
                 self._pending_exec_command = None
                 self._pending_exec_at = 0.0
                 return True
