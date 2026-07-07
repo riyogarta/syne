@@ -33,6 +33,8 @@ class Tool:
     # gate — see security.needs_consent.
     permission: int = 0o700
     enabled: bool = True
+    hidden: bool = False                # callable but omitted from LLM schema
+                                        # (used for deprecated aliases, e.g. exec->shell)
     scrub_level: str = "aggressive"     # "aggressive" | "safe" | "none"
     # aggressive: full regex scrub (Cookie, PEM, querystring, etc.)
     # safe: high-confidence patterns only (JWT, sk-*, bot tokens, etc.)
@@ -64,6 +66,7 @@ class ToolRegistry:
         handler: Callable,
         permission: int = 0o700,
         scrub_level: str = "aggressive",
+        hidden: bool = False,
         operation: str = None,  # deprecated no-op, kept for source compat
     ):
         """Register a new tool.
@@ -89,6 +92,7 @@ class ToolRegistry:
             handler=handler,
             permission=permission,
             scrub_level=scrub_level,
+            hidden=hidden,
         )
         self._schema_cache.clear()
 
@@ -111,7 +115,8 @@ class ToolRegistry:
 
         return [
             tool for tool in self._tools.values()
-            if tool.enabled and check_tool_access(tool.name, access_level, tool.permission)[0]
+            if tool.enabled and not tool.hidden
+            and check_tool_access(tool.name, access_level, tool.permission)[0]
         ]
 
     def to_openai_schema(self, access_level: str = "public") -> list[dict]:

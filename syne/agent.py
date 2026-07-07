@@ -832,31 +832,46 @@ class SyneAgent:
             permission=SEND_VOICE_TOOL["permission"],
         )
 
-        # ── Exec (Core) ──
-        self.tools.register(
-            name="exec",
-            description="Run a shell command. Returns stdout, stderr, exit code.",
-            parameters=self._add_node_param({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "Shell command to execute (bash)",
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds (default 30, max 300)",
-                    },
-                    "workdir": {
-                        "type": "string",
-                        "description": "Working directory (default: home directory)",
-                    },
+        # ── Shell (Core) ──
+        # Primary name is "shell" (unambiguous vs Python's exec()). The old
+        # "exec" name is kept as a HIDDEN alias below: still callable (so any
+        # in-flight session or task that says "exec" keeps working) but omitted
+        # from the LLM tool schema so the model converges on "shell".
+        _shell_params = self._add_node_param({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute (bash)",
                 },
-                "required": ["command"],
-            }),
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds (default 30, max 300)",
+                },
+                "workdir": {
+                    "type": "string",
+                    "description": "Working directory (default: home directory)",
+                },
+            },
+            "required": ["command"],
+        })
+        self.tools.register(
+            name="shell",
+            description="Run a shell command. Returns stdout, stderr, exit code.",
+            parameters=_shell_params,
             handler=self._tool_exec,
             permission=0o700,
-            scrub_level="none",  # exec has dedicated redact_exec_output()
+            scrub_level="none",  # dedicated redact_exec_output()
+        )
+        # Deprecated alias — hidden from schema, still dispatchable.
+        self.tools.register(
+            name="exec",
+            description="[deprecated alias of 'shell'] Run a shell command.",
+            parameters=_shell_params,
+            handler=self._tool_exec,
+            permission=0o700,
+            scrub_level="none",
+            hidden=True,
         )
 
         # Memory search tool

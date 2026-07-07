@@ -145,25 +145,25 @@ syne/
 
 ### How to read logs
 ```
-exec(command="tail -100 ~/.log-syne/syne.log")           — last 100 log lines
-exec(command="grep ERROR ~/.log-syne/syne.log | tail -20") — recent errors
-exec(command="ls -la ~/.log-syne/")                       — list all log files (rotated: .1, .2, .3)
+shell(command="tail -100 ~/.log-syne/syne.log")           — last 100 log lines
+shell(command="grep ERROR ~/.log-syne/syne.log | tail -20") — recent errors
+shell(command="ls -la ~/.log-syne/")                       — list all log files (rotated: .1, .2, .3)
 ```
 
 ### Common issues and diagnosis
 
 **Bot not responding**
-1. Check service: `exec(command="systemctl is-active syne")`
-2. Check logs for crash: `exec(command="journalctl -u syne --no-pager -n 30")`
+1. Check service: `shell(command="systemctl is-active syne")`
+2. Check logs for crash: `shell(command="journalctl -u syne --no-pager -n 30")`
 3. Common causes: OAuth token expired, DB connection failed, provider API down
 
 **LLM returns empty/error**
 1. Check provider health: look for `AUTH_FAILURE`, `429`, `500` in logs
-2. Check token expiry: `exec(command="journalctl -u syne --no-pager | grep -i 'token\\|oauth\\|auth' | tail -10")`
+2. Check token expiry: `shell(command="journalctl -u syne --no-pager | grep -i 'token\\|oauth\\|auth' | tail -10")`
 3. Fallback: suggest switching provider via `update_config`
 
 **Memory not working**
-1. Check embedding service: `exec(command="journalctl -u syne --no-pager | grep -i embed | tail -10")`
+1. Check embedding service: `shell(command="journalctl -u syne --no-pager | grep -i embed | tail -10")`
 2. Check memory count: `db_query(query="SELECT COUNT(*) FROM memory")`
 3. Check if auto_capture is on: `update_config(action='get', key='memory.auto_capture')`
 
@@ -176,7 +176,7 @@ exec(command="ls -la ~/.log-syne/")                       — list all log files
 **Scheduled task didn't run**
 1. Check scheduler: `db_query(query="SELECT id, name, next_run_at, status FROM scheduled_tasks ORDER BY next_run_at DESC LIMIT 10")`
 2. Check misfire grace: task may have been skipped if bot was offline too long
-3. Check logs: `exec(command="journalctl -u syne --no-pager | grep -i scheduler | tail -10")`
+3. Check logs: `shell(command="journalctl -u syne --no-pager | grep -i scheduler | tail -10")`
 
 **Rate limited user**
 1. Check current limits: `update_config(action='get', key='ratelimit.max_requests')`
@@ -186,8 +186,8 @@ exec(command="ls -la ~/.log-syne/")                       — list all log files
 ## Service Management
 
 The bot runs as a systemd service called `syne`.
-- Status: `exec(command="systemctl status syne")`
-- Logs: `exec(command="journalctl -u syne --no-pager -n 50")`
+- Status: `shell(command="systemctl status syne")`
+- Logs: `shell(command="journalctl -u syne --no-pager -n 50")`
 - **Do NOT restart the service yourself** — ask the owner to run `syne restart` from CLI.
 - After config changes via `update_config`, most settings take effect immediately
   (no restart needed). Exceptions: provider changes may need a new session.
@@ -247,7 +247,7 @@ https://github.com/riyogarta/syne/issues/new
 - **Suggest severity**: critical (system down), high (feature broken), medium (annoying),
   low (cosmetic/nice-to-have)
 - **Don't spam** — batch related issues into one report if they share a root cause
-- **Include your diagnosis** — you have read_source and exec access, use them to investigate
+- **Include your diagnosis** — you have read_source and shell access, use them to investigate
   before reporting. A bug report with diagnosis is 10x more valuable.
 - **Feature suggestions should include trade-offs** — what it costs vs what it gains
 """

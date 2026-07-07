@@ -37,6 +37,7 @@ _CORE_TOOLS = {
     "memory_get_file",
     "memory_analyze_file",
     "exec",
+    "shell",
     "db_query",
     # Sub-agent delegation is a judgment call Molt makes from task complexity,
     # not a keyword the user must type. Always available; Molt decides when.
@@ -48,7 +49,7 @@ _TOOL_SIGNALS = {
     # signal patterns (ID + EN) → tool names
     r"cari|search|internet|web|browse|google|lookup|find online": {"web_search", "web_fetch"},
     r"baca|read|buka|open|tulis|write|simpan|save|\bfile\b": {"file_read", "file_write"},
-    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"exec"},
+    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"shell"},
     r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
     # Note: memory_store / memory_store_file / memory_get_file /
     # memory_analyze_file are now in _CORE_TOOLS — always available
@@ -166,7 +167,7 @@ logger = logging.getLogger("syne.conversation")
 try:
     from .gateway.protocol import NODE_TOOLS as _NODE_TOOLS
 except ImportError:
-    _NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
+    _NODE_TOOLS = frozenset({"exec", "shell", "file_read", "file_write", "read_source"})
 
 # ── Time context helpers (module-level, not recreated per call) ──
 
@@ -1451,7 +1452,7 @@ class Conversation:
             guide_key = "config"
         elif tool_name == "update_ability" and args.get("action") == "create":
             guide_key = "ability_create"
-        elif tool_name in ("read_source", "exec"):
+        elif tool_name in ("read_source", "exec", "shell"):
             guide_key = "system"
 
         if not guide_key or guide_key in injected:
@@ -1886,7 +1887,7 @@ class Conversation:
 
                 # Anti-hallucination: flag exec results with non-zero exit code
                 # The LLM sometimes claims success despite error output.
-                if name == "exec" and result.ok:
+                if name in ("exec", "shell") and result.ok:
                     import re as _re
                     _ec_match = _re.search(r'exit_code:\s*(\d+)', result.content)
                     if _ec_match and _ec_match.group(1) != "0":

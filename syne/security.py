@@ -68,7 +68,8 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "manage_schedule":    0o660,  # add/update/delete schedule entry — additive-ish
 
     # ─── Action / destructive (rwx = 7, includes x bit → gate fires) ──
-    "exec":               0o700,  # owner only
+    "shell":              0o700,  # owner only (primary name)
+    "exec":               0o700,  # owner only (deprecated alias of shell)
     "file_write":         0o700,  # owner only — can overwrite anywhere
     "memory_delete":      0o700,  # owner only
     "memory_update":      0o770,  # owner + family

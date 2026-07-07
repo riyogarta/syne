@@ -503,7 +503,7 @@ class SubAgentManager:
         # NO safety check at all (the stale consent.py comment claiming
         # "sub-agent already runs check_command_safety" was false — it never
         # did). Now it does, via the same shell_guard as the main agent.
-        if name == "exec":
+        if name in ("exec", "shell"):
             from .shell_guard import analyze, Verdict
             from .shell_exec import run_shell, Outcome
             from .db.connection import get_pool
