@@ -1732,6 +1732,16 @@ class SyneAgent:
             redact_fn=(None if is_owner_dm else redact_exec_output),
         )
 
+        if _res.outcome == Outcome.DRY_RUN:
+            _v = _res.verdict.value.upper() if _res.verdict else "?"
+            _icon = {"ALLOW": "\u2705", "CONSENT": "\u26A0\uFE0F", "HARD_DENY": "\u26D4"}.get(_v, "\u2753")
+            _cand = f"\nUnrecognized: {', '.join(_res.candidates)}" if _res.candidates else ""
+            return (
+                f"\U0001F9EA DRY-RUN (not executed)\n"
+                f"{_icon} Verdict: {_v}\n"
+                f"Reason: {_res.reason}{_cand}"
+            )
+
         if _res.outcome == Outcome.DENIED:
             _cand = f" (unrecognized: {', '.join(_res.candidates)})" if _res.candidates else ""
             logger.warning(f"shell_guard DENIED: {command[:100]} — {_res.reason}")
