@@ -113,6 +113,20 @@ _DANGER_SIGNALS: list[tuple[str, "re.Pattern[str]"]] = [
     ("sudo / privilege escalation", re.compile(r'\bsudo\b|\bsu\b\s')),
     ("background/detach (&)", re.compile(r'&\s*$')),
     ("write flag on normally-read tool", re.compile(r'\bgit\b[^|;&]*\b(push|reset\s+--hard|clean\s+-\S*f)')),
+    # mv touching a system dir, /tmp, or /dev (incl. /dev/null = destroy).
+    # Match a system path ANYWHERE in the mv command: moving INTO them
+    # (overwrite system file) and OUT of them (removing a system file) are
+    # both worth a conscious Yes.
+    ("mv touches system dir / /tmp / /dev",
+     re.compile(r'\bmv\b[^|;&]*\s(/etc|/usr|/bin|/sbin|/boot|/lib|/lib64|/sys|/proc|/dev|/root|/opt|/var|/tmp)(/|\s|$)')),
+    # cp with force flag (explicit overwrite intent).
+    ("cp force-overwrite (-f)",
+     re.compile(r'\bcp\b[^|;&]*\s-\S*f')),
+    # cp writing into a system dir (overwriting a system file). Note: cp
+    # overwriting a plain file in the working dir is NOT detectable from the
+    # command string alone and is deliberately allowed (low risk).
+    ("cp into system dir",
+     re.compile(r'\bcp\b[^|;&]*\s(/etc|/usr|/bin|/sbin|/boot|/lib|/lib64|/sys|/proc|/dev|/root|/opt|/var)(/|\s|$)')),
 ]
 
 
@@ -140,6 +154,10 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     "uname", "hostname", "lscpu", "lsblk", "systemctl", "journalctl",
     # misc common
     "tar", "gzip", "gunzip", "zip", "unzip", "base64", "jq", "tee",
+    # filesystem create/move/copy — safe by default; mv/cp escalate to CONSENT
+    # via danger-signals when they touch system dirs / /tmp / /dev or force-
+    # overwrite (see _DANGER_SIGNALS). touch/mkdir have no escalation.
+    "touch", "mkdir", "mv", "cp",
     # privilege escalation — allowlisted so they resolve to CONSENT (via the
     # sudo danger-signal) rather than an implicit unknown-binary HARD_DENY.
     # A conscious Yes is the right gate for sudo; but note haram patterns are
