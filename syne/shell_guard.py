@@ -201,6 +201,8 @@ def _check_danger(segment_norm: str) -> Optional[str]:
 def analyze(
     command: str,
     extra_allow: Optional[Iterable[str]] = None,
+    extra_deny_bins: Optional[Iterable[str]] = None,
+    extra_deny_patterns: Optional[Iterable[str]] = None,
 ) -> Analysis:
     """Classify a shell command. Pure, deterministic, fail-closed.
 
@@ -220,7 +222,20 @@ def analyze(
     if extra_allow:
         allow |= {str(b).strip().rsplit('/', 1)[-1] for b in extra_allow if str(b).strip()}
 
+    deny_bins = {str(b).strip().lower().rsplit('/', 1)[-1]
+                 for b in (extra_deny_bins or []) if str(b).strip()}
+    deny_patterns = [str(pat).strip().lower()
+                     for pat in (extra_deny_patterns or []) if str(pat).strip()]
+
     normalized = _normalize(command)
+
+    # ── Runtime DENYLIST patterns — checked with the hardcoded haram set,
+    #    BEFORE allowlist, so they cannot be overridden. Substring match on the
+    #    normalized command (owner writes these deliberately). ──
+    for pat in deny_patterns:
+        if pat in normalized:
+            return Analysis(Verdict.HARD_DENY, f"denylist pattern: {pat}",
+                            segments=[normalized])
 
     # ── 1. DENYLIST-HARAM on the WHOLE command first (independent gate) ──
     haram = _check_haram(normalized)
@@ -261,6 +276,13 @@ def analyze(
             # tokenize failed OR no binary → fail-closed
             verdict = _stricter(verdict, Verdict.HARD_DENY)
             reasons.append(f"fail-closed: unparseable segment [{seg_norm}]")
+            continue
+
+        # runtime denylist by binary name — checked BEFORE allowlist so an
+        # allowlisted duplicate can never save a denied binary.
+        if binary.lower() in deny_bins:
+            verdict = _stricter(verdict, Verdict.HARD_DENY)
+            reasons.append(f"denylist binary '{binary}' [{seg_norm}]")
             continue
 
         known = binary in allow

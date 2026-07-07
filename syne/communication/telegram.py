@@ -204,6 +204,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
+        self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
         self.app.add_handler(CommandHandler("nodes", self._cmd_nodes))
         self.app.add_handler(CommandHandler("quit", self._cmd_quit))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
@@ -287,6 +288,7 @@ class TelegramChannel:
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("backup", "Backup database (owner only)"),
             BotCommand("allowlist", "Manage shell command allowlist (owner only)"),
+            BotCommand("denylist", "Manage shell command denylist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("clear", "Clear current conversation"),
@@ -3451,6 +3453,88 @@ Or just send me a message!"""
         await update.message.reply_text(
             "Usage:\n`/allowlist` — list\n`/allowlist add <bin>`\n`/allowlist rm <bin>`\n"
             "`/allowlist reject <bin>`", parse_mode="Markdown")
+
+    async def _cmd_denylist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manage the shell_guard runtime denylist (owner only).
+
+        Usage:
+          /denylist                    → show denied binaries + patterns
+          /denylist add <bin>          → hard-deny a binary (exact name; safe)
+          /denylist addpat <pattern>   → hard-deny a substring pattern (powerful)
+          /denylist rm <entry>         → remove a denylist entry
+
+        Denylist is checked BEFORE the allowlist, so entries here CANNOT be
+        overridden by /allowlist. Use 'add' for a whole binary (e.g. nmap);
+        use 'addpat' for a dangerous flag/substring (e.g. --no-preserve-root).
+        Patterns match anywhere in the command — be precise to avoid over-
+        blocking (a pattern 'rm' would also hit 'chmod', 'format', etc).
+        """
+        from ..db.connection import get_pool
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage the shell denylist.")
+            return
+
+        parts = update.message.text.split(maxsplit=2)
+        sub = parts[1].strip().lower() if len(parts) > 1 else None
+        arg = parts[2].strip() if len(parts) > 2 else None
+
+        try:
+            pool = get_pool()
+        except Exception as e:
+            await update.message.reply_text(f"❌ DB unavailable: {e}")
+            return
+
+        if sub is None:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT entry, kind FROM shell_denylist ORDER BY kind, entry")
+            bins = [r["entry"] for r in rows if r["kind"] == "binary"]
+            pats = [r["entry"] for r in rows if r["kind"] == "pattern"]
+            lines = ["\U0001F6D1 **Shell denylist (runtime)**\n"]
+            lines.append("*Denied binaries:*")
+            lines += [f"  \u2022 `{b}`" for b in bins] or ["  _(none)_"]
+            lines.append("\n*Denied patterns:*")
+            lines += [f"  \u2022 `{p}`" for p in pats] or ["  _(none)_"]
+            lines.append("\nAdd: `/denylist add <bin>` or `/denylist addpat <pattern>`")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        if sub == "add" and arg:
+            entry = arg.split()[0].rsplit("/", 1)[-1].lower()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO shell_denylist (entry, kind, added_by, note) "
+                    "VALUES ($1,'binary','owner','via /denylist') ON CONFLICT (entry) DO NOTHING", entry)
+            await update.message.reply_text(
+                f"\U0001F6AB `{entry}` hard-denied (binary). Cannot run, cannot be allowlisted.",
+                parse_mode="Markdown")
+            return
+
+        if sub in ("addpat", "addpattern") and arg:
+            entry = arg.strip().lower()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO shell_denylist (entry, kind, added_by, note) "
+                    "VALUES ($1,'pattern','owner','via /denylist') ON CONFLICT (entry) DO NOTHING", entry)
+            await update.message.reply_text(
+                f"\U0001F6AB pattern `{entry}` hard-denied (substring). "
+                "Any command containing it is blocked.", parse_mode="Markdown")
+            return
+
+        if sub in ("rm", "remove", "del") and arg:
+            entry = arg.strip().lower()
+            async with pool.acquire() as conn:
+                res = await conn.execute("DELETE FROM shell_denylist WHERE entry=$1", entry)
+            await update.message.reply_text(
+                (f"\U0001F5D1\uFE0F `{entry}` removed from denylist." if res.endswith("1")
+                 else f"`{entry}` was not in the denylist."), parse_mode="Markdown")
+            return
+
+        await update.message.reply_text(
+            "Usage:\n`/denylist` — list\n`/denylist add <bin>`\n"
+            "`/denylist addpat <pattern>`\n`/denylist rm <entry>`", parse_mode="Markdown")
 
     async def _cmd_consent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /consent command — toggle the consent gate on/off with inline buttons."""

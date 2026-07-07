@@ -75,6 +75,23 @@ async def _load_runtime_allowlist(db_pool) -> set[str]:
         return set()
 
 
+async def _load_runtime_denylist(db_pool) -> tuple[set[str], list[str]]:
+    """Fetch (binary_denies, pattern_denies) from shell_denylist. Fail-safe:
+    on error return empty — a DB hiccup must not silently DROP a deny (that
+    would widen access), but it also cannot invent one. We log loudly."""
+    if db_pool is None:
+        return set(), []
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("SELECT entry, kind FROM shell_denylist")
+        bins = {r["entry"] for r in rows if r["kind"] == "binary" and r["entry"]}
+        pats = [r["entry"] for r in rows if r["kind"] == "pattern" and r["entry"]]
+        return bins, pats
+    except Exception as e:
+        logger.warning(f"denylist load failed: {e}")
+        return set(), []
+
+
 async def _record_candidates(db_pool, candidates: list[str], sample: str, context: str) -> None:
     """Upsert unknown binaries into shell_allowlist_candidates for owner review.
     Best-effort: a failure here must never change the security decision."""
@@ -153,7 +170,9 @@ async def run_shell(
     # ── Untrusted source (llm/subagent): the guard is mandatory. ──
     try:
         extra = await _load_runtime_allowlist(db_pool)
-        result = analyze(command, extra_allow=extra)
+        deny_bins, deny_pats = await _load_runtime_denylist(db_pool)
+        result = analyze(command, extra_allow=extra,
+                         extra_deny_bins=deny_bins, extra_deny_patterns=deny_pats)
     except Exception as e:
         # Guard itself failed → fail-closed, never execute.
         logger.error(f"shell_guard raised (fail-closed to DENY): {e}")

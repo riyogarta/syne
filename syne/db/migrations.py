@@ -365,6 +365,28 @@ async def _m15_shell_allowlist_tables(conn) -> None:
     )
 
 
+async def _m16_shell_denylist_table(conn) -> None:
+    """Create shell_denylist for the shell_guard runtime denylist (memory 54511
+    'update with the times': hard-deny a newly-discovered dangerous command
+    without waiting for a release).
+
+    Entries are checked BEFORE the allowlist, so a denylist row can never be
+    overridden by an allowlist entry. Two kinds:
+      * kind='binary'  — exact binary-name match (safe; e.g. deny 'nmap').
+      * kind='pattern' — substring match on the normalized command (powerful;
+                         e.g. deny '--no-preserve-root'). Owner-authored.
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS shell_denylist (
+            entry     TEXT PRIMARY KEY,
+            kind      TEXT NOT NULL DEFAULT 'binary',
+            added_by  TEXT,
+            added_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            note      TEXT
+        )
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -381,6 +403,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (13, _m13_seed_consent_config, "transactional"),
     (14, _m14_drop_tainted_columns, "transactional"),
     (15, _m15_shell_allowlist_tables, "transactional"),
+    (16, _m16_shell_denylist_table, "transactional"),
 ]
 
 
