@@ -319,6 +319,52 @@ async def _m13_seed_consent_config(conn) -> None:
     """)
 
 
+async def _m15_shell_allowlist_tables(conn) -> None:
+    """Create shell_allowlist + shell_allowlist_candidates for the shell_guard
+    security parser (design: memory 54510).
+
+    shell_allowlist: binaries the OWNER has explicitly approved for shell
+    execution. This is the ONLY thing that opens the default-deny gate at
+    runtime (the hardcoded DEFAULT_ALLOWLIST in shell_guard.py is the release
+    floor). Rows are added via /add-allowlist (owner-only Telegram command).
+    `hits` counts real uses so proven entries can later be promoted into the
+    hardcoded floor in a future release.
+
+    shell_allowlist_candidates: unknown binaries that got HARD_DENY'd, parked
+    here for the owner to review and promote. Deduplicated by binary; each
+    sighting bumps seen_count + last_seen_at and keeps a sample command for
+    context so the owner isn't approving blind.
+
+    Both tables live only in migrations (schema.sql of a later release will
+    carry them for fresh installs — dual-path invariant). IF NOT EXISTS keeps
+    this idempotent.
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS shell_allowlist (
+            bin_name    TEXT PRIMARY KEY,
+            added_by    TEXT,
+            added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+            note        TEXT,
+            hits        BIGINT NOT NULL DEFAULT 0
+        )
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS shell_allowlist_candidates (
+            bin_name       TEXT PRIMARY KEY,
+            first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+            last_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            seen_count     BIGINT NOT NULL DEFAULT 1,
+            sample_command TEXT,
+            context        TEXT,
+            status         TEXT NOT NULL DEFAULT 'pending'
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_shell_cand_status "
+        "ON shell_allowlist_candidates (status, last_seen_at DESC)"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -334,6 +380,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (12, _m12_add_kg_relations_tainted, "transactional"),
     (13, _m13_seed_consent_config, "transactional"),
     (14, _m14_drop_tainted_columns, "transactional"),
+    (15, _m15_shell_allowlist_tables, "transactional"),
 ]
 
 
