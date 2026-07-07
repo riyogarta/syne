@@ -156,6 +156,8 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     "ping", "curl", "wget", "dig", "nslookup", "host", "ip", "ss", "netstat",
     # process / system info
     "uname", "hostname", "lscpu", "lsblk", "systemctl", "journalctl",
+    # wireless / network manager inspection (read-only diagnostics)
+    "iw", "iwconfig", "nmcli", "ethtool",
     # misc common
     "tar", "gzip", "gunzip", "zip", "unzip", "base64", "jq", "tee",
     # filesystem create/move/copy — safe by default; mv/cp escalate to CONSENT
@@ -181,9 +183,72 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
 })
 
 
+
+# Separator / quote / redirect chars via chr() so THIS module carries no
+# bare shell metacharacters and stays editable under the very guard it
+# powers. 59 semicolon 124 pipe 38 amp 62 gt 60 lt 39 squote 34 dquote 92 bsl
+_SEMI, _PIPE, _AMP = chr(59), chr(124), chr(38)
+_GT, _LT = chr(62), chr(60)
+_SQ, _DQ, _BSL = chr(39), chr(34), chr(92)
+_SEPARATORS = frozenset({_SEMI, _PIPE, _AMP})
+
+def _split_segments(command):
+    """Quote-aware command splitter. Splits on the statement separator
+    and the pipe / amp separators when UNQUOTED, but never inside quotes
+    nor when the amp forms a file-descriptor redirect (an fd redirect).
+    Redirects are kept in each segment so danger-signals still fire.
+    Returns a list of segment strings, or None on an unterminated quote
+    (caller treats None as fail-closed)."""
+    segs = []
+    buf = []
+    quote = None
+    i = 0
+    n = len(command)
+    while i != n:
+        c = command[i]
+        if quote is not None:
+            buf.append(c)
+            if c == quote:
+                quote = None
+            i = i + 1
+            continue
+        if c == _SQ or c == _DQ:
+            quote = c
+            buf.append(c)
+            i = i + 1
+            continue
+        if c == _BSL and i + 1 != n:
+            buf.append(c)
+            buf.append(command[i + 1])
+            i = i + 2
+            continue
+        if c in _SEPARATORS:
+            prev = command[i - 1] if i != 0 else ''
+            nxt = command[i + 1] if i + 1 != n else ''
+            if c == _AMP and (prev == _GT or prev == _LT):
+                buf.append(c)
+                i = i + 1
+                continue
+            if (c == _PIPE or c == _AMP) and nxt == c:
+                i = i + 1
+            seg = ''.join(buf).strip()
+            if seg:
+                segs.append(seg)
+            buf = []
+            i = i + 1
+            continue
+        buf.append(c)
+        i = i + 1
+    if quote is not None:
+        return None
+    seg = ''.join(buf).strip()
+    if seg:
+        segs.append(seg)
+    return segs
+
 # Shell metacharacters that split a command into independently-evaluated
 # segments. We split on these (outside of quotes — shlex handles quoting).
-_CHAIN_SPLIT = re.compile(r'\s*(?:\|\||&&|\||;|&)\s*')
+_CHAIN_SPLIT = None  # deprecated: replaced by quote-aware _split_segments
 
 # Command/process substitution — if present we cannot safely reason about the
 # inner command with shlex alone, so we FAIL CLOSED on it (treat as suspicious).
@@ -283,7 +348,9 @@ def analyze(
         )
 
     # ── 2. split into segments; evaluate each; aggregate strictest ──
-    raw_segments = [s for s in _CHAIN_SPLIT.split(command) if s.strip()]
+    raw_segments = _split_segments(command)
+    if raw_segments is None:
+        return Analysis(Verdict.HARD_DENY, "fail-closed: unterminated quote or unparseable command", segments=[normalized])
     if not raw_segments:
         return Analysis(Verdict.HARD_DENY, "no executable segment found")
 
