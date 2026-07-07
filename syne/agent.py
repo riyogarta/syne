@@ -48,6 +48,11 @@ class SyneAgent:
         self._running = False
         self._pending_sudo_command: Optional[str] = None
         self._pending_sudo_at: float = 0.0  # timestamp when pending was set
+        # shell_guard CONSENT confirmation (mirrors the sudo pending pattern):
+        # a command that got verdict CONSENT parks here until the user replies
+        # 'ya', then _exec_consent_approved() lets the re-issued command run.
+        self._pending_exec_command: Optional[str] = None
+        self._pending_exec_at: float = 0.0
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
         self.gateway = None  # Set by main.py if gateway is enabled
         self._consent = ConsentStore(ttl_seconds=DEFAULT_TTL_SECONDS, mode=DEFAULT_MODE)  # consent-system grant cache
@@ -1513,6 +1518,37 @@ class SyneAgent:
                 return True
         return False
 
+    def _exec_consent_approved(self, command: str) -> bool:
+        """True if `command` was the pending CONSENT command AND the user has
+        since confirmed with 'ya' (tracked via _sudo_confirmed_recently, which
+        the deterministic consent bypass reuses). Consumes the pending state so
+        one 'ya' authorizes exactly one run. 120s TTL.
+
+        Mirrors the sudo-guard pattern intentionally: one confirmation → one
+        command, exact-match, time-bounded. Fail-safe: any mismatch → False."""
+        import time as _t
+        if not self._pending_exec_command or not self._pending_exec_at:
+            return False
+        if _t.time() - self._pending_exec_at > 120:
+            self._pending_exec_command = None
+            self._pending_exec_at = 0.0
+            return False
+        if command.strip() != self._pending_exec_command.strip():
+            return False
+        # Check for a recent 'ya'-style confirmation in the user's own messages.
+        # Self-contained (does NOT touch sudo pending state) to avoid coupling.
+        conv = self._get_active_conversation()
+        if not conv or not getattr(conv, "_message_cache", None):
+            return False
+        user_msgs = [m for m in conv._message_cache[-6:] if m.role == "user"]
+        for msg in reversed(user_msgs[-3:]):
+            content = (msg.content or "").strip().lower()
+            if content in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
+                self._pending_exec_command = None
+                self._pending_exec_at = 0.0
+                return True
+        return False
+
     def _is_owner_dm(self) -> bool:
         """Check if current context is a verified owner in a direct message.
 
@@ -1584,13 +1620,10 @@ class SyneAgent:
         # (consent.check_and_hold, wired from tools/registry.execute), so
         # nothing exec-specific happens here beyond shell safety + sudo.
         # ═══════════════════════════════════════════════════════════════
-        if not is_owner_dm:
-            safe, reason = check_command_safety(command)
-            if not safe:
-                logger.warning(
-                    f"Blocked dangerous command (owner_dm={is_owner_dm}): {command[:100]}"
-                )
-                return f"Error: {reason}"
+        # ── shell_guard now gates ALL exec (owner included) via run_shell().
+        # The legacy check_command_safety owner-skip is gone: strict allowlist
+        # + hard-deny binds everyone, so `rm -rf /` cannot be run even by the
+        # owner. The actual guard call happens below, right before spawn. ──
 
         # ═══════════════════════════════════════════════════════════════
         # SECURITY: Sudo Guard
@@ -1653,42 +1686,59 @@ class SyneAgent:
         if self._cli_cwd and self._command_needs_interactive(command_stripped):
             return await self._exec_pty(command, cwd, timeout)
 
+        # ── Single chokepoint: route through run_shell() so shell_guard gates
+        # this command (allowlist / hard-deny / consent). source="llm" because
+        # this is an LLM-issued command. HARD_DENY binds everyone incl. owner. ──
+        from .shell_exec import run_shell, Outcome
+        from .db.connection import get_pool
+        from .security import redact_exec_output
+
         try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
+            _pool = get_pool()
+        except Exception:
+            _pool = None
+
+        _consent_enabled = await get_config("security.consent_enabled", True)
+        if isinstance(_consent_enabled, str):
+            _consent_enabled = _consent_enabled.strip().lower() in ("1", "true", "yes", "on")
+
+        # Was this exact command just approved via the consent 'ya' bypass?
+        _approved = self._exec_consent_approved(command)
+
+        _res = await run_shell(
+            command,
+            source="llm",
+            cwd=cwd,
+            timeout=timeout,
+            db_pool=_pool,
+            consent_enabled=bool(_consent_enabled),
+            approved=_approved,
+            output_max=output_max,
+            redact_fn=(None if is_owner_dm else redact_exec_output),
+        )
+
+        if _res.outcome == Outcome.DENIED:
+            _cand = f" (unrecognized: {', '.join(_res.candidates)})" if _res.candidates else ""
+            logger.warning(f"shell_guard DENIED: {command[:100]} — {_res.reason}")
+            return (
+                f"⛔ Blocked by shell guard: {_res.reason}{_cand}\n\n"
+                "This command is hard-denied and cannot be approved. If a listed "
+                "binary is legitimate, the owner can add it via /add-allowlist."
             )
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 
-            parts = []
-            if stdout:
-                out = stdout.decode("utf-8", errors="replace").replace("\x00", "").strip()
-                if out:
-                    parts.append(f"stdout:\n{out[:output_max]}")
-            if stderr:
-                err = stderr.decode("utf-8", errors="replace").replace("\x00", "").strip()
-                if err:
-                    parts.append(f"stderr:\n{err[:output_max // 2]}")
-            parts.append(f"exit_code: {proc.returncode}")
+        if _res.outcome == Outcome.NEEDS_CONSENT:
+            logger.info(f"shell_guard NEEDS_CONSENT: {command[:100]} — {_res.reason}")
+            self._pending_exec_command = command
+            import time as _t
+            self._pending_exec_at = _t.time()
+            return (
+                "⚠️ This command needs your confirmation before running.\n"
+                f"Reason: {_res.reason}\n\n"
+                f"Command: `{command}`\n\n"
+                "Reply 'ya' to proceed."
+            )
 
-            output = "\n".join(parts) if parts else f"exit_code: {proc.returncode}"
-            # Redact credentials in output — skip for owner DM (owner can see everything)
-            if not is_owner_dm:
-                from .security import redact_exec_output
-                output = redact_exec_output(output)
-            return output
-
-        except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return f"Error: Command timed out after {timeout}s"
-        except Exception as e:
-            logger.error(f"Exec error: {e}")
-            return f"Error: {str(e)}"
+        return _res.output
 
     @staticmethod
     def _command_needs_interactive(command: str) -> bool:

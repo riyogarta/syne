@@ -140,6 +140,12 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     "uname", "hostname", "lscpu", "lsblk", "systemctl", "journalctl",
     # misc common
     "tar", "gzip", "gunzip", "zip", "unzip", "base64", "jq", "tee",
+    # privilege escalation — allowlisted so they resolve to CONSENT (via the
+    # sudo danger-signal) rather than an implicit unknown-binary HARD_DENY.
+    # A conscious Yes is the right gate for sudo; but note haram patterns are
+    # checked FIRST, so `sudo rm -rf /` is still HARD_DENY — sudo can never
+    # launder a haram command past the gate.
+    "sudo", "su",
 })
 
 
