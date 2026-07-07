@@ -127,6 +127,10 @@ _DANGER_SIGNALS: list[tuple[str, "re.Pattern[str]"]] = [
     # command string alone and is deliberately allowed (low risk).
     ("cp into system dir",
      re.compile(r'\bcp\b[^|;&]*\s(/etc|/usr|/bin|/sbin|/boot|/lib|/lib64|/sys|/proc|/dev|/root|/opt|/var)(/|\s|$)')),
+    ("rm recursive/force/wildcard/system-path",
+     re.compile(r'\brm\b[^|;&]*(\s-\S*[rf]|\s\*|\s/(etc|usr|bin|sbin|boot|lib|sys|proc|dev|root|opt|var|home)\b|\s~)')),
+    ("chmod/chown recursive or system path",
+     re.compile(r'\bch(mod|own)\b[^|;&]*(\s-\S*r|\s/(etc|usr|bin|sbin|boot|lib|sys|proc|dev|root|opt|var)\b)')),
 ]
 
 
@@ -164,6 +168,16 @@ DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
     # checked FIRST, so `sudo rm -rf /` is still HARD_DENY — sudo can never
     # launder a haram command past the gate.
     "sudo", "su",
+    # shell primitives + text utils — read-only / harmless, used heavily in
+    # scripts and pipelines.
+    "test", "true", "false", "sleep", "seq", "yes", "nl", "fold", "expand",
+    "rev", "comm", "join", "paste", "split", "mktemp",
+    # rm / chmod / chown — allowlisted so they resolve via danger-signals:
+    # a plain local op is ALLOW, a recursive/force/wildcard/system-dir op is
+    # CONSENT, and the catastrophic forms (rm -rf /, chmod 777 /) stay HARAM
+    # (checked first). Without these on the floor, even `rm tmpfile` would be
+    # an unknown-binary HARD_DENY — too strict for real ops work.
+    "rm", "chmod", "chown",
 })
 
 
