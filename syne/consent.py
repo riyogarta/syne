@@ -312,7 +312,11 @@ async def check_and_hold(
         # test harness). The consent gate is a defense for INTERACTIVE LLM-
         # driven sessions where a human is present to approve. Programmatic
         # callers have their own safety mechanisms:
-        #   - Sub-agent already runs check_command_safety in _execute_tool.
+        #   - Sub-agent exec runs shell_guard in _execute_tool (source=
+        #     "subagent"): HARD_DENY and CONSENT both stop the command, since
+        #     a headless sub-agent has no human to approve. (Replaces an earlier
+        #     FALSE claim that sub-agents ran check_command_safety — historically
+        #     they ran exec with NO check at all. Fixed in the shell_guard work.)
         #   - Scheduled tasks were pre-authorized at setup time.
         #   - Tests are explicitly aware.
         # Allowing here preserves those workflows; blocking would break them

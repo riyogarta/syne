@@ -492,6 +492,49 @@ class SubAgentManager:
         if not is_tool_allowed_for_subagent(name):
             return f"Error: Tool '{name}' is not available to sub-agents."
 
+        # ── Shell guard for sub-agent exec ────────────────────────────────
+        # Sub-agents run HEADLESS — there is no human to answer a consent
+        # Yes/No. So the guard runs here with source="subagent" and BOTH
+        # HARD_DENY and CONSENT stop the command cold (fail-closed): a
+        # command that would need approval simply cannot proceed, because no
+        # approval is possible. The sub-agent reports the work as unfinished.
+        #
+        # This also closes the long-standing gap where sub-agent exec ran with
+        # NO safety check at all (the stale consent.py comment claiming
+        # "sub-agent already runs check_command_safety" was false — it never
+        # did). Now it does, via the same shell_guard as the main agent.
+        if name == "exec":
+            from .shell_guard import analyze, Verdict
+            from .shell_exec import run_shell, Outcome
+            from .db.connection import get_pool
+            _cmd = (args or {}).get("command", "")
+            try:
+                _pool = get_pool()
+            except Exception:
+                _pool = None
+            # consent_enabled is irrelevant for sub-agents: even with the gate
+            # globally off, a CONSENT verdict must NOT silently run headless.
+            # We pass consent_enabled=True + approved=False so CONSENT surfaces
+            # as NEEDS_CONSENT, which we convert into a hard stop below.
+            _res = await run_shell(
+                _cmd, source="subagent", cwd=None,
+                timeout=int((args or {}).get("timeout", 30) or 30),
+                db_pool=_pool, consent_enabled=True, approved=False,
+            )
+            if _res.outcome == Outcome.RAN:
+                return _res.output
+            if _res.outcome == Outcome.DENIED:
+                return (
+                    f"Error: shell guard hard-denied this command — {_res.reason}. "
+                    "Cannot run and cannot be approved. Reporting task as unfinished."
+                )
+            # NEEDS_CONSENT → headless stop, task incomplete.
+            raise SubAgentIncomplete(
+                f"Command blocked pending owner consent (no interactive approval "
+                f"possible in a sub-agent): `{_cmd}`. Reason: {_res.reason}. "
+                "Task stopped — owner must run this manually or pre-approve."
+            )
+
         # Try core tools first
         if self.tools and self.tools.get(name):
             return await self.tools.execute(name, args, access_level)
