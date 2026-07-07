@@ -523,6 +523,9 @@ class SubAgentManager:
             )
             if _res.outcome == Outcome.RAN:
                 return _res.output
+            if _res.outcome == Outcome.DRY_RUN:
+                _v = _res.verdict.value.upper() if _res.verdict else "?"
+                return f"DRY-RUN (not executed) — verdict: {_v}. Reason: {_res.reason}"
             if _res.outcome == Outcome.DENIED:
                 return (
                     f"Error: shell guard hard-denied this command — {_res.reason}. "
