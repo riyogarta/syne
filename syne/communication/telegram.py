@@ -203,6 +203,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
+        self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("nodes", self._cmd_nodes))
         self.app.add_handler(CommandHandler("quit", self._cmd_quit))
         self.app.add_handler(CommandHandler("cancel", self._cmd_cancel))
@@ -285,6 +286,7 @@ class TelegramChannel:
         commands = [
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("backup", "Backup database (owner only)"),
+            BotCommand("allowlist", "Manage shell command allowlist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("clear", "Clear current conversation"),
@@ -3354,6 +3356,101 @@ Or just send me a message!"""
                 "📝 Auto-capture **OFF**\nMemory only stored on explicit request.",
                 parse_mode="Markdown",
             )
+
+    async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manage the shell_guard runtime allowlist (owner only).
+
+        Usage:
+          /allowlist              → show approved binaries + pending candidates
+          /allowlist add <bin>    → approve a binary (opens the default-deny gate)
+          /allowlist rm  <bin>    → remove an approved binary
+          /allowlist reject <bin> → mark a candidate rejected (stop proposing it)
+
+        The allowlist is the ONLY runtime opener of shell_guard's default-deny
+        gate. Adding a binary here lets it run without being hard-denied. Haram
+        patterns are still enforced first, so approving e.g. 'dd' does NOT let
+        'dd of=/dev/sda' through.
+        """
+        from ..db.connection import get_pool
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can manage the shell allowlist.")
+            return
+
+        parts = update.message.text.split(maxsplit=2)
+        sub = parts[1].strip().lower() if len(parts) > 1 else None
+        arg = parts[2].strip() if len(parts) > 2 else None
+        # normalize a binary name (strip path, take first token)
+        if arg:
+            arg = arg.split()[0].rsplit("/", 1)[-1]
+
+        try:
+            pool = get_pool()
+        except Exception as e:
+            await update.message.reply_text(f"❌ DB unavailable: {e}")
+            return
+
+        # ── no subcommand → list ──
+        if sub is None:
+            async with pool.acquire() as conn:
+                approved = await conn.fetch(
+                    "SELECT bin_name, hits, added_by FROM shell_allowlist ORDER BY bin_name")
+                cands = await conn.fetch(
+                    "SELECT bin_name, seen_count, sample_command FROM shell_allowlist_candidates "
+                    "WHERE status='pending' ORDER BY seen_count DESC, last_seen_at DESC LIMIT 20")
+            lines = ["🛡️ **Shell allowlist (runtime)**\n"]
+            if approved:
+                lines.append("*Approved:*")
+                for r in approved:
+                    lines.append(f"  • `{r['bin_name']}`  (hits: {r['hits']})")
+            else:
+                lines.append("_No runtime-approved binaries yet (hardcoded floor still applies)._")
+            lines.append("")
+            if cands:
+                lines.append("*Pending candidates* (hard-denied, awaiting your call):")
+                for r in cands:
+                    samp = (r['sample_command'] or '')[:40]
+                    lines.append(f"  • `{r['bin_name']}`  ×{r['seen_count']}  — `{samp}`")
+                lines.append("\nApprove with `/allowlist add <bin>`")
+            else:
+                lines.append("_No pending candidates._")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        if sub == "add" and arg:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO shell_allowlist (bin_name, added_by, note) VALUES ($1, $2, $3) "
+                    "ON CONFLICT (bin_name) DO NOTHING", arg, "owner", "via /allowlist")
+                await conn.execute(
+                    "UPDATE shell_allowlist_candidates SET status='approved' WHERE bin_name=$1", arg)
+            await update.message.reply_text(
+                f"✅ `{arg}` added to allowlist. It can now run (subject to haram + danger checks).",
+                parse_mode="Markdown")
+            return
+
+        if sub in ("rm", "remove", "del") and arg:
+            async with pool.acquire() as conn:
+                res = await conn.execute("DELETE FROM shell_allowlist WHERE bin_name=$1", arg)
+            removed = res.endswith("1")
+            await update.message.reply_text(
+                (f"🗑️ `{arg}` removed from allowlist." if removed
+                 else f"`{arg}` was not in the allowlist."),
+                parse_mode="Markdown")
+            return
+
+        if sub == "reject" and arg:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE shell_allowlist_candidates SET status='rejected' WHERE bin_name=$1", arg)
+            await update.message.reply_text(f"🚫 `{arg}` marked rejected.", parse_mode="Markdown")
+            return
+
+        await update.message.reply_text(
+            "Usage:\n`/allowlist` — list\n`/allowlist add <bin>`\n`/allowlist rm <bin>`\n"
+            "`/allowlist reject <bin>`", parse_mode="Markdown")
 
     async def _cmd_consent(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /consent command — toggle the consent gate on/off with inline buttons."""
