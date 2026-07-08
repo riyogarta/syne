@@ -93,6 +93,7 @@ _HARAM_PATTERNS: list[tuple[str, "re.Pattern[str]"]] = [
     ("curl/wget piped to shell", re.compile(r'\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(sh|bash|zsh|dash)\b')),
     ("overwrite /etc/passwd or /etc/shadow", re.compile(r'>\s*/etc/(passwd|shadow|sudoers)')),
     ("history/credential exfil via network", re.compile(r'\b(nc|ncat|netcat)\b[^|;&]*\s-\S*e')),
+    ("rollback recovery helper (terminal-only, never via agent)", re.compile(r'rollback\.sh')),
 ]
 
 
