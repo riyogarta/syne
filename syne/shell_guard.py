@@ -170,7 +170,7 @@ _DEFAULT_CONSENT: frozenset[str] = frozenset({
     # GTFOBins-class: hidden exec/write hatches
     "sed", "awk", "find", "less", "more", "git", "env",
     # system / service / logs
-    "systemctl", "journalctl", "sudo",
+    "systemctl", "journalctl",
     # network diagnostics (outbound channel — possible exfil)
     "dig", "host", "nslookup", "ping", "ip", "ss", "netstat", "ethtool",
     "iw", "iwconfig", "nmcli",
@@ -450,7 +450,7 @@ def analyze(
             if iargs and all(a in _VERSION_HELP_FLAGS for a in iargs):
                 reasons.append(f"interpreter '{binary}' version/help only [{seg_norm}]")
                 continue
-            verdict = _stricter(verdict, Verdict.HARD_DENY)
+            verdict = _stricter(verdict, Verdict.CONSENT)
             reasons.append(f"interpreter '{binary}' executes arbitrary code [{seg_norm}]")
             continue
 
