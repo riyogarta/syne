@@ -141,46 +141,98 @@ _DANGER_SIGNALS: list[tuple[str, "re.Pattern[str]"]] = [
 #    not here is HARD_DENY by default.
 # ────────────────────────────────────────────────────────────────────────────
 DEFAULT_ALLOWLIST: frozenset[str] = frozenset({
-    # inspection / read-only
-    "ls", "cat", "head", "tail", "less", "more", "wc", "stat", "file",
-    "find", "grep", "egrep", "fgrep", "rg", "awk", "sed", "cut", "sort",
-    "uniq", "tr", "echo", "printf", "pwd", "whoami", "id", "date", "env",
-    "df", "du", "free", "uptime", "ps", "top", "htop", "which", "type",
-    "readlink", "realpath", "basename", "dirname", "tree", "diff", "cmp",
-    "md5sum", "sha256sum", "hexdump", "xxd", "strings", "column", "tac",
-    # version control (read-ish)
-    "git",
-    # language / package (inspection)
-    "python3", "python", "pip", "pip3", "node", "npm", "go", "cargo",
-    # network inspection (read-only)
-    "ping", "curl", "wget", "dig", "nslookup", "host", "ip", "ss", "netstat",
-    # process / system info
-    "uname", "hostname", "lscpu", "lsblk", "systemctl", "journalctl",
-    # wireless / network manager inspection (read-only diagnostics)
-    "iw", "iwconfig", "nmcli", "ethtool",
-    # misc common
-    "tar", "gzip", "gunzip", "zip", "unzip", "base64", "jq", "tee",
-    # filesystem create/move/copy — safe by default; mv/cp escalate to CONSENT
-    # via danger-signals when they touch system dirs / /tmp / /dev or force-
-    # overwrite (see _DANGER_SIGNALS). touch/mkdir have no escalation.
-    "touch", "mkdir", "mv", "cp",
-    # privilege escalation — allowlisted so they resolve to CONSENT (via the
-    # sudo danger-signal) rather than an implicit unknown-binary HARD_DENY.
-    # A conscious Yes is the right gate for sudo; but note haram patterns are
-    # checked FIRST, so `sudo rm -rf /` is still HARD_DENY — sudo can never
-    # launder a haram command past the gate.
-    "sudo", "su",
-    # shell primitives + text utils — read-only / harmless, used heavily in
-    # scripts and pipelines.
-    "test", "true", "false", "sleep", "seq", "yes", "nl", "fold", "expand",
-    "rev", "comm", "join", "paste", "split", "mktemp",
-    # rm / chmod / chown — allowlisted so they resolve via danger-signals:
-    # a plain local op is ALLOW, a recursive/force/wildcard/system-dir op is
-    # CONSENT, and the catastrophic forms (rm -rf /, chmod 777 /) stay HARAM
-    # (checked first). Without these on the floor, even `rm tmpfile` would be
-    # an unknown-binary HARD_DENY — too strict for real ops work.
-    "rm", "chmod", "chown",
+    # ALLOW: inert read-only inspection tools. Cannot execute code, touch the
+    # network, or write arbitrary files. Dangerous-but-useful tools live in
+    # _DEFAULT_CONSENT; unknown binaries are default-denied.
+    "base64", "basename", "cat", "cmp", "column", "comm", "cut", "date",
+    "df", "diff", "dirname", "du", "echo", "egrep", "expand", "false",
+    "fgrep", "file", "fold", "free", "grep", "head", "hexdump", "hostname",
+    "htop", "id", "join", "jq", "ls", "lsblk", "lscpu", "md5sum", "mktemp",
+    "nl", "paste", "printf", "ps", "pwd", "readlink", "realpath", "rev",
+    "rg", "seq", "sha256sum", "sleep", "stat", "strings", "tac", "tail",
+    "test", "top", "tree", "tr", "true", "type", "uname", "uniq", "uptime",
+    "wc", "which", "whoami", "xxd", "yes",
 })
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 3b. CONSENT TIER — legitimate but weaponizable. These run ONLY after a
+#     conscious human Yes. Catastrophic forms stay HARD_DENY via the haram
+#     denylist (checked FIRST), so CONSENT can never launder a haram command.
+# ────────────────────────────────────────────────────────────────────────────
+_DEFAULT_CONSENT: frozenset[str] = frozenset({
+    # write / mutate filesystem
+    "mv", "cp", "rm", "mkdir", "touch", "tee", "chmod", "chown", "ln",
+    "split", "sort",
+    # archives (write files; tar --checkpoint-action=exec caught by danger)
+    "tar", "zip", "unzip", "gzip", "gunzip",
+    # GTFOBins-class: hidden exec/write hatches
+    "sed", "awk", "find", "less", "more", "git", "env",
+    # system / service / logs
+    "systemctl", "journalctl", "sudo",
+    # network diagnostics (outbound channel — possible exfil)
+    "dig", "host", "nslookup", "ping", "ip", "ss", "netstat", "ethtool",
+    "iw", "iwconfig", "nmcli",
+    # full HTTP clients — needed sometimes, always with a conscious Yes.
+    # curl|sh / wget|sh stay HARD_DENY via the haram denylist (checked first).
+    "curl", "wget",
+})
+
+# Interpreters: their whole purpose is arbitrary code execution, which voids
+# every other guarantee. HARD_DENY, with ONE inert carve-out: pure version/help.
+_INTERPRETERS: frozenset[str] = frozenset({"python", "python3"})
+_VERSION_HELP_FLAGS: frozenset[str] = frozenset({"--version", "-V", "-h", "--help"})
+
+# pip: sub-command sensitive. Read-only queries ALLOW; fetch/run code CONSENT.
+_PIP_BINS: frozenset[str] = frozenset({"pip", "pip3"})
+_PIP_READONLY_SUB: frozenset[str] = frozenset({"list", "show", "freeze", "check", "help"})
+_PIP_WRITE_SUB: frozenset[str] = frozenset({"install", "uninstall", "download", "wheel"})
+
+
+def _args_after_binary(segment: str):
+    """Tokens after the leading binary (ENV=val assignments skipped). Returns
+    None on tokenize failure or no binary (caller fails closed)."""
+    try:
+        tokens = shlex.split(segment, comments=False, posix=True)
+    except ValueError:
+        return None
+    idx = 0
+    while idx < len(tokens) and re.fullmatch(r'[A-Za-z_]\w*=.*', tokens[idx]):
+        idx += 1
+    if idx >= len(tokens):
+        return None
+    return tokens[idx + 1:]
+
+
+def _pip_verdict(args) -> "Verdict":
+    """Classify a pip/pip3 call. Anti-bypass: scan ALL tokens; the first that
+    does NOT start with '-' is the sub-command (flags can be injected before it,
+    e.g. `pip -v install x`). Fail-safe: unknown/missing sub-command -> CONSENT;
+    only explicitly read-only sub-commands -> ALLOW."""
+    subcmd = None
+    sub_i = None
+    for i, t in enumerate(args):
+        if not t.startswith('-'):
+            subcmd = t
+            sub_i = i
+            break
+    if subcmd is None:
+        if any(t in _VERSION_HELP_FLAGS for t in args):
+            return Verdict.ALLOW
+        return Verdict.CONSENT
+    if subcmd == 'config':
+        rest = args[sub_i + 1:]
+        action = next((x for x in rest if not x.startswith('-')), None)
+        if action in {'set', 'unset', 'edit'}:
+            return Verdict.CONSENT
+        if action == 'get' or '--list' in rest:
+            return Verdict.ALLOW
+        return Verdict.CONSENT
+    if subcmd in _PIP_READONLY_SUB:
+        return Verdict.ALLOW
+    if subcmd in _PIP_WRITE_SUB:
+        return Verdict.CONSENT
+    return Verdict.CONSENT
 
 
 
@@ -382,6 +434,41 @@ def analyze(
         if binary.lower() in deny_bins:
             verdict = _stricter(verdict, Verdict.HARD_DENY)
             reasons.append(f"denylist binary '{binary}' [{seg_norm}]")
+            continue
+
+        # ── interpreters: arbitrary code execution. Only pure version/help
+        #    flags are inert; -c, -m, a script, stdin, or a bare REPL are all
+        #    HARD_DENY. Runs BEFORE the allowlist check so a stray runtime
+        #    allowlist entry cannot re-open the bypass.
+        if binary in _INTERPRETERS:
+            iargs = _args_after_binary(seg)
+            if iargs is None:
+                verdict = _stricter(verdict, Verdict.HARD_DENY)
+                reasons.append(f"fail-closed: unparseable interpreter segment [{seg_norm}]")
+                continue
+            if iargs and all(a in _VERSION_HELP_FLAGS for a in iargs):
+                reasons.append(f"interpreter '{binary}' version/help only [{seg_norm}]")
+                continue
+            verdict = _stricter(verdict, Verdict.HARD_DENY)
+            reasons.append(f"interpreter '{binary}' executes arbitrary code [{seg_norm}]")
+            continue
+
+        # ── pip family: sub-command sensitive (read-only ALLOW, else CONSENT).
+        if binary in _PIP_BINS:
+            pargs = _args_after_binary(seg)
+            if pargs is None:
+                verdict = _stricter(verdict, Verdict.HARD_DENY)
+                reasons.append(f"fail-closed: unparseable pip segment [{seg_norm}]")
+                continue
+            pv = _pip_verdict(pargs)
+            verdict = _stricter(verdict, pv)
+            reasons.append(f"pip '{binary}' -> {pv.value} [{seg_norm}]")
+            continue
+
+        # ── consent-tier: legitimate but weaponizable → conscious Yes required.
+        if binary in _DEFAULT_CONSENT:
+            verdict = _stricter(verdict, Verdict.CONSENT)
+            reasons.append(f"consent-tier '{binary}' [{seg_norm}]")
             continue
 
         known = binary in allow
