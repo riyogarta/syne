@@ -815,3 +815,37 @@ INSERT INTO config (key, value, description) VALUES
     ('security.consent_ttl_seconds', '600', 'How long an approved consent stays cached (seconds). Default 600 = 10 min. The next identical call within this window skips the prompt.'),
     ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.')
 ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- SHELL GUARD — runtime allowlist / denylist (shell_exec.py)
+-- Mirrored from migrations.py m15/m16 for fresh-install parity
+-- (dual-path invariant: existing DBs get these via migration,
+--  fresh installs get them here). See syne/shell_exec.py.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS shell_allowlist (
+    bin_name    TEXT PRIMARY KEY,
+    added_by    TEXT,
+    added_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note        TEXT,
+    hits        BIGINT NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS shell_allowlist_candidates (
+    bin_name       TEXT PRIMARY KEY,
+    first_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    seen_count     BIGINT NOT NULL DEFAULT 1,
+    sample_command TEXT,
+    context        TEXT,
+    status         TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS idx_shell_cand_status
+    ON shell_allowlist_candidates (status, last_seen_at DESC);
+
+CREATE TABLE IF NOT EXISTS shell_denylist (
+    entry     TEXT PRIMARY KEY,
+    kind      TEXT NOT NULL DEFAULT 'binary',
+    added_by  TEXT,
+    added_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    note      TEXT
+);
