@@ -3429,7 +3429,7 @@ Or just send me a message!"""
                 await conn.execute(
                     "UPDATE shell_allowlist_candidates SET status='approved' WHERE bin_name=$1", arg)
             await update.message.reply_text(
-                f"✅ `{arg}` added to allowlist. It can now run (subject to haram + danger checks).",
+                f"✅ `{arg}` added to allowlist. It can now run (subject to forbidden + danger checks).",
                 parse_mode="Markdown")
             return
 

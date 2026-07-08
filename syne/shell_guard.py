@@ -337,7 +337,7 @@ def analyze(
     # ── 1. DENYLIST-HARAM on the WHOLE command first (independent gate) ──
     haram = _check_haram(normalized)
     if haram:
-        return Analysis(Verdict.HARD_DENY, f"haram: {haram}", segments=[normalized])
+        return Analysis(Verdict.HARD_DENY, f"forbidden: {haram}", segments=[normalized])
 
     # ── fail-closed: command/process substitution we can't safely reason about ──
     if _SUBSTITUTION.search(command):
@@ -367,7 +367,7 @@ def analyze(
         seg_haram = _check_haram(seg_norm)
         if seg_haram:
             verdict = _stricter(verdict, Verdict.HARD_DENY)
-            reasons.append(f"segment haram: {seg_haram} [{seg_norm}]")
+            reasons.append(f"segment forbidden: {seg_haram} [{seg_norm}]")
             continue
 
         binary = _first_binary(seg)
