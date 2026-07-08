@@ -407,15 +407,37 @@ def format_consent_prompt(
     Yes/No buttons. Channels that don't recognize the marker (CLI, plain
     stdout) leave it as visible text — harmless.
     """
-    import json
-    args_preview = ""
-    try:
-        args_preview = json.dumps(args or {}, ensure_ascii=False)[:300]
-    except Exception:
-        args_preview = str(args)[:300]
+    a = args or {}
+
+    # Shell-style tools: show the command the way it would be typed at a
+    # prompt, not as a raw JSON blob. Far easier to read at a glance.
+    cmd = None
+    if isinstance(a, dict):
+        cmd = a.get("command") or a.get("cmd") or a.get("script")
+    if cmd is not None and str(cmd).strip():
+        body = str(cmd).strip()
+        if len(body) > 500:
+            body = body[:500] + " …"
+        return (
+            f"⚠️ Jalankan perintah ini?\n"
+            f"```\n$ {body}\n```\n"
+            f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
+        )
+
+    # Non-shell tools: render args as tidy key: value lines instead of JSON.
+    if isinstance(a, dict) and a:
+        lines = []
+        for k, v in a.items():
+            val = str(v)
+            if len(val) > 200:
+                val = val[:200] + " …"
+            lines.append(f"• {k}: {val}")
+        preview = "\n".join(lines)
+    else:
+        preview = str(a)[:300]
     return (
-        f"⚠️ `{tool_name}` needs confirmation.\n"
-        f"`{args_preview}`\n"
+        f"⚠️ Konfirmasi `{tool_name}`?\n"
+        f"{preview}\n"
         f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
     )
 
