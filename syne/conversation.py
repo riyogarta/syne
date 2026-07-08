@@ -2164,13 +2164,88 @@ class Conversation:
                     # LLM supports this natively — keep metadata, let LLM handle it
                     logger.info(f"{spec['label']} ability failed, falling back to native LLM")
                 else:
-                    # No native support — strip and show error
-                    logger.warning(f"{spec['label']} failed — no native fallback available")
-                    user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
-                    metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
-                    self._message_metadata = metadata if metadata else None
+                    # Plain-text documents (.md/.txt/.csv/.json/source code)
+                    # need no ability at all: their bytes ARE the content.
+                    # Read and inline directly before giving up.
+                    inlined = None
+                    if input_type == "document" and isinstance(input_data, dict):
+                        inlined = self._inline_text_document(input_data)
+                    if inlined is not None:
+                        fname = input_data.get("filename") or "file"
+                        user_message = (
+                            f"{user_message}\n\n"
+                            f"[Contents of {fname}:]\n{inlined}"
+                        )
+                        logger.info(
+                            f"{spec['label']}: inlined text document "
+                            f"({len(inlined)} chars, no ability needed)"
+                        )
+                        metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                        self._message_metadata = metadata if metadata else None
+                    else:
+                        # No native support — strip and show error
+                        logger.warning(f"{spec['label']} failed — no native fallback available")
+                        user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
+                        metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
+                        self._message_metadata = metadata if metadata else None
         
         return user_message, metadata if metadata else None
+
+    # Text-like MIME types and extensions whose raw bytes are directly
+    # readable as UTF-8 - no parsing ability required.
+    _TEXT_DOC_EXTS = (
+        ".md", ".markdown", ".txt", ".text", ".csv", ".tsv", ".log",
+        ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+        ".xml", ".html", ".htm", ".rst", ".py", ".js", ".ts", ".sh",
+        ".sql", ".c", ".h", ".cpp", ".go", ".rs", ".java", ".rb",
+    )
+    _TEXT_DOC_MAX = 200_000  # ~200 KB safety cap for inlining
+
+    def _inline_text_document(self, doc: dict) -> Optional[str]:
+        """If a document is plain text, return its decoded content.
+
+        Returns None when the document is not text-like or cannot be read,
+        so the caller can fall through to the normal error path.
+        """
+        mime = (doc.get("mime_type") or "").lower()
+        fname = (doc.get("filename") or "").lower()
+        path = doc.get("path")
+        is_text = (
+            mime.startswith("text/")
+            or mime in ("application/json", "application/xml",
+                        "application/x-yaml", "application/yaml")
+            or fname.endswith(self._TEXT_DOC_EXTS)
+        )
+        if not is_text:
+            return None
+        # Prefer base64 (survives disk cleanup); fall back to on-disk path.
+        raw = None
+        b64 = doc.get("base64")
+        if b64:
+            try:
+                import base64 as _b64
+                raw = _b64.b64decode(b64)
+            except Exception:
+                raw = None
+        if raw is None and path:
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read()
+            except Exception as e:
+                logger.warning(f"_inline_text_document: read failed: {e}")
+                return None
+        if not raw:
+            return None
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                return None
+        if len(text) > self._TEXT_DOC_MAX:
+            text = text[: self._TEXT_DOC_MAX] + "\n\n[... truncated ...]"
+        return text
 
 
 class ConversationManager:
