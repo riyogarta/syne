@@ -237,6 +237,7 @@ async def check_and_hold(
     permission: int,
     scheduled: bool = False,
     kind: str = "tool",
+    pre_decided: bool = False,
 ):
     """Consent gate. Single entry used by tools/registry and abilities/registry.
 
@@ -269,7 +270,7 @@ async def check_and_hold(
     _log = logging.getLogger("syne.consent.gate")
     try:
         from .security import needs_consent  # local import to avoid cycles
-        if not needs_consent(access_level, permission):
+        if not pre_decided and not needs_consent(access_level, permission):
             return ("allow", None)
 
         # ── Provenance skip (owner/family, clean turn) ───────────────────────
@@ -286,7 +287,8 @@ async def check_and_hold(
         # file, or an image cannot forge (it cannot press a Telegram button).
         # This is enforced by code + platform, not by the model's discipline.
         if access_level in ("owner", "family") and conv is not None \
-                and not getattr(conv, "_turn_untrusted", False):
+                and not getattr(conv, "_turn_untrusted", False) \
+                and not pre_decided:
             _log.debug(
                 f"consent skip (clean turn): tool={tool_name}, level={access_level}"
             )

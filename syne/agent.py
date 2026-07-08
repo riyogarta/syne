@@ -48,11 +48,6 @@ class SyneAgent:
         self._running = False
         self._pending_sudo_command: Optional[str] = None
         self._pending_sudo_at: float = 0.0  # timestamp when pending was set
-        # shell_guard CONSENT confirmation (mirrors the sudo pending pattern):
-        # a command that got verdict CONSENT parks here until the user replies
-        # 'ya', then _exec_consent_approved() lets the re-issued command run.
-        self._pending_exec_command: Optional[str] = None
-        self._pending_exec_at: float = 0.0
         self._cli_cwd: Optional[str] = None  # Set by CLI channel to override exec cwd
         self.gateway = None  # Set by main.py if gateway is enabled
         self._consent = ConsentStore(ttl_seconds=DEFAULT_TTL_SECONDS, mode=DEFAULT_MODE)  # consent-system grant cache
@@ -1533,44 +1528,6 @@ class SyneAgent:
                 return True
         return False
 
-    def _exec_consent_approved(self, command: str) -> bool:
-        """True if `command` was the pending CONSENT command AND the user has
-        since confirmed with 'ya' (tracked via _sudo_confirmed_recently, which
-        the deterministic consent bypass reuses). Consumes the pending state so
-        one 'ya' authorizes exactly one run. 120s TTL.
-
-        Mirrors the sudo-guard pattern intentionally: one confirmation → one
-        command, exact-match, time-bounded. Fail-safe: any mismatch → False."""
-        import time as _t
-        if not self._pending_exec_command or not self._pending_exec_at:
-            return False
-        if _t.time() - self._pending_exec_at > 120:
-            self._pending_exec_command = None
-            self._pending_exec_at = 0.0
-            return False
-        if command.strip() != self._pending_exec_command.strip():
-            return False
-        # Check for a recent 'ya'-style confirmation in the user's own messages.
-        # Self-contained (does NOT touch sudo pending state) to avoid coupling.
-        conv = self._get_active_conversation()
-        if not conv or not getattr(conv, "_message_cache", None):
-            return False
-        user_msgs = [m for m in conv._message_cache[-6:] if m.role == "user"]
-        # Channels prepend an untrusted-metadata block to every user message,
-        # so a naive .strip().lower() never equals "ya". Use last_reply_token
-        # (the shared parser) to pull the human actual last line. This is the
-        # same fix consent.py documents. agent.py was still doing the naive
-        # compare, which silently swallowed every confirmation whose message
-        # carried a metadata preamble.
-        from .consent import last_reply_token as _lrt
-        for msg in reversed(user_msgs[-3:]):
-            token = _lrt(msg.content or "")
-            if token in ("ya", "yes", "ok", "oke", "lanjut", "proceed", "confirm"):
-                self._pending_exec_command = None
-                self._pending_exec_at = 0.0
-                return True
-        return False
-
     def _is_owner_dm(self) -> bool:
         """Check if current context is a verified owner in a direct message.
 
@@ -1724,9 +1681,13 @@ class SyneAgent:
         if isinstance(_consent_enabled, str):
             _consent_enabled = _consent_enabled.strip().lower() in ("1", "true", "yes", "on")
 
-        # Was this exact command just approved via the consent 'ya' bypass?
-        _approved = self._exec_consent_approved(command)
-
+        # Exec consent is the SAME single gate every other tool uses.
+        # shell_guard decides WHETHER a given command needs consent
+        # (per-command, since exec as a tool cannot be blanket-gated or
+        # ls would prompt too). Once it says NEEDS_CONSENT we funnel
+        # through consent.check_and_hold exactly like send_message /
+        # memory_search: one ConsentStore, one pending state, one Yes/No
+        # button prompt. No exec-private consent path remains.
         _res = await run_shell(
             command,
             source="llm",
@@ -1734,7 +1695,7 @@ class SyneAgent:
             timeout=timeout,
             db_pool=_pool,
             consent_enabled=bool(_consent_enabled),
-            approved=_approved,
+            approved=False,
             output_max=output_max,
             redact_fn=(None if is_owner_dm else redact_exec_output),
         )
@@ -1760,15 +1721,29 @@ class SyneAgent:
 
         if _res.outcome == Outcome.NEEDS_CONSENT:
             logger.info(f"shell_guard NEEDS_CONSENT: {command[:100]} — {_res.reason}")
-            self._pending_exec_command = command
-            import time as _t
-            self._pending_exec_at = _t.time()
-            return (
-                "⚠️ This command needs your confirmation before running.\n"
-                f"Reason: {_res.reason}\n\n"
-                f"Command: `{command}`\n\n"
-                "Reply 'ya' to proceed."
+            from .consent import check_and_hold as _consent_gate
+            _conv = self._get_active_conversation()
+            _access = _conv.user.get("access_level", "public") if _conv else "public"
+            _action, _prompt = await _consent_gate(
+                conv=_conv, agent=self,
+                tool_name="exec", args={"command": command},
+                access_level=_access, permission=0o700,
+                pre_decided=True,
             )
+            if _action == "held":
+                return _prompt or ""
+            _res2 = await run_shell(
+                command,
+                source="llm",
+                cwd=cwd,
+                timeout=timeout,
+                db_pool=_pool,
+                consent_enabled=bool(_consent_enabled),
+                approved=True,
+                output_max=output_max,
+                redact_fn=(None if is_owner_dm else redact_exec_output),
+            )
+            return _res2.output
 
         return _res.output
 
