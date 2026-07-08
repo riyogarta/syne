@@ -44,7 +44,6 @@ class Outcome(str, Enum):
     RAN = "ran"                # executed; `output` holds the result
     DENIED = "denied"          # HARD_DENY; never executed; `reason` explains
     NEEDS_CONSENT = "consent"  # caller must gate Yes/No then re-invoke with approved=True
-    DRY_RUN = "dry_run"        # 'test-' prefix: parsed & classified, NEVER executed
 
 
 # Sources whose commands are author-controlled (fixed argv) and therefore
@@ -163,28 +162,6 @@ async def run_shell(
     """
     if not command or not isinstance(command, str) or not command.strip():
         return ShellResult(Outcome.DENIED, reason="empty command", verdict=Verdict.HARD_DENY)
-
-    # ── DRY-RUN: a 'test-' prefix means "show me the verdict, do NOT run".
-    # Strip the prefix, run the FULL guard (allowlist/denylist/haram/consent),
-    # and return the verdict WITHOUT ever spawning. Lets the owner probe the
-    # parser safely: `test-rm -rf /` reports HARD_DENY without touching disk.
-    # Works regardless of source/consent_enabled — it never executes. ──
-    _stripped = command.strip()
-    if _stripped.lower().startswith("test-"):
-        real_cmd = _stripped[5:].strip()
-        if not real_cmd:
-            return ShellResult(Outcome.DRY_RUN, reason="empty test command",
-                               verdict=Verdict.HARD_DENY)
-        try:
-            extra = await _load_runtime_allowlist(db_pool)
-            deny_bins, deny_pats = await _load_runtime_denylist(db_pool)
-            a = analyze(real_cmd, extra_allow=extra,
-                        extra_deny_bins=deny_bins, extra_deny_patterns=deny_pats)
-        except Exception as e:
-            return ShellResult(Outcome.DRY_RUN, reason=f"guard error (would fail-closed): {e}",
-                               verdict=Verdict.HARD_DENY)
-        return ShellResult(Outcome.DRY_RUN, verdict=a.verdict, reason=a.reason,
-                           candidates=a.candidates)
 
     # ── Trusted source (hardcoded argv): skip the guard, execute directly. ──
     if source in _TRUSTED_SOURCES:
