@@ -127,6 +127,9 @@ class TelegramChannel:
         # Track recent message IDs per chat for reaction context
         # Format: {chat_id: deque([(message_id, preview_text), ...], maxlen=10)}
         self._recent_messages: dict[int, deque] = {}
+        # Cached owner Telegram id (str) for owner-DM path-strip opt-out.
+        # None = not resolved yet; resolved lazily on first outbound send.
+        self._owner_tg_id_cache: 'str | None' = None
         # Browse mode: {telegram_user_id: path_string} — when set, messages use CLI session
         self._browse_cwd: dict[int, str] = {}
         # Path lookup for browse callbacks (short hash → full path)
@@ -9080,7 +9083,8 @@ Or just send me a message!"""
         _marker_in_input = "[[CONSENT_BUTTONS:hash=" in (text or "")
         caption_text, media_path = extract_media(text)
         _marker_after_extract = "[[CONSENT_BUTTONS:hash=" in (caption_text or "")
-        caption_text = process_outbound(caption_text)
+        _keep_paths = await self._is_owner_dm(chat_id)
+        caption_text = process_outbound(caption_text, strip_paths=not _keep_paths)
         _marker_after_outbound = "[[CONSENT_BUTTONS:hash=" in (caption_text or "")
         if _marker_in_input or _marker_after_extract or _marker_after_outbound:
             logger.info(
@@ -9163,6 +9167,23 @@ Or just send me a message!"""
         # No media or media send failed — send as text
         return await self._send_response(chat_id, caption_text, context, reply_to_message_id=reply_to_message_id)
 
+    async def _is_owner_dm(self, chat_id: int) -> bool:
+        """True only for the owner's private chat (positive chat_id that
+        equals the owner's Telegram platform_id). Groups (negative id) and
+        non-owner DMs return False, so path-stripping stays on for them.
+        Owner id is cached on the instance to avoid a DB hit per send."""
+        if chat_id <= 0:
+            return False
+        if self._owner_tg_id_cache is None:
+            try:
+                from ..db.models import get_first_owner
+                owner = await get_first_owner('telegram')
+                self._owner_tg_id_cache = owner.get('platform_id') if owner else ''
+            except Exception as e:
+                logger.warning(f"_is_owner_dm: owner lookup failed: {e}")
+                return False
+        return bool(self._owner_tg_id_cache) and str(chat_id) == self._owner_tg_id_cache
+
     async def _send_response(self, chat_id: int, text: str, context: ContextTypes.DEFAULT_TYPE = None, reply_to_message_id: int | None = None):
         """Send a response, splitting if too long for Telegram.
 
@@ -9184,7 +9205,8 @@ Or just send me a message!"""
         _marker_in_pre = "[[CONSENT_BUTTONS:hash=" in (text or "")
         _pre_len = len(text or "")
         _pre_preview = (text or "")[:200].replace("\n", " ⏎ ")
-        text = process_outbound(text)
+        _keep_paths = await self._is_owner_dm(chat_id)
+        text = process_outbound(text, strip_paths=not _keep_paths)
         _marker_in_post = "[[CONSENT_BUTTONS:hash=" in (text or "")
         _post_len = len(text or "")
         logger.info(

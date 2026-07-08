@@ -188,7 +188,7 @@ def split_message(text: str, max_length: int = 4096) -> list[str]:
 # COMBINED POST-PROCESSING PIPELINE
 # ============================================================
 
-def process_outbound(text: str) -> str:
+def process_outbound(text: str, strip_paths: bool = True) -> str:
     """Apply all outbound post-processing in the correct order.
 
     This is the single entry point for all outbound text processing.
@@ -208,7 +208,8 @@ def process_outbound(text: str) -> str:
     if not text:
         return text
 
-    text = strip_server_paths(text)
+    if strip_paths:
+        text = strip_server_paths(text)
     text = strip_narration(text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
