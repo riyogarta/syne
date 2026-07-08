@@ -1927,8 +1927,9 @@ class Conversation:
                     if media_path and hasattr(self, '_pending_media'):
                         self._pending_media.append(media_path)
 
-                # Strip server paths
-                result_str = strip_server_paths(result_str)
+                # Strip server paths (bypass for owner DM — platform-verified identity)
+                if not is_owner_dm:
+                    result_str = strip_server_paths(result_str)
 
                 # Notify CLI about tool execution details
                 if self._mgr and self._mgr._tool_detail_callback:
