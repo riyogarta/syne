@@ -419,9 +419,32 @@ def format_consent_prompt(
         if len(body) > 500:
             body = body[:500] + " …"
         return (
-            f"⚠️ Jalankan perintah ini?\n"
+            f"⚠️ Run this command?\n"
             f"```\n$ {body}\n```\n"
             f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
+        )
+
+    # File tools: lead with the path so the owner sees exactly which file
+    # is being read/written before approving.
+    if isinstance(a, dict) and a.get('path'):
+        path = str(a.get('path'))
+        verb = {
+            'file_read': 'Read this file?',
+            'file_write': 'Write to this file?',
+        }.get(tool_name, 'Confirm ' + chr(96) + tool_name + chr(96) + ' on this file?')
+        extra = []
+        for _k, _v in a.items():
+            if _k == 'path':
+                continue
+            _val = str(_v)
+            if len(_val) > 200:
+                _val = _val[:200] + ' …'
+            extra.append('• ' + str(_k) + ': ' + _val)
+        extra_block = ('\n' + '\n'.join(extra)) if extra else ''
+        return (
+            '⚠️ ' + verb + '\n'
+            '📄 ' + path + extra_block + '\n'
+            '[[CONSENT_BUTTONS:hash=' + hash_hex + ']]'
         )
 
     # Non-shell tools: render args as tidy key: value lines instead of JSON.
@@ -436,7 +459,7 @@ def format_consent_prompt(
     else:
         preview = str(a)[:300]
     return (
-        f"⚠️ Konfirmasi `{tool_name}`?\n"
+        f"⚠️ Confirm `{tool_name}`?\n"
         f"{preview}\n"
         f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
     )

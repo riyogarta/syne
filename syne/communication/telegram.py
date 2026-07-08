@@ -9324,10 +9324,12 @@ Or just send me a message!"""
                         if len(message) <= max_len:
                             await self._bot.send_message(chat_id=chat_id, text=message)
                         else:
+                            # Plain text only: sub-agent output is raw report text
+                            # (regex/code/stray underscores) that breaks Telegram
+                            # Markdown and gets rejected, silently dropping the notif.
                             await self._bot.send_message(
                                 chat_id=chat_id,
-                                text=message[:max_len - 50] + "\n\n_(truncated — result too long)_",
-                                parse_mode="Markdown",
+                                text=message[:max_len - 50] + "\n\n(truncated - result too long)",
                             )
                     except Exception as e:
                         logger.error(f"Failed to deliver sub-agent result to {chat_id}: {e}")

@@ -38,6 +38,10 @@ def strip_server_paths(text: str) -> str:
     Security measure: internal paths like /home/syne/workspace/outputs/...
     should never be visible to end users.
     """
+    # Consent prompts are owner-only confirmations: the owner MUST see the
+    # real path/command to make an informed Yes/No. Keep them intact.
+    if '[[CONSENT_BUTTONS:hash=' in text:
+        return text
     text = _PATH_STRIP_RE.sub('', text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
