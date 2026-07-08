@@ -98,6 +98,16 @@ async def _handle_read_source(
 ) -> str:
     """Handler for read_source tool."""
 
+    # Tool-call args can arrive as strings (JSON). Coerce numeric params so
+    # max()/slicing downstream never hits a str-vs-int comparison.
+    def _as_int(v, default):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+    offset = _as_int(offset, 1)
+    limit = _as_int(limit, _DEFAULT_LINES)
+
     if action == "tree":
         return _action_tree(path or "syne/")
 
