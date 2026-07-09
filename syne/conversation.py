@@ -25,60 +25,6 @@ from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
 import re as _re
 
-# ── Tool routing: only send tools relevant to user's message ──
-# Memory is core to Syne's identity, not situational. All non-destructive
-# memory tools are always available; permission layer (Rule 760/765 +
-# filter_tools_for_group) still enforces who can actually use them.
-# memory_delete stays pattern-based because it's destructive and owner-only.
-_CORE_TOOLS = {
-    "memory_search",
-    "memory_store",
-    "memory_store_file",
-    "memory_get_file",
-    "memory_analyze_file",
-    "exec",
-    "shell",
-    "db_query",
-    # Sub-agent delegation is a judgment call Molt makes from task complexity,
-    # not a keyword the user must type. Always available; Molt decides when.
-    "spawn_subagent",
-    "subagent_status",
-}
-
-_TOOL_SIGNALS = {
-    # signal patterns (ID + EN) → tool names
-    r"cari|search|internet|web|browse|google|lookup|find online": {"web_search", "web_fetch"},
-    r"baca|read|buka|open|tulis|write|simpan|save|\bfile\b": {"file_read", "file_write"},
-    r"jalankan|run|execute|command|perintah|install|pip|apt|bash|shell|script|terminal": {"shell"},
-    r"kirim|send|pesan|message|notif|notify|sampaikan|forward": {"send_message"},
-    # Note: memory_store / memory_store_file / memory_get_file /
-    # memory_analyze_file are now in _CORE_TOOLS — always available
-    # regardless of keyword. Their previous signal patterns were removed
-    # because pattern matching against natural language was fundamentally
-    # lossy ("ini BAST nya" doesn't match "simpan" but clearly wants storage).
-    r"gambar|image|foto|photo|generate|buat gambar|draw|sketch|illustrat": {"image_gen", "image_analysis"},
-    r"peta|lokasi|arah|map|direction|restoran|restaurant|dekat|nearby|geocode|navigasi|location|place|tempat|rute|route": {"maps"},
-    r"jadwal|schedule|cron|remind|pengingat|alarm|timer|recurring|berkala": {"manage_schedule"},
-    r"\bwa\b|whatsapp|kirim.?wa|send.?wa": {"whatsapp"},
-    r"\bpdf\b|dokumen|document": {"pdf", "send_file"},
-    r"\bword\b|\bdocx\b|\bexcel\b|\bxlsx\b|spreadsheet|powerpoint|\bpptx\b|presentasi|slide\b|office": {"office", "send_file"},
-    r"screenshot|tangkap.?layar|web.?capture|snapshot": {"website_screenshot"},
-    r"voice|suara|bicara|speak|tts|audio|dengar|listen": {"send_voice"},
-    r"config|setting|\bpengaturan\b|konfigurasi|preference": {"update_config"},
-    r"\bgrou?p\b|\bgrup\b": {"manage_group"},
-    r"\buser\b|\bmember\b|akses|access|pengguna": {"manage_user"},
-    r"abilit|kemampuan|capability|fitur|feature": {"update_ability"},
-    r"identity|soul|\baturan\b|\brule\b|kepribadian|personality": {"update_soul"},
-    r"\bauth\b|token|oauth|credential|login|autentikasi": {"check_auth"},
-    r"\bnode\b|remote|device|perangkat": {"node_status"},
-    r"database|query|\bsql\b|tabel|table|\bdb\b": {"db_query"},
-    r"source.?code|kode.?sumber|\bbaca.?kode\b|read.?source|inspect|diagnos": {"read_source"},
-    r"hapus.?memori|delete.?memory|forget|lupa|remove.?memory": {"memory_delete"},
-    r"\breact\b|emoji|reaksi|reaction": {"send_reaction"},
-    r"kirim.?file|send.?file|upload|lampir|attach": {"send_file"},
-}
-
-
 # Tools/abilities that pull UNTRUSTED external content into the turn. When any
 # of these runs mid-turn, the turn is tainted → the consent gate stops skipping
 # for owner/family. Provenance defense: content fetched from web/file/image
@@ -126,34 +72,6 @@ _PHANTOM_ACTION_RE = _re.compile(
 )
 
 
-def _route_tools(tool_schemas: list[dict], user_message: str, metadata: dict = None) -> list[dict]:
-    """Filter tools based on user message + media type — core always included, others by signal."""
-    msg_lower = user_message.lower()
-
-    # Collect needed tool names: core + signal-matched
-    needed = set(_CORE_TOOLS)
-    for pattern, tools in _TOOL_SIGNALS.items():
-        if _re.search(pattern, msg_lower):
-            needed.update(tools)
-
-    # Auto-detect media type from metadata.
-    # memory_store_file is in _CORE_TOOLS, no need to add it here.
-    if metadata:
-        if metadata.get("image") or metadata.get("images"):
-            needed.update({"image_gen", "image_analysis"})
-        if metadata.get("audio") or metadata.get("voice"):
-            needed.update({"send_voice"})
-        if metadata.get("document"):
-            needed.update({"file_read", "file_write", "send_file"})
-
-    # Filter schemas — keep tools whose name is in needed set
-    result = []
-    for schema in tool_schemas:
-        name = schema.get("name") or schema.get("function", {}).get("name", "")
-        if name in needed:
-            result.append(schema)
-
-    return result
 from .security import (
     get_group_context_restrictions,
     filter_tools_for_group,
@@ -1222,17 +1140,16 @@ class Conversation:
                     ability_perms[ab.name] = ab.permission
             tool_schemas = filter_tools_for_group(tool_schemas, extra_permissions=ability_perms)
 
-        # Tool routing: only send tools relevant to the user's message.
-        # SKIP for scheduled tasks — payload may lack keywords (e.g. "[REMINDER]")
-        # but LLM still needs full toolset (send_message, etc.) to fulfill it.
-        _is_scheduled = bool((message_metadata or {}).get("scheduled"))
-        if not _is_scheduled:
-            _before = len(tool_schemas)
-            tool_schemas = _route_tools(tool_schemas, user_message, metadata=message_metadata)
-            if len(tool_schemas) < _before:
-                logger.info(f"Tool routing: {_before} → {len(tool_schemas)} tools for: {user_message[:60]}")
-        else:
-            logger.info(f"Scheduled task — skipping tool routing ({len(tool_schemas)} tools available)")
+        # Tool routing removed: send the full access-level-filtered toolset every
+        # turn. Prior regex routing (_TOOL_SIGNALS) was lossy — English/paraphrase
+        # gaps meant the LLM sometimes did not see meta-tools like update_soul or
+        # memory_delete and would tell the user "I don't have that tool" while
+        # the tool actually existed. Worse, the routing varied the toolset
+        # turn-to-turn, destabilising the model's mental map of its own
+        # capabilities and feeding tool-name hallucinations, AND it killed the
+        # Anthropic prompt-cache breakpoint on system+tools (that cache pays for
+        # itself many times over per session). Now: stable, correct, cheaper.
+        logger.debug(f"Toolset: {len(tool_schemas)} tools (routing dropped)")
 
         # Call LLM with all params from model registry.
         # Retry once on *empty* non-tool responses — some providers occasionally
