@@ -189,6 +189,33 @@ _PIP_BINS: frozenset[str] = frozenset({"pip", "pip3"})
 _PIP_READONLY_SUB: frozenset[str] = frozenset({"list", "show", "freeze", "check", "help"})
 _PIP_WRITE_SUB: frozenset[str] = frozenset({"install", "uninstall", "download", "wheel"})
 
+# git: sub-command sensitive. Pure inspection sub-commands with no write
+# flags → ALLOW. Anything unrecognized → CONSENT (fail-safe: existing
+# CONSENT-tier behavior). The write-flag danger signal (git push/reset
+# --hard/clean -f) still runs independently and can escalate even a
+# read-only-looking sub-command.
+_GIT_READONLY_SUB: frozenset[str] = frozenset({
+    "log", "show", "status", "diff", "branch", "tag", "remote",
+    "rev-parse", "rev-list", "describe", "ls-files", "ls-tree",
+    "blame", "shortlog", "reflog", "stash",  # stash list/show only when no write args
+    "grep", "cat-file", "version",
+})
+# Write-mutating branch flags: -d/-D/-M/-m/-c/-C makes 'git branch' a write.
+_GIT_WRITE_FLAGS: frozenset[str] = frozenset({
+    "-d", "-D", "-M", "-m", "-c", "-C", "--delete", "--move", "--copy",
+    "--set-upstream", "--unset-upstream", "--edit-description",
+    "--force", "-f",
+})
+
+# sed: -n makes it a print-only pipeline (no in-place edits, no writes).
+# ALLOW only when -n is present AND no -i / --in-place (the mutating flag).
+_SED_INPLACE_FLAGS: frozenset[str] = frozenset({"-i", "--in-place"})
+
+# awk: safe as a stream processor. system() is already HARD_DENY via the
+# danger regex; explicit inline-edit flag (-i) and script-file (-f) can
+# hide arbitrary code / mutations, so those escalate to CONSENT.
+_AWK_UNSAFE_FLAGS: frozenset[str] = frozenset({"-i", "--in-place", "-f", "--file"})
+
 
 def _args_after_binary(segment: str):
     """Tokens after the leading binary (ENV=val assignments skipped). Returns
@@ -203,6 +230,66 @@ def _args_after_binary(segment: str):
     if idx >= len(tokens):
         return None
     return tokens[idx + 1:]
+
+
+def _git_verdict(args) -> "Verdict":
+    """Classify a git call. Read-only sub-command with no write flags →
+    ALLOW. Anything else (including unknown sub-command) → CONSENT — the
+    existing default for the git binary in the consent tier. Anti-bypass:
+    scan tokens to find the sub-command, since git accepts pre-command
+    flags (git -C /path log)."""
+    subcmd = None
+    for t in args:
+        if not t.startswith('-'):
+            subcmd = t
+            break
+    if subcmd is None:
+        # 'git' alone or only flags — no side-effect but no useful work
+        # either; existing CONSENT behavior is fine (also covers --version
+        # via the version/help path if the caller wanted that).
+        if any(t in _VERSION_HELP_FLAGS for t in args):
+            return Verdict.ALLOW
+        return Verdict.CONSENT
+    if subcmd not in _GIT_READONLY_SUB:
+        return Verdict.CONSENT
+    # Read-only sub-command — but check for write flags anywhere in args
+    # (git branch -D main is a write; git branch alone is a list).
+    for t in args:
+        if t in _GIT_WRITE_FLAGS:
+            return Verdict.CONSENT
+    # 'git config' needs the same care as 'pip config' — 'get' is safe,
+    # 'set/unset' is a write. Only reachable if the caller added 'config'
+    # to _GIT_READONLY_SUB (currently not — deliberate).
+    return Verdict.ALLOW
+
+
+def _sed_verdict(args) -> "Verdict":
+    """Classify a sed call. ALLOW only when explicit -n (silent/print mode)
+    is present AND there is no -i/--in-place flag. Anything else stays
+    CONSENT (writes, in-place edits, unclear intent)."""
+    has_n = False
+    for t in args:
+        if t in _SED_INPLACE_FLAGS or t.startswith('-i') and t != '-i':
+            # -iEXT (like -i.bak) also in-place
+            return Verdict.CONSENT
+        if t == '-n' or (t.startswith('-') and 'n' in t[1:] and not t.startswith('--')):
+            # -n alone, or combined flags like -sn / -En
+            has_n = True
+    return Verdict.ALLOW if has_n else Verdict.CONSENT
+
+
+def _awk_verdict(args) -> "Verdict":
+    """Classify an awk call. ALLOW when no unsafe flag (-i inline edit,
+    -f script file) is present. The awk-system() danger regex still runs
+    independently and can HARD_DENY a system() call regardless."""
+    for t in args:
+        if t in _AWK_UNSAFE_FLAGS:
+            return Verdict.CONSENT
+        # combined short flags like -if
+        if t.startswith('-') and not t.startswith('--') and len(t) > 1:
+            if 'i' in t[1:] or 'f' in t[1:]:
+                return Verdict.CONSENT
+    return Verdict.ALLOW
 
 
 def _pip_verdict(args) -> "Verdict":
@@ -464,6 +551,47 @@ def analyze(
             pv = _pip_verdict(pargs)
             verdict = _stricter(verdict, pv)
             reasons.append(f"pip '{binary}' -> {pv.value} [{seg_norm}]")
+            continue
+
+        # ── git/sed/awk: sub-command / flag sensitive. Pure inspection →
+        #    ALLOW; anything mutating → CONSENT. Runs BEFORE the blanket
+        #    _DEFAULT_CONSENT check so routine `git log` / `sed -n` /
+        #    `awk '{print $1}'` don't gate. Danger signals (write flags on
+        #    git, redirects, etc.) still escalate below.
+        _tiered = None
+        if binary == "git":
+            _bargs = _args_after_binary(seg)
+            if _bargs is None:
+                verdict = _stricter(verdict, Verdict.HARD_DENY)
+                reasons.append(f"fail-closed: unparseable git segment [{seg_norm}]")
+                continue
+            _tiered = _git_verdict(_bargs)
+        elif binary == "sed":
+            _bargs = _args_after_binary(seg)
+            if _bargs is None:
+                verdict = _stricter(verdict, Verdict.HARD_DENY)
+                reasons.append(f"fail-closed: unparseable sed segment [{seg_norm}]")
+                continue
+            _tiered = _sed_verdict(_bargs)
+        elif binary == "awk":
+            _bargs = _args_after_binary(seg)
+            if _bargs is None:
+                verdict = _stricter(verdict, Verdict.HARD_DENY)
+                reasons.append(f"fail-closed: unparseable awk segment [{seg_norm}]")
+                continue
+            _tiered = _awk_verdict(_bargs)
+
+        if _tiered is not None:
+            # Danger signals ALSO run so redirect / write-flag patterns can
+            # escalate an ALLOW to CONSENT (belt-and-suspenders).
+            _danger_reason = _check_danger(seg_norm)
+            if _danger_reason:
+                _tiered = _stricter(_tiered, Verdict.CONSENT)
+            verdict = _stricter(verdict, _tiered)
+            reasons.append(
+                f"{binary} tiered -> {_tiered.value} [{seg_norm}]"
+                + (f" (danger: {_danger_reason})" if _danger_reason else "")
+            )
             continue
 
         # ── consent-tier: legitimate but weaponizable → conscious Yes required.

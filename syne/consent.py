@@ -373,6 +373,52 @@ async def check_and_hold(
             except Exception as e:
                 _log.warning(f"consent: _consent_confirmed raised: {e}")
 
+        # ── Re-emit block ──────────────────────────────────────────────────
+        # A single pending slot on the conversation used to be silently
+        # overwritten by any new held call. The failure mode: model
+        # re-emits a gate-triggering call with a small edit → new payload
+        # hash → new pending → old prompt orphaned in the transcript, user
+        # sees the new one and clicks Yes → BOTH actions may run when the
+        # user answers the earlier prompt too. For non-idempotent commands
+        # (sed -i, git push --force) this compounds real state.
+        #
+        # Deterministic guard: if a DIFFERENT pending is already in
+        # flight, block the new call with a machine-readable message
+        # instead of overwriting the slot. Same-payload re-emits just get
+        # the existing prompt back (idempotent — no harm).
+        incoming_hash = content_hash(payload)
+        existing_hash = getattr(conv, "_pending_consent_hash", "") or ""
+        existing_tool = getattr(conv, "_pending_consent_tool", "") or ""
+        if existing_hash:
+            if existing_hash == incoming_hash:
+                # Same call re-issued — return the existing canonical
+                # prompt so the human still sees the button and the model
+                # sees the same PENDING status. No pending mutation.
+                _log.info(
+                    f"consent: same-hash re-emit for {tool_name} "
+                    f"hash={existing_hash} — returning existing prompt"
+                )
+                return ("held", format_consent_prompt(
+                    existing_tool or tool_name,
+                    getattr(conv, "_pending_consent_args", None) or args,
+                    existing_hash,
+                ))
+            _log.warning(
+                f"consent: BLOCKED new gate call while pending exists — "
+                f"existing tool={existing_tool} hash={existing_hash}, "
+                f"attempted tool={tool_name} hash={incoming_hash}"
+            )
+            _blocked = (
+                f"⛔ BLOCKED: a prior action is still pending user approval.\n"
+                f"Existing pending: tool=`{existing_tool}` "
+                f"hash=`{existing_hash}`.\n"
+                f"Wait for the user's Yes/No on that first (or let the "
+                f"TTL expire) before issuing this or any other "
+                f"gate-triggering call. This block is deterministic — "
+                f"re-emitting will not queue a second action."
+            )
+            return ("held", _blocked)
+
         # Set pending state on the CONVERSATION (per-conv, not agent-global —
         # avoids the same latent race the sudo-guard has on concurrent sessions).
         import time as _time
@@ -380,7 +426,7 @@ async def check_and_hold(
         conv._pending_consent_op = "x"
         conv._pending_consent_tool = tool_name
         conv._pending_consent_args = dict(args or {})
-        conv._pending_consent_hash = content_hash(payload)
+        conv._pending_consent_hash = incoming_hash
         conv._pending_consent_at = _time.time()
 
         prompt = format_consent_prompt(tool_name, args, conv._pending_consent_hash)
@@ -397,10 +443,36 @@ async def check_and_hold(
         return ("allow", None)
 
 
+# Dual-audience prefix prepended to every consent prompt.
+#
+# Purpose: give the LLM an EXPLICIT, machine-readable "this is pending"
+# signal — not something it has to infer from a warning emoji. Prior
+# behavior handed the model the same human-facing prompt as the user, so
+# an ambiguous-looking tool_result could be misread as failure and trigger
+# a re-emit — sometimes with a small edit that produced a NEW payload
+# hash, a NEW consent prompt, and (once each was approved by a trusting
+# user) MULTIPLE executions of the same non-idempotent action. Real
+# incident: sed -i '…a\ hidden=True' re-emitted three times → three
+# stacked hidden=True lines in the wrong positions → git checkout revert.
+#
+# The prefix is user-visible too (Telegram / CLI both render it) — that is
+# a feature, not a leak. It tells the human "no need to retype, just click
+# Yes or No"; it tells the model "this call is queued, don't touch it".
+_PENDING_STATUS_PREFIX = (
+    "⏳ STATUS: PENDING_USER_CONSENT — jangan kirim ulang perintah ini "
+    "atau varian edited-nya. Tunggu tombol Yes/No dari user. Re-emit "
+    "membuat pending BARU yang harus di-approve ulang, dan kalau "
+    "user meng-approve semuanya, aksi tereksekusi berkali-kali.\n\n"
+)
+
+
 def format_consent_prompt(
     tool_name: str, args: Optional[dict], hash_hex: str,
 ) -> str:
     """User-facing prompt shown when a call is held pending consent.
+
+    Prepended with an explicit PENDING_USER_CONSENT status line so the LLM
+    sees observable state, not inferred state, in its tool_result.
 
     Ends with a machine-readable marker `[[CONSENT_BUTTONS:hash=…]]` that
     channel adapters (Telegram, etc.) can detect and replace with inline
@@ -419,6 +491,7 @@ def format_consent_prompt(
         if len(body) > 500:
             body = body[:500] + " …"
         return (
+            f"{_PENDING_STATUS_PREFIX}"
             f"⚠️ Run this command?\n"
             f"```\n$ {body}\n```\n"
             f"[[CONSENT_BUTTONS:hash={hash_hex}]]"
@@ -442,6 +515,7 @@ def format_consent_prompt(
             extra.append('• ' + str(_k) + ': ' + _val)
         extra_block = ('\n' + '\n'.join(extra)) if extra else ''
         return (
+            _PENDING_STATUS_PREFIX +
             '⚠️ ' + verb + '\n'
             '📄 ' + path + extra_block + '\n'
             '[[CONSENT_BUTTONS:hash=' + hash_hex + ']]'
@@ -459,6 +533,7 @@ def format_consent_prompt(
     else:
         preview = str(a)[:300]
     return (
+        f"{_PENDING_STATUS_PREFIX}"
         f"⚠️ Confirm `{tool_name}`?\n"
         f"{preview}\n"
         f"[[CONSENT_BUTTONS:hash={hash_hex}]]"

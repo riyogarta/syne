@@ -1884,6 +1884,20 @@ class Conversation:
                         ),
                     ))
 
+            # Early exit — a consent gate held mid-loop. Do NOT let the
+            # model iterate again in the same turn: its next tool_result
+            # (the "balas ya" prompt) would be its own signal, and misreads
+            # of that signal have driven duplicate re-emits before. The
+            # marker-injection at the tail of _chat_inner will replace the
+            # outgoing response with the canonical consent prompt for the
+            # channel, so the user still sees Yes/No properly.
+            if getattr(self, "_pending_consent_hash", ""):
+                logger.info(
+                    f"Tool loop: gate held mid-turn "
+                    f"(hash={self._pending_consent_hash}) — terminating loop early"
+                )
+                break
+
             # Small delay between tool call rounds to avoid rate limiting
             await asyncio.sleep(1.0)
 
