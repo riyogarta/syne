@@ -1171,6 +1171,7 @@ class SyneAgent:
             },
             handler=self._tool_manage_group,
             permission=0o700,
+            hidden=True,
         )
 
         # ── User Management ──
@@ -1207,6 +1208,7 @@ class SyneAgent:
             },
             handler=self._tool_manage_user,
             permission=0o700,
+            hidden=True,
         )
 
         # ── Self-Configuration Tools (owner only) ──
