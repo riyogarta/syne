@@ -232,34 +232,70 @@ def _args_after_binary(segment: str):
     return tokens[idx + 1:]
 
 
+# Benign pre-command flags that take a PATH value (chdir / dir redirect).
+# git accepts these BEFORE the sub-command; they execute nothing, so they are
+# skipped (along with the value they consume) when locating the sub-command.
+_GIT_PRECMD_PATH_FLAGS: frozenset[str] = frozenset({
+    "-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix",
+})
+# Pre-command flags that inject config / can execute code (git -c
+# core.pager=..., -c core.sshCommand=..., alias.*, --config-env). These force
+# CONSENT even with a read-only sub-command, since git's pager/alias machinery
+# can run arbitrary commands.
+_GIT_PRECMD_DANGER_FLAGS: frozenset[str] = frozenset({
+    "-c", "--config-env",
+})
+
+
 def _git_verdict(args) -> "Verdict":
-    """Classify a git call. Read-only sub-command with no write flags →
-    ALLOW. Anything else (including unknown sub-command) → CONSENT — the
-    existing default for the git binary in the consent tier. Anti-bypass:
-    scan tokens to find the sub-command, since git accepts pre-command
-    flags (git -C /path log)."""
+    """Classify a git call. Read-only sub-command with no write flags -> ALLOW;
+    everything else -> CONSENT (fail-safe).
+
+    Pre-command flags are parsed the way git accepts them (BEFORE the
+    sub-command). Benign path flags (-C <path>, --git-dir <path>, --work-tree
+    <path>, ...) are skipped together with the value they consume, so
+    'git -C /repo log' correctly resolves to sub-command 'log'. Config /
+    code-injection flags (-c ..., --config-env) force CONSENT even for a
+    read-only sub-command. Write-mutating flags (git branch -D/-M/-c/-C ...)
+    are checked ONLY after the sub-command, so a benign pre-command -C no
+    longer masquerades as a branch-copy write. Any parsing ambiguity falls
+    through to CONSENT, never ALLOW.
+    """
     subcmd = None
-    for t in args:
+    subcmd_idx = -1
+    i = 0
+    n = len(args)
+    while i < n:
+        t = args[i]
         if not t.startswith('-'):
             subcmd = t
+            subcmd_idx = i
             break
+        base = t.split('=', 1)[0]
+        # config / code-injection pre-command flags -> always CONSENT.
+        # t[:2] == '-c' catches '-c', '-c name=val', and attached '-cname=val'
+        # (lowercase c only; '-C' is the benign chdir flag handled below).
+        if base in _GIT_PRECMD_DANGER_FLAGS or t[:2] == '-c':
+            return Verdict.CONSENT
+        # benign path-taking pre-command flags: skip the flag and its value.
+        if base in _GIT_PRECMD_PATH_FLAGS:
+            i += 1 if '=' in t else 2   # glued '--flag=val' is one token
+            continue
+        # any other pre-command flag (--paginate, --no-pager, --bare, ...)
+        i += 1
+
     if subcmd is None:
-        # 'git' alone or only flags — no side-effect but no useful work
-        # either; existing CONSENT behavior is fine (also covers --version
-        # via the version/help path if the caller wanted that).
+        # 'git' alone or only flags -- no side effect but no useful work either.
         if any(t in _VERSION_HELP_FLAGS for t in args):
             return Verdict.ALLOW
         return Verdict.CONSENT
     if subcmd not in _GIT_READONLY_SUB:
         return Verdict.CONSENT
-    # Read-only sub-command — but check for write flags anywhere in args
-    # (git branch -D main is a write; git branch alone is a list).
-    for t in args:
+    # Write-mutating flags matter ONLY after the sub-command
+    # (git branch -D main is a write; pre-command -C/-c were handled above).
+    for t in args[subcmd_idx + 1:]:
         if t in _GIT_WRITE_FLAGS:
             return Verdict.CONSENT
-    # 'git config' needs the same care as 'pip config' — 'get' is safe,
-    # 'set/unset' is a write. Only reachable if the caller added 'config'
-    # to _GIT_READONLY_SUB (currently not — deliberate).
     return Verdict.ALLOW
 
 
