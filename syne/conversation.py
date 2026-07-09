@@ -746,6 +746,17 @@ class Conversation:
         except Exception as e:
             logger.error(f"Consent bypass dispatch failed: {e}", exc_info=True)
             result_str = f"Error running action after consent: {e}"
+        finally:
+            # Single-use grant (root fix for consent double-exec): revoke the
+            # grant immediately after dispatch. If the transcript surgery below
+            # fails to resolve the LLM's original tool_use, the LLM may re-emit
+            # the identical payload next turn — without this revoke that re-emit
+            # hits the still-cached grant and runs a SECOND time with no prompt.
+            # Revoking here forces the re-emit back through the consent gate.
+            try:
+                agent._consent.revoke(ckey)
+            except Exception as _e:
+                logger.warning(f"Consent bypass: revoke failed: {_e}")
 
         # ─── Transcript surgery ────────────────────────────────────────────
         # When the gate held earlier, the tool loop saved the "balas ya"
