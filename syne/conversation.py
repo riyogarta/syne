@@ -876,7 +876,7 @@ class Conversation:
             if meta_name != tool_name:
                 continue
             body = m.content or ""
-            if expected_hash in body:
+            if (CONSENT_BUTTON_MARKER + expected_hash) in body:
                 target_idx = i
                 break
         if target_idx is None:
