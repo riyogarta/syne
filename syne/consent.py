@@ -459,10 +459,10 @@ async def check_and_hold(
 # a feature, not a leak. It tells the human "no need to retype, just click
 # Yes or No"; it tells the model "this call is queued, don't touch it".
 _PENDING_STATUS_PREFIX = (
-    "⏳ STATUS: PENDING_USER_CONSENT — jangan kirim ulang perintah ini "
-    "atau varian edited-nya. Tunggu tombol Yes/No dari user. Re-emit "
-    "membuat pending BARU yang harus di-approve ulang, dan kalau "
-    "user meng-approve semuanya, aksi tereksekusi berkali-kali.\n\n"
+    "⏳ STATUS: PENDING_USER_CONSENT — awaiting the user's Yes/No. Do NOT "
+    "re-send this command or an edited variant. A re-emit only creates a "
+    "new pending that must be approved again; if the user approves them "
+    "all, the action executes multiple times.\n\n"
 )
 
 
