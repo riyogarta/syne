@@ -449,13 +449,79 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 
 ---
 
+## Consent Gate & Shell Guard
+
+Beyond the permission tier (who can invoke), Syne has a **per-action confirmation layer** for destructive tools and a **deterministic parser** for every shell command. Together they make prompt-injection attacks operationally hard: an attacker cannot press a Telegram button, and a hard-denied command never runs even if the model was convinced to try.
+
+### Consent Gate — Per-Action Yes/No
+
+When the LLM emits a destructive tool call (any tool whose caller-class digit has the `x` bit — `shell`, `file_write`, `memory_delete`, `update_config`, etc.), the gate:
+
+1. Suspends the call
+2. Sends a `⚠️ Confirm this?` prompt to Telegram with inline **Yes** / **No** buttons
+3. Only runs the tool if the owner clicks Yes (buttons are owner-only)
+
+Skips the gate on a **clean turn** from a trusted caller (owner or family) — a conscious, direct command doesn't need friction. A turn is considered *tainted* and re-arms the gate when:
+
+- The message carries an attachment (image / document / uploaded file) or a URL
+- A tool that fetches external content ran mid-turn (`web_search`, `fetch_url`, `website_screenshot`, `image_analysis`, `file_read`, `pdf`, `office`)
+
+The Yes button becomes proof of conscious approval that content injected from a web page, an uploaded file, or an image cannot forge — it cannot press a Telegram button. Enforced by code + platform, not by the model's discipline.
+
+**Anti-double-execution** (v1.18.20): the grant is single-use per approval — if a transcript race makes the LLM re-emit the same call, it hits the gate again and prompts fresh rather than running silently on a cached grant. Different-payload re-emits while pending are deterministically blocked, so a small edit ("try again with the flag") can't sneak an unapproved second action past.
+
+Toggle globally via `/consent on|off` (owner-only). Off means destructive tools run immediately without asking — meant for headless / trusted-terminal contexts.
+
+### Shell Guard — Deterministic Command Parser
+
+Every shell command — whether from the LLM, a sub-agent, or an ability shell-out — routes through `run_shell()`, which calls `shell_guard.analyze()` for a verdict before any subprocess is spawned:
+
+| Verdict | Meaning |
+|---------|---------|
+| `ALLOW` | Every segment's binary is on the allowlist and no danger signal → runs directly |
+| `CONSENT` | Allowlisted binary but a danger signal (write flag, redirect, pager exec, etc.) → gate fires |
+| `HARD_DENY` | A haram pattern (`rm -rf /`, `mkfs`, `curl | sh`, fork bomb), an unknown binary, or a parse failure → never runs, not even the owner can approve |
+
+Non-negotiable properties:
+
+- **Fail-closed** — any parse error / exception / tokenize failure = `HARD_DENY`, never `ALLOW`
+- **Default-deny** — unknown binaries never run; the allowlist is the only thing that opens the gate
+- **Denylist first** — haram patterns are checked before the allowlist, so a bad entry in the runtime allowlist can't launder a forbidden command
+- **Whole-command** — a compound (`cmd1 && cmd2`) is only as safe as its weakest segment (aggregate = strictest)
+
+**Read-only tiering** — routine inspection doesn't gate:
+
+| Binary | ALLOW form | Escalates to CONSENT when |
+|---|---|---|
+| `git` | `log`, `show`, `status`, `diff`, `branch`, `tag`, `remote`, `rev-parse/list`, `describe`, `ls-files/tree`, `blame`, `shortlog`, `reflog`, `stash`, `grep`, `cat-file` — with no write flags | write flag (`-d/-D/-M/-c/-C/--force`), unknown sub-command, config-injection (`-c ...`), output redirect |
+| `sed` | `-n` (print-only) present, no `-i` | in-place edit (`-i`), no `-n`, or any write signal |
+| `awk` | no `-i` (inline edit), no `-f` (script file) | inline edit, script file, or `system()` (danger regex) |
+| `pip` | `list`, `show`, `freeze`, `check`, `help`, `config get`, `--version` | `install`, `uninstall`, `download`, `wheel`, `config set/unset` |
+| `cat`, `grep`, `head`, `tail`, `wc`, `diff`, `df`, `du`, etc. | Any use | Danger signal (redirect, pager escape) |
+
+**Runtime allowlist/denylist** — owner can promote binaries or add pattern denies via Telegram:
+
+```
+/allowlist                            → show current allowlist + candidates
+/allowlist add npm                    → promote npm to ALLOW
+/allowlist remove foo                 → revoke
+/denylist                             → show denies
+/denylist add-pattern 'gnome-keyring' → block anything matching the regex
+```
+
+Runtime lists layer over the hardcoded floor — floor is authoritative for security; runtime is the operator's carve-outs.
+
+Shell guard is standalone: no imports from Syne internals, no DB, no I/O in `analyze()`. Pure so it can be unit-tested exhaustively. The DB-backed runtime allowlist/denylist is injected as arguments — a DB hiccup fails closed to the floor, never widens the gate.
+
+---
+
 ## Core Tools (26)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
 | `web_search` | 555 | Search the web (Brave Search API) |
 | `web_fetch` | 555 | Fetch and extract content from URLs |
-| `exec` | 700 | Execute shell commands |
+| `shell` | 700 | Execute shell commands (routed through shell_guard for parse + consent). Alias: `exec` |
 | `db_query` | 700 | Read-only SQL queries (SELECT only, credentials redacted) |
 | `file_read` | 500 | Read files in workspace (max 100KB) |
 | `file_write` | 700 | Write files (restricted to safe directories) |
@@ -473,12 +539,14 @@ Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
 | `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it as document |
 | `memory_analyze_file` | 555 | Re-analyze a memory's attached file (PDF/Office text extract or image vision) — returns content to LLM, not media |
 | `memory_delete` | 700 | Delete memories (owner only) |
-| `manage_group` | 700 | Manage group chat settings |
-| `manage_user` | 700 | Manage user access levels |
 | `update_config` | 700 | Change runtime configuration |
 | `update_ability` | 700 | Enable/disable/create abilities |
 | `update_soul` | 700 | Modify personality and behavioral rules |
 | `check_auth` | 700 | OAuth token management |
+
+`manage_group` and `manage_user` are owner-only tools registered in the engine but **not exposed to the LLM** — group and member changes are more reliable via the `/groups` and `/members` Telegram menus. The tools exist for future automation but the model doesn't see them today.
+
+Since v1.18.18, the LLM sees the **full toolset every turn** (subject to the access-level filter). Prior versions filtered tools by regex-matching the user's message, which caused false-negative "I don't have that tool" reports for meta-tools like `update_soul` when users phrased around the trigger keywords. Full-toolset delivery also holds the Anthropic prompt-cache breakpoint on system+tools, so the extra schema tokens are absorbed by the cache after the first turn.
 
 ---
 
@@ -559,15 +627,17 @@ class Ability:
     async def ensure_dependencies(self) -> tuple[bool, str]: ...
 ```
 
-### Exec Security
+### Shell Security
 
-The `exec` tool gives Syne shell access on the host system:
+The `shell` tool (formerly `exec`) gives Syne shell access on the host system. Every command — from the LLM, from a sub-agent, or from an ability shell-out (LibreOffice conversion, WhatsApp bridge, etc.) — routes through a single chokepoint `run_shell()` that calls **shell_guard** for a verdict (see [Consent Gate & Shell Guard](#consent-gate--shell-guard)).
 
-- **Owner-only** (permission 700) — only the owner can trigger exec
+- **Owner-only** (permission 700) — only the owner can trigger the LLM to call `shell`
 - **Configurable timeout** — `exec.timeout_max` (default: 300 seconds)
 - **Output limit** — `exec.output_max_chars` (default: 4000 chars)
-- **Sub-agents** — inherit exec access but run in isolated sessions
-- **Your responsibility** — review what Syne executes, especially on production systems
+- **Sub-agents** — inherit shell access but gate through shell_guard the same way (v1.18.0 Phase 5 closed the headless bypass); a sub-agent has no human to approve, so any `CONSENT`-tier command in a sub-agent context becomes an effective denial
+- **Fail-closed everywhere** — parse errors, tokenize failures, DB hiccups on the allowlist load — every uncertainty resolves to HARD_DENY, never ALLOW
+- **rollback.sh** — a terminal-only recovery helper. Hard-denied via `_HARAM_PATTERNS` so no agent path can invoke it; runs only when you type it yourself in a real terminal
+- **Your responsibility** — the parser is a defense, not a magic barrier. Review what you approve, especially on production systems
 
 ---
 
@@ -695,13 +765,22 @@ syne identity name "Syne"  # Set identity value
 syne prompt                # Show system prompt
 
 # Memory
-syne memory stats          # Memory statistics
-syne memory search "query" # Semantic search
-syne memory add "info"     # Manually add memory
+syne memory stats                    # Memory statistics
+syne memory search "query"           # Semantic search
+syne memory add "info"               # Manually add memory
+syne memory delete <id>              # Delete a memory by id
+syne memory prune '%pattern%'        # Bulk-delete matching ILIKE pattern (with preview + confirm)
+
+# Config
+syne config                          # List all config keys
+syne config list [prefix]            # Filter list by prefix
+syne config get <key>                # Print a single value
+syne config set <key> <value>        # Upsert (value auto-parsed: bool/int/JSON/str)
+syne config delete <key>             # Remove a key
 
 # Backup & Restore
-syne backup                # Backup database
-syne restore               # Restore from backup
+syne backup                          # Backup database
+syne restore                         # Restore from backup
 ```
 
 ---
@@ -720,9 +799,14 @@ syne restore               # Restore from backup
 | `/compact` | Compact conversation | Owner |
 | `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
 | `/autocapture [on/off]` | Toggle auto memory capture | Owner |
+| `/consent [on/off]` | Toggle consent gate for destructive tools | Owner |
+| `/allowlist` | Manage shell_guard runtime allowlist (add/remove binaries) | Owner |
+| `/denylist` | Manage shell_guard runtime denylist (binaries + patterns) | Owner |
 | `/models` | Manage LLM models (thinking, reasoning, context, params) | Owner |
 | `/embedding` | Manage embedding models | Owner |
 | `/evaluator` | Manage evaluator model | Owner |
+| `/vision` | Manage vision provider (for OCR / image analysis) | Owner |
+| `/imagegen` | Manage image generation provider | Owner |
 | `/browse` | Browse directories (share session with CLI) | Owner |
 | `/groups` | Manage groups & members | Owner |
 | `/members` | Manage global user access levels | Owner |
@@ -771,7 +855,14 @@ syne restore               # Restore from backup
 |  +------------------------------------------------------+  |
 |  |              PERMISSION LAYER                        |  |
 |  |  Linux-style 3-digit octal: owner/family/public      |  |
-|  |  Every tool and ability has its own permission        |  |
+|  |  Every tool and ability has its own permission       |  |
+|  +------------------------------------------------------+  |
+|                                                            |
+|  +------------------------------------------------------+  |
+|  |          CONSENT GATE  +  SHELL GUARD                |  |
+|  |  Provenance-aware Yes/No confirmation for destructive|  |
+|  |  tools; deterministic parser (ALLOW / CONSENT /      |  |
+|  |  HARD_DENY) for every shell command; fail-closed.    |  |
 |  +------------------------------------------------------+  |
 |                                                            |
 |  +------------------------------------------------------+  |
@@ -839,18 +930,23 @@ syne/
 │   ├── context.py           # Context window manager (token counting)
 │   ├── compaction.py        # Conversation summarization
 │   ├── security.py          # Permission system, SSRF protection, credential masking
+│   ├── consent.py           # Per-action Yes/No gate (owner/family clean-turn skip, provenance-aware)
+│   ├── shell_guard.py       # Deterministic shell parser (ALLOW/CONSENT/HARD_DENY, fail-closed)
+│   ├── shell_exec.py        # run_shell() — the single subprocess chokepoint for every shell path
 │   ├── ratelimit.py         # Per-user rate limiting
 │   ├── scheduler.py         # Cron/scheduled task runner
 │   ├── subagent.py          # Background sub-agent task runner
 │   ├── config_guide.py      # Config reference (injected into system prompt)
 │   ├── system_guide.py      # Architecture guide (injected into system prompt)
-│   ├── update_checker.py    # GitHub version checker
 │   ├── communication/
+│   │   ├── telegram.py      # Telegram bot (commands, groups, photos, voice, docs)
 │   │   ├── inbound.py       # InboundContext (source of truth per message)
-│   │   ├── formatting.py    # Output formatting, tag stripping
+│   │   ├── outbound.py      # Outbound post-processing (path strip, narration strip, MEDIA extract)
+│   │   ├── formatting.py    # Output formatting, markdown → Telegram HTML
+│   │   ├── tags.py          # [[reply_to]] / [[react]] tag parsing
 │   │   └── errors.py        # Error classification
 │   ├── channels/
-│   │   ├── telegram.py      # Telegram bot (commands, groups, photos, voice, docs)
+│   │   ├── telegram.py      # Deprecated re-export → syne.communication.telegram
 │   │   └── cli_channel.py   # Interactive CLI (REPL)
 │   ├── auth/
 │   │   ├── google_oauth.py  # Google OAuth2 (for Gemini CCA)
@@ -889,10 +985,12 @@ syne/
 │       ├── cmd_repair.py    # syne repair
 │       ├── cmd_update.py    # syne update
 │       ├── cmd_db.py        # syne db
-│       ├── cmd_memory.py    # syne memory
+│       ├── cmd_config.py    # syne config (list/get/set/delete)
+│       ├── cmd_memory.py    # syne memory (stats/search/add/delete/prune)
 │       ├── cmd_node.py      # syne node (init/start/stop/restart/status)
 │       ├── cmd_backup.py    # syne backup/restore
 │       └── ...
+├── rollback.sh              # Terminal-only recovery helper (hard-denied via shell_guard)
 ├── docker-compose.yml
 ├── pyproject.toml
 └── README.md
@@ -920,6 +1018,8 @@ pytest
 - [x] Interactive CLI (`syne cli`)
 - [x] Knowledge Graph (entity-relation extraction from memories)
 - [x] Remote Node (multi-machine via WebSocket gateway)
+- [x] Consent gate (per-action Yes/No with provenance-aware skip)
+- [x] Shell guard (deterministic parser: ALLOW / CONSENT / HARD_DENY)
 - [ ] Ability marketplace
 
 ---
