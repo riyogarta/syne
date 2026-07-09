@@ -188,7 +188,6 @@ class MemoryEngine:
                 LEFT JOIN memory_blobs b ON b.memory_id = m.id
                 WHERE {where}
                   AND m.embedding IS NOT NULL
-                  AND (COALESCE(m.permanent, false) = true OR COALESCE(m.recall_count, 1) > 0)
                 ORDER BY m.embedding <=> $1::vector
                 LIMIT $2
             """, *params)
@@ -231,8 +230,19 @@ class MemoryEngine:
                     UPDATE memory
                     SET access_count = access_count + 1,
                         accessed_at = NOW(),
-                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 2 END
+                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 1 END
                     WHERE id = ANY($1)
+                """, ids_to_update)
+
+                # Decay v2: event-driven tick — every recall nudges all
+                # OTHER non-permanent memories down by 1 (permanent immune).
+                # recall_count may go 0/negative; that's just ordering score.
+                # Life/death is decided by the cap in run_decay(), not by 0.
+                await conn.execute("""
+                    UPDATE memory
+                    SET recall_count = recall_count - 1
+                    WHERE COALESCE(permanent, false) = false
+                      AND NOT (id = ANY($1))
                 """, ids_to_update)
 
             # ═══════════════════════════════════════════════════════════
@@ -382,6 +392,7 @@ class MemoryEngine:
         async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT id, content, source, importance,
+                       COALESCE(permanent, false) as permanent,
                        1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE 1 - (embedding <=> $1::vector) >= $2
@@ -406,6 +417,20 @@ class MemoryEngine:
             old_content = existing["content"]
             old_source = existing.get("source", "system")
             old_importance = existing.get("importance", 0.5)
+
+            old_permanent = existing.get("permanent", False)
+
+            # Decay v2 — Rule 0: permanent ALWAYS wins. A non-permanent
+            # (auto-captured / observed) memory must never silently
+            # overwrite a permanent one the user explicitly locked in.
+            # Skip the overwrite and log so the LLM can flag it to the user.
+            if old_permanent and not permanent:
+                logger.info(
+                    f"Conflict: new non-permanent memory contradicts PERMANENT "
+                    f"#{old_id}. Keeping permanent, skipping new. "
+                    f"(new='{content[:50]}')"
+                )
+                return None
 
             new_priority = self._source_priority(source)
             old_priority = self._source_priority(old_source)
@@ -685,30 +710,41 @@ class MemoryEngine:
         if current % interval != 0:
             return  # Not time yet
         
-        decay_amount = int(await get_config("memory.decay_amount", "5"))
+        cap = int(await get_config("memory.max_records", "50"))
+        promo = int(await get_config("memory.promotion_threshold", "1000"))
 
         async with get_connection() as conn:
-            # No promotion — permanent is only set by explicit user command ("ingat").
-            # Non-permanent memories stay non-permanent and subject to decay.
-
-            # Decay non-permanent memories
+            # Decay v2 — Fase 2 (dormant): auto-promote a non-permanent
+            # memory to permanent once its recall_count crosses the (high)
+            # promotion threshold. Threshold defaults very high so this is
+            # effectively inert until tuned against real recall data.
             await conn.execute("""
                 UPDATE memory
-                SET recall_count = recall_count - $1,
-                    updated_at = NOW()
-                WHERE permanent = false
-                  AND recall_count > 0
-            """, decay_amount)
+                SET permanent = true, updated_at = NOW()
+                WHERE COALESCE(permanent, false) = false
+                  AND recall_count >= $1
+            """, promo)
 
-            # Delete memories with recall_count <= 0
-            deleted = await conn.fetch("""
-                DELETE FROM memory
-                WHERE permanent = false
-                  AND recall_count <= 0
-                RETURNING id, content
+            # Decay v2 — cap-based eviction (LRU/LFU hybrid). Life/death is
+            # decided HERE, not by recall_count<=0. When non-permanent count
+            # exceeds the cap, evict the lowest-recall (LFU), oldest-id (LRU)
+            # rows until back at cap. Permanent memories are never touched.
+            n = await conn.fetchval("""
+                SELECT COUNT(*) FROM memory WHERE COALESCE(permanent, false) = false
             """)
-
-            if deleted:
-                logger.info(f"Memory decay: deleted {len(deleted)} forgotten memories")
-                for row in deleted:
-                    logger.debug(f"  Forgotten: [{row['id']}] {row['content'][:60]}...")
+            over = int(n) - cap
+            if over > 0:
+                deleted = await conn.fetch("""
+                    DELETE FROM memory
+                    WHERE id IN (
+                        SELECT id FROM memory
+                        WHERE COALESCE(permanent, false) = false
+                        ORDER BY recall_count ASC, id ASC
+                        LIMIT $1
+                    )
+                    RETURNING id, content
+                """, over)
+                if deleted:
+                    logger.info(f"Memory decay v2: evicted {len(deleted)} over-cap memories (cap={cap})")
+                    for row in deleted:
+                        logger.debug(f"  Evicted: [{row['id']}] {row['content'][:60]}...")

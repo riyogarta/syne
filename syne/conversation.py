@@ -872,9 +872,12 @@ class Conversation:
             if m.role != "tool":
                 continue
             _tool_rows_seen += 1
-            meta_name = (m.metadata or {}).get("tool_name", "")
-            if meta_name != tool_name:
-                continue
+            # NOTE: we deliberately do NOT gate on metadata.tool_name here.
+            # Held rows are saved with the LLM-issued tool name (e.g. 'shell')
+            # while the consent gate tracks the canonical name (e.g. 'exec'),
+            # so a name comparison produces false negatives and re-loops the
+            # tool. The marker+hash below is already a globally-unique key for
+            # exactly one held-prompt row, so it is sufficient and safe.
             body = m.content or ""
             if (CONSENT_BUTTON_MARKER + expected_hash) in body:
                 target_idx = i
