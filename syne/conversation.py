@@ -1250,6 +1250,11 @@ class Conversation:
 
         # Handle tool calls
         logger.info(f"LLM response: content={len(response.content or '')} chars, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, model={response.model}")
+        # Capture BEFORE _handle_tool_calls: the final response it returns always
+        # has empty .tool_calls (the closing answer doesn't call another tool), so
+        # checking response.tool_calls afterwards can't tell "no tool ran" apart
+        # from "tool ran, now summarizing". This flag preserves that distinction.
+        tools_ran_this_turn = bool(response.tool_calls)
         if response.tool_calls:
             logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
@@ -1258,7 +1263,10 @@ class Conversation:
         # performed (no tool calls). Provider-agnostic on purpose: Claude is
         # less prone than Gemini/GPT but NOT immune, and it's the owner's
         # preferred model. Deterministic regex guard, runs for all providers.
-        if not response.tool_calls:
+        # BUT: skip if a tool actually ran this turn — summarizing a real
+        # tool_result with words like "berhasil/executed" is NOT a phantom claim
+        # (false positive fixed 11 Jul 2026: speedtest summary got flagged).
+        if not response.tool_calls and not tools_ran_this_turn:
             content = response.content or ""
             if _PHANTOM_ACTION_RE.search(content):
                 logger.warning(f"Phantom action detected in response (no tool calls): {content[:200]}")

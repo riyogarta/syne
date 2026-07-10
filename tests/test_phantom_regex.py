@@ -77,3 +77,59 @@ class TestPhantomRegexObject:
         # false positives.
         far = "sudah " + ("x" * 60) + " simpan"
         assert not _matches(far), "should not bridge >40 char gap"
+
+
+# ---------------------------------------------------------------------------
+# Guard gating — the WARNING should only be appended when:
+#   (regex matches) AND (final response has no tool_calls)
+#   AND (no tool ran this turn)
+#
+# This mirrors the runtime condition in ConversationManager:
+#     if not response.tool_calls and not tools_ran_this_turn:
+#         if _PHANTOM_ACTION_RE.search(content): <append warning>
+#
+# The bug fixed on 11 Jul 2026: after a tool ran, _handle_tool_calls returns a
+# FINAL response with empty .tool_calls, so the old condition (which only
+# checked response.tool_calls) fired a FALSE POSITIVE when the model summarized
+# a real tool_result using words like "Berhasil". `tools_ran_this_turn` closes
+# that gap.
+# ---------------------------------------------------------------------------
+
+def _should_warn(content: str, final_has_tool_calls: bool, tools_ran_this_turn: bool) -> bool:
+    """Pure replica of the runtime gating decision (see ConversationManager)."""
+    if final_has_tool_calls or tools_ran_this_turn:
+        return False
+    return _PHANTOM_ACTION_RE.search(content) is not None
+
+
+class TestPhantomGuardGating:
+
+    def test_real_phantom_warns(self):
+        # Model claims an action, NO tool ran, final has no tool_calls → WARN
+        assert _should_warn("Sudah saya simpan ke memori.",
+                            final_has_tool_calls=False,
+                            tools_ran_this_turn=False)
+
+    def test_tool_ran_then_summary_no_warn(self):
+        # THE FIX: tool actually ran this turn, model summarizes with an
+        # action-word → must NOT warn (this was the speedtest false positive).
+        assert not _should_warn("Berhasil menjalankan speedtest lewat WiFi.",
+                                final_has_tool_calls=False,
+                                tools_ran_this_turn=True)
+
+    def test_final_still_calling_tool_no_warn(self):
+        # Final response is itself still calling a tool → not a phantom claim.
+        assert not _should_warn("Sudah saya jalankan.",
+                                final_has_tool_calls=True,
+                                tools_ran_this_turn=False)
+
+    def test_innocent_prose_no_warn_even_without_tools(self):
+        # No action claim + no tool → still no warning (regex doesn't match).
+        assert not _should_warn("Ini penjelasan biasa saja.",
+                                final_has_tool_calls=False,
+                                tools_ran_this_turn=False)
+
+    def test_tool_ran_but_innocent_summary_no_warn(self):
+        assert not _should_warn("Hasilnya 111 Mbps download.",
+                                final_has_tool_calls=False,
+                                tools_ran_this_turn=True)
