@@ -293,7 +293,7 @@
   <!-- L1 memory -->
   <section id="memory" style="padding-top:36px">
     <div class="wrap">
-      <div class="sec-head"><span class="depth">Layer 01 · <b>How memory works</b></span><h2>Two ways to remember. One shared store.</h2><p class="sub">Memory isn't a chat log stuffed back into the prompt. It's a first-class store you search by meaning and traverse by relationship, backed by PostgreSQL + pgvector.</p></div>
+      <div class="sec-head"><span class="depth">Layer 01 · <b>How memory works</b></span><h2>Two ways to remember. One clean store.</h2><p class="sub">Memory isn't a chat log stuffed back into the prompt. It's a first-class store you search by meaning and traverse by relationship, backed by PostgreSQL + pgvector, and kept clean by a filter that runs the moment a fact is saved.</p></div>
       <div class="two">
         <div class="card"><span class="tag">semantic</span><h3>Vector recall</h3><p>Every memory is embedded and searched by meaning, so "what do you know about my work?" finds the right notes even when you never used those words. Millions of memories, millisecond lookup.</p></div>
         <div class="card"><span class="tag">relational</span><h3>Knowledge graph</h3><p>Facts are parsed into entities and relationships you can traverse, so "who is Agha's mother?" resolves a structured answer, not a fuzzy guess. Two systems, one memory.</p></div>
@@ -304,6 +304,7 @@
         <div class="step"><span class="num">02</span><span>Similarity picks <b>insert · update · skip</b>, so memory never fills with near-duplicates.</span></div>
         <div class="step"><span class="num">03</span><span>Non-permanent memories <b>decay</b> with disuse and gain durability each time they're recalled. <span class="note">Explicit "remember this" facts never decay.</span></span></div>
       </div>
+      <p style="color:var(--muted);font-size:14.5px;margin-top:18px;max-width:62ch;border-left:2px solid var(--gold-line);padding-left:16px;font-family:var(--mono);font-size:12.5px;line-height:1.8">This filter guards <b style="color:var(--text);font-weight:500">what enters your memory</b>, not what Syne says while chatting. It keeps stray guesses out of long-term storage, so your memory stays trustworthy over years. Answers in conversation are still the model's, review them like you would any assistant's.</p>
 
       <div class="callout">
         <div>
@@ -436,7 +437,7 @@
   <!-- L6 install -->
   <section id="install" style="padding-top:36px;padding-bottom:44px">
     <div class="wrap">
-      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>Three commands. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box. The installer detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, wires your Telegram bot, and installs the service.</p></div>
+      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>Three commands. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box, or on Windows through WSL2. The installer detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, wires your Telegram bot, and installs the service.</p></div>
       <div class="term">
         <div class="term-bar"><i></i><i></i><i></i><span>your-server ~ zsh</span></div>
         <div class="term-body"><span class="c">$ git clone https://github.com/riyogarta/syne.git</span>
