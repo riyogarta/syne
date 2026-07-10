@@ -387,6 +387,38 @@ async def _m16_shell_denylist_table(conn) -> None:
     """)
 
 
+async def _m17_decay_v2_config(conn) -> None:
+    """Decay v2 config-only migration (memory 54522 blueprint, approved Riyo
+    9 Jul 2026). NO column alters — existing memory rows are left to decay
+    naturally (option a).
+
+    Converges existing installs to schema.sql v2 seeds:
+      * initial_recall_count 5 -> 1  (new memories start low)
+      * promotion_threshold 10 -> 1000 (auto-promote dormant, high threshold)
+      * seed max_records = 50 (cap for LRU/LFU eviction in run_decay)
+
+    decay_interval is kept (it now paces the cap-check cadence). decay_amount
+    is dead under v2 but harmless, so it is left untouched.
+    """
+    # Lower starting recall for new memories (only if still at old default).
+    await conn.execute("""
+        UPDATE config SET value = '1'
+        WHERE key = 'memory.initial_recall_count' AND value = '5'
+    """)
+    # Raise promotion threshold so auto-promote is effectively dormant.
+    await conn.execute("""
+        UPDATE config SET value = '1000'
+        WHERE key = 'memory.promotion_threshold' AND value = '10'
+    """)
+    # Seed the eviction cap if it does not exist yet.
+    await conn.execute("""
+        INSERT INTO config (key, value, description)
+        VALUES ('memory.max_records', '50',
+                'Decay v2 cap: max non-permanent memories; LRU/LFU eviction above this')
+        ON CONFLICT (key) DO NOTHING
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -404,6 +436,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (14, _m14_drop_tainted_columns, "transactional"),
     (15, _m15_shell_allowlist_tables, "transactional"),
     (16, _m16_shell_denylist_table, "transactional"),
+    (17, _m17_decay_v2_config, "transactional"),
 ]
 
 

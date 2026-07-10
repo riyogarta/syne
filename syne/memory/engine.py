@@ -101,6 +101,18 @@ class MemoryEngine:
                 RETURNING id
             """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
 
+            # Decay v2: store-event tick — a brand-new non-permanent memory
+            # nudges all OTHER non-permanent memories down by 1 (permanent
+            # immune). New row keeps its initial recall_count. Life/death is
+            # decided by the cap in run_decay(), not by hitting 0.
+            if not permanent:
+                await conn.execute("""
+                    UPDATE memory
+                    SET recall_count = recall_count - 1
+                    WHERE COALESCE(permanent, false) = false
+                      AND id <> $1
+                """, row["id"])
+
             return row["id"]
 
     async def recall(
@@ -491,6 +503,18 @@ class MemoryEngine:
                 VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
                 RETURNING id
             """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
+
+            # Decay v2: store-event tick — a brand-new non-permanent memory
+            # nudges all OTHER non-permanent memories down by 1 (permanent
+            # immune). New row keeps its initial recall_count. Life/death is
+            # decided by the cap in run_decay(), not by hitting 0.
+            if not permanent:
+                await conn.execute("""
+                    UPDATE memory
+                    SET recall_count = recall_count - 1
+                    WHERE COALESCE(permanent, false) = false
+                      AND id <> $1
+                """, row["id"])
 
             return row["id"]
 
