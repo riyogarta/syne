@@ -1254,10 +1254,11 @@ class Conversation:
             logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
 
-        # Phantom action detection — non-Anthropic models sometimes claim actions
-        # they never performed (no tool calls). Append a warning so user knows.
-        _pname = getattr(self.provider, 'name', '')
-        if _pname and 'anthropic' not in _pname and not response.tool_calls:
+        # Phantom action detection — ANY model can claim an action it never
+        # performed (no tool calls). Provider-agnostic on purpose: Claude is
+        # less prone than Gemini/GPT but NOT immune, and it's the owner's
+        # preferred model. Deterministic regex guard, runs for all providers.
+        if not response.tool_calls:
             content = response.content or ""
             if _PHANTOM_ACTION_RE.search(content):
                 logger.warning(f"Phantom action detected in response (no tool calls): {content[:200]}")
