@@ -436,6 +436,23 @@ async def _m18_decay_v2_initial_count_force(conn) -> None:
     """)
 
 
+async def _m19_decay_v2_cap_1000(conn) -> None:
+    """Raise memory.max_records (decay v2 eviction cap) to 1000 on ALL installs.
+
+    Evaluation-window setting (Riyo, 10 Jul 2026): with the cap at 1000 and
+    promotion_threshold already at 1000, decay v2 accumulates recall signal
+    without evicting or auto-promoting anything. Final values will be tuned
+    once enough real recall data exists. Unconditional converge to JSON
+    number 1000.
+    """
+    await conn.execute("""
+        UPDATE config
+        SET value = '1000'::jsonb
+        WHERE key = 'memory.max_records'
+          AND value IS DISTINCT FROM '1000'::jsonb
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -455,6 +472,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (16, _m16_shell_denylist_table, "transactional"),
     (17, _m17_decay_v2_config, "transactional"),
     (18, _m18_decay_v2_initial_count_force, "transactional"),
+    (19, _m19_decay_v2_cap_1000, "transactional"),
 ]
 
 
