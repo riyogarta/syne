@@ -419,6 +419,23 @@ async def _m17_decay_v2_config(conn) -> None:
     """)
 
 
+async def _m18_decay_v2_initial_count_force(conn) -> None:
+    """Force memory.initial_recall_count to 1 on ALL installs (decay v2 fix).
+
+    v17 only updated the value when it equalled the assumed old default '5'.
+    Installs that had customised it (e.g. prod at 10) were skipped and stayed
+    on the pre-v2 starting count. This migration converges unconditionally to
+    the JSON number 1, matching the schema.sql seed. Also normalises a
+    jsonb-string \"1\" into a jsonb-number 1 for type parity.
+    """
+    await conn.execute("""
+        UPDATE config
+        SET value = '1'::jsonb
+        WHERE key = 'memory.initial_recall_count'
+          AND value IS DISTINCT FROM '1'::jsonb
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -437,6 +454,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (15, _m15_shell_allowlist_tables, "transactional"),
     (16, _m16_shell_denylist_table, "transactional"),
     (17, _m17_decay_v2_config, "transactional"),
+    (18, _m18_decay_v2_initial_count_force, "transactional"),
 ]
 
 
