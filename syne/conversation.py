@@ -63,11 +63,40 @@ _NON_ANTHROPIC_GUARDRAILS = """
 - When uncertain, say "I'm not sure" — never present uncertainty as fact.
 """
 
-# Regex for detecting phantom action claims (used post-response)
+# Regex for detecting phantom action claims (used post-response). Three
+# independent branches, any hit ⇒ phantom claim:
+#
+#   (a) Claim marker + action verb, ≤40 chars apart. ID (sudah/telah/
+#       berhasil) + EN (I have/I've/I already/successfully/done). Verb
+#       list is a stem/short form so it catches inflected variants
+#       (save/saved/saving; delet-ed/-ing). Expanded with dev/ops verbs
+#       (push/pull/commit/install/deploy/…) — the actions Syne actually
+#       gets asked to perform and is most likely to phantom-claim.
+#
+#   (b) Indonesian passive: `ter-<verb>` intrinsically claims completion,
+#       no marker needed ("Tersimpan di memori."). Vocabulary is narrow
+#       on purpose — only ter- forms where the prefix unambiguously means
+#       'action performed' (never a benign adjective/preposition like
+#       terima, terlihat, termasuk, terjadi, terlalu).
+#
+#   (c) English standalone participle at end of clause. Requires trailing
+#       .!, or end-of-string via lookahead, so 'committed to helping you'
+#       (no punctuation after 'committed') does NOT match. Catches terse
+#       status reports like "Message sent." / "File saved." / "Deployed!"
+#
+# Note: current runtime gates the entire guard with `tools_ran_this_turn`
+# in Conversation, so a broader regex here CAN'T fire on a legitimate
+# tool-result summary — it still needs 'no tool ran this turn' to trigger.
 _PHANTOM_ACTION_RE = _re.compile(
     r"(?:sudah|telah|berhasil|sudah saya|sudah ku|I have|I've|I already|successfully|done)"
     r"[^.!?\n]{0,40}"
-    r"(?:simpan|tulis|jalankan|eksekusi|kirim|hapus|buat|save|writ|ran|execut|sent|delet|creat|search|stor)",
+    r"(?:simpan|tulis|jalankan|eksekusi|kirim|hapus|buat|catat|proses|unggah|unduh"
+    r"|save|writ|ran|execut|sent|delet|creat|search|stor"
+    r"|upload|download|commit|push|pull|install|deploy|publish|restart|start|stop)"
+    r"|"
+    r"\bter(?:simpan|kirim|hapus|instal(?:l)?|update|catat|jalankan|proses|unggah|unduh|upload|download|selesaikan)\b"
+    r"|"
+    r"\b(?:sent|saved|deleted|created|stored|executed|uploaded|downloaded|installed|deployed|published|restarted|committed|pushed|completed)(?=\s*[.!,]|\s*$)",
     _re.IGNORECASE,
 )
 

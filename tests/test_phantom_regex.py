@@ -39,6 +39,50 @@ class TestPhantomPositive:
     def test_flags_action_claims(self, text):
         assert _matches(text), f"should flag phantom claim: {text!r}"
 
+    # Dev/ops verb list expansion (2026-07-13). Catches the claim patterns a
+    # dev-flavored assistant most often phantoms.
+    @pytest.mark.parametrize("text", [
+        "Sudah saya push commit-nya ke main.",
+        "Sudah saya pull latest changes.",
+        "Berhasil install dependensinya.",
+        "Sudah saya deploy ke staging.",
+        "Sudah saya restart service-nya.",
+        "I have deployed the app.",
+        "Successfully committed the change.",
+        "I've already installed the package.",
+    ])
+    def test_flags_dev_ops_claims(self, text):
+        assert _matches(text), f"should flag dev/ops phantom claim: {text!r}"
+
+    # Indonesian passive (ter- prefix). No marker needed — the prefix itself
+    # carries claim of completion.
+    @pytest.mark.parametrize("text", [
+        "Tersimpan di database.",
+        "Terkirim ke grup keluarga.",
+        "Terhapus dari daftar.",
+        "Terinstall semua dependensinya.",
+        "Terupdate ke versi terbaru.",
+        "Tercatat di log.",
+        "Terupload ke drive.",
+        "Terselesaikan semua tugasnya.",
+    ])
+    def test_flags_indonesian_passive(self, text):
+        assert _matches(text), f"should flag ID passive claim: {text!r}"
+
+    # English standalone participle at end of clause. Terse status reports
+    # that carry the same 'action was performed' claim without any 'I have'
+    # preamble.
+    @pytest.mark.parametrize("text", [
+        "Message sent.",
+        "File saved.",
+        "Task completed.",
+        "Deployed!",
+        "Committed.",
+        "All records deleted.",
+    ])
+    def test_flags_english_standalone_participle(self, text):
+        assert _matches(text), f"should flag EN participle claim: {text!r}"
+
 
 # ---------------------------------------------------------------------------
 # NEGATIVE — must NOT be flagged (innocent prose / no action claim)
@@ -59,6 +103,37 @@ class TestPhantomNegative:
     ])
     def test_does_not_flag_innocent(self, text):
         assert not _matches(text), f"false positive on: {text!r}"
+
+    # Indonesian words that START with 'ter-' but are NOT action-completion
+    # claims. The ter- passive branch must never trip on these — its verb
+    # vocabulary is deliberately narrow.
+    @pytest.mark.parametrize("text", [
+        "Terima kasih atas bantuannya.",
+        "Terlihat sudah sesuai.",
+        "Termasuk juga permintaan itu.",
+        "Terjadi kesalahan di server.",
+        "Terlalu banyak untuk ditangani sekarang.",
+        "Terserah kamu saja.",
+        "Terbaru versinya sudah keluar.",
+        "Terkadang begitulah cara kerjanya.",
+    ])
+    def test_does_not_flag_benign_ter_words(self, text):
+        assert not _matches(text), f"false positive on benign ter- word: {text!r}"
+
+    # English participles / verb-lookalikes that must NOT fire — either
+    # they're not at end of clause, or they're a different tense (present
+    # continuous / imperative), or the trailing punctuation is missing.
+    @pytest.mark.parametrize("text", [
+        "I'm committed to helping you.",         # 'committed' not at end of clause
+        "The user sent me this",                  # 'sent' not at end (followed by ' me')
+        "Sending you a summary now.",             # 'sending' ≠ participle 'sent'
+        "Save your work before restarting.",      # 'save' as imperative, no marker
+        "Please push the button.",                # 'push' as imperative, no marker
+        "Baik, aku akan install dependensinya.",  # future tense, no marker
+        "Mau kupush sekarang?",                   # question / future, no marker
+    ])
+    def test_does_not_flag_non_completion_forms(self, text):
+        assert not _matches(text), f"false positive on non-completion form: {text!r}"
 
 
 # ---------------------------------------------------------------------------
