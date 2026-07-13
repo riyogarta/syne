@@ -3,6 +3,9 @@
 import os
 import subprocess
 import sys
+import logging
+
+logger = logging.getLogger('syne.cli.helpers')
 
 from .shared import console, _strip_env_quotes, _get_db_url
 
@@ -967,8 +970,10 @@ def _ensure_vector_index(syne_dir: str | None = None):
             for fn in ("ensure_memory_hnsw_index", "ensure_messages_hnsw_index"):
                 try:
                     await conn.execute(f"SELECT {fn}()")
-                except Exception:
-                    pass  # function may not exist yet (older DB, mid-migration)
+                except Exception as e:
+                    # Non-fatal: function may not exist yet (older DB / mid-migration).
+                    # Log at debug so a genuine failure is still observable.
+                    logger.debug(f"{fn}() skipped: {e}")
         finally:
             await conn.close()
 

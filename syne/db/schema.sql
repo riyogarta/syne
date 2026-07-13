@@ -88,16 +88,24 @@ CREATE TABLE IF NOT EXISTS memory (
 CREATE OR REPLACE FUNCTION ensure_memory_hnsw_index() RETURNS void AS $$
 DECLARE
     dim INT;
+    cur_typmod INT;
+    idx_exists BOOL;
 BEGIN
     SELECT vector_dims(embedding) INTO dim FROM memory WHERE embedding IS NOT NULL LIMIT 1;
     IF dim IS NULL THEN RETURN; END IF;
-    -- Fix column type to explicit dimension so HNSW index matches query expressions
+    -- Smart guard: pgvector stores dimension directly in atttypmod. If the
+    -- column is already typed vector(dim) AND the HNSW index exists, skip the
+    -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
+    SELECT a.atttypmod INTO cur_typmod
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'memory' AND a.attname = 'embedding';
+    SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_memory_embedding_hnsw') INTO idx_exists;
+    IF cur_typmod = dim AND idx_exists THEN RETURN; END IF;
     EXECUTE format('ALTER TABLE memory ALTER COLUMN embedding TYPE vector(%s)', dim);
     DROP INDEX IF EXISTS idx_memory_embedding_hnsw;
-    EXECUTE format(
-        'CREATE INDEX idx_memory_embedding_hnsw ON memory USING hnsw (embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)',
-        dim
-    );
+    EXECUTE 'CREATE INDEX idx_memory_embedding_hnsw '
+            'ON memory USING hnsw (embedding vector_cosine_ops) '
+            'WITH (m = 24, ef_construction = 200)';
 END;
 $$ LANGUAGE plpgsql;
 
@@ -153,9 +161,19 @@ CREATE INDEX IF NOT EXISTS idx_messages_embedding_pending
 CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index() RETURNS void AS $$
 DECLARE
     dim INT;
+    cur_typmod INT;
+    idx_exists BOOL;
 BEGIN
     SELECT vector_dims(embedding) INTO dim FROM messages WHERE embedding IS NOT NULL LIMIT 1;
     IF dim IS NULL THEN RETURN; END IF;
+    -- Smart guard: pgvector stores dimension directly in atttypmod. If the
+    -- column is already typed vector(dim) AND the HNSW index exists, skip the
+    -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
+    SELECT a.atttypmod INTO cur_typmod
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'messages' AND a.attname = 'embedding';
+    SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_embedding_hnsw') INTO idx_exists;
+    IF cur_typmod = dim AND idx_exists THEN RETURN; END IF;
     EXECUTE format('ALTER TABLE messages ALTER COLUMN embedding TYPE vector(%s)', dim);
     DROP INDEX IF EXISTS idx_messages_embedding_hnsw;
     EXECUTE 'CREATE INDEX idx_messages_embedding_hnsw '
