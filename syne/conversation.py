@@ -1006,7 +1006,14 @@ class Conversation:
         try:
             # Reset per-turn state
             self._pending_media: list[str] = []
-            self._cached_input_data: dict = {}  # For ability-first retry via tool call
+            # Per-turn cache of raw media input (image / audio / document).
+            # Populated by _ability_first_preprocess as it walks INPUT_TYPES,
+            # BEFORE that function strips the raw bytes from metadata on a
+            # successful ability run. Read by _handle_tool_calls to auto-fill
+            # image_base64 / audio_base64 / document_base64 when the LLM
+            # emits image_analysis(...) / audio_transcription(...) / etc.
+            # without providing pixels itself. Reset each turn (this line).
+            self._cached_input_data: dict = {}
             self._message_metadata = message_metadata
             # Provenance taint: seed from this turn's INPUT (image / uploaded
             # file / URL). May also flip True later if an untrusted tool runs
@@ -2094,6 +2101,19 @@ class Conversation:
             input_data = metadata.get(spec["meta_key"])
             if not input_data:
                 continue
+
+            # Snapshot the raw input BEFORE any stripping so a later
+            # tool-call retry can access it. The tool loop (in
+            # _handle_tool_calls) auto-injects from self._cached_input_data
+            # when the LLM emits e.g. image_analysis(prompt="…") without
+            # pixels — common flow: pre_process succeeds → text description
+            # injected → LLM decides to re-analyze from a different angle →
+            # calls the tool → tool loop pulls the raw bytes from HERE.
+            # Without this snapshot the tool call would fail with
+            # "Either image_url or image_base64 is required" and the model
+            # would surface "aku nggak bisa baca gambarnya" to the user
+            # even though the pixels are literally one dict away.
+            self._cached_input_data[input_type] = input_data
 
             # Find a priority ability that handles this input type
             result_text = None
