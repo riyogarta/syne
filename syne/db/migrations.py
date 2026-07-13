@@ -584,6 +584,45 @@ END;
 $$ LANGUAGE plpgsql;""")
 
 
+async def _m22_fk_index_and_autovacuum(conn) -> None:
+    """Persist two production DB tweaks into the migration path so BOTH fresh
+    installs and existing DBs get them (previously applied ad-hoc to the live
+    DB only, so they were not install defaults).
+
+    1. FK index on kg_relations.source_memory_id — the only foreign key that
+       lacked a backing index. Without it, DELETE/UPDATE on memory seq-scans
+       the entire kg_relations table (100k+ rows) for the referential check.
+    2. Aggressive per-table autovacuum for high-churn tables (memory,
+       kg_relations, kg_entities). The global scale_factor=0.2 default is too
+       lax — dead tuples + stale planner stats accumulated (memory once
+       reported 2 live rows when it actually held 31k, breaking query plans).
+
+    All statements idempotent. CREATE INDEX (not CONCURRENTLY) because this
+    migration runs inside a transaction; IF NOT EXISTS makes it a no-op where
+    the index is already present.
+    """
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kg_relations_source_memory "
+        "ON kg_relations (source_memory_id)"
+    )
+    await conn.execute(
+        "ALTER TABLE memory SET ("
+        "autovacuum_vacuum_scale_factor = 0.05, "
+        "autovacuum_analyze_scale_factor = 0.02, "
+        "autovacuum_vacuum_threshold = 50)"
+    )
+    await conn.execute(
+        "ALTER TABLE kg_relations SET ("
+        "autovacuum_vacuum_scale_factor = 0.05, "
+        "autovacuum_analyze_scale_factor = 0.02)"
+    )
+    await conn.execute(
+        "ALTER TABLE kg_entities SET ("
+        "autovacuum_vacuum_scale_factor = 0.05, "
+        "autovacuum_analyze_scale_factor = 0.02)"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -606,6 +645,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (19, _m19_decay_v2_cap_1000, "transactional"),
     (20, _m20_history_search_embedding, "transactional"),
     (21, _m21_smart_hnsw_guard, "transactional"),
+    (22, _m22_fk_index_and_autovacuum, "transactional"),
 ]
 
 

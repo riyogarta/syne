@@ -113,6 +113,16 @@ CREATE INDEX IF NOT EXISTS idx_memory_category ON memory (category);
 CREATE INDEX IF NOT EXISTS idx_memory_user ON memory (user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory (importance DESC);
 
+-- Aggressive autovacuum for high-churn memory table: decay updates rewrite
+-- rows + embeddings frequently. The global scale_factor=0.2 default is too lax
+-- here (dead tuples + stale planner stats accumulate). Keeps stats fresh and
+-- reclaims dead tuples on a much tighter threshold.
+ALTER TABLE memory SET (
+    autovacuum_vacuum_scale_factor = 0.05,
+    autovacuum_analyze_scale_factor = 0.02,
+    autovacuum_vacuum_threshold = 50
+);
+
 -- ============================================================
 -- SESSIONS: Conversation history
 -- ============================================================
@@ -761,6 +771,21 @@ CREATE TABLE IF NOT EXISTS kg_relations (
 CREATE INDEX IF NOT EXISTS idx_kg_relations_subject ON kg_relations (subject_id);
 CREATE INDEX IF NOT EXISTS idx_kg_relations_object ON kg_relations (object_id);
 CREATE INDEX IF NOT EXISTS idx_kg_relations_predicate ON kg_relations (predicate);
+
+-- FK index: source_memory_id references memory(id). The only foreign key
+-- without a backing index — without it, DELETE/UPDATE on memory seq-scans the
+-- entire kg_relations table (can be 100k+ rows) for the referential check.
+CREATE INDEX IF NOT EXISTS idx_kg_relations_source_memory ON kg_relations (source_memory_id);
+
+-- Aggressive autovacuum for high-churn KG tables (bulk-built during ingestion).
+ALTER TABLE kg_relations SET (
+    autovacuum_vacuum_scale_factor = 0.05,
+    autovacuum_analyze_scale_factor = 0.02
+);
+ALTER TABLE kg_entities SET (
+    autovacuum_vacuum_scale_factor = 0.05,
+    autovacuum_analyze_scale_factor = 0.02
+);
 
 -- ============================================================
 -- MEMORY BLOBS: Binary attachments stored in DB
