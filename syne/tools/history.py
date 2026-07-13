@@ -15,9 +15,9 @@ around each anchor. This keeps the semantic space clean (one canonical
 anchor per topic) and mirrors the human intuition: "when did I ASK about
 X?" → jump to that user message → read around.
 
-Both tools are owner-only (0o400): raw messages include tool outputs, other
-family members' turns, redaction contexts, etc. Rule 760 (family privacy)
-means only the owner may semantically browse the full log. The dedicated
+Both tools are owner+family (0o440): raw messages include tool outputs, other
+family members' turns, redaction contexts, etc. Owner explicitly widened
+access to family level; public is still excluded. The dedicated
 ``memory_search`` remains available to family for curated, permission-gated
 recall from the memory table.
 """
@@ -280,7 +280,7 @@ HISTORY_SEARCH_TOOL = {
         "required": ["query"],
     },
     "handler": history_search_handler,
-    "permission": 0o400,  # owner-only, read-only (raw log incl. tool outputs)
+    "permission": 0o440,  # owner+family read-only (raw log incl. tool outputs)
 }
 
 
@@ -415,5 +415,5 @@ HISTORY_EXPAND_TOOL = {
         "required": ["anchor_ids"],
     },
     "handler": history_expand_handler,
-    "permission": 0o400,
+    "permission": 0o440,
 }
