@@ -42,6 +42,8 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "db_query":           0o400,  # owner only
     "file_read":          0o400,
     "read_source":        0o400,
+    "history_search":     0o400,  # owner only — raw log semantic search
+    "history_expand":     0o400,  # owner only — read around anchors
     "subagent_status":    0o440,  # owner + family
     "memory_search":      0o444,  # public via Rule 765
     "memory_get_file":    0o444,

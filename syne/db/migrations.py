@@ -453,6 +453,77 @@ async def _m19_decay_v2_cap_1000(conn) -> None:
     """)
 
 
+async def _m20_history_search_embedding(conn) -> None:
+    """Semantic search across all-time message history — schema + function seeds.
+
+    Design (Riyo, 13 Jul 2026): embed ONLY user messages as anchors. Assistant
+    and tool rows are the derived context you scroll around each anchor. This
+    keeps the semantic space clean (one canonical anchor per topic), shrinks
+    storage 3-5x versus embedding every row, and mirrors how a human recalls a
+    past conversation: 'when did I ASK about X?' → jump to that user message →
+    read the surrounding turns.
+
+    This migration is idempotent — safe to re-run:
+      * ADD COLUMN IF NOT EXISTS: nullable embedding vector on messages
+      * CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index(): mirrors the
+        memory HNSW pattern; called AFTER enough embedded rows exist so the
+        column can be typed to the correct dimension and indexed.
+      * Config seeds (ON CONFLICT DO NOTHING preserves any operator override).
+
+    HNSW build is deferred to first backfill / CLI trigger — pgvector cannot
+    build the index on an empty column, and doing it inline here would fail
+    on fresh installs.
+    """
+    await conn.execute("""
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS embedding vector
+    """)
+    # Not-null lookup index — the backfill CLI needs to page fast through
+    # rows that still need embedding.
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_embedding_pending
+        ON messages (session_id, id)
+        WHERE role = 'user' AND embedding IS NULL
+    """)
+    # HNSW builder — dimension picked up from the first embedded row.
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index() RETURNS void AS $fn$
+        DECLARE
+            dim INT;
+        BEGIN
+            SELECT vector_dims(embedding) INTO dim
+              FROM messages WHERE embedding IS NOT NULL LIMIT 1;
+            IF dim IS NULL THEN RETURN; END IF;
+            EXECUTE format('ALTER TABLE messages ALTER COLUMN embedding TYPE vector(%s)', dim);
+            DROP INDEX IF EXISTS idx_messages_embedding_hnsw;
+            EXECUTE 'CREATE INDEX idx_messages_embedding_hnsw '
+                    'ON messages USING hnsw (embedding vector_cosine_ops) '
+                    'WITH (m = 24, ef_construction = 200)';
+        END;
+        $fn$ LANGUAGE plpgsql
+    """)
+    # Config seeds. INSERT ON CONFLICT DO NOTHING so an operator who tuned
+    # the value already isn't clobbered.
+    await conn.execute("""
+        INSERT INTO config (key, value, description)
+        VALUES
+          ('messages.embedding_enabled', 'true'::jsonb,
+           'When true, save_message fires a background embed for role=user rows '
+           'so history_search can retrieve them semantically. Safe to toggle off '
+           'in emergencies — content is always kept, only the embedding stops.'),
+          ('history_search.default_limit', '10'::jsonb,
+           'Default number of anchor previews returned per history_search call.'),
+          ('history_search.context_before', '2'::jsonb,
+           'Default turns to include BEFORE each anchor in history_expand.'),
+          ('history_search.context_after', '5'::jsonb,
+           'Default turns AFTER each anchor. Larger than before because you want '
+           'to see the assistant response + follow-up.'),
+          ('history_search.max_content_chars', '4000'::jsonb,
+           'Truncate user message content to this many chars before embedding. '
+           'Long messages average their semantic signal into noise otherwise.')
+        ON CONFLICT (key) DO NOTHING
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -473,6 +544,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (17, _m17_decay_v2_config, "transactional"),
     (18, _m18_decay_v2_initial_count_force, "transactional"),
     (19, _m19_decay_v2_cap_1000, "transactional"),
+    (20, _m20_history_search_embedding, "transactional"),
 ]
 
 

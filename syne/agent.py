@@ -254,6 +254,16 @@ class SyneAgent:
         # Update memory engine
         self.memory = MemoryEngine(new_provider)
 
+        # Re-wire the history_search embedding provider slot so the tool
+        # keeps working after the owner switches embedding models via
+        # /embedding. Without this, history_search would keep using the
+        # stale provider until the process restarts.
+        try:
+            from .tools.history import set_embedding_provider
+            set_embedding_provider(new_provider)
+        except Exception as e:
+            logger.warning(f"Failed to rewire history_search embedding provider: {e}")
+
         # Recreate ContextManager from new model's context_window
         models = await get_config("provider.models", None)
         active_key = await get_config("provider.active_model", None)
@@ -757,6 +767,38 @@ class SyneAgent:
             handler=DB_QUERY_TOOL["handler"],
             permission=DB_QUERY_TOOL["permission"],
             scrub_level="safe",  # query results may contain config values
+        )
+
+        # ── History Search + Expand (Core — semantic recall over chat log) ──
+        # Two-primitive design: search returns cheap previews, expand fetches
+        # full context around selected anchors. Both owner-only because raw
+        # messages carry tool outputs, cross-chat context, and other family
+        # members' turns — Rule 760 (family privacy) applies here.
+        from .tools.history import (
+            HISTORY_SEARCH_TOOL, HISTORY_EXPAND_TOOL, set_embedding_provider,
+        )
+        # Wire the embedding provider so history_search can vectorise queries.
+        # None-safe: if the provider isn't ready yet, the handler returns a
+        # clear error rather than crashing. Reload provider calls should
+        # re-invoke set_embedding_provider() from wherever the memory engine
+        # is rebuilt.
+        _embed_prov = getattr(self.memory, "provider", None) if self.memory else None
+        set_embedding_provider(_embed_prov)
+        self.tools.register(
+            name=HISTORY_SEARCH_TOOL["name"],
+            description=HISTORY_SEARCH_TOOL["description"],
+            parameters=HISTORY_SEARCH_TOOL["parameters"],
+            handler=HISTORY_SEARCH_TOOL["handler"],
+            permission=HISTORY_SEARCH_TOOL["permission"],
+            scrub_level="safe",  # raw log content — do not corrupt with regex scrub
+        )
+        self.tools.register(
+            name=HISTORY_EXPAND_TOOL["name"],
+            description=HISTORY_EXPAND_TOOL["description"],
+            parameters=HISTORY_EXPAND_TOOL["parameters"],
+            handler=HISTORY_EXPAND_TOOL["handler"],
+            permission=HISTORY_EXPAND_TOOL["permission"],
+            scrub_level="safe",
         )
 
         # ── File Operations (Core) ──

@@ -367,13 +367,16 @@ class Conversation:
 
         meta_json = json.dumps(metadata) if metadata else "{}"
 
+        inserted_id: Optional[int] = None
         for attempt in range(2):
             try:
                 async with get_connection() as conn:
-                    await conn.execute("""
+                    row = await conn.fetchrow("""
                         INSERT INTO messages (session_id, role, content, metadata)
                         VALUES ($1, $2, $3, $4::jsonb)
+                        RETURNING id
                     """, self.session_id, role, content, meta_json)
+                    inserted_id = row["id"] if row else None
 
                     await conn.execute("""
                         UPDATE sessions
@@ -402,6 +405,59 @@ class Conversation:
                 raise
 
         self._message_cache.append(ChatMessage(role=role, content=content, metadata=metadata))
+
+        # Fire-and-forget: embed user rows as anchors for history_search.
+        # Only user role — see design note in migration v20 for rationale
+        # (single canonical anchor per topic, 3-5x storage saving, reads
+        # around anchor recover the assistant/tool context anyway).
+        # Compaction_summary rows are role='system' so they're excluded
+        # by the role check — no metadata inspection needed.
+        if role == "user" and inserted_id is not None and content:
+            asyncio.create_task(self._embed_message_row(inserted_id, content))
+
+    async def _embed_message_row(self, message_id: int, content: str) -> None:
+        """Background task: embed a user-role message and UPDATE messages.embedding.
+
+        Fail-quiet: any error (kill switch off, provider missing, embed call
+        fails, DB write fails) is logged at info/warning and swallowed. The
+        content row is already durably stored; a NULL embedding just means
+        this row is invisible to history_search until the backfill CLI
+        (`syne memory reembed-history`) picks it up. Never let embed
+        failures surface as user-visible chat errors.
+        """
+        try:
+            from .db.models import get_config
+            if not bool(await get_config("messages.embedding_enabled", True)):
+                return
+            if self.memory is None or getattr(self.memory, "provider", None) is None:
+                logger.debug(
+                    f"_embed_message_row skipped id={message_id}: no memory/provider"
+                )
+                return
+
+            max_chars = int(await get_config("history_search.max_content_chars", 4000))
+            body = content if len(content) <= max_chars else content[:max_chars]
+            resp = await self.memory.provider.embed(body)
+            vector = getattr(resp, "vector", None)
+            if not vector:
+                logger.warning(
+                    f"_embed_message_row id={message_id}: provider returned empty vector"
+                )
+                return
+
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE messages SET embedding = $1::vector WHERE id = $2",
+                    str(vector), message_id,
+                )
+            logger.debug(
+                f"_embed_message_row id={message_id}: embedded ({len(vector)} dims)"
+            )
+        except Exception as e:
+            # Do NOT re-raise from a fire-and-forget task — an uncaught
+            # exception would show up as 'Task exception was never retrieved'
+            # in the log without any actionable context.
+            logger.warning(f"_embed_message_row id={message_id} failed: {e}")
 
     async def build_context(self, user_message: str, recall_query: Optional[str] = None) -> list[ChatMessage]:
         """Build full context: system prompt + memories + history + current message.

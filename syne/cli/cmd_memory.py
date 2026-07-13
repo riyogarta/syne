@@ -225,3 +225,127 @@ def memory_prune(pattern, yes):
         await close_db()
 
     asyncio.run(_prune())
+
+
+@memory.command("reembed-history")
+@click.option("--batch", "-b", default=50, help="Rows to embed per batch (default 50)")
+@click.option("--limit", "-l", default=None, type=int, help="Cap total rows processed (default: no cap — process until done)")
+@click.option("--sleep", "-s", default=0.0, type=float, help="Seconds to sleep between batches (throttle if Ollama shared)")
+def memory_reembed_history(batch, limit, sleep):
+    """Backfill embeddings for user messages that don't have one yet.
+
+    Only user-role rows are embedded (assistant/tool/system are anchors' context,
+    not anchors themselves). Rows already embedded are skipped. Resumable: safe
+    to Ctrl-C and re-run — the pending index picks up where you stopped.
+
+    After the first batch succeeds, HNSW index is created automatically
+    (ensure_messages_hnsw_index()). Rebuilds are idempotent.
+    """
+    async def _run():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+        from syne.db.models import get_config
+        from syne.llm.drivers import create_hybrid_provider, get_model_from_list
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+
+        # Build a provider so we can embed. Same path as agent boot.
+        models = await get_config("provider.models", None)
+        active_key = await get_config("provider.active_model", None)
+        if not (models and active_key):
+            console.print("[red]No active chat model configured — cannot embed.[/red]")
+            await close_db()
+            return
+        entry = get_model_from_list(models, active_key)
+        if not entry:
+            console.print(f"[red]Active model '{active_key}' not in registry.[/red]")
+            await close_db()
+            return
+        provider = await create_hybrid_provider(entry)
+        if provider is None:
+            console.print("[red]Failed to build hybrid provider.[/red]")
+            await close_db()
+            return
+
+        max_chars = int(await get_config("history_search.max_content_chars", 4000))
+
+        # Count pending so the progress bar is meaningful.
+        async with pool.acquire() as conn:
+            total_pending = await conn.fetchval(
+                "SELECT COUNT(*) FROM messages "
+                "WHERE role = 'user' AND embedding IS NULL AND content <> ''"
+            )
+        if not total_pending:
+            console.print("[green]Nothing to backfill — every user message already has an embedding.[/green]")
+            await close_db()
+            return
+
+        target = min(int(total_pending), int(limit)) if limit else int(total_pending)
+        console.print(
+            f"[cyan]Backfill target: {target} user messages "
+            f"(batch={batch}, sleep={sleep}s between batches).[/cyan]"
+        )
+
+        done = 0
+        failed = 0
+        with console.status(f"Embedding batch...") as status:
+            while done < target:
+                remaining = target - done
+                take = min(int(batch), remaining)
+
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT id, content FROM messages "
+                        "WHERE role = 'user' AND embedding IS NULL AND content <> '' "
+                        "ORDER BY id ASC LIMIT $1",
+                        take,
+                    )
+                if not rows:
+                    break
+
+                # Embed serially — Ollama semaphore keeps parallelism sane
+                # inside the driver already, and small batch sizes make
+                # concurrent DB writes noisy for tiny wins.
+                import asyncio as _asyncio
+                for r in rows:
+                    try:
+                        body = r["content"]
+                        if len(body) > max_chars:
+                            body = body[:max_chars]
+                        resp = await provider.embed(body)
+                        vec = getattr(resp, "vector", None)
+                        if not vec:
+                            failed += 1
+                            continue
+                        async with pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE messages SET embedding = $1::vector WHERE id = $2",
+                                str(vec), r["id"],
+                            )
+                        done += 1
+                    except Exception as e:
+                        failed += 1
+                        console.print(f"[yellow]row id={r['id']} failed: {e}[/yellow]")
+
+                status.update(f"Embedded {done}/{target} (failed {failed})")
+
+                if sleep > 0:
+                    await _asyncio.sleep(sleep)
+
+        # Try to build HNSW after backfill so subsequent searches are fast.
+        # ensure_messages_hnsw_index() no-ops if no embeddings exist yet, so
+        # this is safe even when everything failed.
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT ensure_messages_hnsw_index()")
+            console.print("[green]✓ HNSW index built / refreshed.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]HNSW build skipped: {e}[/yellow]")
+
+        console.print(
+            f"[green]✓ Backfill done. Embedded: {done}. Failed: {failed}.[/green]"
+        )
+        await close_db()
+
+    asyncio.run(_run())

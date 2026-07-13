@@ -515,7 +515,7 @@ Shell guard is standalone: no imports from Syne internals, no DB, no I/O in `ana
 
 ---
 
-## Core Tools (26)
+## Core Tools (28)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
@@ -534,6 +534,8 @@ Shell guard is standalone: no imports from Syne internals, no DB, no I/O in `ana
 | `spawn_subagent` | 750 | Spawn background sub-agents |
 | `subagent_status` | 550 | Check sub-agent status |
 | `memory_search` | 555 | Semantic search over memories (Rule 760/765 filters by category) |
+| `history_search` | 400 | Semantic search over user messages across the entire chat log — returns anchor previews (owner-only, cross-session by default) |
+| `history_expand` | 400 | Fetch full turn context around anchor IDs from `history_search` — call selectively after previews |
 | `memory_store` | 770 | Store new text memory |
 | `memory_store_file` | 770 | Store memory + binary file attachment (image, PDF, etc.) |
 | `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it as document |
@@ -770,6 +772,7 @@ syne memory search "query"           # Semantic search
 syne memory add "info"               # Manually add memory
 syne memory delete <id>              # Delete a memory by id
 syne memory prune '%pattern%'        # Bulk-delete matching ILIKE pattern (with preview + confirm)
+syne memory reembed-history          # Backfill embeddings for user messages that don't have one yet (resumable)
 
 # Config
 syne config                          # List all config keys

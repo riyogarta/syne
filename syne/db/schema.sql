@@ -135,11 +135,34 @@ CREATE TABLE IF NOT EXISTS messages (
     metadata JSONB DEFAULT '{}',          -- tool calls, attachments, etc.
     token_count INT DEFAULT 0,
     status VARCHAR(20) DEFAULT 'active',  -- 'active' | 'compacted' (archived, retained for search — NEVER deleted)
+    embedding vector,                     -- user rows only: anchor for history_search (dim set by embedding provider)
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_messages_status ON messages (session_id, status, created_at);
+-- Pending-embed lookup index — used by the backfill CLI to page through
+-- rows that still need embedding without a full-table scan.
+CREATE INDEX IF NOT EXISTS idx_messages_embedding_pending
+    ON messages (session_id, id)
+    WHERE role = 'user' AND embedding IS NULL;
+
+-- HNSW builder for messages.embedding, same shape as ensure_memory_hnsw_index.
+-- Call after user messages have been embedded so the column can be typed to
+-- the actual provider dimension and indexed.
+CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index() RETURNS void AS $$
+DECLARE
+    dim INT;
+BEGIN
+    SELECT vector_dims(embedding) INTO dim FROM messages WHERE embedding IS NOT NULL LIMIT 1;
+    IF dim IS NULL THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE messages ALTER COLUMN embedding TYPE vector(%s)', dim);
+    DROP INDEX IF EXISTS idx_messages_embedding_hnsw;
+    EXECUTE 'CREATE INDEX idx_messages_embedding_hnsw '
+            'ON messages USING hnsw (embedding vector_cosine_ops) '
+            'WITH (m = 24, ef_construction = 200)';
+END;
+$$ LANGUAGE plpgsql;
 
 -- ============================================================
 -- SUB-AGENT RUNS: Track spawned sub-agent tasks
@@ -366,6 +389,11 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
+    ('messages.embedding_enabled', 'true', 'When true, save_message fires a background embed for role=user rows so history_search can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.'),
+    ('history_search.default_limit', '10', 'Default number of anchor previews returned per history_search call.'),
+    ('history_search.context_before', '2', 'Default turns to include BEFORE each anchor in history_expand.'),
+    ('history_search.context_after', '5', 'Default turns AFTER each anchor. Larger than before because you want to see the assistant response + follow-up.'),
+    ('history_search.max_content_chars', '4000', 'Truncate user message content to this many chars before embedding. Long messages average their semantic signal into noise otherwise.'),
     ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
     ('session.history_limit', '100', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
