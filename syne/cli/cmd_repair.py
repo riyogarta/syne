@@ -272,37 +272,50 @@ def repair(fix):
                     fixed.append("Added .env to .gitignore")
                     console.print("   [green]  → Fixed: added to .gitignore[/green]")
 
-        # -- 8. Vector Index --
-        console.print("\n[bold]8. Vector Index[/bold]")
+        # -- 8. Vector Indexes (memory + messages) --
+        console.print("\n[bold]8. Vector Indexes[/bold]")
         try:
             from syne.db.connection import init_db, close_db
             await init_db(settings.database_url)
             from syne.db.connection import get_connection
-            async with get_connection() as conn:
-                idx = await conn.fetchval(
-                    "SELECT indexname FROM pg_indexes WHERE indexname = 'idx_memory_embedding_hnsw'"
-                )
-            if idx:
-                console.print("   [green]✓ HNSW index exists[/green]")
-            else:
-                issues.append("HNSW vector index missing on memory.embedding")
-                console.print("   [yellow]⚠ HNSW index not found[/yellow]")
-                if fix:
-                    try:
-                        async with get_connection() as conn:
-                            await conn.execute("SELECT ensure_memory_hnsw_index()")
-                        # Verify it was created
-                        async with get_connection() as conn:
-                            idx2 = await conn.fetchval(
-                                "SELECT indexname FROM pg_indexes WHERE indexname = 'idx_memory_embedding_hnsw'"
-                            )
-                        if idx2:
-                            fixed.append("Created HNSW vector index")
-                            console.print("   [green]  → Fixed: HNSW index created[/green]")
-                        else:
-                            console.print("   [dim]  → No embeddings yet — index will be created when data exists[/dim]")
-                    except Exception as e:
-                        console.print(f"   [yellow]  → Could not create index: {e}[/yellow]")
+
+            # Both HNSW indexes are checked/fixed the same way: presence
+            # tested, missing → try ensure_*_hnsw_index() which no-ops if
+            # no embedded rows exist yet.
+            for table, index_name, ensure_fn in (
+                ("memory",   "idx_memory_embedding_hnsw",   "ensure_memory_hnsw_index"),
+                ("messages", "idx_messages_embedding_hnsw", "ensure_messages_hnsw_index"),
+            ):
+                async with get_connection() as conn:
+                    idx = await conn.fetchval(
+                        "SELECT indexname FROM pg_indexes WHERE indexname = $1",
+                        index_name,
+                    )
+                if idx:
+                    console.print(f"   [green]✓ HNSW index on {table}.embedding exists[/green]")
+                    continue
+                issues.append(f"HNSW vector index missing on {table}.embedding")
+                console.print(f"   [yellow]⚠ HNSW index on {table}.embedding not found[/yellow]")
+                if not fix:
+                    continue
+                try:
+                    async with get_connection() as conn:
+                        await conn.execute(f"SELECT {ensure_fn}()")
+                    async with get_connection() as conn:
+                        idx2 = await conn.fetchval(
+                            "SELECT indexname FROM pg_indexes WHERE indexname = $1",
+                            index_name,
+                        )
+                    if idx2:
+                        fixed.append(f"Created HNSW vector index on {table}.embedding")
+                        console.print(f"   [green]  → Fixed: HNSW index on {table} created[/green]")
+                    else:
+                        console.print(
+                            f"   [dim]  → No embeddings on {table} yet — "
+                            "index will be created when data exists[/dim]"
+                        )
+                except Exception as e:
+                    console.print(f"   [yellow]  → Could not create {table} index: {e}[/yellow]")
             await close_db()
         except Exception as e:
             console.print(f"   [dim]  → Skipped: {e}[/dim]")

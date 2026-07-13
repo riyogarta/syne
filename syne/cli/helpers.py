@@ -943,7 +943,15 @@ def _restart_service():
 
 
 def _ensure_vector_index(syne_dir: str | None = None):
-    """Create HNSW index on memory.embedding if embeddings exist."""
+    """Create HNSW indexes on embedding columns if embeddings exist.
+
+    Runs after every schema migration (`syne update`, `syne repair`, initial
+    setup). Both `ensure_memory_hnsw_index()` and `ensure_messages_hnsw_index()`
+    are idempotent — they no-op if no embedded rows exist yet, and rebuild the
+    index if rows do. This is what makes `history_search` fast the moment the
+    first embeddings arrive without the owner needing to remember to run
+    `syne memory reembed-history` manually.
+    """
     import asyncio
 
     db_url = _get_db_url(syne_dir)
@@ -954,7 +962,13 @@ def _ensure_vector_index(syne_dir: str | None = None):
         import asyncpg
         conn = await asyncpg.connect(db_url)
         try:
-            await conn.execute("SELECT ensure_memory_hnsw_index()")
+            # Each SELECT is wrapped in its own try so a missing function on
+            # a partially-migrated DB doesn't abort the other.
+            for fn in ("ensure_memory_hnsw_index", "ensure_messages_hnsw_index"):
+                try:
+                    await conn.execute(f"SELECT {fn}()")
+                except Exception:
+                    pass  # function may not exist yet (older DB, mid-migration)
         finally:
             await conn.close()
 
