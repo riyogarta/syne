@@ -907,6 +907,10 @@ class Conversation:
         ).hexdigest()
         self._last_saved_hash = _ya_hash
 
+        # The tool already ran via the consent-bypass path above; this
+        # continuation only summarizes it. Flag it one-shot so the phantom-
+        # action guard in _chat_inner does not flag the summary as fake.
+        self._tool_ran_via_bypass = True
         try:
             llm_response = await self._chat_inner(user_message, message_metadata=None)
             if llm_response:
@@ -1346,7 +1350,13 @@ class Conversation:
         # has empty .tool_calls (the closing answer doesn't call another tool), so
         # checking response.tool_calls afterwards can't tell "no tool ran" apart
         # from "tool ran, now summarizing". This flag preserves that distinction.
-        tools_ran_this_turn = bool(response.tool_calls)
+        # A tool that ran via the consent-bypass path executed in a PRIOR
+        # turn; this continuation only summarizes it. Consume the one-shot
+        # flag so the phantom guard below does not flag the summary (fixes
+        # "push sukses" false-positive on bypass continuations, 13 Jul 2026).
+        _bypass_ran = getattr(self, "_tool_ran_via_bypass", False)
+        self._tool_ran_via_bypass = False
+        tools_ran_this_turn = bool(response.tool_calls) or _bypass_ran
         if response.tool_calls:
             logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
