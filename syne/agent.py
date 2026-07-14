@@ -736,14 +736,14 @@ class SyneAgent:
             scrub_level="safe",  # search snippets may contain code
         )
 
-        # ── Web Fetch (Core) ──
-        from .tools.web_fetch import WEB_FETCH_TOOL
+        # ── Fetch URL (Core — SSRF-hardened, replaces web_fetch) ──
+        from .tools.fetch_url import FETCH_URL_TOOL
         self.tools.register(
-            name=WEB_FETCH_TOOL["name"],
-            description=WEB_FETCH_TOOL["description"],
-            parameters=WEB_FETCH_TOOL["parameters"],
-            handler=WEB_FETCH_TOOL["handler"],
-            permission=WEB_FETCH_TOOL["permission"],
+            name=FETCH_URL_TOOL["name"],
+            description=FETCH_URL_TOOL["description"],
+            parameters=FETCH_URL_TOOL["parameters"],
+            handler=FETCH_URL_TOOL["handler"],
+            permission=FETCH_URL_TOOL["permission"],
             scrub_level="safe",  # web content may contain code/docs
         )
 

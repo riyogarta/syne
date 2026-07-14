@@ -33,7 +33,6 @@ def get_bundled_ability_classes() -> list[Type[Ability]]:
         ("syne.abilities.pdf", "PdfAbility"),
         ("syne.abilities.office", "OfficeAbility"),
         ("syne.abilities.website_screenshot", "WebsiteScreenshotAbility"),
-        ("syne.abilities.fetch_url", "FetchUrlAbility"),
     ]
     for module_path, class_name in _imports:
         try:

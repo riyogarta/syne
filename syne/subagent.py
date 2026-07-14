@@ -277,7 +277,7 @@ class SubAgentManager:
             "You CAN use all available tools:\n"
             "- exec — execute shell commands (your main tool for getting work done)\n"
             "- memory_search / memory_store — search and save information\n"
-            "- web_search / web_fetch — search the web and fetch pages\n"
+            "- web_search / fetch_url — search the web and fetch pages\n"
             "- file_read / file_write — read and write files\n"
             "- read_source — read Syne's own source code\n"
             "- All enabled abilities (image_gen, image_analysis, maps, etc.)\n\n"

@@ -422,7 +422,7 @@ def _format_tokens(n: int) -> str:
 # ── Tool activity labels ──
 _TOOL_LABELS = {
     "read_source": "Read", "file_read": "Read", "file_write": "Write",
-    "exec": "Run", "db_query": "Query", "web_fetch": "Fetch",
+    "exec": "Run", "db_query": "Query", "fetch_url": "Fetch",
     "web_search": "Search", "send_message": "Send", "send_file": "SendFile",
     "send_voice": "Voice", "send_reaction": "React",
     "manage_schedule": "Schedule", "update_config": "Config",

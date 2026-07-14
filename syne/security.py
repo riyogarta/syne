@@ -38,7 +38,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
 
     # ─── Read-only (r bit = 4) ─────────────────────────────────────────
     "web_search":         0o444,  # public via Rule 765; r-only, no side effect
-    "web_fetch":          0o444,
+    "fetch_url":          0o444,  # public via Rule 765; r-only, SSRF-hardened
     "db_query":           0o400,  # owner only
     "file_read":          0o400,
     "read_source":        0o400,
@@ -789,7 +789,7 @@ _EXEC_REDACT_PATTERNS = [
 def redact_content_output(text: str) -> str:
     """Redact credentials using SAFE patterns only.
     
-    For tools that return content/code (web_fetch, web_search, file_read).
+    For tools that return content/code (fetch_url, web_search, file_read).
     Uses Level 1 patterns that won't false-positive on code/docs.
     
     Args:

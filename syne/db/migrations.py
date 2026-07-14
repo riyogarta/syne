@@ -623,6 +623,24 @@ async def _m22_fk_index_and_autovacuum(conn) -> None:
     )
 
 
+async def _m23_fetch_url_config(conn) -> None:
+    """web_fetch retired -> fetch_url promoted to core tool (Riyo, 14 Jul 2026).
+
+    Converges existing DBs to the new config surface:
+      * seed fetch_url.timeout = 15 (core tool reads this key; default 15)
+      * DROP the now-dead web_fetch.timeout key (the web_fetch tool no longer
+        exists, so this config variable is unused — remove it per owner request)
+    Fresh installs get fetch_url.timeout directly from schema.sql instead.
+    """
+    await conn.execute("""
+        INSERT INTO config (key, value, description)
+        VALUES ('fetch_url.timeout', '15',
+                'Fetch URL (core tool) timeout in seconds')
+        ON CONFLICT (key) DO NOTHING
+    """)
+    await conn.execute("DELETE FROM config WHERE key = 'web_fetch.timeout'")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -646,6 +664,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (20, _m20_history_search_embedding, "transactional"),
     (21, _m21_smart_hnsw_guard, "transactional"),
     (22, _m22_fk_index_and_autovacuum, "transactional"),
+    (23, _m23_fetch_url_config, "transactional"),
 ]
 
 

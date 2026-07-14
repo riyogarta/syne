@@ -231,14 +231,14 @@ Safety limits for the `exec` tool (shell command execution).
 |-----|---------|------|
 | `web_search.api_key` | `""` | string |
 | `web_search.driver` | `""` | string |
-| `web_fetch.timeout` | `30` | integer (seconds) |
+| `fetch_url.timeout` | `15` | integer (seconds) |
 
 - `web_search.api_key` — Web search API key. Supports Tavily (tvly-...) or Brave Search.
   Tavily: get a free key at https://app.tavily.com (1,000 searches/month free).
   Brave: https://brave.com/search/api/ (paid).
   Empty string = web search disabled.
 - `web_search.driver` — `"tavily"` or `"brave"`. Auto-detected from key prefix if empty.
-- `web_fetch.timeout` — HTTP request timeout for the `web_fetch` tool.
+- `fetch_url.timeout` — HTTP request timeout for the `fetch_url` tool.
 - **Increase timeout when**: Fetching from slow servers or large pages.
 - **Warning**: High timeouts delay bot responses while waiting for external servers.
 

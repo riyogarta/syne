@@ -52,7 +52,7 @@ syne/
 ├── tools/               — Built-in tools (registered in agent.py)
 │   ├── registry.py      — Tool dataclass, registration, execution with permission checks
 │   ├── web_search.py    — Brave Search API
-│   ├── web_fetch.py     — HTTP fetch + HTML→text
+│   ├── fetch_url.py     — HTTP fetch + HTML→text (SSRF-hardened)
 │   ├── file_ops.py      — file_read, file_write (sandboxed to workspace/)
 │   ├── read_source.py   — Read-only access to entire codebase
 │   ├── db_query.py      — Direct SQL queries (owner-only)
