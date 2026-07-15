@@ -3615,7 +3615,7 @@ Or just send me a message!"""
             ]
             await update.message.reply_text(
                 f"\U0001f9ea **Ability creation gate:** {state}\n\n"
-                f"ON = Syne may register NEW abilities via update_ability(create).\n"
+                f"ON = Syne may register NEW abilities via `update_ability(create)`.\n"
                 f"OFF = ability creation blocked (default \u2014 safest).\n\n"
                 f"\u26a0\ufe0f Sensitive vector \u2014 turn ON only while building an\n"
                 f"ability, then turn it OFF again.",
