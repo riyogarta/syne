@@ -206,6 +206,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
+        self.app.add_handler(CommandHandler("createability", self._cmd_createability))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
         self.app.add_handler(CommandHandler("nodes", self._cmd_nodes))
@@ -297,6 +298,7 @@ class TelegramChannel:
             BotCommand("clear", "Clear current conversation"),
             BotCommand("compact", "Compact conversation history"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
+            BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
@@ -3584,6 +3586,60 @@ Or just send me a message!"""
             f"🔒 Consent gate **{state_word}**\n{detail}",
             parse_mode="Markdown",
         )
+
+    async def _cmd_createability(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /createability on|off — toggle the self-modification gate.
+
+        Controls abilities.self_modification_enabled, which allows the LLM to
+        register NEW abilities via update_ability(action='create'). Default OFF
+        (security: closes the creation vector against prompt injection).
+        Owner-only.
+        """
+        user = update.effective_user
+
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("\u26a0\ufe0f Only the owner can change ability-creation settings.")
+            return
+
+        args = update.message.text.split(maxsplit=1)
+        toggle = args[1].strip().lower() if len(args) > 1 else None
+
+        if toggle is None:
+            current = await get_config("abilities.self_modification_enabled", False)
+            state = "ON" if current else "OFF"
+            await update.message.reply_text(
+                f"\U0001f9ea **Ability creation gate:** {state}\n\n"
+                f"ON = Syne may register NEW abilities via update_ability(create).\n"
+                f"OFF = ability creation blocked (default \u2014 safest).\n\n"
+                f"\u26a0\ufe0f This is a sensitive vector. Turn ON only while you\n"
+                f"intend to build an ability, then turn it OFF again.\n\n"
+                f"Use: `/createability on` or `/createability off`",
+                parse_mode="Markdown",
+            )
+            return
+
+        if toggle not in ("on", "off"):
+            await update.message.reply_text("\u274c Use: `on` or `off`", parse_mode="Markdown")
+            return
+
+        enabled = toggle == "on"
+        await set_config("abilities.self_modification_enabled", enabled)
+        if enabled:
+            await update.message.reply_text(
+                "\U0001f9ea Ability creation **ON**\n"
+                "Syne may now register new abilities. \u26a0\ufe0f Remember to run\n"
+                "`/createability off` once you\u2019re done \u2014 this closes the\n"
+                "self-modification vector again.",
+                parse_mode="Markdown",
+            )
+        else:
+            await update.message.reply_text(
+                "\U0001f9ea Ability creation **OFF**\n"
+                "The creation vector is closed. Existing abilities are unaffected.",
+                parse_mode="Markdown",
+            )
 
     async def _cmd_identity(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /identity command."""
