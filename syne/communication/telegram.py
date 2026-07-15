@@ -3609,14 +3609,18 @@ Or just send me a message!"""
         if toggle is None:
             current = await get_config("abilities.self_modification_enabled", False)
             state = "ON" if current else "OFF"
+            buttons = [
+                InlineKeyboardButton(f"{'\u2705 ' if current else ''}ON", callback_data="createability_toggle:on"),
+                InlineKeyboardButton(f"{'\u2705 ' if not current else ''}OFF", callback_data="createability_toggle:off"),
+            ]
             await update.message.reply_text(
                 f"\U0001f9ea **Ability creation gate:** {state}\n\n"
                 f"ON = Syne may register NEW abilities via update_ability(create).\n"
                 f"OFF = ability creation blocked (default \u2014 safest).\n\n"
-                f"\u26a0\ufe0f This is a sensitive vector. Turn ON only while you\n"
-                f"intend to build an ability, then turn it OFF again.\n\n"
-                f"Use: `/createability on` or `/createability off`",
+                f"\u26a0\ufe0f Sensitive vector \u2014 turn ON only while building an\n"
+                f"ability, then turn it OFF again.",
                 parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
             )
             return
 
@@ -8694,6 +8698,26 @@ Or just send me a message!"""
             ]
             await query.edit_message_text(
                 f"🔒 **Consent gate:** {state}\n{detail}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+
+        elif data.startswith("createability_toggle:"):
+            toggle = data.split(":", 1)[1]
+            enabled = toggle == "on"
+            await set_config("abilities.self_modification_enabled", enabled)
+            state = "ON" if enabled else "OFF"
+            detail = (
+                "Syne may register new abilities. \u26a0\ufe0f Turn OFF when done."
+                if enabled
+                else "Ability creation blocked (creation vector closed)."
+            )
+            buttons = [
+                InlineKeyboardButton(f"{'\u2705 ' if enabled else ''}ON", callback_data="createability_toggle:on"),
+                InlineKeyboardButton(f"{'\u2705 ' if not enabled else ''}OFF", callback_data="createability_toggle:off"),
+            ]
+            await query.edit_message_text(
+                f"\U0001f9ea **Ability creation gate:** {state}\n{detail}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
