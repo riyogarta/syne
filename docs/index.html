@@ -51,6 +51,9 @@
   .subline b{color:var(--text);font-weight:500}
   .hero-meta{margin-top:14px;font-family:var(--mono);font-size:12.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted-2)}
   .hero-cta{margin-top:38px;display:flex;flex-direction:column;align-items:center;gap:16px}
+  .alt-install{font-family:var(--mono);font-size:12px;color:var(--muted-2);margin-top:-6px}
+  .alt-install a{color:var(--muted);border-bottom:1px solid var(--line-2);transition:color .15s,border-color .15s}
+  .alt-install a:hover{color:var(--gold);border-color:var(--gold-line)}
   .install{background:var(--ink-2);border:1px solid var(--line-2);border-radius:12px;padding:14px 15px;font-family:var(--mono);font-size:13.5px;display:flex;align-items:center;gap:12px;max-width:560px;width:100%;text-align:left}
   .install .code{color:var(--text);overflow-x:auto;white-space:nowrap;flex:1;scrollbar-width:none}
   .install .code::-webkit-scrollbar{display:none}
@@ -230,9 +233,10 @@
     <div class="hero-cta">
       <div class="install">
         <span class="prompt">$</span>
-        <span class="code">git clone https://github.com/riyogarta/syne.git &amp;&amp; cd syne &amp;&amp; bash install.sh</span>
+        <span class="code">curl -fsSL https://syne.codes/install.sh | bash</span>
         <button class="copy" id="copyBtn" aria-label="Copy install command">Copy</button>
       </div>
+      <p class="alt-install">Rather read it first? <a href="https://raw.githubusercontent.com/riyogarta/syne/main/install.sh">Inspect the script</a>, or <a href="#install">clone the repo</a> instead.</p>
       <div class="row">
         <a class="btn btn-primary" href="#get">Self-host it</a>
         <a class="btn btn-ghost" href="https://github.com/riyogarta/syne">★ Star on GitHub</a>
@@ -437,17 +441,17 @@
   <!-- L6 install -->
   <section id="install" style="padding-top:36px;padding-bottom:44px">
     <div class="wrap">
-      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>Three commands. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box, or on Windows through WSL2. The installer detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, wires your Telegram bot, and installs the service.</p></div>
+      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>One command. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box, or on Windows through WSL2. The installer pulls its own dependencies: it detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, installs Ollama, wires your Telegram bot, and registers the service.</p></div>
       <div class="term">
         <div class="term-bar"><i></i><i></i><i></i><span>your-server ~ zsh</span></div>
-        <div class="term-body"><span class="c">$ git clone https://github.com/riyogarta/syne.git</span>
-<span class="c">$ cd syne &amp;&amp; bash install.sh</span>
+        <div class="term-body"><span class="c">$ curl -fsSL https://syne.codes/install.sh | bash</span>
 <span class="o">→ choose provider (OAuth free / API key)</span>
 <span class="o">→ auto-detect hardware, recommend models</span>
-<span class="o">→ Docker + PostgreSQL + pgvector</span>
-<span class="o">→ Ollama + embedding + evaluator · Telegram bot · service</span>
+<span class="o">→ git + Python 3.11+ + Docker + PostgreSQL + pgvector</span>
+<span class="o">→ Ollama + embedding + evaluator · Telegram bot · systemd</span>
 <span class="ok">✓ Syne is running. Say hi on Telegram.</span></div>
       </div>
+      <p class="caveat" style="margin-top:0;margin-bottom:22px">Piping a script into your shell isn't for everyone, and that's fair. <a href="https://raw.githubusercontent.com/riyogarta/syne/main/install.sh" style="color:var(--gold)">Read install.sh first</a>, or clone and run it yourself, same result:<br><span style="color:var(--text)">git clone https://github.com/riyogarta/syne.git &amp;&amp; cd syne &amp;&amp; bash install.sh</span></p>
       <div class="ref">
         <div>
           <h4>Setup &amp; run</h4>
@@ -491,7 +495,7 @@
     <p class="subline">Give yourself an assistant that <b>actually remembers.</b></p>
     <div class="install">
       <span class="prompt">$</span>
-      <span class="code">git clone https://github.com/riyogarta/syne.git &amp;&amp; cd syne &amp;&amp; bash install.sh</span>
+      <span class="code">curl -fsSL https://syne.codes/install.sh | bash</span>
       <button class="copy" id="copyBtn2" aria-label="Copy install command">Copy</button>
     </div>
     <div class="row">
@@ -516,7 +520,7 @@
 </footer>
 
 <script>
-  const CMD="git clone https://github.com/riyogarta/syne.git && cd syne && bash install.sh";
+  const CMD="curl -fsSL https://syne.codes/install.sh | bash";
   function wireCopy(id){const b=document.getElementById(id);if(!b)return;
     b.addEventListener("click",async()=>{try{await navigator.clipboard.writeText(CMD);b.textContent="Copied";b.classList.add("done");setTimeout(()=>{b.textContent="Copy";b.classList.remove("done");},1600);}catch(e){b.textContent="Copy manually";}});}
   wireCopy("copyBtn");wireCopy("copyBtn2");
