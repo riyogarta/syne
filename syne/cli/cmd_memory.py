@@ -349,3 +349,144 @@ def memory_reembed_history(batch, limit, sleep):
         await close_db()
 
     asyncio.run(_run())
+
+
+@memory.command("reembed-memory")
+@click.option("--batch", "-b", default=50, help="Rows to embed per batch (default 50)")
+@click.option("--limit", "-l", default=None, type=int, help="Cap total rows processed (default: no cap)")
+@click.option("--sleep", "-s", default=0.0, type=float, help="Seconds to sleep between batches (throttle if Ollama shared)")
+@click.option("--force", "-f", is_flag=True, help="Re-embed EVERY memory row, not just rows with NULL embedding. Use this when switching embedding models with a different vector dimension.")
+def memory_reembed_memory(batch, limit, sleep, force):
+    """Backfill (or re-embed) embeddings for rows in the memory table.
+
+    By default only rows whose embedding is NULL are processed. Pass --force
+    to re-embed every memory row — needed when switching embedding models
+    with a different vector dimension (e.g. moving off qwen3-embedding:0.6b
+    to a higher-dimension model). Resumable: safe to Ctrl-C.
+
+    HNSW index is refreshed automatically after the batch (idempotent).
+    Companion to `reembed-history` (which does the messages table).
+    """
+    async def _run():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+        from syne.db.models import get_config
+        from syne.llm.drivers import create_hybrid_provider, get_model_from_list
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+
+        # Reuse the same provider-build path as agent boot / reembed-history.
+        models = await get_config("provider.models", None)
+        active_key = await get_config("provider.active_model", None)
+        if not (models and active_key):
+            console.print("[red]No active chat model configured — cannot embed.[/red]")
+            await close_db()
+            return
+        entry = get_model_from_list(models, active_key)
+        if not entry:
+            console.print(f"[red]Active model '{active_key}' not in registry.[/red]")
+            await close_db()
+            return
+        provider = await create_hybrid_provider(entry)
+        if provider is None:
+            console.print("[red]Failed to build hybrid provider.[/red]")
+            await close_db()
+            return
+
+        where = "content <> ''" if force else "embedding IS NULL AND content <> ''"
+
+        async with pool.acquire() as conn:
+            total_pending = await conn.fetchval(
+                f"SELECT COUNT(*) FROM memory WHERE {where}"
+            )
+        if not total_pending:
+            if force:
+                console.print("[yellow]No memory rows to re-embed (table is empty or all rows have blank content).[/yellow]")
+            else:
+                console.print("[green]Nothing to backfill — every memory row already has an embedding.[/green]")
+            await close_db()
+            return
+
+        target = min(int(total_pending), int(limit)) if limit else int(total_pending)
+        mode = "re-embed ALL" if force else "backfill NULL"
+        console.print(
+            f"[cyan]Memory {mode}: target {target} rows "
+            f"(batch={batch}, sleep={sleep}s between batches).[/cyan]"
+        )
+
+        done = 0
+        failed = 0
+        # For --force we walk id ASC and remember the last processed id so a
+        # freshly-embedded row doesn't get picked up again by the next
+        # `LIMIT` batch (the WHERE clause would still match it because it
+        # has content). For backfill mode, once we UPDATE embedding it stops
+        # matching the WHERE, so the natural pagination just works.
+        last_id = 0
+
+        import asyncio as _asyncio
+        with console.status("Embedding batch...") as status:
+            while done < target:
+                remaining = target - done
+                take = min(int(batch), remaining)
+
+                if force:
+                    sql = (
+                        f"SELECT id, content FROM memory "
+                        f"WHERE {where} AND id > $1 "
+                        f"ORDER BY id ASC LIMIT $2"
+                    )
+                    params = (last_id, take)
+                else:
+                    sql = (
+                        f"SELECT id, content FROM memory "
+                        f"WHERE {where} "
+                        f"ORDER BY id ASC LIMIT $1"
+                    )
+                    params = (take,)
+
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(sql, *params)
+                if not rows:
+                    break
+
+                for r in rows:
+                    try:
+                        body = r["content"] or ""
+                        # Memory rows tend to be short (<1KB) — no truncation
+                        # needed like in messages backfill.
+                        resp = await provider.embed(body)
+                        vec = getattr(resp, "vector", None)
+                        if not vec:
+                            failed += 1
+                            continue
+                        async with pool.acquire() as conn:
+                            await conn.execute(
+                                "UPDATE memory SET embedding = $1::vector WHERE id = $2",
+                                str(vec), r["id"],
+                            )
+                        done += 1
+                        last_id = r["id"]
+                    except Exception as e:
+                        failed += 1
+                        console.print(f"[yellow]memory row id={r['id']} failed: {e}[/yellow]")
+
+                status.update(f"Embedded {done}/{target} (failed {failed})")
+
+                if sleep > 0:
+                    await _asyncio.sleep(sleep)
+
+        # Refresh HNSW so recall benefits from the new embeddings immediately.
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT ensure_memory_hnsw_index()")
+            console.print("[green]✓ Memory HNSW index built / refreshed.[/green]")
+        except Exception as e:
+            console.print(f"[yellow]HNSW build skipped: {e}[/yellow]")
+
+        console.print(
+            f"[green]✓ Memory {mode} done. Embedded: {done}. Failed: {failed}.[/green]"
+        )
+        await close_db()
+
+    asyncio.run(_run())

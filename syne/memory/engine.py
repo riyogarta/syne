@@ -738,11 +738,39 @@ class MemoryEngine:
 
     async def run_decay(self):
         """Run memory decay based on conversation count.
-        
+
         Called periodically (e.g. after every conversation).
         Increments global conversation counter. Every N conversations,
-        decays non-permanent memories by reducing recall_count.
-        Memories with recall_count <= 0 are deleted.
+        checks whether to promote high-recall rows to permanent and whether
+        the non-permanent count is over cap; if so, evicts the lowest-recall
+        / oldest rows until back at cap. Nothing is deleted on the basis of
+        recall_count alone — life/death is decided by the cap here.
+
+        ── Decay v2 design notes ──────────────────────────────────────────
+        Two per-event UPDATEs (in store() and recall()) also nudge every
+        OTHER non-permanent row's recall_count down by 1. That's what gives
+        the "busy day = faster global decay" property (see README's
+        Zero-sum dynamic note). Simple, no timestamps to maintain, ordering
+        stays correct across restarts.
+
+        Cost: each store or recall is an O(N) UPDATE across all
+        non-permanent rows. At the current cap of 1000 and realistic
+        traffic (~50-100 store+recall events / day for a single owner),
+        Postgres handles this comfortably — ~50-100K narrow UPDATEs per
+        day is well inside its comfort zone. If the cap is raised, or if
+        family/group traffic pushes events into the low thousands per day,
+        this is where the model starts to hurt.
+
+        Decay v3 (not implemented, worth noting for future work): store an
+        `updated_at` timestamp per row and compute effective decay lazily
+        on read — `effective_recall = recall_count - hours_since_touch * α`.
+        Zero per-event writes to other rows; the ORDER BY in eviction sorts
+        on `effective_recall` instead of `recall_count`. Same qualitative
+        behaviour (busy days still push unused rows down faster, because
+        events tick the clock forward), but the write path stays O(1). The
+        promotion + cap-eviction shape from v2 carries over — only the
+        per-event decrement is what changes.
+        ─────────────────────────────────────────────────────────────────
         """
         from ..db.models import get_config, set_config
         

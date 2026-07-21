@@ -213,15 +213,20 @@ Graph extraction uses the main chat LLM by default, switchable to Ollama via `/g
 
 #### 3. Decay Engine — "What should I forget?"
 
-Non-permanent memories fade naturally, mimicking human forgetting:
+Non-permanent memories fade naturally, mimicking human forgetting. The current model (decay v2) is event-driven and cap-based, not fixed-schedule:
 
-- New memories start with `recall_count = 5` (configurable via `memory.initial_recall_count`)
-- Every **50 conversations** (configurable), `recall_count` decreases by 1
-- When `recall_count` reaches 0, the memory is **deleted**
-- Memories that are **recalled** (used in context) get a **+2 boost** each time
-- **Permanent** memories (explicit "remember this") **never decay**
+- **New non-permanent memories** start with `recall_count = 1` (config: `memory.initial_recall_count`)
+- **Every store event** decrements `recall_count` on every *other* non-permanent memory by 1 (permanent memories are immune)
+- **Every recall event** boosts the recalled memories by +1 and decrements every *other* non-permanent memory by 1 (permanent memories are immune)
+- **Cap-based eviction** — every `memory.decay_interval` conversations (default 50), if the number of non-permanent memories exceeds `memory.max_records` (default 1000), the lowest-recall / oldest rows are pruned in an LRU/LFU hybrid pass
+- **Auto-promotion** — a non-permanent memory whose `recall_count` crosses `memory.promotion_threshold` (default 1000, effectively dormant until tuned) is promoted to permanent
+- **Permanent memories** (explicit "remember this") are never touched by any of the above
 
-This creates a natural selection: useful memories that keep getting recalled survive, while irrelevant ones fade away. No manual cleanup needed.
+**No zero-deletion** — a memory whose `recall_count` drops to 0 or negative is *not* deleted on that basis. It just becomes a bottom-ranked candidate for the next cap-based eviction pass. Life/death is decided by the cap, not by hitting 0.
+
+**Zero-sum dynamic (worth understanding)** — because every store and every recall decrements every *other* non-permanent memory by 1, rank is relative, not absolute. A heavy day of stores and recalls accelerates the decay of unused memories globally. That's intentional: memories that keep getting used rise faster than the ambient decrement, while unused ones sink. Combined with cap-based eviction, only what actually gets used survives at cap. If you're seeing older memories disappear faster than you expect on busy days, this is why — not a bug, but a design consequence worth knowing.
+
+Permanent memories are outside all of this. If a fact matters, tell Syne to *remember* it explicitly — that flips `permanent = true` and the memory is never touched by decay again.
 
 ### Memory Types
 
@@ -802,6 +807,7 @@ syne memory add "info"               # Manually add memory
 syne memory delete <id>              # Delete a memory by id
 syne memory prune '%pattern%'        # Bulk-delete matching ILIKE pattern (with preview + confirm)
 syne memory reembed-history          # Backfill embeddings for user messages that don't have one yet (resumable)
+syne memory reembed-memory [-f]      # Backfill (or --force re-embed) rows in the memory table — use after switching embedding models
 
 # Config
 syne config                          # List all config keys
