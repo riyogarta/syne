@@ -304,17 +304,41 @@ Set config memory.public_categories to ["alquran","bukhari","muslim","fiqih"]
 
 When a public user searches memories, results outside the allowed categories are silently filtered — they appear as if they don't exist.
 
-### History & Compaction
+### History & Recall — Raw Window + Semantic Search (No Compaction)
 
-Syne uses **Limit N** history loading — only the last N messages (default: 100, configurable via `session.history_limit`) are loaded from the database per chat turn. This leverages PostgreSQL's ability to query with `LIMIT` efficiently, regardless of total session size.
+Syne loads a **large raw window** each turn (default: 1000 messages via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
 
-**Adaptive reduction**: If the loaded messages still exceed the context window, the oldest non-system messages are dropped 4 at a time until they fit. This is transparent — no data is lost in the database.
+**Why no compaction — architectural note:**
 
-**Compaction** summarizes old messages when the session grows large:
-- Triggered automatically when total messages in DB exceed thresholds
-- Creates a detailed narrative summary preserving conversation context, facts, and decisions
-- Adaptive: if the batch to summarize exceeds the LLM's context, reduces by 4 messages at a time — remaining messages stay for the next compact round
-- All compact paths (auto, manual `/compact`, emergency) use the same `run_compact()` method
+Compaction is a workaround for a constraint Syne doesn't have. Other assistants use it because they can't reach messages outside their context window — so they must compress old history into a summary and hope the summarizer picks the right details to keep. That approach carries three tradeoffs Syne no longer wants:
+
+- **Lossy by design.** A narrative summary can't preserve every detail. The summarizer decides what matters — sometimes it's wrong.
+- **Bias injection.** Summaries are LLM-generated text. If the summarizer hallucinates a claim ("we agreed to X"), that claim becomes "background context" for every subsequent turn — the model treats it as fact, not as one model's interpretation of a past exchange.
+- **Compounding drift.** Summaries of summaries progressively lose fidelity. Old decisions get restated in the summarizer's preferred framing rather than the owner's own words.
+
+Syne's tradeoff is different: it retains **every message forever** (marked `status='compacted'` only when a compaction summary was created historically — content is never deleted) and provides `history_search` to reach anything outside the raw window semantically. The tools loop is:
+
+```
+history_search(query, ...)        → previews (user messages, ground truth)
+    ↓ (Molt picks the relevant anchors)
+history_expand(anchor_ids, ...)   → full context around each anchor (all roles)
+    ↓ (Molt reads assistant reply, tool results, follow-ups)
+Molt answers grounded in what actually happened
+```
+
+The retrieval is (a) unlimited in reach — full chat archive is searchable, (b) grounded in the owner's literal words (embeds are on `role='user'` only), and (c) reactive — semantic work happens only when a specific turn actually needs it, not proactively on every batch of old messages.
+
+**Layers that still apply:**
+
+- `trim_context` — per-turn safety net that drops oldest non-system messages 4 at a time if the loaded window still exceeds the context budget. Non-destructive; nothing leaves the DB.
+- `session.history_limit` — the load window itself. 1000 default is generous but tunable. `syne config set session.history_limit 500` if your token budget is tight.
+- `run_compact()` — the summarizer stays in the code, dormant. If a specific installation observes that the raw window pattern is a poor fit (e.g. extremely high-throughput group chat), reactivating is one config change: `syne config set compaction.trigger_percent 60`.
+
+**How this shows up in behavior:**
+
+- Molt can recall specific past turns by paraphrase, not just exact keyword. "What did we decide about the shell guard tier?" reaches the actual decision message, not a summarizer's interpretation of it.
+- Old sessions get less confidently-wrong narrative claims. Molt is more likely to say "let me search" (and actually search) than to synthesize from a lossy summary.
+- Session token cost scales linearly with `history_limit`, not exponentially with session length. Prompt caching (Anthropic) absorbs most of the extra tokens.
 
 ### Conflict Resolution
 
@@ -693,10 +717,13 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `session.compaction_threshold` | `80000` | Characters before auto-compaction |
-| `session.compaction_keep_recent` | `40` | Messages kept after compaction |
-| `session.max_messages` | `100` | Messages before suggesting compaction |
+| `session.history_limit` | `1000` | Max messages loaded into context per turn. Large raw window is Syne's replacement for compaction — see [History & Recall](#history--recall--raw-window--semantic-search-no-compaction). Tune down (e.g. `500`) if token budget is tight. |
+| `session.tool_loop_timeout` | `1800` | Tool loop timeout in seconds (30 min default) |
+| `compaction.trigger_percent` | `100` | Compaction trigger: fires when context usage reaches this % of the model window. **Default 100 = proactive compaction OFF.** Set to `60–80` to reactivate if you observe raw-window pattern is a poor fit for your workload. |
+| `session.compaction_keep_recent` | `40` | Messages preserved raw when compaction does run |
+| `session.compaction_overlap_percent` | `15` | Overlap: % of summarized batch also kept raw as a verbatim bridge |
 | `session.thinking_budget` | `null` | Global default only — per-model thinking is set via `/models` |
+| `session.reasoning_visible` | `false` | Show model thinking in responses (on/off) |
 
 ### Claude OAuth (Optional)
 
@@ -834,7 +861,7 @@ syne restore                         # Restore from backup
 |  +------------------------------------------------------+  |
 |  |                 CORE (Protected)                     |  |
 |  |                                                      |  |
-|  |  [Chat]  [Memory]  [Compaction]  [Channels]  [Sub]   |  |
+|  |  [Chat]  [Memory]  [HistorySearch] [Channels] [Sub]  |  |
 |  |  (LLM)   (pgvec)    (context)   (TG + CLI)  agent   |  |
 |  |                                                      |  |
 |  |  [Graph]  [Gateway]                                  |  |

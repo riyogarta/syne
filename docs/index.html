@@ -325,6 +325,18 @@
       </div>
 
       <p style="color:var(--muted);font-size:15px;margin-top:24px;max-width:60ch">Memory is <b style="color:var(--text);font-weight:500">shared</b> across your people, and <b style="color:var(--text);font-weight:500">private by default</b>. You can open a single category to the public, say a shared Quran and Hadith corpus anyone may query, while everything else stays for you and family only.</p>
+
+      <div class="callout" style="margin-top:36px">
+        <div>
+          <h3>No compaction, on purpose.</h3>
+          <p>Other assistants summarize old chat because they can't reach messages outside their context window. Syne can — every past turn is searchable by meaning. So the summarizer's guesses (and its confidently-wrong "we agreed to X") never enter your conversation as background fact. Syne loads a large raw window each turn, and reaches beyond it with semantic search over your own literal words.</p>
+        </div>
+        <div class="mini">
+          <div><span class="u">you:</span> what did we decide about the shell guard tier?</div>
+          <div style="color:var(--muted-2);margin:6px 0">— syne searches your history semantically, reads full context around the hit —</div>
+          <div><span class="s">syne:</span> On 12 Jul you approved the read-only carve-out for git log / sed -n / awk print, keeping the rest at CONSENT.</div>
+        </div>
+      </div>
     </div>
   </section>
 
