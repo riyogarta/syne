@@ -224,13 +224,20 @@ async def history_search_handler(
 HISTORY_SEARCH_TOOL = {
     "name": "history_search",
     "description": (
-        "Semantic search over user messages across the entire chat log. Returns "
-        "anchor PREVIEWS only (cheap scan) — call history_expand afterwards for "
-        "the promising ones. Iterate like scrolling through search results: broad "
-        "query first, then refine with more specific terms, or narrow with "
-        "since/until (temporal), also_contains (keyword AND-filter), or session_id "
-        "(scope to one chat). Sort by similarity (default) or recency (for "
-        "'terakhir kali' / 'kemarin' style questions). Owner-only."
+        "Semantic search over USER messages across the entire chat log. Indexing "
+        "is user-only BY DESIGN: user messages are ground truth (what the owner "
+        "actually said) so results can never be seeded by a past assistant "
+        "hallucination. Returns anchor PREVIEWS only — a snippet of the USER "
+        "message, WITHOUT the surrounding assistant reply or context. "
+        "MANDATORY: after finding a relevant anchor you MUST call history_expand "
+        "to read the full turn context (which includes ALL roles: user, "
+        "assistant, tool) BEFORE concluding or answering. NEVER draw a conclusion "
+        "from the preview alone — the preview is only the question, not the "
+        "answer. Iterate like scrolling through search results: broad query "
+        "first, then refine with more specific terms, or narrow with since/until "
+        "(temporal), also_contains (keyword AND-filter), or session_id (scope to "
+        "one chat). Sort by similarity (default) or recency (for 'terakhir kali' "
+        "/ 'kemarin' style questions). Owner-only."
     ),
     "parameters": {
         "type": "object",
@@ -390,10 +397,14 @@ HISTORY_EXPAND_TOOL = {
     "name": "history_expand",
     "description": (
         "Fetch full turn context around one or more anchor message IDs found by "
-        "history_search. Call SELECTIVELY — only expand previews that look "
-        "promising, not the whole top-N. context_after can/should be larger "
-        "than context_before because you want to see the assistant response + "
-        "follow-up around each anchor. Owner-only."
+        "history_search. This is the ONLY way to see the ASSISTANT replies and "
+        "tool results around a hit — history_search previews are user-only. "
+        "REQUIRED before concluding from any relevant anchor: never answer from "
+        "the search preview alone; expand to read what was actually said around "
+        "it. Call SELECTIVELY — only expand previews that look promising, not the "
+        "whole top-N. context_after can/should be larger than context_before "
+        "because you want to see the assistant response + follow-up around each "
+        "anchor. Owner-only."
     ),
     "parameters": {
         "type": "object",
