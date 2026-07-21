@@ -1542,7 +1542,23 @@ class Conversation:
 
         Sends a tool_request to the node and waits for tool_result.
         Returns a ToolResult.
+
+        Shell tools ("shell" / "exec") pass through the server-side shell_guard
+        BEFORE the WebSocket forward: HARD_DENY blocks here, NEEDS_CONSENT
+        goes through the same check_and_hold flow every other gated tool
+        uses, and only ALLOWED commands actually reach the node. This gives
+        node-routed exec the same security posture as local exec — the node's
+        own blocklist stays as defense-in-depth for a spoofed/replayed
+        gateway message, but the primary gate lives on the server where the
+        runtime allowlist and consent state live.
         """
+        if tool_name in ("shell", "exec"):
+            guard_result = await self._gate_shell_for_node(
+                args.get("command", ""), tool_name,
+            )
+            if guard_result is not None:
+                return guard_result
+
         try:
             result = await node_conn.request_tool(tool_name, args, timeout=120)
             if result.get("success"):
@@ -1562,6 +1578,83 @@ class Conversation:
                 f"Error: Remote node disconnected while executing '{tool_name}'",
                 ok=False, error_type="disconnected",
             )
+
+    async def _gate_shell_for_node(self, command: str, tool_name: str):
+        """Run shell_guard against a command about to be forwarded to a node.
+
+        Returns:
+            None if the guard cleared — caller proceeds with the WebSocket
+            forward.
+            ToolResult if execution must short-circuit — either HARD_DENY
+            (ok=False) or a held consent prompt (ok=True, LLM surfaces it
+            to the owner).
+        """
+        from .shell_exec import run_shell, Outcome
+        from .db.connection import get_pool
+        from .db.models import get_config as _gc
+
+        if not command:
+            return None  # let the node-side handler produce its own error
+
+        try:
+            _pool = get_pool()
+        except Exception:
+            _pool = None
+
+        _consent_enabled = await _gc("security.consent_enabled", True)
+        if isinstance(_consent_enabled, str):
+            _consent_enabled = _consent_enabled.strip().lower() in ("1", "true", "yes", "on")
+
+        async def _guard(approved: bool):
+            return await run_shell(
+                command,
+                source="llm",
+                db_pool=_pool,
+                consent_enabled=bool(_consent_enabled),
+                approved=approved,
+                check_only=True,
+            )
+
+        res = await _guard(approved=False)
+
+        if res.outcome == Outcome.DENIED:
+            cand = f" (unrecognized: {', '.join(res.candidates)})" if res.candidates else ""
+            logger.warning(
+                f"shell_guard DENIED (node route): {command[:100]} — {res.reason}"
+            )
+            return ToolResult(
+                f"⛔ Blocked by shell guard: {res.reason}{cand}\n\n"
+                "This command is hard-denied and cannot be approved. If a listed "
+                "binary is legitimate, the owner can add it via /add-allowlist.",
+                ok=False, error_type="permission",
+            )
+
+        if res.outcome == Outcome.NEEDS_CONSENT:
+            from .consent import check_and_hold as _consent_gate
+            logger.info(
+                f"shell_guard NEEDS_CONSENT (node route): {command[:100]} — {res.reason}"
+            )
+            _access = self.user.get("access_level", "public")
+            _agent = getattr(self._mgr, "_agent", None) if self._mgr else None
+            action, prompt = await _consent_gate(
+                conv=self, agent=_agent,
+                tool_name=tool_name, args={"command": command},
+                access_level=_access, permission=0o700,
+                pre_decided=True,
+            )
+            if action == "held":
+                return ToolResult(prompt or "", ok=True)
+            # Owner approved — re-run the guard with approved=True so a stale
+            # allowlist / denylist change between the two calls is honoured.
+            res2 = await _guard(approved=True)
+            if res2.outcome != Outcome.ALLOWED:
+                return ToolResult(
+                    f"Error: shell guard rejected after consent: {res2.reason}",
+                    ok=False, error_type="permission",
+                )
+
+        # ALLOWED — safe to forward to the node.
+        return None
 
     async def _handle_tool_calls(
         self,

@@ -44,6 +44,7 @@ class Outcome(str, Enum):
     RAN = "ran"                # executed; `output` holds the result
     DENIED = "denied"          # HARD_DENY; never executed; `reason` explains
     NEEDS_CONSENT = "consent"  # caller must gate Yes/No then re-invoke with approved=True
+    ALLOWED = "allowed"        # check_only=True: guard cleared; caller executes elsewhere (e.g. remote node)
 
 
 # Sources whose commands are author-controlled (fixed argv) and therefore
@@ -140,6 +141,7 @@ async def run_shell(
     approved: bool = False,
     output_max: int = 4000,
     redact_fn=None,
+    check_only: bool = False,
 ) -> ShellResult:
     """Execute a shell command through the single chokepoint.
 
@@ -156,6 +158,11 @@ async def run_shell(
             command (consent granted). Lets a CONSENT verdict proceed.
         output_max: truncate stdout to this many chars.
         redact_fn: optional callable(str)->str to mask secrets in output.
+        check_only: run the guard but skip _spawn(). On success return
+            Outcome.ALLOWED so the caller can execute the command elsewhere
+            (e.g. forward to a remote node over WebSocket). HARD_DENY /
+            NEEDS_CONSENT behave exactly as in the normal path — the caller
+            still sees the same verdicts and must handle them the same way.
 
     Returns:
         ShellResult(outcome, output/reason, verdict, candidates).
@@ -194,6 +201,9 @@ async def run_shell(
         )
 
     # ── ALLOW (or degraded/approved CONSENT) → execute. ──
+    if check_only:
+        # Caller runs the command themselves (e.g. remote node). Guard passed.
+        return ShellResult(Outcome.ALLOWED, verdict=result.verdict)
     return await _spawn(command, cwd, timeout, output_max, redact_fn)
 
 

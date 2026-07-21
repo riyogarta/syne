@@ -124,5 +124,10 @@ def decode(raw: str | bytes) -> dict[str, Any]:
     return json.loads(raw)
 
 
-# Node-side tool names — these execute on the node, not the server
-NODE_TOOLS = frozenset({"exec", "file_read", "file_write", "read_source"})
+# Node-side tool names — these execute on the node, not the server.
+# Include BOTH "shell" (canonical) and "exec" (deprecated alias) so a rename
+# on the server side doesn't silently drop node routing: a call the LLM
+# issues as `shell(command=..., node=X)` must still hit the node instead of
+# falling through to local server execution (with the `node` kwarg leaking
+# into _tool_exec and crashing on TypeError).
+NODE_TOOLS = frozenset({"shell", "exec", "file_read", "file_write", "read_source"})
