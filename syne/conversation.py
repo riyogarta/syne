@@ -1558,6 +1558,17 @@ class Conversation:
             )
             if guard_result is not None:
                 return guard_result
+        else:
+            # Non-shell node tools (file_write, file_read, read_source): fire
+            # the same check_and_hold gate the server-side tools.registry.execute()
+            # would run. Without this, routing a file_write to a node would
+            # skip the owner's Yes/No prompt that the identical file_write
+            # tool triggers when run locally — same tool, same permission
+            # bits, wildly different security posture based on where it
+            # happens to execute.
+            gate_result = await self._gate_generic_tool_for_node(tool_name, args)
+            if gate_result is not None:
+                return gate_result
 
         try:
             result = await node_conn.request_tool(tool_name, args, timeout=120)
@@ -1654,6 +1665,36 @@ class Conversation:
                 )
 
         # ALLOWED — safe to forward to the node.
+        return None
+
+    async def _gate_generic_tool_for_node(self, tool_name: str, args: dict):
+        """Run the standard check_and_hold gate for a node-routed non-shell tool.
+
+        Mirrors the consent flow that tools.registry.execute() runs for local
+        calls, so a tool like file_write can't reach the node without the
+        owner's explicit Yes just because the WebSocket path skipped
+        registry.execute(). Returns None if the gate cleared, ToolResult if
+        held (LLM surfaces the prompt to the owner).
+        """
+        tool = self.tools.get(tool_name) if self.tools else None
+        if tool is None:
+            # Not a registered server-side tool — nothing to gate against.
+            # Should not happen for NODE_TOOLS in normal flow.
+            return None
+
+        from .consent import check_and_hold as _consent_gate
+        _access = self.user.get("access_level", "public")
+        _agent = getattr(self._mgr, "_agent", None) if self._mgr else None
+        is_scheduled = bool((self._message_metadata or {}).get("scheduled"))
+
+        action, prompt = await _consent_gate(
+            conv=self, agent=_agent,
+            tool_name=tool_name, args=args,
+            access_level=_access, permission=tool.permission,
+            scheduled=is_scheduled,
+        )
+        if action == "held":
+            return ToolResult(prompt or "", ok=True)
         return None
 
     async def _handle_tool_calls(
