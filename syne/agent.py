@@ -2020,16 +2020,40 @@ class SyneAgent:
             # Closes the creation vector: stranger → prompt injection →
             # update_ability(action='create') → arbitrary code in custom/.
             # Existing custom abilities still run; this flag only blocks NEW ones.
+            #
+            # Strict truthy: the guard opens ONLY on literal True or one of the
+            # canonical string affirmatives ('true'/'1'/'yes'/'on'). A plain
+            # `if not value` would treat the JSON-stored string "false" (or
+            # "no", "disabled", any typo like "enabled") as truthy and quietly
+            # unlock ability creation. Same coercion pattern used elsewhere
+            # for security.consent_enabled — keeps the semantics consistent
+            # across boolean-flag configs.
             from .db.models import get_config
-            self_mod_enabled = await get_config("abilities.self_modification_enabled", False)
+            _raw = await get_config("abilities.self_modification_enabled", False)
+            if isinstance(_raw, bool):
+                self_mod_enabled = _raw
+            elif isinstance(_raw, str):
+                self_mod_enabled = _raw.strip().lower() in ("1", "true", "yes", "on")
+            else:
+                self_mod_enabled = False
             if not self_mod_enabled:
+                _hint = ""
+                if _raw not in (None, False) and not (isinstance(_raw, bool) and _raw is True):
+                    _hint = (
+                        f"\n(Note: current stored value is {_raw!r} which does "
+                        "NOT count as enabled — the flag must be the JSON "
+                        "literal true, not a string like 'yes' or 'enabled'.)"
+                    )
                 return (
                     "Self-modification is disabled. To allow creating new abilities, "
                     "the owner must explicitly enable it:\n"
                     "  update_config(key='abilities.self_modification_enabled', value='true')\n"
+                    "(the value 'true' will be parsed as the JSON boolean literal — "
+                    "any other spelling is treated as disabled).\n"
                     "This flag closes the creation vector. Existing custom abilities are "
                     "unaffected — use update_ability(action='disable', name='X') to "
                     "deactivate them individually if needed."
+                    + _hint
                 )
 
             if not module_path:
