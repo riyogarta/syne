@@ -142,11 +142,24 @@ class MemoryEngine:
         # ═══════════════════════════════════════════════════════
         # RULE 760/765 — PRIVACY PROTECTION
         # Owner/family: access all. Public: only allowed categories (Rule 765).
-        # Load public categories cache for Rule 765 checks below.
         # ═══════════════════════════════════════════════════════
+        # Public categories must be applied IN THE SQL WHERE clause, before
+        # ORDER BY / LIMIT. Doing this in a Python post-filter (the previous
+        # design) meant a public requester's top-K slot would fill with
+        # private memories, then those would be dropped in Python — often
+        # leaving the actual permitted corpus (e.g. Quran, Hadith) empty
+        # even when it had strong semantic matches. Push the filter down.
+        public_cats: list[str] = []
         if requester_access_level not in ("owner", "family"):
             from ..security import _load_public_categories
-            await _load_public_categories()  # refresh cache for Rule 765
+            public_cats = await _load_public_categories() or []
+            if not public_cats:
+                # No categories opened to public → no memory is reachable.
+                # Skip the DB round-trip; return an empty list directly.
+                logger.debug(
+                    "Recall: public requester + empty public_categories → skip"
+                )
+                return []
 
         # Skip recall for very short queries (1 word) — no meaningful semantic match
         words = [w for w in query.strip().split() if len(w) > 1]
@@ -179,6 +192,15 @@ class MemoryEngine:
             if user_id is not None:
                 conditions.append(f"(m.user_id = ${param_idx} OR m.user_id IS NULL)")
                 params.append(user_id)
+                param_idx += 1
+
+            # Rule 765 pushed into SQL — see comment at the top of this method.
+            # Compare case-insensitively so seed categories saved with any
+            # capitalisation still match. Public_cats is already lowercased by
+            # _load_public_categories().
+            if public_cats:
+                conditions.append(f"LOWER(m.category) = ANY(${param_idx})")
+                params.append(public_cats)
                 param_idx += 1
 
             where = " AND ".join(conditions)

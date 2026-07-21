@@ -226,7 +226,7 @@ class TestToolSchemas:
     def test_history_search_tool_schema_required_fields(self):
         t = H.HISTORY_SEARCH_TOOL
         assert t["name"] == "history_search"
-        assert t["permission"] == 0o400  # owner-only
+        assert t["permission"] == 0o440  # owner + family (widened from 0o400 in v1.18.36)
         assert "query" in t["parameters"]["properties"]
         assert t["parameters"]["required"] == ["query"]
         assert callable(t["handler"])
@@ -234,7 +234,7 @@ class TestToolSchemas:
     def test_history_expand_tool_schema_required_fields(self):
         t = H.HISTORY_EXPAND_TOOL
         assert t["name"] == "history_expand"
-        assert t["permission"] == 0o400
+        assert t["permission"] == 0o440  # owner + family (widened from 0o400 in v1.18.36)
         assert "anchor_ids" in t["parameters"]["properties"]
         assert t["parameters"]["required"] == ["anchor_ids"]
         assert callable(t["handler"])

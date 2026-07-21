@@ -63,8 +63,8 @@ User: "Hi, how are you?"
 User: "I prefer dark mode in all apps"
 → STORE|preference|0.5|User prefers dark mode in all applications
 
-User: "My wife's name is Yuli, she's a lecturer"
-→ STORE|relationship|0.7|User's wife is named Yuli and works as a lecturer
+User: "My partner is a photographer"
+→ STORE|relationship|0.7|User's partner works as a photographer
 
 User: "Can you check the weather?"
 → SKIP

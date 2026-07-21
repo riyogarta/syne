@@ -522,21 +522,34 @@ def get_subagent_access_level() -> str:
 def filter_tools_for_subagent(tools: list[dict]) -> list[dict]:
     """Filter tools available to sub-agents.
 
-    Sub-agents are "workers" — they can use tools where the family digit > 0
-    (inheriting family-level access), EXCEPT spawn_subagent (no nesting).
+    Deliberately blocklist-based, not access-level based: sub-agents
+    inherit the OWNER's access level (`get_subagent_access_level()`
+    returns "owner"), so shell, file_write, memory_delete, and the rest
+    of the destructive owner tools ARE available to them. That's the
+    point — a worker sub-agent needs real capability to be useful. The
+    filter's job is only to strip the small set of tools that would let
+    a sub-agent modify Syne itself or recursively spawn more workers.
 
-    Sub-agents CANNOT:
+    Sub-agents CANNOT (this list IS the blocklist, `SUBAGENT_BLOCKED_TOOLS`):
     - Modify configuration (update_config)
     - Change identity/rules (update_soul)
     - Manage abilities (update_ability)
     - Manage groups/users (manage_group, manage_user)
     - Spawn other sub-agents (spawn_subagent)
 
+    Sub-agents CAN (owner-level access, still gated by shell_guard +
+    consent for destructive shell commands):
+    - shell (exec)
+    - file_read, file_write
+    - memory_search / memory_store / memory_update / memory_delete
+    - All abilities (web_search, fetch_url, maps, image_gen, etc.)
+    - db_query, read_source, history_search / history_expand
+
     Args:
         tools: List of tools in OpenAI schema format
 
     Returns:
-        Filtered list suitable for sub-agents (config tools removed)
+        Filtered list with SUBAGENT_BLOCKED_TOOLS entries removed.
     """
     filtered = []
     for tool in tools:

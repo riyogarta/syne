@@ -9,7 +9,13 @@ services:
       POSTGRES_USER: ${SYNE_DB_USER:-syne}
       POSTGRES_PASSWORD: ${SYNE_DB_PASSWORD:-syne}
     ports:
-      - "5433:5432"    # 5433 to avoid conflict with existing PostgreSQL
+      # Bind localhost only — never expose the DB to the public network.
+      # 5433 (host) → 5432 (container) so we don't collide with a system
+      # PostgreSQL install on the default port. Use 127.0.0.1: explicitly
+      # so a hardened firewall isn't the only line of defense; Docker
+      # publishes to all interfaces by default and that's the wrong
+      # default for a DB holding OAuth tokens and every memory row.
+      - "127.0.0.1:5433:5432"
     volumes:
       - syne_pgdata:/var/lib/postgresql/data
       - ./syne/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
