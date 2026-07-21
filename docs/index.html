@@ -228,7 +228,7 @@
 <header>
   <div class="wrap">
     <h1 class="tagline"><span class="q">“</span>I remember,<br>therefore I am.<span class="q">”</span></h1>
-    <p class="subline">The assistant that never forgets, and never <b>leaves your server.</b></p>
+    <p class="subline">The assistant that <b>remembers what matters,</b> and never <b>leaves your server.</b></p>
     <div class="hero-meta">Self-hosted · on Telegram · near-zero cost · Apache 2.0</div>
     <div class="hero-cta">
       <div class="install">
@@ -265,7 +265,7 @@
   <div class="wrap">
     <div class="sec-head"><span class="eyebrow">Why people keep it running</span><h2>Three reasons, not twenty features.</h2></div>
     <div class="proofs">
-      <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Nothing is capped, nothing expires. Stop repeating yourself to your tools.</p><div class="detail">millions of memories · useful ones stay, unused ones fade</div></div>
+      <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Anything you explicitly ask it to remember is kept forever. Stop repeating yourself to your tools.</p><div class="detail">explicit facts never fade · casual mentions decay if unused</div></div>
       <div class="proof"><div class="n">02</div><h3>It's yours.</h3><p>Runs entirely on your own server, stored in your own PostgreSQL. Your memories never touch a third party unless you choose them to.</p><div class="detail">Telegram + terminal · same agent, same memory</div></div>
       <div class="proof"><div class="n">03</div><h3>It's near-zero cost.</h3><p>Memory and evaluation run locally on Ollama for free. Chat can run on free OAuth, or a paid API key when you want the resilience.</p><div class="detail">free memory floor · your call on the chat model</div></div>
     </div>
@@ -299,7 +299,7 @@
     <div class="wrap">
       <div class="sec-head"><span class="depth">Layer 01 · <b>How memory works</b></span><h2>Two ways to remember. One clean store.</h2><p class="sub">Memory isn't a chat log stuffed back into the prompt. It's a first-class store you search by meaning and traverse by relationship, backed by PostgreSQL + pgvector, and kept clean by a filter that runs the moment a fact is saved.</p></div>
       <div class="two">
-        <div class="card"><span class="tag">semantic</span><h3>Vector recall</h3><p>Every memory is embedded and searched by meaning, so "what do you know about my work?" finds the right notes even when you never used those words. Millions of memories, millisecond lookup.</p></div>
+        <div class="card"><span class="tag">semantic</span><h3>Vector recall</h3><p>Every memory is embedded and searched by meaning, so "what do you know about my work?" finds the right notes even when you never used those words. HNSW-indexed, millisecond lookup as the store grows.</p></div>
         <div class="card"><span class="tag">relational</span><h3>Knowledge graph</h3><p>Facts are parsed into entities and relationships you can traverse, so "who is Agha's mother?" resolves a structured answer, not a fuzzy guess. Two systems, one memory.</p></div>
       </div>
 

@@ -114,10 +114,45 @@ class TestValidateStructure:
         assert ok is False
         assert "Cannot parse" in err
 
-    def test_base_class_case_insensitive(self):
-        """Base class matching uses case-insensitive check on 'ability'."""
+    def test_base_class_accepts_sanctioned_bases(self):
+        """Both 'Ability' and 'BaseAbility' are recognised as valid bases."""
         code = (
             "class MyThing(BaseAbility):\n"
+            "    name = 'test'\n"
+            "    description = 'desc'\n"
+            "    def execute(self): pass\n"
+            "    def get_schema(self): pass\n"
+            "    def get_guide(self): pass\n"
+        )
+        ok, err = validate_structure(code)
+        assert ok is True
+
+    def test_base_class_rejects_lookalike(self):
+        """Classes inheriting from base names that merely CONTAIN 'ability'
+        (e.g. PseudoAbility, FakeAbility, AbilityLike) must be rejected.
+        The previous loose 'ability' in base_name.lower() check accepted
+        these — that was defense-in-depth-negative for a security surface
+        that already gates ability creation via
+        abilities.self_modification_enabled + owner permission.
+        """
+        for lookalike in ("PseudoAbility", "FakeAbility", "AbilityLike", "MyAbility"):
+            code = (
+                f"class Injected({lookalike}):\n"
+                "    name = 'x'\n"
+                "    description = 'x'\n"
+                "    def execute(self): pass\n"
+                "    def get_schema(self): pass\n"
+                "    def get_guide(self): pass\n"
+            )
+            ok, err = validate_structure(code)
+            assert ok is False, f"lookalike base {lookalike!r} must not be accepted"
+            assert "No Ability subclass" in err
+
+    def test_base_class_accepts_dotted_import(self):
+        """A base referenced via a dotted path (syne.abilities.base.Ability)
+        must still resolve to the short 'Ability' name and pass."""
+        code = (
+            "class MyThing(syne.abilities.base.Ability):\n"
             "    name = 'test'\n"
             "    description = 'desc'\n"
             "    def execute(self): pass\n"

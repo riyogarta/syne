@@ -875,7 +875,7 @@ syne restore                         # Restore from backup
 |  |  [Graph]  [Gateway]                                  |  |
 |  |  (KG)    (remote)                                    |  |
 |  |                                                      |  |
-|  |  Core Tools (26):                                    |  |
+|  |  Core Tools (28):                                    |  |
 |  |  exec · db_query · memory · web · config · files     |  |
 |  |  send · schedule · reactions · voice · subagent      |  |
 |  +------------------------------------------------------+  |
@@ -1004,7 +1004,7 @@ syne/
 │   │   ├── engine.py        # Store, recall, decay, dedup, conflict resolution
 │   │   ├── evaluator.py     # Auto-evaluate (3-layer filter)
 │   │   └── graph.py         # Knowledge graph extraction, storage, recall
-│   ├── tools/               # 26 core tools
+│   ├── tools/               # 28 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   │   ├── custom/          # User-created abilities (only writable dir)
 │   │   └── ...              # 7 bundled abilities (image_gen, image_analysis, maps, pdf, office, website_screenshot, whatsapp)

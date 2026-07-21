@@ -53,14 +53,27 @@ def validate_structure(code: str, source_label: str = "<ability>") -> tuple[bool
     except SyntaxError as e:
         return False, f"Cannot parse {source_label}: {e.msg}"
     
-    # Find classes that look like Ability subclasses
+    # Find classes that inherit from Ability. Strict equality against the
+    # sanctioned base names — the old substring check ("ability" in name.lower())
+    # was defense-in-depth-negative: it matched anything ending in "Ability"
+    # (MyAbility, PseudoAbility, EvilAbility, FakeAbility) or containing the
+    # word (AbilityLike, AbilityShim), letting an attacker with write access to
+    # custom/ define a class that structurally looks like an ability without
+    # ever inheriting from the real base. Ability creation is already gated by
+    # abilities.self_modification_enabled + owner permission, but a shallow
+    # loose-match check is the wrong shape for a security gate — one grep of a
+    # class name should not decide whether arbitrary code runs.
+    _ABILITY_BASES = frozenset({"Ability", "BaseAbility"})
     ability_classes = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
-            # Check if any base class looks like Ability
             for base in node.bases:
                 base_name = _get_name(base)
-                if base_name and "ability" in base_name.lower():
+                if not base_name:
+                    continue
+                # Strip module prefix: "syne.abilities.base.Ability" → "Ability"
+                short = base_name.rsplit(".", 1)[-1]
+                if short in _ABILITY_BASES:
                     ability_classes.append(node)
                     break
     
