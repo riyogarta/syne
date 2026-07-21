@@ -69,7 +69,7 @@ syne init  # Follow the OAuth flow
 
 Or if you already have OpenClaw installed, Syne auto-detects and reuses OpenClaw's Google credentials.
 
-Credentials are stored in your local PostgreSQL, in the `credentials` table (same DB as memory + config — encrypted at rest if you enable Postgres TDE). Nothing is written to disk under `~/.syne/`; if a legacy `~/.syne/google_credentials.json` from an older install exists, Syne auto-migrates it into the DB on next start and tells you to delete the file.
+Credentials are stored in your local PostgreSQL, in the `config` table (keys prefixed `credential.` — same DB as memory and other config). Encrypt at the disk level (e.g. LUKS) if your threat model requires at-rest encryption; see SECURITY.md. Nothing is written to disk under `~/.syne/`; if a legacy `~/.syne/google_credentials.json` from an older install exists, Syne auto-migrates it into the DB on next start and tells you to delete the file.
 
 ### 4. Initialize Database Schema
 

@@ -82,7 +82,7 @@ During `syne init`, the installer detects your server's CPU and RAM to recommend
 | Strong | 4+ core | 8-16 GB | qwen3-embedding:4b (2560d) | qwen3:1.7b |
 | Beast | 4+ core | 16+ GB | qwen3-embedding:8b (4096d) | qwen3:4b |
 
-> **Embedding model is permanent** — changing it later requires resetting all memories (re-embedding is not yet supported). The evaluator model can be changed anytime via `/evaluator` in Telegram.
+> **Switching embedding models later is supported** — run `syne memory reembed-memory --force` to re-embed every memory row (resumable, HNSW index refreshed automatically) and `syne memory reembed-history` for the messages table. Use both when changing to a model with a different vector dimension. The evaluator model can be changed anytime via `/evaluator` in Telegram.
 
 ### Verify Installation
 

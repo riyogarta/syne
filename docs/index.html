@@ -495,7 +495,7 @@
           <div class="cmd"><code>syne updatedev</code><span>force pull + reinstall</span></div>
           <div class="caveat" style="margin-top:22px">
             <div><b>Free floor:</b> Ollama local embedding + evaluator = $0. Chat via OAuth is free; a paid API key is optional, for resilience.</div>
-            <div style="margin-top:10px"><b>Note:</b> the embedding model is permanent, changing it later re-embeds all memories. The evaluator can change anytime.</div>
+            <div style="margin-top:10px"><b>Note:</b> switching the embedding model later is supported — <code>syne memory reembed-memory --force</code> re-embeds every row (resumable, HNSW index refreshed). The evaluator can change anytime.</div>
           </div>
         </div>
       </div>

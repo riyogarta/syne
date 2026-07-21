@@ -27,7 +27,7 @@ from .abilities.loader import load_all_abilities
 from .context import ContextManager
 from .conversation import ConversationManager
 from .subagent import SubAgentManager
-from .security import check_command_safety, check_rule_removal
+from .security import check_rule_removal
 from .consent import ConsentStore, make_key, content_hash, DEFAULT_TTL_SECONDS, DEFAULT_MODE, DEFAULT_CONSENT_ENABLED
 
 logger = logging.getLogger("syne.agent")
