@@ -129,10 +129,15 @@ class TestExtractAndStore:
             "entities": [{"name": "Alice", "type": "person", "description": ""}],
             "relations": [{"subject": "Alice", "predicate": "lives_in", "object": "Jakarta"}],
         }
-        mock_provider.chat.return_value = MagicMock(content=json.dumps(extraction))
+        # Provider extraction now uses structured tool_calls, not raw content parsing.
+        mock_provider.chat.return_value = MagicMock(
+            content=None,
+            tool_calls=[{"name": "extract_kg", "args": extraction, "id": "call_1"}],
+        )
 
         with patch("syne.memory.graph.get_config", side_effect=get_config), \
-             patch("syne.memory.graph._store_graph", new_callable=AsyncMock) as mock_store:
+             patch("syne.memory.graph._store_graph", new_callable=AsyncMock) as mock_store, \
+             patch("syne.memory.graph._mark_kg_processed", new_callable=AsyncMock):
             result = await extract_and_store(mock_provider, "Alice lives in Jakarta", 1)
 
         assert result is True

@@ -100,11 +100,20 @@ class TestContextManagerInit:
         assert cm.available == int(120000 / SAFETY_MARGIN)
         assert cm.available < 120000
 
-    def test_budget_calculations(self):
-        cm = ContextManager()
-        assert cm.system_budget == int(cm.available * 0.15)
-        assert cm.memory_budget_tokens == int(cm.available * 0.10)
-        assert cm.history_budget == int(cm.available * 0.65)
+    def test_legacy_budget_kwargs_accepted_but_ignored(self):
+        # ContextManager moved to a dynamic budget (system + memory + current
+        # take what they need, history gets the remainder). The old fixed-
+        # percentage kwargs are still accepted for backward compatibility
+        # but don't produce attributes anymore — verify they don't blow up
+        # and that no stale attribute survives.
+        cm = ContextManager(
+            system_prompt_budget=0.15,
+            memory_budget=0.10,
+            history_budget=0.65,
+        )
+        assert not hasattr(cm, "system_budget")
+        assert not hasattr(cm, "memory_budget_tokens")
+        assert not hasattr(cm, "history_budget")
 
     def test_chars_per_token_stored(self):
         cm = ContextManager(chars_per_token=3.0)

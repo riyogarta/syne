@@ -165,6 +165,7 @@ class TestAbilityRegistryExecute:
         mock_ability.name = "good"
         mock_ability.description = "test"
         mock_ability.version = "1.0"
+        mock_ability.ensure_dependencies = AsyncMock(return_value=(True, ""))
         mock_ability.validate_config = AsyncMock(return_value=(True, ""))
         mock_ability.execute = AsyncMock(return_value={"success": True, "result": "ok"})
         registry.register(mock_ability, enabled=True, permission=0o700)
@@ -179,6 +180,7 @@ class TestAbilityRegistryExecute:
         mock_ability.name = "badconfig"
         mock_ability.description = "test"
         mock_ability.version = "1.0"
+        mock_ability.ensure_dependencies = AsyncMock(return_value=(True, ""))
         mock_ability.validate_config = AsyncMock(return_value=(False, "Missing API key"))
         registry.register(mock_ability, enabled=True, permission=0o700)
 
@@ -193,6 +195,7 @@ class TestAbilityRegistryExecute:
         mock_ability.name = "slow"
         mock_ability.description = "test"
         mock_ability.version = "1.0"
+        mock_ability.ensure_dependencies = AsyncMock(return_value=(True, ""))
         mock_ability.validate_config = AsyncMock(return_value=(True, ""))
 
         async def slow_execute(params, context):
@@ -215,6 +218,7 @@ class TestAbilityRegistryExecute:
         mock_ability.name = "failing"
         mock_ability.description = "test"
         mock_ability.version = "1.0"
+        mock_ability.ensure_dependencies = AsyncMock(return_value=(True, ""))
         mock_ability.validate_config = AsyncMock(return_value=(True, ""))
         mock_ability.execute = AsyncMock(side_effect=RuntimeError("boom"))
         registry.register(mock_ability, enabled=True, permission=0o700)
