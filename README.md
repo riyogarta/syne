@@ -466,7 +466,7 @@ Each digit controls access for Owner / Family / Public. Bits: `r`(4) read, `w`(2
 |------------|---------|---------------|
 | `0o700` | Owner only | exec, db_query, file_write, update_config |
 | `0o770` | Owner + family | send_message, memory_store, manage_schedule |
-| `0o555` | Everyone (read/exec) | web_search, web_fetch |
+| `0o555` / `0o444` | Everyone (read/exec, or read-only) | web_search, fetch_url |
 | `0o550` | Owner + family (read/exec) | memory_search, subagent_status |
 
 Manage users via conversation: *"Make @alice family"*, *"Remove @bob's access"*
@@ -539,12 +539,12 @@ Shell guard is standalone: no imports from Syne internals, no DB, no I/O in `ana
 
 ---
 
-## Core Tools (28)
+## Core Tools (28 visible to the LLM)
 
 | Tool | Permission | Description |
 |------|-----------|-------------|
 | `web_search` | 555 | Search the web (Brave Search API) |
-| `web_fetch` | 555 | Fetch and extract content from URLs |
+| `fetch_url` | 444 | Fetch and extract content from URLs (SSRF-hardened, in `_UNTRUSTED_TOOLS` for provenance taint). Replaces the retired `web_fetch` |
 | `shell` | 700 | Execute shell commands (routed through shell_guard for parse + consent). Alias: `exec` |
 | `db_query` | 700 | Read-only SQL queries (SELECT only, credentials redacted) |
 | `file_read` | 500 | Read files in workspace (max 100KB) |
@@ -557,20 +557,22 @@ Shell guard is standalone: no imports from Syne internals, no DB, no I/O in `ana
 | `manage_schedule` | 770 | Create/list/delete scheduled tasks |
 | `spawn_subagent` | 750 | Spawn background sub-agents |
 | `subagent_status` | 550 | Check sub-agent status |
+| `node_status` | 700 | List connected remote nodes and their WebSocket status |
 | `memory_search` | 555 | Semantic search over memories (Rule 760/765 filters by category) |
-| `history_search` | 400 | Semantic search over user messages across the entire chat log — returns anchor previews (owner-only, cross-session by default) |
-| `history_expand` | 400 | Fetch full turn context around anchor IDs from `history_search` — call selectively after previews |
+| `history_search` | 440 | Semantic search over user messages across the entire chat log — returns anchor previews. Owner + family; cross-session by default |
+| `history_expand` | 440 | Fetch full turn context (all roles) around anchor IDs from `history_search` — call selectively after promising previews |
 | `memory_store` | 770 | Store new text memory |
 | `memory_store_file` | 770 | Store memory + binary file attachment (image, PDF, etc.) |
 | `memory_get_file` | 555 | Retrieve a memory's attached file and deliver it as document |
 | `memory_analyze_file` | 555 | Re-analyze a memory's attached file (PDF/Office text extract or image vision) — returns content to LLM, not media |
+| `memory_update` | 770 | Overwrite an existing memory in place (with old→new diff + 'ya' confirmation) and re-embed. Unlike `memory_store` which appends |
 | `memory_delete` | 700 | Delete memories (owner only) |
 | `update_config` | 700 | Change runtime configuration |
 | `update_ability` | 700 | Enable/disable/create abilities |
 | `update_soul` | 700 | Modify personality and behavioral rules |
 | `check_auth` | 700 | OAuth token management |
 
-`manage_group` and `manage_user` are owner-only tools registered in the engine but **not exposed to the LLM** — group and member changes are more reliable via the `/groups` and `/members` Telegram menus. The tools exist for future automation but the model doesn't see them today.
+`manage_group` and `manage_user` are owner-only tools registered in the engine but **not exposed to the LLM** — group and member changes are more reliable via the `/groups` and `/members` Telegram menus. The tools exist for future automation but the model doesn't see them today. Similarly, `exec` is registered as a hidden deprecated alias of `shell` so old habits keep working.
 
 Since v1.18.18, the LLM sees the **full toolset every turn** (subject to the access-level filter). Prior versions filtered tools by regex-matching the user's message, which caused false-negative "I don't have that tool" reports for meta-tools like `update_soul` when users phrased around the trigger keywords. Full-toolset delivery also holds the Anthropic prompt-cache breakpoint on system+tools, so the extra schema tokens are absorbed by the cache after the first turn.
 
@@ -753,7 +755,7 @@ All configuration lives in the `config` table. Change via conversation or `updat
 |-----|---------|-------------|
 | `exec.timeout_max` | `300` | Max exec timeout (seconds) |
 | `exec.output_max_chars` | `4000` | Max output characters |
-| `web_fetch.timeout` | `30` | HTTP fetch timeout (seconds) |
+| `fetch_url.timeout` | `15` | HTTP fetch timeout (seconds) — used by `fetch_url` |
 
 ### Sub-agent Settings
 
