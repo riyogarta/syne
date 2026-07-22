@@ -2038,25 +2038,50 @@ class TelegramChannel:
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command."""
-        help_text = """**Available commands:**
+        help_text = """**Available commands**
 
+*General*
 /start — Welcome message
 /help — This help message
 /version — Version info
-/status — Show agent status
-/memory — Show memory stats
-/compact — Compact conversation history
+/status — Agent status
+/identity — Show agent identity
+
+*Memory & Context*
+/memory — Memory stats
 /autocapture — Toggle auto memory capture (on/off)
-/consent — Toggle consent gate for destructive tools (on/off)
-/models — Manage LLM models
-/embedding — Manage embedding models
-/evaluator — Manage evaluator model
+/graph — Manage knowledge-graph extractor model
+/compact — Compact conversation history
+/clear — Clear conversation history
+
+*AI Models*
+/models — Manage LLM (chat) models
+/embedding — Manage embedding model
+/evaluator — Manage memory-evaluator model
+/imagegen — Switch image-generation provider
+/vision — Switch image-analysis provider
+
+*Security* (owner)
+/consent — Toggle consent gate for destructive tools
+/createability — Toggle the self-modification gate (ability creation)
+/allowlist — Manage shell allowlist (add/remove/list)
+/denylist — Manage shell denylist (add/remove/list)
+/reset — Clear your consent grants
+
+*Users & Groups* (owner)
 /groups — Manage groups & members
 /members — Manage global user access
+/wamembers — Manage WhatsApp members
 /nodes — Manage remote nodes
-/clear — Clear conversation history
-/identity — Show agent identity
+
+*System* (owner)
+/update — Update to the latest release
+/updatedev — Pull dev + reinstall + restart
+/restart — Restart the Syne process
+/backup — Back up the database
+/restore — List & restore a backup
 /browse — Browse directories (share session with CLI)
+/quit — Exit remote-node mode
 /cancel — Cancel active auth flow
 
 Or just send me a message!"""
