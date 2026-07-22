@@ -416,7 +416,7 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.chat_model', '"gemini-2.5-pro"', 'Chat model name'),
     ('provider.embedding_model', '"text-embedding-004"', 'Embedding model name'),
     ('provider.embedding_dimensions', '768', 'Embedding vector dimensions'),
-    ('memory.auto_capture', 'false', 'Auto-evaluate messages for memory storage (default OFF — user must explicitly ask to remember)'),
+    ('memory.auto_capture', 'true', 'Auto-evaluate messages for memory storage (default ON — LLM judges what is worth remembering; explicit stores are permanent, auto-captured ones are non-permanent and subject to decay)'),
     ('memory.auto_evaluate', 'true', 'Use LLM to judge what is worth storing (only when auto_capture is ON)'),
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '5', 'Max memories to recall per query'),
@@ -878,6 +878,18 @@ INSERT INTO config (key, value, description) VALUES
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)')
 ON CONFLICT (key) DO NOTHING;
 DELETE FROM config WHERE key = 'session.max_tool_rounds';
+
+-- Migration: memory.auto_capture (default ON)
+INSERT INTO config (key, value, description) VALUES
+    ('memory.auto_capture', 'true', 'Auto-evaluate messages for memory storage (default ON — LLM judges what is worth remembering; explicit stores are permanent, auto-captured ones are non-permanent and subject to decay)')
+ON CONFLICT (key) DO NOTHING;
+-- One-shot: force EXISTING installs still on the old default (false) -> true.
+-- Conditional on old value so a deliberate user opt-out isn't clobbered on
+-- every restart... EXCEPT here Riyo explicitly asked existing installs be
+-- forced ON, so we migrate any value that is currently 'false'. Idempotent:
+-- once true, the WHERE no longer matches.
+UPDATE config SET value = 'true'
+  WHERE key = 'memory.auto_capture' AND value = 'false';
 
 -- Migration: compaction.trigger_percent (single token-based compaction trigger)
 INSERT INTO config (key, value, description) VALUES
