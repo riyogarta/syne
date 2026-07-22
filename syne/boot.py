@@ -547,13 +547,26 @@ async def build_system_prompt(
                 parts.append(f"- {entry['content']}")
             parts.append("")
 
-    # [3] RULES
+    # [3] RULES — hard rules are separated and made prominent so they don't
+    # get lost in the list; soft rules follow as guidelines. Generic: the split
+    # is purely by severity, the code never inspects rule content.
     if rules:
-        parts.append("# Rules (Non-Negotiable)")
-        for rule in rules:
-            severity_marker = "🔴" if rule["severity"] == "hard" else "🟡"
-            parts.append(f"- {severity_marker} [{rule['code']}] {rule['name']}: {rule['description']}")
-        parts.append("")
+        hard_rules = [r for r in rules if r["severity"] == "hard"]
+        soft_rules = [r for r in rules if r["severity"] != "hard"]
+
+        if hard_rules:
+            parts.append("# 🔴 HARD RULES — NON-NEGOTIABLE (violating ANY is a failure)")
+            parts.append("These are absolute. Before you send ANY response, you are"
+                         " accountable to every one of these. Do not autopilot past them.")
+            for rule in hard_rules:
+                parts.append(f"- 🔴 [{rule['code']}] {rule['name']}: {rule['description']}")
+            parts.append("")
+
+        if soft_rules:
+            parts.append("# 🟡 Soft Rules (Guidelines)")
+            for rule in soft_rules:
+                parts.append(f"- 🟡 [{rule['code']}] {rule['name']}: {rule['description']}")
+            parts.append("")
 
     # [3.5] PROPOSE BEFORE EXECUTE — high priority, early in prompt
     parts.append(_get_propose_before_execute_section())
@@ -629,6 +642,34 @@ async def build_user_context(user: dict) -> str:
     return "\n".join(parts)
 
 
+async def _build_hard_rule_final_check() -> str:
+    """Generic recency-effect echo: list every HARD rule (code + name) as a
+    final self-check at the very end of the prompt. Content lives in the DB;
+    this only re-surfaces the hard-rule identifiers so they're the LAST thing
+    the model reads before answering."""
+    try:
+        rules = await models.get_rules()
+    except Exception:
+        return ""
+    hard = [r for r in rules if r.get("severity") == "hard"]
+    if not hard:
+        return ""
+    lines = [
+        "# ⚠️ FINAL CHECK BEFORE YOU RESPOND (do not skip)",
+        "You are about to answer. STOP and self-audit against EVERY hard rule"
+        " below. If your draft touches what a rule governs, re-read that rule's"
+        " full text above and comply — do NOT answer from habit/assumption."
+        " A confident wrong answer is worse than a slow correct one.",
+        "",
+        "Hard rules you MUST NOT violate:",
+    ]
+    for r in hard:
+        lines.append(f"- 🔴 [{r['code']}] {r['name']}")
+    lines.append("")
+    lines.append("Now respond, having verified you violate none of the above.")
+    return "\n".join(lines)
+
+
 async def get_full_prompt(
     user: dict = None,
     tools: Optional[list[dict]] = None,
@@ -668,6 +709,12 @@ async def get_full_prompt(
 
     if extra_context:
         prompt += "\n" + extra_context
+
+    # FINAL — hard-rule self-check echo (recency effect: the very last thing the
+    # model reads before it answers). Generic, sourced from the rules table.
+    final_check = await _build_hard_rule_final_check()
+    if final_check:
+        prompt += "\n\n" + final_check
 
     return prompt
 
