@@ -410,12 +410,12 @@ def init():
     else:
         console.print(
             "[yellow]⚠️  Evaluator model NOT installed — Ollama isn't available on "
-            "this server. The rule checker (security.rule_checker_enabled) will "
-            "fail-open on every response with a warning tag. Two ways to fix:\n"
-            "  1. Set memory.evaluator_driver=\"provider\" to use the main LLM as "
-            "the checker (higher per-turn cost, but works without Ollama).\n"
-            "  2. Set security.rule_checker_enabled=false to disable the checker "
-            "entirely (loses enforcement).[/yellow]"
+            "this server. The rule checker will automatically fall back to using "
+            "the main LLM as the checker on every turn (higher per-turn token "
+            "cost, but enforcement stays alive with no manual config change). "
+            "If that per-turn cost isn't acceptable, either install Ollama + pull "
+            "the evaluator model later, or disable the checker via "
+            "security.rule_checker_enabled=false.[/yellow]"
         )
 
     # 3b. Vision / Image Analysis provider

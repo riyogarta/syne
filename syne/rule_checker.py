@@ -188,7 +188,18 @@ async def check_response(
             severity == 'hard'). Each has keys: code, name, description.
         evaluator_driver: 'ollama' (local, cheap) or 'provider' (main LLM).
         evaluator_model: Ollama model name when driver == 'ollama'.
-        provider: Main LLM provider — required when driver == 'provider'.
+        provider: Main LLM provider — used when driver == 'provider' AND
+            as automatic fallback when driver == 'ollama' fails (see below).
+
+    Auto-fallback:
+        When the configured driver is 'ollama' but the call fails for ANY
+        reason (Ollama not installed, service down, model not pulled,
+        timeout), the checker automatically retries with the main
+        provider. This trades a slightly higher per-turn cost for
+        keeping rule enforcement alive without the owner needing to
+        switch drivers by hand. The fallback attempt is logged so the
+        situation is visible. Only if BOTH drivers fail does the
+        checker return ERROR.
 
     Returns:
         CheckResult with state CLEAN / VIOLATED / ERROR.
@@ -204,18 +215,58 @@ async def check_response(
 
     prompt = _build_prompt(draft, user_message, hard_rules)
 
+    raw: Optional[str] = None
+    primary_err: Optional[Exception] = None
+
+    # Primary attempt — configured driver.
     try:
         if evaluator_driver == "ollama":
             raw = await _check_via_ollama(prompt, model=evaluator_model)
         else:
             if provider is None:
-                return CheckResult(VerdictState.ERROR, reason="provider driver but no provider passed")
+                return CheckResult(
+                    VerdictState.ERROR,
+                    reason="provider driver but no provider passed",
+                )
             raw = await _check_via_provider(prompt, provider)
     except Exception as e:
-        logger.warning(f"Rule checker LLM call failed: {type(e).__name__}: {e}")
-        return CheckResult(VerdictState.ERROR, reason=f"checker call failed: {type(e).__name__}")
+        primary_err = e
+        logger.warning(
+            f"Rule checker primary ({evaluator_driver}) failed: {type(e).__name__}: {e}"
+        )
 
-    verdict = _parse_verdict_line(raw)
+    # Auto-fallback: primary was ollama and failed → try main provider.
+    # Cannot fallback in the reverse direction (provider→ollama) because
+    # provider failure typically means the main LLM is unreachable, which
+    # means Syne itself can't answer regardless — and blindly trying
+    # Ollama would just add another failure without a way to verify the
+    # model is even pulled.
+    if primary_err is not None:
+        if evaluator_driver == "ollama" and provider is not None:
+            try:
+                logger.info(
+                    "Rule checker: primary Ollama failed, falling back to main provider"
+                )
+                raw = await _check_via_provider(prompt, provider)
+            except Exception as e2:
+                logger.warning(
+                    f"Rule checker fallback (provider) also failed: {type(e2).__name__}: {e2}"
+                )
+                return CheckResult(
+                    VerdictState.ERROR,
+                    reason=(
+                        f"both drivers failed — "
+                        f"primary({evaluator_driver})={type(primary_err).__name__}, "
+                        f"fallback(provider)={type(e2).__name__}"
+                    ),
+                )
+        else:
+            return CheckResult(
+                VerdictState.ERROR,
+                reason=f"checker call failed: {type(primary_err).__name__}",
+            )
+
+    verdict = _parse_verdict_line(raw or "")
     if verdict.state == VerdictState.VIOLATED:
         # Filter to codes we actually know about — hallucinated codes get dropped
         known_codes = {r.get("code", "").upper() for r in hard_rules}

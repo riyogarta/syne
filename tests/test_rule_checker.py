@@ -150,7 +150,8 @@ class TestCheckResponse:
         assert r.state == VerdictState.VIOLATED
         assert r.violated == ["DATE_VERIFY"]
 
-    async def test_ollama_exception_returns_error(self, monkeypatch):
+    async def test_ollama_exception_without_provider_returns_error(self, monkeypatch):
+        """Ollama fails and no provider available for fallback → ERROR."""
         async def fake_ollama(prompt, model, base_url="http://localhost:11434", timeout=30.0):
             raise RuntimeError("ollama down")
         monkeypatch.setattr("syne.rule_checker._check_via_ollama", fake_ollama)
@@ -158,6 +159,76 @@ class TestCheckResponse:
             draft="hi",
             user_message="hi",
             hard_rules=[{"code": "X", "name": "n", "description": "d"}],
+            provider=None,
         )
         assert r.state == VerdictState.ERROR
         assert "checker call failed" in r.reason
+
+    async def test_ollama_failure_falls_back_to_provider(self, monkeypatch):
+        """Ollama fails but a provider is available → auto-fallback and use provider verdict."""
+        async def fake_ollama(prompt, model, base_url="http://localhost:11434", timeout=30.0):
+            raise RuntimeError("ollama not installed")
+        called_provider = {"count": 0}
+        async def fake_provider_check(prompt, provider):
+            called_provider["count"] += 1
+            return "CLEAN"
+        monkeypatch.setattr("syne.rule_checker._check_via_ollama", fake_ollama)
+        monkeypatch.setattr("syne.rule_checker._check_via_provider", fake_provider_check)
+
+        # Any non-None provider will do — the mock replaces _check_via_provider.
+        dummy_provider = object()
+        r = await check_response(
+            draft="hello",
+            user_message="hi",
+            hard_rules=[{"code": "X", "name": "n", "description": "d"}],
+            evaluator_driver="ollama",
+            provider=dummy_provider,
+        )
+        assert r.state == VerdictState.CLEAN
+        assert called_provider["count"] == 1
+
+    async def test_both_drivers_failure_returns_error(self, monkeypatch):
+        """Ollama fails, provider fallback also fails → ERROR, and reason
+        mentions BOTH drivers so the owner can see which paths blew up."""
+        async def fake_ollama(prompt, model, base_url="http://localhost:11434", timeout=30.0):
+            raise RuntimeError("ollama refused")
+        async def fake_provider_check(prompt, provider):
+            raise TimeoutError("provider timed out")
+        monkeypatch.setattr("syne.rule_checker._check_via_ollama", fake_ollama)
+        monkeypatch.setattr("syne.rule_checker._check_via_provider", fake_provider_check)
+
+        r = await check_response(
+            draft="hello",
+            user_message="hi",
+            hard_rules=[{"code": "X", "name": "n", "description": "d"}],
+            evaluator_driver="ollama",
+            provider=object(),
+        )
+        assert r.state == VerdictState.ERROR
+        assert "both drivers failed" in r.reason
+        assert "RuntimeError" in r.reason
+        assert "TimeoutError" in r.reason
+
+    async def test_provider_driver_failure_does_not_fallback_to_ollama(self, monkeypatch):
+        """When user configured 'provider' driver and it fails, we do NOT
+        try Ollama as fallback — the reverse fallback would just paper
+        over a real problem (main LLM down) with a very fragile local
+        model that has no guarantee of being pulled."""
+        async def fake_provider_check(prompt, provider):
+            raise RuntimeError("provider down")
+        ollama_called = {"count": 0}
+        async def fake_ollama(prompt, model, base_url="http://localhost:11434", timeout=30.0):
+            ollama_called["count"] += 1
+            return "CLEAN"
+        monkeypatch.setattr("syne.rule_checker._check_via_provider", fake_provider_check)
+        monkeypatch.setattr("syne.rule_checker._check_via_ollama", fake_ollama)
+
+        r = await check_response(
+            draft="hi",
+            user_message="hi",
+            hard_rules=[{"code": "X", "name": "n", "description": "d"}],
+            evaluator_driver="provider",
+            provider=object(),
+        )
+        assert r.state == VerdictState.ERROR
+        assert ollama_called["count"] == 0
