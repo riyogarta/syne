@@ -914,11 +914,21 @@ INSERT INTO config (key, value, description) VALUES
     ('subagents.round_delay', '2.0', 'Delay in seconds between sub-agent tool-call rounds (throttle).')
 ON CONFLICT (key) DO NOTHING;
 
+-- Migration: security.rule_checker_* — hard-rule compliance checker on final responses.
+-- Runs the evaluator model against every final assistant draft; violations trigger
+-- a rewrite (bounded), errors fail-open with a warning tag prepended to the reply.
+INSERT INTO config (key, value, description) VALUES
+    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through the evaluator model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); evaluator errors fail-open with a warning tag.'),
+    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.')
+ON CONFLICT (key) DO NOTHING;
+
 -- security.consent_* — ya/yes confirmation gate for destructive (op=x) tool calls
 INSERT INTO config (key, value, description) VALUES
     ('security.consent_enabled', 'true', 'Master switch for the consent gate on op=x tool calls. When true, destructive tools (exec, file_write, memory_delete, update_*, etc.) prompt "balas ya" before running. Set false to disable the whole gate.'),
     ('security.consent_ttl_seconds', '600', 'How long an approved consent stays cached (seconds). Default 600 = 10 min. The next identical call within this window skips the prompt.'),
-    ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.')
+    ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.'),
+    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through the evaluator model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); evaluator errors fail-open with a warning tag.'),
+    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.')
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================
