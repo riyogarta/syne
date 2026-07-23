@@ -1389,6 +1389,14 @@ class Conversation:
         # didn't run. Skipped when a pending consent will overwrite this
         # response anyway (line ~1441 replaces it with the canonical Yes/No
         # prompt regardless).
+        #
+        # HARD RULE for this block: it must never break the main response
+        # path. If anything inside raises for any reason (a bug in the
+        # checker, a driver exception my try/except missed, an unexpected
+        # response shape), we log the full traceback and continue with the
+        # original response untouched. The whole point of the checker is
+        # to gate what reaches the user — it must not become a NEW way to
+        # not reach the user.
         try:
             _rule_check_enabled_raw = await get_config("security.rule_checker_enabled", True)
         except Exception:
@@ -1407,118 +1415,19 @@ class Conversation:
             and not _has_pending_consent
         ):
             try:
-                from .rule_checker import check_response as _rc, VerdictState as _RCState
-                from .db.models import get_rules as _get_rules
-                _hard_rules = [r for r in await _get_rules() if r.get("severity") == "hard"]
-            except Exception as _e:
-                logger.warning(f"Rule checker setup failed: {type(_e).__name__}: {_e}")
-                _hard_rules = []
-
-            if _hard_rules:
-                try:
-                    _max_retries = int(await get_config("security.rule_checker_max_retries", 2))
-                except Exception:
-                    _max_retries = 2
-                _max_retries = max(0, min(5, _max_retries))  # sanity clamp
-
-                # Driver selection: /checker lets the owner pin the checker
-                # to either the evaluator (default: local qwen3:0.6b via
-                # Ollama — cheap) OR the main provider (main chat model —
-                # more accurate, higher per-turn cost, works without
-                # Ollama). "evaluator" is the layered case: honour
-                # whatever memory.evaluator_driver says (which itself
-                # may be "ollama" or "provider").
-                _checker_driver_pref = await get_config("security.rule_checker_driver", "evaluator")
-                if isinstance(_checker_driver_pref, str):
-                    _checker_driver_pref = _checker_driver_pref.strip().lower()
-                if _checker_driver_pref == "provider":
-                    _eval_driver = "provider"
-                else:
-                    _eval_driver = await get_config("memory.evaluator_driver", "ollama")
-                _eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-
-                _current = response
-                _checker_warning = None
-
-                for _attempt in range(_max_retries + 1):
-                    _verdict = await _rc(
-                        draft=_current.content or "",
-                        user_message=user_message,
-                        hard_rules=_hard_rules,
-                        evaluator_driver=_eval_driver,
-                        evaluator_model=_eval_model,
-                        provider=self.provider,
-                    )
-                    if _verdict.state == _RCState.CLEAN:
-                        logger.info(
-                            f"Rule checker: CLEAN (attempt {_attempt + 1}/"
-                            f"{_max_retries + 1})"
-                        )
-                        break
-                    if _verdict.state == _RCState.ERROR:
-                        logger.warning(f"Rule checker ERROR: {_verdict.reason}")
-                        _checker_warning = (
-                            "⚠️ [Rule checker unavailable — response sent unevaluated]"
-                        )
-                        break
-                    # VIOLATED
-                    logger.warning(
-                        f"Rule checker: VIOLATED {_verdict.violated} — "
-                        f"{_verdict.reason} (attempt {_attempt + 1}/{_max_retries + 1})"
-                    )
-                    if _attempt >= _max_retries:
-                        _checker_warning = (
-                            "⚠️ [Rule checker exhausted retries — response may "
-                            f"violate: {', '.join(_verdict.violated)}]"
-                        )
-                        break
-                    # Build nudge and regenerate. We rebuild context each time
-                    # from the base so retries don't accumulate stale drafts.
-                    _retry_ctx = list(context)
-                    _retry_ctx.append(ChatMessage(
-                        role="assistant", content=_current.content or "",
-                    ))
-                    _retry_ctx.append(ChatMessage(
-                        role="user",
-                        content=(
-                            f"Your previous draft violated hard rule(s): "
-                            f"{', '.join(_verdict.violated)}.\n"
-                            f"Reason: {_verdict.reason}\n"
-                            "Rewrite your response to comply. If a rule "
-                            "requires calling a tool (e.g. verify a date), "
-                            "call that tool first. Do not repeat the violation."
-                        ),
-                    ))
-                    try:
-                        _new_resp = await self.provider.chat(
-                            messages=_retry_ctx,
-                            tools=tool_schemas if tool_schemas else None,
-                            stream_callbacks=None,  # retry never streams
-                            **chat_kwargs,
-                        )
-                        if _new_resp.tool_calls:
-                            _new_resp = await self._handle_tool_calls(
-                                _new_resp, _retry_ctx, access_level, tool_schemas,
-                            )
-                        _current = _new_resp
-                    except Exception as _re:
-                        logger.warning(f"Rule checker retry failed: {type(_re).__name__}: {_re}")
-                        _checker_warning = (
-                            "⚠️ [Rule checker retry failed — response sent as-is]"
-                        )
-                        break
-
-                # Apply warning + swap in the (possibly regenerated) response
-                if _checker_warning:
-                    _current = ChatResponse(
-                        content=f"{_checker_warning}\n\n{_current.content or ''}",
-                        model=_current.model,
-                        input_tokens=_current.input_tokens,
-                        output_tokens=_current.output_tokens,
-                        tool_calls=_current.tool_calls,
-                        thinking=_current.thinking,
-                    )
-                response = _current
+                response = await self._rule_check_and_maybe_regenerate(
+                    response=response,
+                    context=context,
+                    tool_schemas=tool_schemas,
+                    access_level=access_level,
+                    chat_kwargs=chat_kwargs,
+                    user_message=user_message,
+                )
+            except Exception:
+                # HARD RULE: the checker must never break the main response
+                # path. Log the full traceback so we can diagnose, then
+                # continue with the LLM's original response untouched.
+                logger.exception("Rule checker crashed — sending original response as-is")
 
         # Save assistant response
         await self.save_message("assistant", response.content)
@@ -1835,6 +1744,137 @@ class Conversation:
         if action == "held":
             return ToolResult(prompt or "", ok=True)
         return None
+
+    async def _rule_check_and_maybe_regenerate(
+        self,
+        response: ChatResponse,
+        context: list[ChatMessage],
+        tool_schemas: Optional[list[dict]],
+        access_level: str,
+        chat_kwargs: dict,
+        user_message: str,
+    ) -> ChatResponse:
+        """Run the hard-rule checker against a draft; regenerate on violation.
+
+        Returns the possibly-modified response. Never raises — the caller
+        wraps the whole call in its own try/except that fails-open on any
+        unexpected exception with a logged traceback.
+        """
+        from .rule_checker import check_response as _rc, VerdictState as _RCState
+        from .db.models import get_rules as _get_rules
+
+        try:
+            hard_rules = [r for r in await _get_rules() if r.get("severity") == "hard"]
+        except Exception as e:
+            logger.warning(f"Rule checker setup failed: {type(e).__name__}: {e}")
+            return response
+
+        if not hard_rules:
+            return response
+
+        try:
+            max_retries = int(await get_config("security.rule_checker_max_retries", 2))
+        except Exception:
+            max_retries = 2
+        max_retries = max(0, min(5, max_retries))  # sanity clamp
+
+        # Driver selection: /checker lets the owner pin the checker to
+        # either the evaluator (default: local qwen3:0.6b via Ollama —
+        # cheap) OR the main provider (main chat model — more accurate,
+        # higher per-turn cost, works without Ollama). "evaluator" is
+        # the layered case: honour whatever memory.evaluator_driver
+        # says (which itself may be "ollama" or "provider").
+        driver_pref = await get_config("security.rule_checker_driver", "evaluator")
+        if isinstance(driver_pref, str):
+            driver_pref = driver_pref.strip().lower()
+        if driver_pref == "provider":
+            eval_driver = "provider"
+        else:
+            eval_driver = await get_config("memory.evaluator_driver", "ollama")
+        eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+
+        current = response
+        checker_warning = None
+
+        for attempt in range(max_retries + 1):
+            verdict = await _rc(
+                draft=current.content or "",
+                user_message=user_message,
+                hard_rules=hard_rules,
+                evaluator_driver=eval_driver,
+                evaluator_model=eval_model,
+                provider=self.provider,
+            )
+            if verdict.state == _RCState.CLEAN:
+                logger.info(
+                    f"Rule checker: CLEAN (attempt {attempt + 1}/{max_retries + 1})"
+                )
+                break
+            if verdict.state == _RCState.ERROR:
+                logger.warning(f"Rule checker ERROR: {verdict.reason}")
+                checker_warning = (
+                    "⚠️ [Rule checker unavailable — response sent unevaluated]"
+                )
+                break
+            # VIOLATED
+            logger.warning(
+                f"Rule checker: VIOLATED {verdict.violated} — "
+                f"{verdict.reason} (attempt {attempt + 1}/{max_retries + 1})"
+            )
+            if attempt >= max_retries:
+                checker_warning = (
+                    "⚠️ [Rule checker exhausted retries — response may "
+                    f"violate: {', '.join(verdict.violated)}]"
+                )
+                break
+            # Build nudge and regenerate. We rebuild context each round
+            # from the base so retries don't accumulate stale drafts.
+            retry_ctx = list(context)
+            retry_ctx.append(ChatMessage(
+                role="assistant", content=current.content or "",
+            ))
+            retry_ctx.append(ChatMessage(
+                role="user",
+                content=(
+                    f"Your previous draft violated hard rule(s): "
+                    f"{', '.join(verdict.violated)}.\n"
+                    f"Reason: {verdict.reason}\n"
+                    "Rewrite your response to comply. If a rule "
+                    "requires calling a tool (e.g. verify a date), "
+                    "call that tool first. Do not repeat the violation."
+                ),
+            ))
+            try:
+                new_resp = await self.provider.chat(
+                    messages=retry_ctx,
+                    tools=tool_schemas if tool_schemas else None,
+                    stream_callbacks=None,  # retry never streams
+                    **chat_kwargs,
+                )
+                if new_resp.tool_calls:
+                    new_resp = await self._handle_tool_calls(
+                        new_resp, retry_ctx, access_level, tool_schemas,
+                    )
+                current = new_resp
+            except Exception as retry_err:
+                logger.warning(
+                    f"Rule checker retry failed: {type(retry_err).__name__}: {retry_err}"
+                )
+                checker_warning = (
+                    "⚠️ [Rule checker retry failed — response sent as-is]"
+                )
+                break
+
+        if checker_warning:
+            current = ChatResponse(
+                content=f"{checker_warning}\n\n{current.content or ''}",
+                model=current.model,
+                input_tokens=current.input_tokens,
+                output_tokens=current.output_tokens,
+                tool_calls=current.tool_calls,
+                thinking=current.thinking,
+            )
+        return current
 
     async def _handle_tool_calls(
         self,
