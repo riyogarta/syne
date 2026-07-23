@@ -918,8 +918,9 @@ ON CONFLICT (key) DO NOTHING;
 -- Runs the evaluator model against every final assistant draft; violations trigger
 -- a rewrite (bounded), errors fail-open with a warning tag prepended to the reply.
 INSERT INTO config (key, value, description) VALUES
-    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through the evaluator model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries). If the primary evaluator (per memory.evaluator_driver) fails, the checker auto-falls-back to the main LLM as a second-chance run before giving up; only when BOTH drivers fail does the response go out with a warning tag prepended.'),
-    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.')
+    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through a checker model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); checker errors fail-open with a warning tag prepended.'),
+    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.'),
+    ('security.rule_checker_driver', '"evaluator"', 'Which model powers the rule checker. "evaluator" = the model configured under memory.evaluator_driver + memory.evaluator_model (default: qwen3:0.6b via Ollama — cheap and local). "provider" = the main chat model (higher per-turn cost, but works without Ollama). Owner switches this via /checker.')
 ON CONFLICT (key) DO NOTHING;
 
 -- security.consent_* — ya/yes confirmation gate for destructive (op=x) tool calls
@@ -927,8 +928,9 @@ INSERT INTO config (key, value, description) VALUES
     ('security.consent_enabled', 'true', 'Master switch for the consent gate on op=x tool calls. When true, destructive tools (exec, file_write, memory_delete, update_*, etc.) prompt "balas ya" before running. Set false to disable the whole gate.'),
     ('security.consent_ttl_seconds', '600', 'How long an approved consent stays cached (seconds). Default 600 = 10 min. The next identical call within this window skips the prompt.'),
     ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.'),
-    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through the evaluator model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries). If the primary evaluator (per memory.evaluator_driver) fails, the checker auto-falls-back to the main LLM as a second-chance run before giving up; only when BOTH drivers fail does the response go out with a warning tag prepended.'),
-    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.')
+    ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through a checker model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); checker errors fail-open with a warning tag prepended.'),
+    ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.'),
+    ('security.rule_checker_driver', '"evaluator"', 'Which model powers the rule checker. "evaluator" = the model configured under memory.evaluator_driver + memory.evaluator_model (default: qwen3:0.6b via Ollama — cheap and local). "provider" = the main chat model (higher per-turn cost, but works without Ollama). Owner switches this via /checker.')
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================

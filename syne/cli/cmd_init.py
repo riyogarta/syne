@@ -410,12 +410,14 @@ def init():
     else:
         console.print(
             "[yellow]⚠️  Evaluator model NOT installed — Ollama isn't available on "
-            "this server. The rule checker will automatically fall back to using "
-            "the main LLM as the checker on every turn (higher per-turn token "
-            "cost, but enforcement stays alive with no manual config change). "
-            "If that per-turn cost isn't acceptable, either install Ollama + pull "
-            "the evaluator model later, or disable the checker via "
-            "security.rule_checker_enabled=false.[/yellow]"
+            "this server. The rule checker (security.rule_checker_enabled) will "
+            "fail-open on every response with a warning tag prepended. Two ways "
+            "to fix it later:\n"
+            "  1. In Telegram, run /checker and pick 'Main LLM' — the checker "
+            "will use the main model instead of Ollama (higher per-turn cost, "
+            "but no Ollama required).\n"
+            "  2. Set security.rule_checker_enabled=false to disable the "
+            "checker entirely (loses enforcement).[/yellow]"
         )
 
     # 3b. Vision / Image Analysis provider

@@ -196,6 +196,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("consent", self._cmd_consent))
+        self.app.add_handler(CommandHandler("checker", self._cmd_checker))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("models", self._cmd_models))
@@ -297,6 +298,7 @@ class TelegramChannel:
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("clear", "Clear current conversation"),
             BotCommand("compact", "Compact conversation history"),
+            BotCommand("checker", "Choose rule-checker driver: evaluator model or main LLM (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
@@ -2063,6 +2065,7 @@ class TelegramChannel:
 
 *Security* (owner)
 /consent — Toggle consent gate for destructive tools
+/checker — Choose rule-checker driver (evaluator model vs main LLM)
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
 /denylist — Manage shell denylist (add/remove/list)
@@ -3609,6 +3612,72 @@ Or just send me a message!"""
         )
         await update.message.reply_text(
             f"🔒 Consent gate **{state_word}**\n{detail}",
+            parse_mode="Markdown",
+        )
+
+    async def _cmd_checker(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /checker — choose which model powers the rule compliance checker.
+
+        Options:
+          * evaluator — the model set under memory.evaluator_driver +
+            memory.evaluator_model (default: qwen3:0.6b via Ollama, cheap
+            and local).
+          * provider — the main chat model that runs Molt (higher per-turn
+            cost, but works when Ollama is not available).
+
+        Writes to security.rule_checker_driver. Owner-only.
+        """
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can change the rule-checker driver.")
+            return
+
+        args = update.message.text.split(maxsplit=1)
+        choice = args[1].strip().lower() if len(args) > 1 else None
+
+        current = await get_config("security.rule_checker_driver", "evaluator")
+        if isinstance(current, str):
+            current = current.strip().lower()
+        eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+        main_model = await get_config("provider.chat_model", "?")
+
+        if choice is None:
+            buttons = [
+                InlineKeyboardButton(
+                    f"{'✅ ' if current == 'evaluator' else ''}Evaluator ({eval_model})",
+                    callback_data="checker_set:evaluator",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if current == 'provider' else ''}Main LLM ({main_model})",
+                    callback_data="checker_set:provider",
+                ),
+            ]
+            await update.message.reply_text(
+                f"🛡 **Rule-checker driver:** `{current}`\n\n"
+                f"The rule checker judges every final response against the hard rules "
+                f"before it is sent. Pick which model does the judging:\n\n"
+                f"• **Evaluator** — `{eval_model}` (via `memory.evaluator_driver`). "
+                f"Cheap, local when driver is Ollama, no per-turn API cost.\n"
+                f"• **Main LLM** — `{main_model}`. More accurate, but every response "
+                f"costs an extra API call to your main model.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+            return
+
+        if choice not in ("evaluator", "provider"):
+            await update.message.reply_text(
+                "❌ Use: `evaluator` or `provider` (or call `/checker` with no argument for buttons).",
+                parse_mode="Markdown",
+            )
+            return
+
+        await set_config("security.rule_checker_driver", choice)
+        picked_model = eval_model if choice == "evaluator" else main_model
+        await update.message.reply_text(
+            f"🛡 Rule-checker driver set to **{choice}** (`{picked_model}`).",
             parse_mode="Markdown",
         )
 
@@ -8723,6 +8792,31 @@ Or just send me a message!"""
             ]
             await query.edit_message_text(
                 f"🔒 **Consent gate:** {state}\n{detail}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([buttons]),
+            )
+
+        elif data.startswith("checker_set:"):
+            choice = data.split(":", 1)[1]
+            if choice not in ("evaluator", "provider"):
+                await query.answer("Unknown driver", show_alert=True)
+                return
+            await set_config("security.rule_checker_driver", choice)
+            eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+            main_model = await get_config("provider.chat_model", "?")
+            picked_model = eval_model if choice == "evaluator" else main_model
+            buttons = [
+                InlineKeyboardButton(
+                    f"{'✅ ' if choice == 'evaluator' else ''}Evaluator ({eval_model})",
+                    callback_data="checker_set:evaluator",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if choice == 'provider' else ''}Main LLM ({main_model})",
+                    callback_data="checker_set:provider",
+                ),
+            ]
+            await query.edit_message_text(
+                f"🛡 **Rule-checker driver:** `{choice}` (`{picked_model}`)",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )

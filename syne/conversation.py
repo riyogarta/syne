@@ -1421,7 +1421,20 @@ class Conversation:
                     _max_retries = 2
                 _max_retries = max(0, min(5, _max_retries))  # sanity clamp
 
-                _eval_driver = await get_config("memory.evaluator_driver", "ollama")
+                # Driver selection: /checker lets the owner pin the checker
+                # to either the evaluator (default: local qwen3:0.6b via
+                # Ollama — cheap) OR the main provider (main chat model —
+                # more accurate, higher per-turn cost, works without
+                # Ollama). "evaluator" is the layered case: honour
+                # whatever memory.evaluator_driver says (which itself
+                # may be "ollama" or "provider").
+                _checker_driver_pref = await get_config("security.rule_checker_driver", "evaluator")
+                if isinstance(_checker_driver_pref, str):
+                    _checker_driver_pref = _checker_driver_pref.strip().lower()
+                if _checker_driver_pref == "provider":
+                    _eval_driver = "provider"
+                else:
+                    _eval_driver = await get_config("memory.evaluator_driver", "ollama")
                 _eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
 
                 _current = response
