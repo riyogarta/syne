@@ -193,7 +193,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
         self.app.add_handler(CommandHandler("compact", self._cmd_compact))
-        self.app.add_handler(CommandHandler("clear", self._cmd_clear))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("consent", self._cmd_consent))
         self.app.add_handler(CommandHandler("checker", self._cmd_checker))
@@ -296,7 +295,6 @@ class TelegramChannel:
             BotCommand("denylist", "Manage shell command denylist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
-            BotCommand("clear", "Clear current conversation"),
             BotCommand("compact", "Compact conversation history"),
             BotCommand("checker", "Choose rule-checker driver: evaluator model or main LLM (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
@@ -2054,7 +2052,6 @@ class TelegramChannel:
 /autocapture — Toggle auto memory capture (on/off)
 /graph — Manage knowledge-graph extractor model
 /compact — Compact conversation history
-/clear — Clear conversation history
 
 *AI Models*
 /models — Manage LLM (chat) models
@@ -2449,31 +2446,6 @@ Or just send me a message!"""
                         pass
             except Exception as e:
                 logger.warning(f"Model-switch compact failed for {key}: {e}")
-
-    async def _cmd_clear(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /clear command — archive current session and start fresh."""
-        # Route to remote session if in remote mode
-        user = update.effective_user
-        if user.id in self._remote_node:
-            node_id = self._remote_node[user.id]
-            await self._remote_slash_command(update, context, "/new", node_id)
-            return
-
-        from ..db.connection import get_connection
-
-        chat_id = str(update.effective_chat.id)
-
-        async with get_connection() as conn:
-            await conn.execute("""
-                UPDATE sessions SET status = 'archived', updated_at = NOW()
-                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
-            """, chat_id)
-
-        # Clear from active conversations
-        key = f"telegram:{chat_id}"
-        self.agent.conversations._active.pop(key, None)
-
-        await update.message.reply_text("Session cleared. Starting fresh! 🔄")
 
     async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /evaluator command — manage evaluator model for auto-capture."""
