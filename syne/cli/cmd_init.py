@@ -390,13 +390,33 @@ def init():
     auto_capture_enabled = auto_capture_choice == 1
 
     if auto_capture_enabled:
-        # Ensure Ollama is installed (may already be if embedding uses Ollama)
-        if embed_choice not in (3, 4, 5):
-            _ensure_ollama()
-        _ensure_evaluator_model(eval_model=selected_eval_model)
         console.print("[green]✓ Auto-capture enabled[/green]")
     else:
         console.print("[dim]  Auto-capture disabled — you can enable it later via /autocapture or chat.[/dim]")
+
+    # Evaluator model — used by BOTH auto_capture (optional above) AND the
+    # rule_checker (security.rule_checker_enabled, defaults ON in schema.sql).
+    # Pull it unconditionally when Ollama can run: without it, the rule
+    # checker fails-open on every turn (silent loss of enforcement) even
+    # for owners who left auto_capture off. This is why the pull is not
+    # gated behind auto_capture_enabled.
+    if can_run_ollama:
+        if embed_choice not in (3, 4, 5):
+            _ensure_ollama()
+        _ensure_evaluator_model(eval_model=selected_eval_model)
+        console.print(
+            "[green]✓ Evaluator model ready — powers rule checker + auto-capture.[/green]"
+        )
+    else:
+        console.print(
+            "[yellow]⚠️  Evaluator model NOT installed — Ollama isn't available on "
+            "this server. The rule checker (security.rule_checker_enabled) will "
+            "fail-open on every response with a warning tag. Two ways to fix:\n"
+            "  1. Set memory.evaluator_driver=\"provider\" to use the main LLM as "
+            "the checker (higher per-turn cost, but works without Ollama).\n"
+            "  2. Set security.rule_checker_enabled=false to disable the checker "
+            "entirely (loses enforcement).[/yellow]"
+        )
 
     # 3b. Vision / Image Analysis provider
     console.print("\n[bold]Image Analysis (Vision)[/bold]")
