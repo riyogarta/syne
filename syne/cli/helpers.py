@@ -608,7 +608,7 @@ def _create_symlink():
 
 
 def _setup_update_check():
-    """Create weekly update check scheduled task in DB."""
+    """Create daily update-check scheduled task in DB (21:00 local)."""
     syne_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     venv_python = os.path.join(syne_dir, ".venv", "bin", "python")
 
@@ -638,12 +638,12 @@ async def setup():
         )
     created_by = int(row["platform_id"]) if row else None
 
-    # Create weekly cron task (every Monday at 9:00 AM)
+    # Create daily cron task (every day at 21:00 local time)
     from syne.scheduler import create_task
     result = await create_task(
         name="_syne_update_check",
         schedule_type="cron",
-        schedule_value="0 9 * * 1",
+        schedule_value="0 21 * * *",
         payload="__syne_update_check__",
         created_by=created_by,
     )
@@ -656,7 +656,7 @@ asyncio.run(setup())
         cwd=syne_dir, capture_output=True, text=True,
     )
     if result.returncode == 0:
-        console.print("[green]✓[/green] Weekly update check scheduled")
+        console.print("[green]✓[/green] Daily update check scheduled (21:00)")
     else:
         console.print(f"[yellow]⚠ Could not setup update check: {result.stderr.strip()[:100]}[/yellow]")
 
