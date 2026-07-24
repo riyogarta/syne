@@ -2461,6 +2461,15 @@ class Conversation:
                 "native_check": lambda: self.provider.supports_vision,
                 "label": "Image analysis",
             },
+            "images": {
+                # Album / multi-photo message. telegram.py buffers a media-group
+                # and stores the ordered list under metadata['images']. Route it
+                # to image_analysis.pre_process (which iterates the list) instead
+                # of silently dropping every photo but the first.
+                "meta_key": "images",
+                "native_check": lambda: self.provider.supports_vision,
+                "label": "Image analysis",
+            },
             "audio": {
                 "meta_key": "audio",
                 "native_check": lambda: False,  # No LLM natively handles audio input (yet)

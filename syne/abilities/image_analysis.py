@@ -31,16 +31,49 @@ class ImageAnalysisAbility(Ability):
     permission = 0o444
 
     def handles_input_type(self, input_type: str) -> bool:
-        return input_type == "image"
+        return input_type in ("image", "images")
 
     async def pre_process(
-        self, input_type: str, input_data: dict, user_prompt: str,
+        self, input_type: str, input_data, user_prompt: str,
         config: Optional[dict] = None
     ) -> Optional[str]:
         prompt = user_prompt if user_prompt and user_prompt.lower() not in (
             "what's in this image?", "describe this image"
         ) else "Describe this image in detail. If there is text, transcribe it."
 
+        # Album path: input_type 'images' carries a LIST of image dicts.
+        # Analyze each one and concatenate, so a multi-photo message doesn't
+        # silently drop every photo but the first.
+        if input_type == "images" or isinstance(input_data, list):
+            images = input_data if isinstance(input_data, list) else [input_data]
+            parts: list[str] = []
+            total = len(images)
+            for idx, img in enumerate(images, start=1):
+                b64 = img.get("base64", "") if isinstance(img, dict) else ""
+                if not b64:
+                    parts.append(f"[Foto {idx}/{total}: gagal dibaca (data kosong)]")
+                    continue
+                result = await self.execute(
+                    params={
+                        "image_base64": b64,
+                        "mime_type": (img.get("mime_type", "image/jpeg")
+                                      if isinstance(img, dict) else "image/jpeg"),
+                        "prompt": prompt,
+                    },
+                    context={"config": config or {}},
+                )
+                if result.get("success"):
+                    parts.append(f"=== Foto {idx}/{total} ===\n{result['result']}")
+                else:
+                    err = result.get("error", "unknown")
+                    logger.warning(f"Image analysis failed (photo {idx}/{total}): {err}")
+                    parts.append(f"=== Foto {idx}/{total} ===\n[Analisis gagal: {err}]")
+            # Only return text if at least one photo produced a real analysis.
+            if any("[Analisis gagal" not in p and "gagal dibaca" not in p for p in parts):
+                return "\n\n".join(parts)
+            return None
+
+        # Single-image path (unchanged).
         result = await self.execute(
             params={
                 "image_base64": input_data.get("base64", ""),
