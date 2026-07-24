@@ -14,16 +14,12 @@ from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-import httpx
 
 from . import __version__
 
 logger = logging.getLogger("syne.update_checker")
 
 GITHUB_REPO = "riyogarta/syne"
-GITHUB_TAGS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/tags"
-# Raw __init__.py on default branch — always present, no tags needed.
-GITHUB_INIT_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/syne/__init__.py"
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -74,21 +70,35 @@ def _is_newer(current: str, latest: str) -> bool:
 
 
 async def check_latest_version() -> Optional[str]:
-    """Fetch latest version from __init__.py on the default branch.
-    
-    Returns:
-        Latest version string (e.g., "0.4.1") or None on error.
+    """Read the latest version from origin/main via local git — the SAME method
+    `syne update` uses (git fetch + git show origin/main:syne/__init__.py).
+
+    No GitHub API, no tags, no network library — just git against the repo the
+    install already tracks. Returns the version string, or None on error.
     """
-    import re as _re
+    import asyncio as _asyncio
+    import os as _os
+
+    # Repo root = three levels up from this file (syne/update_checker.py).
+    # syne/update_checker.py -> repo root is two levels up.
+    repo_dir = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+    async def _git(*args) -> tuple[int, str]:
+        proc = await _asyncio.create_subprocess_exec(
+            "git", *args, cwd=repo_dir,
+            stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        return proc.returncode, out.decode("utf-8", "replace")
+
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(GITHUB_INIT_RAW_URL)
-            resp.raise_for_status()
-            for line in resp.text.splitlines():
-                if line.strip().startswith("__version__"):
-                    m = _re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", line)
-                    if m:
-                        return m.group(1).lstrip("v")
+        await _git("fetch", "origin")
+        code, text = await _git("show", "origin/main:syne/__init__.py")
+        if code != 0:
+            return None
+        for line in text.splitlines():
+            if line.strip().startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'").lstrip("v")
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
     return None
