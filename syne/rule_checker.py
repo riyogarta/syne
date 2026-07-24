@@ -171,6 +171,71 @@ async def _check_via_provider(prompt: str, provider: LLMProvider) -> str:
     return (response.content or "").strip()
 
 
+_PHANTOM_PROMPT_TEMPLATE = """You are a strict verifier. In this turn the assistant called NO tools at all — nothing was actually executed, saved, sent, deleted, pushed, deployed, or changed by the system.
+
+Decide ONE thing: does the DRAFT RESPONSE below CLAIM that it just performed such a concrete action, as if it really happened this turn?
+
+Count as a phantom claim (PHANTOM):
+- Claims of having just executed/saved/sent/deleted/created/stored/uploaded/downloaded/committed/pushed/pulled/installed/deployed/published/restarted something THIS turn, in ANY language.
+- Present-perfect or past-tense action claims that imply the system did the work now (e.g. "done, I saved it", "sudah kukirim", "已发送", "he enviado", "terhapus").
+
+Do NOT count as phantom (CLEAN):
+- Referring to an action done in a PREVIOUS turn ("earlier I saved...", "tadi sudah...").
+- Merely PROPOSING/OFFERING to do something ("I can save this", "mau kusimpan?").
+- Describing facts, opinions, plans, or conversation with no claim of a just-executed system action.
+- Ordinary words that happen to sound like actions but describe no system operation ("semoga tetap terjaga", "the deal is done" as an idiom).
+
+Reply with EXACTLY ONE word on its own line, nothing else:
+  CLEAN
+  PHANTOM
+
+DRAFT RESPONSE:
+{draft}"""
+
+
+async def check_phantom_action(
+    draft: str,
+    evaluator_driver: str = "ollama",
+    evaluator_model: str = "qwen3:0.6b",
+    provider: Optional[LLMProvider] = None,
+) -> bool:
+    """Language-agnostic phantom-action check.
+
+    Returns True if the draft appears to CLAIM a just-executed system action
+    while (per the caller) no tool ran this turn. Fail-open: on any error or
+    unparseable output, returns False (no warning) — a false negative is
+    less disruptive than nagging the user on every benign message.
+
+    The caller MUST only invoke this when no tool ran this turn.
+    """
+    if not (draft and draft.strip()):
+        return False
+
+    prompt = _PHANTOM_PROMPT_TEMPLATE.format(draft=draft.strip()[:4000])
+    try:
+        if evaluator_driver == "ollama":
+            raw = await _check_via_ollama(prompt, model=evaluator_model)
+        else:
+            if provider is None:
+                return False
+            raw = await _check_via_provider(prompt, provider)
+    except Exception as e:
+        logger.warning(f"Phantom checker call failed: {type(e).__name__}: {e}")
+        return False
+
+    text = _strip_think(raw or "").strip().upper()
+    if not text:
+        return False
+    # Accept the verdict anywhere; PHANTOM wins only if explicitly present.
+    for line in text.splitlines():
+        if line.strip() == "PHANTOM":
+            return True
+    # Some models append trailing punctuation/prose.
+    if "PHANTOM" in text and "CLEAN" not in text:
+        return True
+    return False
+
+
 async def check_response(
     draft: str,
     user_message: str,

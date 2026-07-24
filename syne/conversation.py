@@ -87,20 +87,6 @@ _NON_ANTHROPIC_GUARDRAILS = """
 # Note: current runtime gates the entire guard with `tools_ran_this_turn`
 # in Conversation, so a broader regex here CAN'T fire on a legitimate
 # tool-result summary — it still needs 'no tool ran this turn' to trigger.
-_PHANTOM_ACTION_RE = _re.compile(
-    r"(?:sudah|telah|berhasil|sudah saya|sudah ku|I have|I've|I already|successfully|done)"
-    r"[^.!?\n]{0,40}"
-    r"(?:simpan|tulis|jalankan|eksekusi|kirim|hapus|buat|catat|proses|unggah|unduh"
-    r"|save|writ|ran|execut|sent|delet|creat|search|stor"
-    r"|upload|download|commit|push|pull|install|deploy|publish|restart|start|stop)"
-    r"|"
-    r"\bter(?:simpan|kirim|hapus|instal(?:l)?|update|catat|jalankan|proses|unggah|unduh|upload|download|selesaikan)\b"
-    r"|"
-    r"\b(?:sent|saved|deleted|created|stored|executed|uploaded|downloaded|installed|deployed|published|restarted|committed|pushed|completed)(?=\s*[.!,]|\s*$)",
-    _re.IGNORECASE,
-)
-
-
 from .security import (
     get_group_context_restrictions,
     filter_tools_for_group,
@@ -1370,16 +1356,41 @@ class Conversation:
         # (false positive fixed 11 Jul 2026: speedtest summary got flagged).
         if not response.tool_calls and not tools_ran_this_turn:
             content = response.content or ""
-            if _PHANTOM_ACTION_RE.search(content):
-                logger.warning(f"Phantom action detected in response (no tool calls): {content[:200]}")
-                response = ChatResponse(
-                    content=content + "\n\n⚠️ _Warning: the above claims may not have been executed. No tool was actually called. Please verify._",
-                    model=response.model,
-                    input_tokens=response.input_tokens,
-                    output_tokens=response.output_tokens,
-                    tool_calls=response.tool_calls,
-                    thinking=response.thinking,
-                )
+            if content.strip():
+                is_phantom = False
+                try:
+                    from .rule_checker import check_phantom_action
+                    # Same driver/model resolution as the rule-checker.
+                    _dp = await get_config("security.rule_checker_driver", "evaluator")
+                    if isinstance(_dp, str):
+                        _dp = _dp.strip().lower()
+                    if _dp == "provider":
+                        _eval_driver = "provider"
+                    else:
+                        _eval_driver = await get_config("memory.evaluator_driver", "ollama")
+                    _eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
+                    is_phantom = await check_phantom_action(
+                        draft=content,
+                        evaluator_driver=_eval_driver if isinstance(_eval_driver, str) else "ollama",
+                        evaluator_model=_eval_model if isinstance(_eval_model, str) else "qwen3:0.6b",
+                        provider=self.provider,
+                    )
+                except Exception:
+                    # Fail-open: a phantom-checker failure must never break the
+                    # response path. No warning added (a false negative is far
+                    # less disruptive than nagging on every benign message).
+                    logger.exception("Phantom checker crashed — sending response as-is")
+                    is_phantom = False
+                if is_phantom:
+                    logger.warning(f"Phantom action detected (LLM, no tool calls): {content[:200]}")
+                    response = ChatResponse(
+                        content=content + "\n\n⚠️ _Warning: the above claims may not have been executed. No tool was actually called. Please verify._",
+                        model=response.model,
+                        input_tokens=response.input_tokens,
+                        output_tokens=response.output_tokens,
+                        tool_calls=response.tool_calls,
+                        thinking=response.thinking,
+                    )
 
         # ─── Rule-checker: verify draft against hard rules before send ─────
         # Runs a cheap second-pass LLM (evaluator model) that reads the draft
