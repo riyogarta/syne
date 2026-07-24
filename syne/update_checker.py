@@ -22,6 +22,8 @@ logger = logging.getLogger("syne.update_checker")
 
 GITHUB_REPO = "riyogarta/syne"
 GITHUB_TAGS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/tags"
+# Raw __init__.py on default branch — always present, no tags needed.
+GITHUB_INIT_RAW_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/syne/__init__.py"
 
 
 def _parse_version(v: str) -> tuple[int, ...]:
@@ -72,22 +74,21 @@ def _is_newer(current: str, latest: str) -> bool:
 
 
 async def check_latest_version() -> Optional[str]:
-    """Fetch latest version tag from GitHub.
+    """Fetch latest version from __init__.py on the default branch.
     
     Returns:
         Latest version string (e.g., "0.4.1") or None on error.
     """
+    import re as _re
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                GITHUB_TAGS_URL,
-                params={"per_page": 1},
-                headers={"Accept": "application/vnd.github.v3+json"},
-            )
+            resp = await client.get(GITHUB_INIT_RAW_URL)
             resp.raise_for_status()
-            tags = resp.json()
-            if tags:
-                return tags[0]["name"].lstrip("v")
+            for line in resp.text.splitlines():
+                if line.strip().startswith("__version__"):
+                    m = _re.search(r"__version__\s*=\s*['\"]([^'\"]+)['\"]", line)
+                    if m:
+                        return m.group(1).lstrip("v")
     except Exception as e:
         logger.debug(f"Update check failed: {e}")
     return None
@@ -143,7 +144,7 @@ async def get_pending_update_notice() -> Optional[str]:
         return None
     
     current = __version__
-    if _is_minor_upgrade(current, latest):
+    if _is_newer(current, latest):
         return (
             f"⬆️ Syne v{latest} available! (current: v{current}) — "
             f"run `syne update` to upgrade"
