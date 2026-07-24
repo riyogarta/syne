@@ -57,6 +57,17 @@ def _is_minor_upgrade(current: str, latest: str) -> bool:
     return False
 
 
+def _is_newer(current: str, latest: str) -> bool:
+    """True if latest is a strictly newer version than current (any bump:
+    major, minor, or patch). Tuple compare handles 1.20.9 < 1.21.0 and
+    1.20.9 < 1.20.10 correctly."""
+    cur = _parse_version(current)
+    lat = _parse_version(latest)
+    if not cur or not lat:
+        return False
+    return lat > cur
+
+
 async def check_latest_version() -> Optional[str]:
     """Fetch latest version tag from GitHub.
     
@@ -96,8 +107,10 @@ async def check_and_notify() -> Optional[str]:
     # Save latest version to DB
     await set_config("update_check.latest_version", latest)
     
-    # Check if this is a minor upgrade
-    if not _is_minor_upgrade(current, latest):
+    # Notify on ANY newer version (minor or patch) — the user is entitled to
+    # know an update exists whenever the version changes. De-dup below keeps
+    # it to one notification per version.
+    if not _is_newer(current, latest):
         return None
     
     # Check if we already notified about this version
