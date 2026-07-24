@@ -8,8 +8,11 @@ Results stored in DB config:
 - update_check.notified_version: last version we notified about (avoid spam)
 """
 
+import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -146,3 +149,75 @@ async def get_pending_update_notice() -> Optional[str]:
             f"run `syne update` to upgrade"
         )
     return None
+
+
+# Daily hour (local time) at which the update check runs.
+_UPDATE_CHECK_HOUR = 21
+
+
+async def _seconds_until_next_run(hour: int, tz: ZoneInfo) -> float:
+    """Seconds from now until the next occurrence of `hour`:00 in tz."""
+    now = datetime.now(tz)
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def update_check_loop(send_dm) -> None:
+    """Background task: once a day at _UPDATE_CHECK_HOUR local time, check for a
+    newer version and DM the owner if one exists.
+
+    Args:
+        send_dm: async callable send_dm(chat_id:int, text:str) that delivers a
+            Telegram DM. Provided by main.run() (wraps the Telegram bot).
+
+    Self-contained and fail-safe: any error is logged and the loop continues;
+    it never raises out, so it can't take the process down. Does NOT rely on
+    the scheduler table — every running install gets the daily check.
+    """
+    from .db.models import get_config
+    from .db.connection import get_connection
+
+    # Resolve local timezone from config (fallback UTC).
+    try:
+        tz_name = await get_config("system.timezone", "UTC")
+        tz = ZoneInfo(tz_name if isinstance(tz_name, str) and tz_name else "UTC")
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    logger.info(f"Update-check loop started (daily at {_UPDATE_CHECK_HOUR}:00 {tz}).")
+
+    while True:
+        try:
+            delay = await _seconds_until_next_run(_UPDATE_CHECK_HOUR, tz)
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            logger.info("Update-check loop cancelled.")
+            return
+        except Exception as e:
+            logger.warning(f"Update-check loop sleep error: {e}; retrying in 1h")
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                return
+            continue
+
+        # Time to check.
+        try:
+            message = await check_and_notify()
+            if not message:
+                continue
+            # Find owner Telegram ID and DM them.
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT platform_id FROM users "
+                    "WHERE access_level = 'owner' AND platform = 'telegram' LIMIT 1"
+                )
+            if row and row["platform_id"]:
+                await send_dm(int(row["platform_id"]), message)
+                logger.info("Update-check loop: notified owner of new version.")
+            else:
+                logger.debug("Update-check loop: no owner to notify.")
+        except Exception as e:
+            logger.error(f"Update-check loop check failed: {e}", exc_info=True)

@@ -164,6 +164,7 @@ async def run():
     agent = SyneAgent(settings)
     channels = []
     scheduler = None
+    update_check_task = None
 
     try:
         await agent.start()
@@ -228,6 +229,25 @@ async def run():
         await scheduler.start()
         logger.info("Scheduler active.")
 
+        # Start the self-contained daily update-check loop (independent of the
+        # scheduler table). Needs Telegram to DM the owner, so only if active.
+        update_check_task = None
+        if _telegram_channel is not None:
+            try:
+                from .update_checker import update_check_loop
+
+                async def _send_update_dm(chat_id: int, text: str):
+                    await _telegram_channel._bot.send_message(
+                        chat_id=chat_id, text=text, parse_mode="Markdown",
+                    )
+
+                update_check_task = asyncio.create_task(
+                    update_check_loop(_send_update_dm)
+                )
+                logger.info("Update-check loop active.")
+            except Exception as e:
+                logger.warning(f"Update-check loop failed to start: {e}")
+
         # Keep alive
         logger.info("Syne is running. Press Ctrl+C to stop.")
         while agent._running:
@@ -241,6 +261,13 @@ async def run():
         # Stop gateway
         if gateway:
             await gateway.stop()
+        # Stop the update-check loop
+        if update_check_task:
+            update_check_task.cancel()
+            try:
+                await update_check_task
+            except (asyncio.CancelledError, Exception):
+                pass
         # Stop scheduler
         if scheduler:
             await scheduler.stop()
