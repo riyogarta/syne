@@ -63,30 +63,10 @@ _NON_ANTHROPIC_GUARDRAILS = """
 - When uncertain, say "I'm not sure" — never present uncertainty as fact.
 """
 
-# Regex for detecting phantom action claims (used post-response). Three
-# independent branches, any hit ⇒ phantom claim:
-#
-#   (a) Claim marker + action verb, ≤40 chars apart. ID (sudah/telah/
-#       berhasil) + EN (I have/I've/I already/successfully/done). Verb
-#       list is a stem/short form so it catches inflected variants
-#       (save/saved/saving; delet-ed/-ing). Expanded with dev/ops verbs
-#       (push/pull/commit/install/deploy/…) — the actions Syne actually
-#       gets asked to perform and is most likely to phantom-claim.
-#
-#   (b) Indonesian passive: `ter-<verb>` intrinsically claims completion,
-#       no marker needed ("Tersimpan di memori."). Vocabulary is narrow
-#       on purpose — only ter- forms where the prefix unambiguously means
-#       'action performed' (never a benign adjective/preposition like
-#       terima, terlihat, termasuk, terjadi, terlalu).
-#
-#   (c) English standalone participle at end of clause. Requires trailing
-#       .!, or end-of-string via lookahead, so 'committed to helping you'
-#       (no punctuation after 'committed') does NOT match. Catches terse
-#       status reports like "Message sent." / "File saved." / "Deployed!"
-#
-# Note: current runtime gates the entire guard with `tools_ran_this_turn`
-# in Conversation, so a broader regex here CAN'T fire on a legitimate
-# tool-result summary — it still needs 'no tool ran this turn' to trigger.
+# Phantom-action detection is a HARD RULE (NO_PHANTOM_ACTION) judged by the
+# rule-checker, which receives the authoritative tools_ran signal. The old
+# keyword regex (ID+EN only, false-positive-prone) was removed in favour of
+# that language-agnostic, preventive+detective approach.
 from .security import (
     get_group_context_restrictions,
     filter_tools_for_group,
@@ -1347,50 +1327,12 @@ class Conversation:
             logger.info(f"Tool calls: {[tc.get('name') for tc in response.tool_calls]}")
             response = await self._handle_tool_calls(response, context, access_level, tool_schemas)
 
-        # Phantom action detection — ANY model can claim an action it never
-        # performed (no tool calls). Provider-agnostic on purpose: Claude is
-        # less prone than Gemini/GPT but NOT immune, and it's the owner's
-        # preferred model. Deterministic regex guard, runs for all providers.
-        # BUT: skip if a tool actually ran this turn — summarizing a real
-        # tool_result with words like "berhasil/executed" is NOT a phantom claim
-        # (false positive fixed 11 Jul 2026: speedtest summary got flagged).
-        if not response.tool_calls and not tools_ran_this_turn:
-            content = response.content or ""
-            if content.strip():
-                is_phantom = False
-                try:
-                    from .rule_checker import check_phantom_action
-                    # Same driver/model resolution as the rule-checker.
-                    _dp = await get_config("security.rule_checker_driver", "evaluator")
-                    if isinstance(_dp, str):
-                        _dp = _dp.strip().lower()
-                    if _dp == "provider":
-                        _eval_driver = "provider"
-                    else:
-                        _eval_driver = await get_config("memory.evaluator_driver", "ollama")
-                    _eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-                    is_phantom = await check_phantom_action(
-                        draft=content,
-                        evaluator_driver=_eval_driver if isinstance(_eval_driver, str) else "ollama",
-                        evaluator_model=_eval_model if isinstance(_eval_model, str) else "qwen3:0.6b",
-                        provider=self.provider,
-                    )
-                except Exception:
-                    # Fail-open: a phantom-checker failure must never break the
-                    # response path. No warning added (a false negative is far
-                    # less disruptive than nagging on every benign message).
-                    logger.exception("Phantom checker crashed — sending response as-is")
-                    is_phantom = False
-                if is_phantom:
-                    logger.warning(f"Phantom action detected (LLM, no tool calls): {content[:200]}")
-                    response = ChatResponse(
-                        content=content + "\n\n⚠️ _Warning: the above claims may not have been executed. No tool was actually called. Please verify._",
-                        model=response.model,
-                        input_tokens=response.input_tokens,
-                        output_tokens=response.output_tokens,
-                        tool_calls=response.tool_calls,
-                        thinking=response.thinking,
-                    )
+        # Phantom-action detection is now a HARD RULE (NO_PHANTOM_ACTION) judged
+        # by the rule-checker below, which is fed the authoritative
+        # tools_ran_this_turn signal so it can tell a genuine post-tool summary
+        # ("push sukses" after a real push) from a bare unbacked claim. This
+        # replaces the old standalone regex/LLM phantom guard — one mechanism,
+        # preventive (rule is in the system prompt) + detective (checker).
 
         # ─── Rule-checker: verify draft against hard rules before send ─────
         # Runs a cheap second-pass LLM (evaluator model) that reads the draft
@@ -1433,6 +1375,7 @@ class Conversation:
                     access_level=access_level,
                     chat_kwargs=chat_kwargs,
                     user_message=user_message,
+                    tools_ran=tools_ran_this_turn,
                 )
             except Exception:
                 # HARD RULE: the checker must never break the main response
@@ -1764,6 +1707,7 @@ class Conversation:
         access_level: str,
         chat_kwargs: dict,
         user_message: str,
+        tools_ran: bool = True,
     ) -> ChatResponse:
         """Run the hard-rule checker against a draft; regenerate on violation.
 
@@ -1815,6 +1759,7 @@ class Conversation:
                 evaluator_driver=eval_driver,
                 evaluator_model=eval_model,
                 provider=self.provider,
+                tools_ran=tools_ran,
             )
             if verdict.state == _RCState.CLEAN:
                 logger.info(

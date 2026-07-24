@@ -55,6 +55,9 @@ _CHECKER_PROMPT_TEMPLATE = """You are a strict but fair compliance checker. Your
 HARD RULES:
 {rules_block}
 
+TOOL-EXECUTION CONTEXT (authoritative — trust this over the draft's wording):
+{tool_context}
+
 USER MESSAGE (for context — do NOT judge this, only the draft):
 {user_message}
 
@@ -120,8 +123,18 @@ def _parse_verdict_line(raw: str) -> CheckResult:
     return CheckResult(VerdictState.ERROR, reason="unparseable checker output")
 
 
-def _build_prompt(draft: str, user_message: str, hard_rules: list[dict]) -> str:
-    """Compact prompt for the checker LLM. Keeps rule content in DB shape."""
+def _build_prompt(
+    draft: str, user_message: str, hard_rules: list[dict],
+    tools_ran: bool = True,
+) -> str:
+    """Compact prompt for the checker LLM. Keeps rule content in DB shape.
+
+    tools_ran: whether ANY tool actually executed this turn. Fed to the
+    checker so a rule like 'don't claim an action unless a tool ran' can be
+    judged correctly — a genuine post-tool summary ('push sukses') is CLEAN
+    when tools_ran is True, but a bare claim with no tool is a violation.
+    Defaults True (conservative: assume a tool ran → never phantom-flag).
+    """
     rules_lines = []
     for r in hard_rules:
         code = r.get("code", "?")
@@ -130,11 +143,25 @@ def _build_prompt(draft: str, user_message: str, hard_rules: list[dict]) -> str:
         rules_lines.append(f"- [{code}] {name}: {desc}")
     rules_block = "\n".join(rules_lines)
 
+    if tools_ran:
+        tool_context = ("At least one tool WAS actually called and executed this "
+                        "turn. Any claim in the draft of having performed an action "
+                        "is therefore backed by a real execution — do NOT treat a "
+                        "post-action summary as a false claim.")
+    else:
+        tool_context = ("NO tool was called this turn — nothing was actually "
+                        "executed, saved, sent, deleted, pushed, deployed, or "
+                        "changed by the system. If the draft CLAIMS to have just "
+                        "performed such a concrete system action (in any language), "
+                        "that is a false/unbacked claim. Merely offering to do it, "
+                        "or referring to something done in a PREVIOUS turn, is fine.")
+
     # Truncate to keep the checker request cheap. Real DATE_VERIFY-style
     # violations always sit in the first paragraph or two; long tail rarely
     # matters. If it does, we can raise these.
     return _CHECKER_PROMPT_TEMPLATE.format(
         rules_block=rules_block,
+        tool_context=tool_context,
         user_message=(user_message or "").strip()[:1500],
         draft=(draft or "").strip()[:4000],
     )
@@ -169,80 +196,16 @@ async def _check_via_provider(prompt: str, provider: LLMProvider) -> str:
         thinking_budget=0,
     )
     return (response.content or "").strip()
-
-
-_PHANTOM_PROMPT_TEMPLATE = """You are a strict verifier. In this turn the assistant called NO tools at all — nothing was actually executed, saved, sent, deleted, pushed, deployed, or changed by the system.
-
-Decide ONE thing: does the DRAFT RESPONSE below CLAIM that it just performed such a concrete action, as if it really happened this turn?
-
-Count as a phantom claim (PHANTOM):
-- Claims of having just executed/saved/sent/deleted/created/stored/uploaded/downloaded/committed/pushed/pulled/installed/deployed/published/restarted something THIS turn, in ANY language.
-- Present-perfect or past-tense action claims that imply the system did the work now (e.g. "done, I saved it", "sudah kukirim", "已发送", "he enviado", "terhapus").
-
-Do NOT count as phantom (CLEAN):
-- Referring to an action done in a PREVIOUS turn ("earlier I saved...", "tadi sudah...").
-- Merely PROPOSING/OFFERING to do something ("I can save this", "mau kusimpan?").
-- Describing facts, opinions, plans, or conversation with no claim of a just-executed system action.
-- Ordinary words that happen to sound like actions but describe no system operation ("semoga tetap terjaga", "the deal is done" as an idiom).
-
-Reply with EXACTLY ONE word on its own line, nothing else:
-  CLEAN
-  PHANTOM
-
-DRAFT RESPONSE:
-{draft}"""
-
-
-async def check_phantom_action(
-    draft: str,
-    evaluator_driver: str = "ollama",
-    evaluator_model: str = "qwen3:0.6b",
-    provider: Optional[LLMProvider] = None,
-) -> bool:
-    """Language-agnostic phantom-action check.
-
-    Returns True if the draft appears to CLAIM a just-executed system action
-    while (per the caller) no tool ran this turn. Fail-open: on any error or
-    unparseable output, returns False (no warning) — a false negative is
-    less disruptive than nagging the user on every benign message.
-
-    The caller MUST only invoke this when no tool ran this turn.
-    """
-    if not (draft and draft.strip()):
-        return False
-
-    prompt = _PHANTOM_PROMPT_TEMPLATE.format(draft=draft.strip()[:4000])
-    try:
-        if evaluator_driver == "ollama":
-            raw = await _check_via_ollama(prompt, model=evaluator_model)
-        else:
-            if provider is None:
-                return False
-            raw = await _check_via_provider(prompt, provider)
-    except Exception as e:
-        logger.warning(f"Phantom checker call failed: {type(e).__name__}: {e}")
-        return False
-
-    text = _strip_think(raw or "").strip().upper()
-    if not text:
-        return False
-    # Accept the verdict anywhere; PHANTOM wins only if explicitly present.
-    for line in text.splitlines():
-        if line.strip() == "PHANTOM":
-            return True
-    # Some models append trailing punctuation/prose.
-    if "PHANTOM" in text and "CLEAN" not in text:
-        return True
-    return False
-
-
 async def check_response(
     draft: str,
+
+
     user_message: str,
     hard_rules: list[dict],
     evaluator_driver: str = "ollama",
     evaluator_model: str = "qwen3:0.6b",
     provider: Optional[LLMProvider] = None,
+    tools_ran: bool = True,
 ) -> CheckResult:
     """Judge a draft response against every hard rule.
 
@@ -271,7 +234,7 @@ async def check_response(
     if not (draft and draft.strip()):
         return CheckResult(VerdictState.CLEAN)
 
-    prompt = _build_prompt(draft, user_message, hard_rules)
+    prompt = _build_prompt(draft, user_message, hard_rules, tools_ran=tools_ran)
 
     try:
         if evaluator_driver == "ollama":
