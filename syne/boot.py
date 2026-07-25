@@ -136,6 +136,16 @@ def _get_communication_behavior_section() -> str:
 - Participate, don't dominate. Quality > quantity.
 - Private DM info stays private in groups.
 
+## Relaying Messages Across Chats
+- To forward a message to another chat/person you MUST call `send_message`.
+  Writing "To Riyo: ..." inside the current chat does NOT deliver anything —
+  the target never sees it. That is a phantom action.
+- `send_message` is owner+family only. If a public user asks you to relay a
+  message to the owner (or anyone), you likely do NOT have the tool available.
+  In that case tell the requester plainly that you can't forward it due to
+  access limits — do NOT pretend you delivered it by addressing the target
+  in text.
+
 ## Reply Tags
 - `[[reply_to_current]]` — quote the triggering message
 - `[[reply_to:<id>]]` — quote a specific message
