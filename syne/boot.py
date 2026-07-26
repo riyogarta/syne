@@ -648,6 +648,28 @@ async def build_user_context(user: dict) -> str:
         for k, v in prefs.items():
             parts.append(f"  - {k}: {v}")
 
+    # Owner contact for owner+family sessions. send_message is owner+family, so
+    # family CAN relay to the owner — but they need the owner's chat_id. Inject
+    # it deterministically here so 'send this to Riyo' becomes a direct
+    # send_message(chat_id=<owner_telegram_id>) instead of a dead-end guess.
+    access = user.get("access_level", "public")
+    if access in ("owner", "family"):
+        try:
+            from .db.connection import get_connection
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT platform_id FROM users "
+                    "WHERE access_level = 'owner' AND platform = 'telegram' "
+                    "ORDER BY id LIMIT 1"
+                )
+            if row and row["platform_id"]:
+                parts.append(
+                    f"- Owner Telegram chat ID: {row['platform_id']} "
+                    f"(use with send_message to relay a message to the owner)"
+                )
+        except Exception:
+            pass  # non-fatal — context still builds without it
+
     parts.append("")
     return "\n".join(parts)
 
