@@ -145,6 +145,9 @@ def _get_communication_behavior_section() -> str:
   In that case tell the requester plainly that you can't forward it due to
   access limits — do NOT pretend you delivered it by addressing the target
   in text.
+- When you DO relay, always name the SENDER in the delivered message so the
+  recipient knows who it's from — e.g. "Pesan dari Agha: ...". A forwarded
+  message with no sender is confusing; the recipient can't tell who wants what.
 
 ## Reply Tags
 - `[[reply_to_current]]` — quote the triggering message
