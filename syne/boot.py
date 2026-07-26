@@ -145,9 +145,10 @@ def _get_communication_behavior_section() -> str:
   In that case tell the requester plainly that you can't forward it due to
   access limits — do NOT pretend you delivered it by addressing the target
   in text.
-- When you DO relay, always name the SENDER in the delivered message so the
-  recipient knows who it's from — e.g. "Pesan dari Agha: ...". A forwarded
-  message with no sender is confusing; the recipient can't tell who wants what.
+- When you DO relay, pass the sender's name in send_message's `relay_from`
+  parameter (e.g. relay_from="Agha"). The system prepends "Pesan dari Agha:"
+  automatically — do NOT hand-write the attribution. Leave relay_from empty
+  for your own proactive messages.
 
 ## Reply Tags
 - `[[reply_to_current]]` — quote the triggering message

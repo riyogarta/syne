@@ -25,6 +25,7 @@ async def send_message_handler(
     chat_id: str,
     message: str,
     reply_to_message_id: int = 0,
+    relay_from: str = "",
     _scheduled: bool = False,
 ) -> str:
     """Send a message to a Telegram chat.
@@ -48,6 +49,12 @@ async def send_message_handler(
 
     if not message or not message.strip():
         return "Error: message cannot be empty"
+
+    # Deterministic relay attribution: if this is a forwarded/relayed message,
+    # the code (not the LLM) prepends the sender line so the recipient always
+    # knows who it's from. Proactive Molt messages leave relay_from empty.
+    if relay_from and relay_from.strip():
+        message = f"Pesan dari {relay_from.strip()}:\n\n{message}"
 
     # Guard: sending to groups requires scheduled context
     if str(chat_id).startswith("-") and not _scheduled:
@@ -104,6 +111,16 @@ SEND_MESSAGE_TOOL = {
             "reply_to_message_id": {
                 "type": "integer",
                 "description": "Optional: reply to a specific message ID in that chat.",
+            },
+            "relay_from": {
+                "type": "string",
+                "description": (
+                    "Set this to the SENDER's name ONLY when relaying/forwarding "
+                    "someone else's message (e.g. 'Agha'). The system will "
+                    "automatically prefix the delivered text with 'Pesan dari "
+                    "<name>:' so the recipient knows who it's from. Leave EMPTY "
+                    "for your own proactive messages (reminders, alerts)."
+                ),
             },
         },
         "required": ["chat_id", "message"],
