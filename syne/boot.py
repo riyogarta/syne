@@ -648,25 +648,36 @@ async def build_user_context(user: dict) -> str:
         for k, v in prefs.items():
             parts.append(f"  - {k}: {v}")
 
-    # Owner contact for owner+family sessions. send_message is owner+family, so
-    # family CAN relay to the owner — but they need the owner's chat_id. Inject
-    # it deterministically here so 'send this to Riyo' becomes a direct
-    # send_message(chat_id=<owner_telegram_id>) instead of a dead-end guess.
+    # Family directory for owner+family sessions. send_message is owner+family,
+    # so they CAN relay to each other — they just need chat_ids. Inject the
+    # directory (names/aliases -> chat_id) from config so 'send this to Riyo'
+    # or 'kirim ke Bunli' becomes a direct send_message(chat_id=<id>) instead
+    # of a dead-end guess. Public sessions get NOTHING (privacy). Generic: each
+    # install populates family.directory with its own people.
     access = user.get("access_level", "public")
     if access in ("owner", "family"):
         try:
-            from .db.connection import get_connection
-            async with get_connection() as conn:
-                row = await conn.fetchrow(
-                    "SELECT platform_id FROM users "
-                    "WHERE access_level = 'owner' AND platform = 'telegram' "
-                    "ORDER BY id LIMIT 1"
-                )
-            if row and row["platform_id"]:
+            from .db.models import get_config as _get_config
+            directory = await _get_config("family.directory", [])
+            if isinstance(directory, str):
+                import json as _json
+                directory = _json.loads(directory)
+            entries = []
+            for person in (directory or []):
+                names = person.get("names", [])
+                cid = person.get("chat_id", "")
+                plat = person.get("platform", "telegram")
+                if names and cid:
+                    entries.append(
+                        f"  - {' / '.join(names)} -> {plat} chat_id {cid}"
+                    )
+            if entries:
                 parts.append(
-                    f"- Owner Telegram chat ID: {row['platform_id']} "
-                    f"(use with send_message to relay a message to the owner)"
+                    "- Family directory (use send_message with the chat_id to "
+                    "relay a message to that person; any listed name/alias "
+                    "refers to the same person):"
                 )
+                parts.extend(entries)
         except Exception:
             pass  # non-fatal — context still builds without it
 
