@@ -202,6 +202,34 @@ class ToolRegistry:
             call_args = {**arguments}
             if scheduled and name in ("send_message",):
                 call_args["_scheduled"] = True
+            # Deterministic relay attribution: for a non-scheduled send_message
+            # whose destination is a DIFFERENT chat than the current user (a
+            # relay to someone else), auto-fill relay_from with the sender's
+            # display name so the recipient always sees "Pesan dari <sender>:".
+            # This does not depend on the LLM remembering the param.
+            if name == "send_message" and not scheduled and conv is not None:
+                try:
+                    sender_user = getattr(conv, "user", None) or {}
+                    sender_pid = str(sender_user.get("platform_id", "") or "")
+                    dest = str(call_args.get("chat_id", "") or "")
+                    # Relay = destination is a real chat, different from sender,
+                    # and not a group (group sends are scheduled-only anyway).
+                    if (
+                        dest
+                        and sender_pid
+                        and dest != sender_pid
+                        and not dest.startswith("-")
+                        and not str(call_args.get("relay_from", "")).strip()
+                    ):
+                        sender_name = (
+                            sender_user.get("display_name")
+                            or sender_user.get("name")
+                            or ""
+                        )
+                        if sender_name:
+                            call_args["relay_from"] = sender_name
+                except Exception:
+                    pass  # never block a send over attribution
             if provider and name in ("spawn_subagent",):
                 call_args["_provider"] = provider
             result = await tool.handler(**call_args)
