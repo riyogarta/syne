@@ -740,6 +740,10 @@ class AnthropicProvider(LLMProvider):
                             resp_model = msg_data.get("model", model)
                             u = msg_data.get("usage", {})
                             usage["input_tokens"] = u.get("input_tokens", 0)
+                            # DIAG(cache): these two were never captured, so every
+                            # cache_read=0 we logged before was meaningless.
+                            usage["cache_read_input_tokens"] = u.get("cache_read_input_tokens", 0)
+                            usage["cache_creation_input_tokens"] = u.get("cache_creation_input_tokens", 0)
 
                         # ── content_block_start: begin a new block ──
                         elif event_type == "content_block_start":
@@ -891,6 +895,27 @@ class AnthropicProvider(LLMProvider):
                            resp_model, stop_reason, usage.get('input_tokens', 0),
                            usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0),
                            usage.get('output_tokens', 0), event_counts)
+
+            # DIAG(cache): one line per successful request. Tells us whether the
+            # prompt cache is actually being hit, and how the system prompt is
+            # split into cacheable blocks. Remove after root-cause.
+            try:
+                _sys_sizes = [len(b.get("text", "")) for b in body.get("system", [])]
+                _cached_at = [
+                    i for i, b in enumerate(body.get("system", []))
+                    if b.get("cache_control")
+                ]
+                logger.warning(
+                    "DIAG-CACHE in=%s cache_read=%s cache_write=%s out=%s | "
+                    "sys_blocks=%s cached_idx=%s",
+                    usage.get("input_tokens", 0),
+                    usage.get("cache_read_input_tokens", 0),
+                    usage.get("cache_creation_input_tokens", 0),
+                    usage.get("output_tokens", 0),
+                    _sys_sizes, _cached_at,
+                )
+            except Exception as _e:
+                logger.debug("DIAG-CACHE logging failed: %s", _e)
 
             # Success — exit retry loop
             break
