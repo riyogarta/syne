@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional
 
@@ -31,17 +32,39 @@ _BETA_PROMPT_CACHING = "prompt-caching-2024-07-31"
 _BETA_OAUTH_PREFIX = "claude-code-20250219,oauth-2025-04-20"
 
 # Adaptive-thinking model tags. Anthropic switched from budget_tokens to
-# `thinking: adaptive` starting with the 4.6 family; assume forward-compat
-# for 4.7, 4.8, and later until a model is explicitly known not to support it.
+# `thinking: adaptive` starting with the 4.6 family, and also DEPRECATED
+# the `temperature` parameter on the same lineage. Every new model since
+# has kept both changes. Assume forward-compat for anything at or beyond
+# 4.6, or any 5.x / 6.x / …, or any Claude 5 family (opus/sonnet/haiku/fable-5).
 _ADAPTIVE_MODEL_TAGS = (
+    # 4.6/4.7/4.8/4.9 family (both dashed and dotted forms Anthropic ships)
     "opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6",
     "opus-4-7", "opus-4.7", "sonnet-4-7", "sonnet-4.7",
     "opus-4-8", "opus-4.8", "sonnet-4-8", "sonnet-4.8",
+    "opus-4-9", "opus-4.9", "sonnet-4-9", "sonnet-4.9",
+    # Claude 5 family (per current model registry: fable/opus/sonnet-5)
+    "opus-5", "sonnet-5", "haiku-5", "fable-5",
+)
+
+# Fallback regex for future adaptive models Anthropic hasn't shipped yet —
+# any -{family}-M[-N…] where M >= 5, or M == 4 and N >= 6. Matches
+# claude-opus-4-9-20260401, claude-sonnet-5-20260701, etc. Keeps us from
+# needing a release for every new snapshot Anthropic pushes.
+_ADAPTIVE_VERSION_RE = re.compile(
+    r"-(opus|sonnet|haiku|fable)-(\d+)(?:[-\.](\d+))?", re.IGNORECASE
 )
 
 
 def _is_adaptive_model(model_id: str) -> bool:
-    return any(t in model_id for t in _ADAPTIVE_MODEL_TAGS)
+    if any(t in model_id for t in _ADAPTIVE_MODEL_TAGS):
+        return True
+    m = _ADAPTIVE_VERSION_RE.search(model_id or "")
+    if not m:
+        return False
+    major = int(m.group(2))
+    minor = int(m.group(3) or 0)
+    # 5.x+ always adaptive; 4.x adaptive from 4.6 onwards.
+    return major >= 5 or (major == 4 and minor >= 6)
 
 
 def _build_beta_header(is_oauth: bool, model_id: str) -> str:
@@ -485,11 +508,21 @@ class AnthropicProvider(LLMProvider):
                 }
             # Temperature incompatible with thinking (both adaptive and budget)
         else:
-            # Adaptive models (Opus/Sonnet 4.6+) deprecate temperature entirely,
-            # even when thinking is off (e.g. during compaction). Sending it
-            # triggers a 400 invalid_request_error.
+            # Adaptive models (Opus/Sonnet 4.6+, Claude 5 family) deprecate
+            # `temperature` entirely — even when thinking is off. Sending it
+            # triggers a 400 invalid_request_error 'temperature is deprecated
+            # for this model'. Skip it for anything _is_adaptive_model() matches.
             if not _is_adaptive_model(model):
                 body["temperature"] = temperature
+                # If Anthropic starts rejecting temperature on a new model
+                # we haven't tagged yet, this log line + the 400 body pinpoints
+                # which model id to add to _ADAPTIVE_MODEL_TAGS (or the regex
+                # in _ADAPTIVE_VERSION_RE) next.
+                logger.debug(
+                    f"Anthropic: sending temperature={temperature} for model={model!r} "
+                    "(model not matched by _is_adaptive_model — if API returns "
+                    "'temperature is deprecated', this tag needs adding)"
+                )
 
         # Anthropic: top_p and top_k are not allowed when thinking is enabled
         if top_p is not None and effective_budget <= 0:
