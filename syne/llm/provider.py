@@ -50,6 +50,7 @@ class ChatResponse:
     output_tokens: int = 0
     tool_calls: Optional[list] = None
     thinking: Optional[str] = None  # Model's reasoning/thinking text (if returned)
+    stop_reason: Optional[str] = None  # Provider stop reason (e.g. 'refusal', 'end_turn')
 
 
 @dataclass

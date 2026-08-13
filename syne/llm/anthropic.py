@@ -904,6 +904,7 @@ class AnthropicProvider(LLMProvider):
             output_tokens=usage.get("output_tokens", 0),
             tool_calls=tool_calls if tool_calls else None,
             thinking=thinking_text if thinking_text else None,
+            stop_reason=stop_reason or None,
         )
 
     async def embed(

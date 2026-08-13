@@ -1360,6 +1360,13 @@ class Conversation:
             if (response.tool_calls) or ((response.content or "").strip()):
                 break
 
+            # A provider *refusal* (Anthropic safety) returns empty content
+            # with stop_reason=refusal. Retrying is pointless — the same
+            # input will be refused again. Break out now and handle below.
+            if getattr(response, "stop_reason", None) == "refusal":
+                logger.warning("LLM refused the request (stop_reason=refusal); not retrying")
+                break
+
             if attempt < max_attempts - 1:
                 logger.warning(
                     f"LLM returned empty content (no tool calls). Retrying after 1s (attempt {attempt + 1}/{max_attempts})..."
@@ -1371,6 +1378,18 @@ class Conversation:
                     chat_kwargs.pop("top_k", None)
                     logger.info("Final empty retry: thinking disabled")
                 await asyncio.sleep(1.0)
+
+        # Provider refusal with no usable content — raise so chat()'s
+        # wrapper removes the triggering user message from history (it would
+        # otherwise poison every subsequent turn). Only when there is truly
+        # nothing to show: a refusal that still produced tool calls or text
+        # is handled normally below.
+        if (getattr(response, "stop_reason", None) == "refusal"
+                and not response.tool_calls
+                and not (response.content or "").strip()):
+            raise LLMBadRequestError(
+                f"Provider refused the request (stop_reason=refusal, model={response.model})"
+            )
 
         # Handle tool calls
         logger.info(f"LLM response: content={len(response.content or '')} chars, tool_calls={len(response.tool_calls) if response.tool_calls else 0}, model={response.model}")
