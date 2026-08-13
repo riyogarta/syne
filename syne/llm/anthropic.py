@@ -888,9 +888,9 @@ class AnthropicProvider(LLMProvider):
                     f"block_types={block_types_seen}"
                 )
                 logger.warning('DIAG-EMPTY model=%s stop=%s in=%s cache_read=%s cache_write=%s out=%s events=%s',
-                               resp_model, stop_reason, usage.get('input_tokens', 0),
-                               usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0),
-                               usage.get('output_tokens', 0), event_counts)
+                           resp_model, stop_reason, usage.get('input_tokens', 0),
+                           usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0),
+                           usage.get('output_tokens', 0), event_counts)
 
             # Success — exit retry loop
             break
