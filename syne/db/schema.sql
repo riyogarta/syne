@@ -446,7 +446,7 @@ INSERT INTO config (key, value, description) VALUES
     ('history_search.context_after', '5', 'Default turns AFTER each anchor. Larger than before because you want to see the assistant response + follow-up.'),
     ('history_search.max_content_chars', '4000', 'Truncate user message content to this many chars before embedding. Long messages average their semantic signal into noise otherwise.'),
     ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
-    ('session.history_limit', '1000', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
+    ('session.history_limit', '50', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
     ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
     ('session.compaction_overlap_percent', '15', 'Compaction overlap: keep this % of the summarized batch ALSO as raw messages (a verbatim bridge between summary and recent tail) for smooth transition. 0 = disabled. Char-budget guarded.'),
@@ -872,26 +872,18 @@ CREATE TABLE IF NOT EXISTS pairing_tokens (
 
 -- Migration: session.history_limit
 INSERT INTO config (key, value, description) VALUES
-    ('session.history_limit', '1000', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)')
+    ('session.history_limit', '50', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)')
 ON CONFLICT (key) DO NOTHING;
--- One-shot: migrate EXISTING installs still on the old default (100) -> 1000.
--- GUARDED BY A MARKER. The old version keyed only on `value = '100'`, which is
--- indistinguishable from a *deliberate* user setting of 100 — so every restart
--- silently reset that choice back to 1000 (hit in production 14 Aug 2026).
--- The marker makes this run at most once per install, ever.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-      SELECT 1 FROM config WHERE key = 'session.history_limit_migrated'
-  ) THEN
-      UPDATE config SET value = '1000'
-        WHERE key = 'session.history_limit' AND value = '100';
-      INSERT INTO config (key, value, description) VALUES
-        ('session.history_limit_migrated', 'true',
-         'Internal marker: the one-shot history_limit 100->1000 migration has run. Do not delete — its absence would re-trigger the migration and clobber a deliberate setting of 100.')
-      ON CONFLICT (key) DO NOTHING;
-  END IF;
-END $$;
+-- NOTE: the old one-shot migration that forced history_limit 100 -> 1000 has
+-- been REMOVED (14 Aug 2026). Two reasons:
+--   1. It keyed only on `value = '100'`, indistinguishable from a deliberate
+--      user setting of 100 — so every restart silently clobbered that choice.
+--   2. The default is now 50, not 1000. A 1000-message window costs ~316k
+--      tokens per request on a long session; 50 costs ~17k. Forcing existing
+--      installs UP to 1000 would work directly against that.
+-- Existing installs keep whatever value they already have. The marker key
+-- session.history_limit_migrated may still exist from an earlier version;
+-- it is harmless and simply unused now.
 
 -- Migration: memory.public_categories (Rule 765)
 INSERT INTO config (key, value, description) VALUES
