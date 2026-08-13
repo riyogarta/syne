@@ -875,10 +875,23 @@ INSERT INTO config (key, value, description) VALUES
     ('session.history_limit', '1000', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)')
 ON CONFLICT (key) DO NOTHING;
 -- One-shot: migrate EXISTING installs still on the old default (100) -> 1000.
--- Conditional on old value so a user who intentionally set something else is
--- left untouched, and it's a no-op on every subsequent restart (idempotent).
-UPDATE config SET value = '1000'
-  WHERE key = 'session.history_limit' AND value = '100';
+-- GUARDED BY A MARKER. The old version keyed only on `value = '100'`, which is
+-- indistinguishable from a *deliberate* user setting of 100 — so every restart
+-- silently reset that choice back to 1000 (hit in production 14 Aug 2026).
+-- The marker makes this run at most once per install, ever.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+      SELECT 1 FROM config WHERE key = 'session.history_limit_migrated'
+  ) THEN
+      UPDATE config SET value = '1000'
+        WHERE key = 'session.history_limit' AND value = '100';
+      INSERT INTO config (key, value, description) VALUES
+        ('session.history_limit_migrated', 'true',
+         'Internal marker: the one-shot history_limit 100->1000 migration has run. Do not delete — its absence would re-trigger the migration and clobber a deliberate setting of 100.')
+      ON CONFLICT (key) DO NOTHING;
+  END IF;
+END $$;
 
 -- Migration: memory.public_categories (Rule 765)
 INSERT INTO config (key, value, description) VALUES
