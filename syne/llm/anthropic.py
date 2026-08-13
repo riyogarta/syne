@@ -536,6 +536,18 @@ class AnthropicProvider(LLMProvider):
         if self._is_oauth and hasattr(self, '_user_id') and self._user_id:
             body["metadata"] = {"user_id": str(self._user_id)}
 
+        # TEMP DIAG (opus-5 refusal investigation) — remove after root-cause
+        try:
+            _dmsgs = body.get('messages', [])
+            _dsys = body.get('system', [])
+            _dsyslen = sum(len(b.get('text', '')) for b in _dsys) if isinstance(_dsys, list) else len(str(_dsys))
+            _dmsglen = len(json.dumps(_dmsgs, ensure_ascii=False))
+            _dthink = body.get('thinking')
+            _dtools = bool(body.get('tools'))
+            logger.warning('DIAG-REQ model=%s n_messages=%s system_chars=%s messages_chars=%s thinking=%s has_tools=%s',
+                           model, len(_dmsgs), _dsyslen, _dmsglen, _dthink, _dtools)
+        except Exception as _de:
+            logger.warning('DIAG-REQ failed: %s', _de)
         stream_body = {**body, "stream": True}
 
         token = await self._load_token()
@@ -875,6 +887,10 @@ class AnthropicProvider(LLMProvider):
                     f"events={event_counts} "
                     f"block_types={block_types_seen}"
                 )
+                logger.warning('DIAG-EMPTY model=%s stop=%s in=%s cache_read=%s cache_write=%s out=%s events=%s',
+                               resp_model, stop_reason, usage.get('input_tokens', 0),
+                               usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0),
+                               usage.get('output_tokens', 0), event_counts)
 
             # Success — exit retry loop
             break
