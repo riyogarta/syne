@@ -311,6 +311,46 @@ class Conversation:
         self._message_cache = messages
         return messages
 
+    async def _trim_message_cache(self):
+        """Keep the in-memory cache bounded by session.history_limit.
+
+        load_history() applies the limit exactly once, when a session is first
+        pulled into memory. After that save_message() appends without bound, so
+        a long-lived session drifts far past the configured window — and a
+        config change never takes effect until the process restarts. Observed
+        in production 14 Aug 2026: limit was lowered to 50, yet live requests
+        still carried 1014 messages (~1M chars) because the resident cache had
+        been built when the limit was 1000.
+
+        Trimming on every append makes the limit continuous and makes config
+        changes apply on the next turn, without a restart.
+
+        Slicing can strand a tool_result whose matching tool_use fell off the
+        front. That is handled downstream by the provider layer
+        (anthropic._sanitize_conversation drops orphaned tool_result blocks
+        and neutralises orphaned tool_use blocks), so a plain tail slice is
+        safe here.
+        """
+        try:
+            from .db.models import get_config as _get_config
+            limit = await _get_config("session.history_limit", 100)
+            if isinstance(limit, str):
+                limit = int(limit)
+        except Exception as e:
+            logger.debug(f"_trim_message_cache: config read failed, skipping trim: {e}")
+            return
+
+        if not isinstance(limit, int) or limit <= 0:
+            return
+
+        if len(self._message_cache) > limit:
+            dropped = len(self._message_cache) - limit
+            self._message_cache = self._message_cache[-limit:]
+            logger.debug(
+                f"_trim_message_cache: dropped {dropped} msg(s), "
+                f"cache now {len(self._message_cache)} (limit={limit})"
+            )
+
     async def save_message(self, role: str, content: str, metadata: Optional[dict] = None):
         """Save a message to the database.
 
@@ -371,6 +411,7 @@ class Conversation:
                 raise
 
         self._message_cache.append(ChatMessage(role=role, content=content, metadata=metadata))
+        await self._trim_message_cache()
 
         # Fire-and-forget: embed user rows as anchors for history_search.
         # Only user role — see design note in migration v20 for rationale
