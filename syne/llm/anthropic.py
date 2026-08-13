@@ -492,43 +492,42 @@ class AnthropicProvider(LLMProvider):
                 system_blocks[-1]["cache_control"] = _cache
             body["system"] = system_blocks
 
-        # Thinking: None=default ON, 0=explicitly OFF, >0=use that value
+        # Thinking: None=default ON, 0=explicitly OFF, >0=use that value.
         effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
-        if effective_budget > 0:
-            # Opus 4.6+ / Sonnet 4.6+: adaptive thinking (model decides when/how much)
-            # Older models: budget-based thinking
-            _adaptive = _is_adaptive_model(model)
-            if _adaptive:
-                body["thinking"] = {"type": "adaptive"}
-                # No output_config.effort — let Claude decide entirely on its own
-            else:
-                body["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": effective_budget,
-                }
-            # Temperature incompatible with thinking (both adaptive and budget)
-        else:
-            # Adaptive models (Opus/Sonnet 4.6+, Claude 5 family) deprecate
-            # `temperature` entirely — even when thinking is off. Sending it
-            # triggers a 400 invalid_request_error 'temperature is deprecated
-            # for this model'. Skip it for anything _is_adaptive_model() matches.
-            if not _is_adaptive_model(model):
-                body["temperature"] = temperature
-                # If Anthropic starts rejecting temperature on a new model
-                # we haven't tagged yet, this log line + the 400 body pinpoints
-                # which model id to add to _ADAPTIVE_MODEL_TAGS (or the regex
-                # in _ADAPTIVE_VERSION_RE) next.
-                logger.debug(
-                    f"Anthropic: sending temperature={temperature} for model={model!r} "
-                    "(model not matched by _is_adaptive_model — if API returns "
-                    "'temperature is deprecated', this tag needs adding)"
-                )
+        _adaptive = _is_adaptive_model(model)
 
-        # Anthropic: top_p and top_k are not allowed when thinking is enabled
-        if top_p is not None and effective_budget <= 0:
-            body["top_p"] = top_p
-        if top_k is not None and effective_budget <= 0:
-            body["top_k"] = top_k
+        # Three distinct model classes, each with its own compatible knob set:
+        #
+        #  A. Adaptive models (4.6+, Claude 5 family)
+        #       - Thinking is ALWAYS adaptive — there is no "off" mode and no
+        #         budget knob. Set thinking={"type":"adaptive"} regardless of
+        #         what the caller asked for. If we omit this, the model
+        #         defaults to producing THINKING-only output (empty content),
+        #         which surfaces as "No response received" upstream.
+        #       - `temperature` is deprecated on this lineage — sending it
+        #         returns 400 'temperature is deprecated for this model'.
+        #       - `top_p` / `top_k` are also incompatible with thinking-on
+        #         (which is always the case for adaptive), so skip them.
+        #
+        #  B. Older models with thinking ON (effective_budget > 0)
+        #       - Set thinking={"type":"enabled", "budget_tokens": N}.
+        #       - Temperature and top_p/top_k are incompatible with thinking.
+        #
+        #  C. Older models with thinking OFF (effective_budget == 0)
+        #       - No `thinking` field.
+        #       - Temperature, top_p, top_k are all fine to pass through.
+        if _adaptive:
+            body["thinking"] = {"type": "adaptive"}
+            # No temperature, no top_p, no top_k for adaptive models.
+        elif effective_budget > 0:
+            body["thinking"] = {"type": "enabled", "budget_tokens": effective_budget}
+            # No temperature/top_p/top_k when thinking is on for older models.
+        else:
+            body["temperature"] = temperature
+            if top_p is not None:
+                body["top_p"] = top_p
+            if top_k is not None:
+                body["top_k"] = top_k
 
         if tools:
             body["tools"] = self._convert_tools(tools)
