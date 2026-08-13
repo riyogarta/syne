@@ -835,6 +835,11 @@ INSERT INTO config (key, value, description) VALUES
     ('graph.enabled', 'true', 'Enable knowledge graph extraction from permanent memories')
 ON CONFLICT (key) DO NOTHING;
 
+-- Workspace file retention (cleanup runs daily via scheduler)
+INSERT INTO config (key, value, description) VALUES
+    ('workspace.retention_days', '30', 'Delete files older than N days from workspace/uploads, temp and outputs. 0 disables cleanup.')
+ON CONFLICT (key) DO NOTHING;
+
 -- Default scheduler output policy
 INSERT INTO config (key, value, description) VALUES (
   'scheduler.echo_response_to_creator',

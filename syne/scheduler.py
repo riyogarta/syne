@@ -177,7 +177,9 @@ class Scheduler:
     
     async def _run_loop(self):
         """Main scheduler loop."""
-        cleanup_counter = 0
+        # Start near the threshold so the first cleanup pass runs shortly
+        # after startup (files may already be long overdue), then daily.
+        cleanup_counter = 2878
         while self._running:
             try:
                 await self._check_and_execute()
@@ -193,6 +195,10 @@ class Scheduler:
                     await self._cleanup_expired()
                 except Exception as e:
                     logger.error(f"Scheduler cleanup error: {e}")
+                try:
+                    await self._cleanup_workspace()
+                except Exception as e:
+                    logger.error(f"Workspace cleanup error: {e}")
 
             await asyncio.sleep(_CHECK_INTERVAL)
 
@@ -211,6 +217,61 @@ class Scheduler:
         count = result.split()[-1] if result else "0"
         if count != "0":
             logger.info(f"Cleanup: deleted {count} expired disabled tasks (>30 days old)")
+
+    async def _cleanup_workspace(self):
+        """Delete files older than workspace.retention_days from workspace dirs.
+
+        Applies to workspace/uploads, workspace/temp, workspace/outputs.
+        Config: workspace.retention_days (default 30, 0 disables cleanup).
+        File scan runs in a thread to avoid blocking the event loop.
+        """
+        from .db.models import get_config
+
+        try:
+            days = int(await get_config("workspace.retention_days", 30) or 0)
+        except (TypeError, ValueError):
+            days = 30
+        if days <= 0:
+            return
+
+        def _scan_and_delete() -> tuple[int, int]:
+            import time
+            from pathlib import Path
+
+            root = Path(__file__).resolve().parent.parent / "workspace"
+            cutoff = time.time() - days * 86400
+            removed = 0
+            freed = 0
+            for sub in ("uploads", "temp", "outputs"):
+                d = root / sub
+                if not d.is_dir():
+                    continue
+                dirs = []
+                for f in d.rglob("*"):
+                    try:
+                        if f.is_dir():
+                            dirs.append(f)
+                        elif f.is_file() and f.stat().st_mtime < cutoff:
+                            size = f.stat().st_size
+                            f.unlink()
+                            removed += 1
+                            freed += size
+                    except OSError:
+                        continue
+                # prune now-empty subdirectories (deepest first)
+                for sd in sorted(dirs, reverse=True):
+                    try:
+                        sd.rmdir()
+                    except OSError:
+                        pass
+            return removed, freed
+
+        removed, freed = await asyncio.to_thread(_scan_and_delete)
+        if removed:
+            logger.info(
+                f"Workspace cleanup: removed {removed} files older than "
+                f"{days} days, freed {freed / 1_000_000:.1f} MB"
+            )
     
     async def _check_and_execute(self):
         """Check for due tasks and execute them."""
