@@ -381,6 +381,53 @@ class Conversation:
         if role == "user" and inserted_id is not None and content:
             asyncio.create_task(self._embed_message_row(inserted_id, content))
 
+    async def _delete_last_user_message(self) -> bool:
+        """Remove the most recent user message of this session from the DB
+        and the in-memory cache.
+
+        Called when the provider rejects the request (LLMBadRequestError,
+        e.g. Anthropic safety refusal). The just-saved user message is the
+        most likely trigger; deleting it immediately prevents it from
+        poisoning every subsequent turn's context (the message remains
+        visible in the user's chat window — only history is cleaned).
+
+        Returns True if a message was deleted.
+        """
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchrow("""
+                    DELETE FROM messages
+                    WHERE id = (
+                        SELECT id FROM messages
+                        WHERE session_id = $1 AND role = 'user'
+                        ORDER BY id DESC LIMIT 1
+                    )
+                    RETURNING id
+                """, self.session_id)
+            deleted_db = row is not None
+        except Exception as e:
+            logger.error(f"_delete_last_user_message: DB delete failed: {e}")
+            deleted_db = False
+
+        # Also drop from the in-memory cache — otherwise the poison stays
+        # in context until restart even though the DB row is gone.
+        deleted_cache = False
+        for i in range(len(self._message_cache) - 1, -1, -1):
+            if self._message_cache[i].role == "user":
+                del self._message_cache[i]
+                deleted_cache = True
+                break
+
+        # Reset dedup hash so an identical re-send isn't silently skipped
+        self._last_saved_hash = ""
+
+        if deleted_db or deleted_cache:
+            logger.warning(
+                f"Session {self.session_id}: last user message removed from history "
+                f"(db={deleted_db} cache={deleted_cache}) after provider rejection"
+            )
+        return deleted_db or deleted_cache
+
     async def _embed_message_row(self, message_id: int, content: str) -> None:
         """Background task: embed a user-role message and UPDATE messages.embedding.
 
@@ -1061,7 +1108,22 @@ class Conversation:
                 _bypass_response = await self._maybe_execute_pending_consent(user_message)
                 if _bypass_response is not None:
                     return _bypass_response
-                return await self._chat_inner(user_message, message_metadata)
+                try:
+                    return await self._chat_inner(user_message, message_metadata)
+                except LLMBadRequestError:
+                    # Provider rejected the request — most likely a safety
+                    # refusal triggered by the just-saved user message.
+                    # Remove it from history so it cannot poison subsequent
+                    # turns (visible chat window is unaffected).
+                    if await self._delete_last_user_message():
+                        return (
+                            "⚠️ Your last message was rejected by the model "
+                            "(it likely contains wording that triggers a "
+                            "refusal). It has been removed from history so "
+                            "it won't affect future turns. Please rephrase "
+                            "and try again."
+                        )
+                    raise
             finally:
                 self._processing = False
                 # Cleanup transient upload files (Option B from design discussion).
