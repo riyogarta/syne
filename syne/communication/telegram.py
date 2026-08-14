@@ -179,6 +179,7 @@ class TelegramChannel:
             has_reply_context=reply_raw is not None,
             reply_to_sender=reply_raw["sender"] if reply_raw else None,
             reply_to_body=reply_raw["body"] if reply_raw else None,
+            reply_to_excerpt=reply_raw.get("excerpt") if reply_raw else None,
         )
         # Load group settings from DB (owner_alias, context_notes, etc.)
         await load_group_settings(ctx)
@@ -9025,6 +9026,15 @@ Or just send me a message!"""
         
         reply = update.message.reply_to_message
         reply_text = reply.text or reply.caption or ""
+
+        # Telegram "quote": the sub-portion of the replied message that the user
+        # actually highlighted before hitting reply. Without reading this, a reply
+        # to ONE sentence of a long message is indistinguishable from a reply to
+        # the whole message -- the user's actual focus is silently lost.
+        excerpt = None
+        quote = getattr(update.message, "quote", None)
+        if quote is not None:
+            excerpt = (getattr(quote, "text", None) or "").strip() or None
         
         # Detect media in replied message
         has_photo = bool(reply.photo)
@@ -9058,17 +9068,26 @@ Or just send me a message!"""
             else:
                 sender = reply.from_user.first_name or reply.from_user.username or str(reply.from_user.id)
         
-        # Truncate
+        # Truncate -- mark it explicitly so downstream can tell text was
+        # dropped, instead of seeing a message that merely appears to stop.
         max_quote = 4000
         if len(body) > max_quote:
-            body = body[:max_quote] + "…"
-        
+            dropped = len(body) - max_quote
+            body = body[:max_quote] + "… [truncated: %d more characters]" % dropped
+
+        max_excerpt = 2000
+        if excerpt and len(excerpt) > max_excerpt:
+            dropped = len(excerpt) - max_excerpt
+            excerpt = excerpt[:max_excerpt] + "… [truncated: %d more characters]" % dropped
+
         result = {"sender": sender, "body": body}
+        if excerpt:
+            result["excerpt"] = excerpt
         if has_photo:
             result["has_photo"] = True
         if has_document:
             result["has_document"] = True
-        
+
         return result
 
     async def _download_reply_media(self, update: Update) -> dict | None:

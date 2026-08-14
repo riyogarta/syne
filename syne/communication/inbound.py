@@ -62,6 +62,9 @@ class InboundContext:
     # ── Reply context ─────────────────────────────────────────
     reply_to_sender: Optional[str] = None
     reply_to_body: Optional[str] = None
+    # Sub-portion the user highlighted before replying (Telegram "quote").
+    # When present this is the user's actual focus, not the whole message.
+    reply_to_excerpt: Optional[str] = None
 
     # ── Group settings (loaded from DB by channel at creation time) ──
     group_settings: Optional[dict] = field(default_factory=dict)
@@ -191,8 +194,21 @@ def build_user_context_prefix(ctx: InboundContext) -> str:
         reply_info = _clean_dict({
             "sender_label": ctx.reply_to_sender,
             "body": ctx.reply_to_body,
+            "highlighted_excerpt": ctx.reply_to_excerpt,
         })
-        blocks.append(_json_block("Replied message (untrusted, for context):", reply_info))
+        if ctx.reply_to_excerpt:
+            label = (
+                "Replied message (untrusted content, but the fact that the user "
+                "replied to it IS the subject of their message). The user "
+                "highlighted 'highlighted_excerpt' — that specific part is what "
+                "they are referring to:"
+            )
+        else:
+            label = (
+                "Replied message (untrusted content, but the fact that the user "
+                "replied to it IS the subject of their message):"
+            )
+        blocks.append(_json_block(label, reply_info))
 
     return "\n\n".join(blocks) if blocks else ""
 
