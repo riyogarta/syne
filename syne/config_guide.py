@@ -22,6 +22,7 @@ Always inform the owner of **both positive and negative impacts** before changin
 |-----|---------|------|
 | `memory.auto_capture` | `false` | boolean |
 | `memory.auto_evaluate` | `true` | boolean |
+| `memory.auto_capture_category` | `"auto"` | string |
 
 - `auto_capture` — automatically evaluates every message for memory-worthy content.
 - `auto_evaluate` — use LLM to judge what is worth storing (only applies when auto_capture is ON).
@@ -31,6 +32,15 @@ Always inform the owner of **both positive and negative impacts** before changin
 - **Positive**: Bot learns preferences, facts, and context over time without manual effort.
 - **Negative**: Uses extra compute per message (evaluator model call). May store unwanted info.
   Non-permanent auto-captured memories decay naturally, so low-value ones will fade.
+- `auto_capture_category` — quarantine category for auto-captured memories. Every
+  non-explicit capture is filed under this single category instead of whatever the
+  small evaluator model invents (`usage`, `conflict`, `personal facts`, ...), so cleanup
+  is one `WHERE category = 'auto'` instead of guesswork.
+  - An explicit "ingat ini" / "remember this" keeps the evaluator's category — that
+    one is a deliberate instruction from the owner, not a guess.
+  - Keep this category OUT of `memory.category_routes` so it stays in the default
+    recall bucket and remains searchable exactly as before.
+  - Set to `""` to disable and restore the old free-for-all behaviour.
 
 ### Evaluator Model
 | Key | Default | Type |

@@ -376,9 +376,23 @@ async def evaluate_and_store(
 
     permanent = is_explicit
 
+    # Auto-capture quarantine: force every auto-captured memory into ONE
+    # category so the evaluator can't keep inventing new ones ("usage",
+    # "conflict", "feature", "personal facts", ...). The quarantine category
+    # is deliberately NOT registered in memory.category_routes, so it falls
+    # into the default recall bucket and stays searchable as before.
+    # An explicit "ingat ini" is a deliberate instruction from the owner,
+    # so its evaluator-chosen category is preserved.
+    category = result["category"]
+    if not is_explicit:
+        from ..db.models import get_config
+        forced = await get_config("memory.auto_capture_category", "auto")
+        if isinstance(forced, str) and forced.strip():
+            category = forced.strip()
+
     mem_id = await memory_engine.store_if_new(
         content=result["content"],
-        category=result["category"],
+        category=category,
         source="user_confirmed",
         user_id=user_id,
         importance=result["importance"],
@@ -386,7 +400,7 @@ async def evaluate_and_store(
     )
 
     if mem_id:
-        logger.info(f"Stored memory #{mem_id}: [{result['category']}] {result['content'][:80]}")
+        logger.info(f"Stored memory #{mem_id}: [{category}] {result['content'][:80]}")
         # Permanent memory → trigger KG extraction
         if permanent:
             from .graph import extract_and_store as graph_extract
