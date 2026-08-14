@@ -1488,7 +1488,8 @@ class Conversation:
         # to gate what reaches the user — it must not become a NEW way to
         # not reach the user.
         try:
-            _rule_check_enabled_raw = await get_config("security.rule_checker_enabled", True)
+            from .db.models import get_config as _gc_rc
+            _rule_check_enabled_raw = await _gc_rc("security.rule_checker_enabled", True)
         except Exception:
             _rule_check_enabled_raw = True
         if isinstance(_rule_check_enabled_raw, str):
@@ -1853,7 +1854,7 @@ class Conversation:
         unexpected exception with a logged traceback.
         """
         from .rule_checker import check_response as _rc, VerdictState as _RCState
-        from .db.models import get_rules as _get_rules
+        from .db.models import get_rules as _get_rules, get_config
 
         try:
             hard_rules = [r for r in await _get_rules() if r.get("severity") == "hard"]
