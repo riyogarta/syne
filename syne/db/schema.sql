@@ -440,6 +440,7 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
+    ('memory.category_routes', '{}', 'Keyword -> category routing for recall. JSON object, empty = disabled'),
     ('messages.embedding_enabled', 'true', 'When true, save_message fires a background embed for role=user rows so history_search can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.'),
     ('history_search.default_limit', '10', 'Default number of anchor previews returned per history_search call.'),
     ('history_search.context_before', '2', 'Default turns to include BEFORE each anchor in history_expand.'),
@@ -893,6 +894,12 @@ ON CONFLICT (key) DO NOTHING;
 -- Migration: memory.public_categories (Rule 765)
 INSERT INTO config (key, value, description) VALUES
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]')
+ON CONFLICT (key) DO NOTHING;
+
+-- Migration: memory.category_routes (keyword-based recall routing)
+-- Empty object = routing disabled = original behaviour.
+INSERT INTO config (key, value, description) VALUES
+    ('memory.category_routes', '{}', 'Keyword -> category routing for recall. JSON object: {"islam, fiqih, ayat": ["fiqih","alquran"]}. Keys are comma-separated trigger keywords; a fired route restricts recall to its categories, no match excludes all routed categories. Empty = disabled.')
 ON CONFLICT (key) DO NOTHING;
 
 -- Migration: session.tool_loop_timeout (replaces max_tool_rounds)

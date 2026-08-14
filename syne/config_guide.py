@@ -87,6 +87,31 @@ Controls how fast non-permanent memories fade and when they get promoted.
 - **Tune similarity thresholds when**: Too many duplicates stored (lower similarity_threshold) or valid updates being skipped (raise conflict_threshold).
 - **Warning**: Each recalled memory uses tokens. Setting too high wastes context window.
 
+### Category Routing
+| Key | Default | Type |
+|-----|---------|------|
+| `memory.category_routes` | `{}` | JSON object |
+
+Maps trigger keywords to target categories. Empty object = disabled (original behaviour).
+
+```json
+{
+  "islam, fiqih, ayat, hadits, shalat": ["fiqih", "alquran", "bukhari", "muslim"],
+  "rumah, listrik, pln": ["home"]
+}
+```
+
+- Keys are comma-separated trigger keywords, matched case-insensitively on word
+  boundaries against the user message.
+- A route fires: recall searches ONLY that route's categories (union if several fire).
+- No route fires: every routed category is excluded, recall searches the rest.
+- Categories belonging to no route are the "default" set and are always reachable.
+- **Use when**: a large corpus (scripture, case law, docs) crowds out personal
+  memories on unrelated topics. Routing keeps the corpus out of context until a
+  trigger word appears, and makes recall topically correct.
+- **Caveat**: a topical question phrased without any trigger keyword misses its
+  corpus. Keep keyword lists generous. The memory_search tool bypasses routing.
+
 ## Session & Compaction
 
 ### Compaction Threshold

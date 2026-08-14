@@ -603,6 +603,19 @@ class Conversation:
         if isinstance(recall_limit, str):
             recall_limit = int(recall_limit)
 
+        # 2a. Keyword routing — restrict recall to topically relevant categories.
+        #     Without this, a large corpus (scripture, case law, ...) wins every
+        #     top-K slot on every message regardless of topic. See memory/routing.py.
+        _route_include = _route_exclude = None
+        try:
+            from .memory.routing import resolve as _resolve_routes
+            _raw_routes = await _get_recall_config("memory.category_routes", {})
+            _route_include, _route_exclude = _resolve_routes(
+                recall_query or user_message, _raw_routes
+            )
+        except Exception as e:
+            logger.debug(f"Memory routing skipped: {e}")
+
         # 2b. Run memory recall + graph recall IN PARALLEL (saves ~400ms)
         from .memory.graph import recall_graph as _recall_graph
 
@@ -610,6 +623,8 @@ class Conversation:
             return await self.memory.recall(
                 query=recall_query or user_message,
                 limit=recall_limit,
+                categories=_route_include,
+                exclude_categories=_route_exclude,
                 user_id=self.user.get("id"),
                 requester_access_level=access_level,
             )

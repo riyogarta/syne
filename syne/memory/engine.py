@@ -122,6 +122,7 @@ class MemoryEngine:
         min_similarity: float = 0.3,
         category: Optional[str] = None,
         categories: Optional[list[str]] = None,
+        exclude_categories: Optional[list[str]] = None,
         user_id: Optional[int] = None,
         requester_access_level: str = "public",
     ) -> list[dict]:
@@ -133,6 +134,10 @@ class MemoryEngine:
             min_similarity: Minimum similarity threshold
             category: Filter by single category (legacy, still supported)
             categories: Filter by multiple categories (e.g. ["fact", "preference"])
+            exclude_categories: Categories to keep OUT of the result. Used by
+                keyword routing (see memory/routing.py) when no route fired:
+                every routed category is excluded so the remaining "default"
+                categories are searched instead.
             user_id: Filter by user
             requester_access_level: Access level of the requester (for Rule 760 filtering)
 
@@ -187,6 +192,15 @@ class MemoryEngine:
                 else:
                     conditions.append(f"m.category = ANY(${param_idx})")
                     params.append(_cats)
+                param_idx += 1
+
+            # Exclusion must live in SQL for the same reason as the Rule 765
+            # filter above: a Python post-filter lets unwanted rows occupy the
+            # top-K slots and then discards them, starving the categories that
+            # were actually wanted.
+            if exclude_categories:
+                conditions.append(f"NOT (LOWER(m.category) = ANY(${param_idx}))")
+                params.append([c.lower().strip() for c in exclude_categories])
                 param_idx += 1
 
             if user_id is not None:
