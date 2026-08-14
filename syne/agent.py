@@ -2245,7 +2245,7 @@ class SyneAgent:
 
     async def _tool_memory_store(self, content: str, category: str = "fact") -> str:
         """Tool handler: store a memory."""
-        mem_id = await self.memory.store_if_new(
+        mem_id, action = await self.memory.store_if_new_verbose(
             content=content,
             category=category,
             source="user_confirmed",
@@ -2259,6 +2259,12 @@ class SyneAgent:
                 asyncio.create_task(graph_extract(self.provider, content, mem_id))
             except Exception as e:
                 logger.debug(f"KG extraction skipped: {e}")
+            if action == "updated":
+                return (
+                    f"⚠️ OVERWROTE existing memory id {mem_id} — this was NOT "
+                    f"a new row. The previous content of #{mem_id} is gone. "
+                    f"Report this to the owner explicitly."
+                )
             return f"Memory stored (id: {mem_id})"
         return "Similar memory already exists. Skipped."
 

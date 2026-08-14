@@ -391,6 +391,30 @@ class MemoryEngine:
         "auto_captured": 1,   # Alias for system
     }
 
+    # ================================================================
+    # APPEND-ONLY CATEGORIES — immutable knowledge corpus.
+    #
+    # These hold SOURCE TEXT (scripture, hadith, classical fiqh books),
+    # not mutable facts about the user. Chunk N and chunk N+1 of the
+    # same chapter are naturally 0.70-0.85 similar, which is exactly
+    # the conflict zone — so recency-based "newer wins" resolution
+    # would silently EAT the corpus, one chunk per write.
+    #
+    # A memory in one of these categories is NEVER overwritten by
+    # store_if_new(); a colliding write is inserted as a new row.
+    # Deliberate edits must go through memory_update (consent-gated).
+    # ================================================================
+    APPEND_ONLY_CATEGORIES = {
+        "alquran", "quran", "asbabnuzul", "ibnukatsir", "tafsir",
+        "bukhari", "muslim", "riyadhus", "hadits", "hadith",
+        "fiqih", "fiqih_ext", "aqidah", "sirah", "kaidah",
+    }
+
+    def _is_append_only(self, category: Optional[str]) -> bool:
+        """True if the category is an immutable corpus store."""
+        cat = (category or "").strip().lower()
+        return cat in self.APPEND_ONLY_CATEGORIES
+
     def _source_priority(self, source: str) -> int:
         """Get numeric priority for a memory source. Higher = more authoritative."""
         return self.SOURCE_PRIORITY.get(source, 0)
@@ -436,25 +460,79 @@ class MemoryEngine:
                 "Refusing to store memory: embedding provider returned empty vector."
             )
 
-        # Find most similar existing memory using pre-computed vector
+        # Find the most similar existing memory using the pre-computed
+        # vector, RESTRICTED TO THE SAME CATEGORY. The category filter
+        # belongs in SQL, not in a Python post-check: this probe takes
+        # LIMIT 1, so a cross-category row sitting in the top slot would
+        # mask a real same-category duplicate ranked #2 and defeat dedup.
         async with get_connection() as conn:
             rows = await conn.fetch("""
-                SELECT id, content, source, importance,
+                SELECT id, content, category, source, importance,
                        COALESCE(permanent, false) as permanent,
                        1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE 1 - (embedding <=> $1::vector) >= $2
+                  AND LOWER(TRIM(COALESCE(category, ''))) = LOWER(TRIM($3))
                 ORDER BY embedding <=> $1::vector
                 LIMIT 1
-            """, str(vector), conflict_threshold)
+            """, str(vector), conflict_threshold, category or "")
 
         if rows:
             existing = dict(rows[0])
             sim = existing["similarity"]
 
+            # ═══════════════════════════════════════════════════════════
+            # GUARD 1 — NAMESPACE. A memory may only ever collide with a
+            # memory of the SAME category. Categories are namespaces:
+            # "fiqih" (source corpus) and "fiqih_ext" (external addendum)
+            # are deliberately separate stores, not two versions of one
+            # fact. Without this, a new note could UPDATE — i.e. destroy —
+            # an unrelated corpus chunk that merely discussed the same
+            # topic. Different namespace → always insert.
+            # ═══════════════════════════════════════════════════════════
+            if (existing.get("category") or "").strip().lower() != (
+                (category or "").strip().lower()
+            ):
+                logger.info(
+                    f"Cross-category collision ignored (sim={sim:.3f}): "
+                    f"new '{category}' vs existing #{existing['id']} "
+                    f"'{existing.get('category')}'. Inserting as new."
+                )
+                return await self._store_with_vector(
+                    content, vector, category, source, user_id, importance, permanent
+                )
+
+            # Exact duplicate → skip. This check must come BEFORE the
+            # append-only guard: skipping a byte-identical write is not
+            # destructive, and letting the guard insert first would fill
+            # corpus categories with duplicate rows.
             if sim >= similarity_threshold:
                 logger.debug(f"Duplicate (sim={sim:.3f}), skipping: {content[:80]}")
                 return None
+
+            # ═══════════════════════════════════════════════════════════
+            # GUARD 2 — APPEND-ONLY. Corpus rows are immutable source
+            # text. Never overwrite one, even from the same category:
+            # adjacent chunks of one chapter sit squarely in the conflict
+            # band, so "newer wins" would consume the corpus chunk by
+            # chunk. Deliberate corpus edits go through memory_update.
+            #
+            # NOTE ON SOURCE PRIORITY: corpus rows carry importer sources
+            # (e.g. "fiqih_import") that are absent from SOURCE_PRIORITY,
+            # so they score 0 — while memory_store always writes as
+            # "user_confirmed" (3). Rule 1 would thus overwrite ANY
+            # corpus row it collided with, deterministically. This guard
+            # is what stops that.
+            # ═══════════════════════════════════════════════════════════
+            if self._is_append_only(existing.get("category")):
+                logger.info(
+                    f"Append-only category '{existing.get('category')}' "
+                    f"protected (sim={sim:.3f}): #{existing['id']} kept "
+                    f"intact, new content inserted as a separate row."
+                )
+                return await self._store_with_vector(
+                    content, vector, category, source, user_id, importance, permanent
+                )
 
             # ═══════════════════════════════════════════════════════════
             # CONFLICT ZONE (0.70–0.85): same topic, different info
@@ -516,6 +594,31 @@ class MemoryEngine:
         return await self._store_with_vector(
             content, vector, category, source, user_id, importance, permanent
         )
+
+    async def store_if_new_verbose(
+        self, **kwargs
+    ) -> tuple[Optional[int], str]:
+        """store_if_new() + what actually happened to the database.
+
+        store_if_new() returns a bare id, which is indistinguishable
+        between "inserted a new row" and "OVERWROTE row #id, its old
+        content is gone". Callers that report back to a human need to
+        know the difference. Detected by comparing against MAX(id)
+        before the write — an id at or below the previous maximum can
+        only mean an existing row was updated.
+
+        Returns:
+            (memory_id, action) where action is one of:
+            "inserted" | "updated" | "skipped"  (id is None if skipped)
+        """
+        async with get_connection() as conn:
+            row = await conn.fetchrow("SELECT COALESCE(MAX(id), 0) AS m FROM memory")
+        before_max = row["m"] if row else 0
+
+        mem_id = await self.store_if_new(**kwargs)
+        if mem_id is None:
+            return None, "skipped"
+        return mem_id, ("inserted" if mem_id > before_max else "updated")
 
     async def _store_with_vector(
         self,
