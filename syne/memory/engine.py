@@ -430,19 +430,23 @@ class MemoryEngine:
         conflict_threshold: float = None,
         permanent: bool = False,
     ) -> Optional[int]:
-        """Store a memory with conflict resolution.
+        """Store a memory. APPEND-ONLY — never overwrites an existing row.
 
-        Three zones based on similarity to existing memories:
-        - >= similarity_threshold (0.85): Exact duplicate → SKIP
-        - >= conflict_threshold (0.70):   Same topic, different info → RESOLVE
-        - < conflict_threshold:           New topic → INSERT
+        Two outcomes based on similarity to existing memories:
+        - >= similarity_threshold: byte-equivalent duplicate → SKIP
+        - everything else:                                   → INSERT
 
-        Conflict resolution rules (enforced by code, not prompt):
-        1. user_confirmed ALWAYS wins over auto_captured/system/observed
-        2. Same source priority → newer wins (time-based data changes)
-        3. Higher importance wins as tiebreaker
+        This function does not resolve conflicts and does not update
+        rows. Two memories that contradict each other are both kept;
+        _detect_conflicts() decides which is authoritative at recall
+        time, by source priority then recency. That keeps every write
+        recoverable — the losing memory still exists and can be read,
+        audited, or promoted later.
 
-        Returns memory ID (new or updated) or None if duplicate/skipped.
+        In-place edits go through memory_update(), which is explicit and
+        consent-gated.
+
+        Returns the new memory ID, or None if skipped as a duplicate.
         """
         from ..db.models import get_config
 
@@ -535,59 +539,33 @@ class MemoryEngine:
                 )
 
             # ═══════════════════════════════════════════════════════════
-            # CONFLICT ZONE (0.70–0.85): same topic, different info
-            # Resolve by source priority, then recency, then importance.
-            # This is CODE-ENFORCED — model-agnostic, deterministic.
+            # GUARD 3 — NEVER OVERWRITE. A store is a store.
+            #
+            # This used to be the "conflict zone": a same-category write
+            # whose similarity landed between conflict_threshold and
+            # similarity_threshold was resolved by UPDATING the existing
+            # row, i.e. deleting its content. That cost us corpus row
+            # #24774 and was capable of eating the rest one write at a
+            # time.
+            #
+            # Conflict resolution is NOT lost — it moved to read time.
+            # _detect_conflicts() runs on every recall and flags the
+            # winner "authoritative" and the loser "conflicted" using the
+            # same rules (source priority, then recency). Deciding at
+            # read time is strictly better: a wrong write-time decision
+            # destroys data permanently, a wrong read-time flag is just
+            # a label on two rows that both still exist.
+            #
+            # The ONLY in-place edit path left is memory_update, which is
+            # explicit and consent-gated.
             # ═══════════════════════════════════════════════════════════
-            old_id = existing["id"]
-            old_content = existing["content"]
-            old_source = existing.get("source", "system")
-            old_importance = existing.get("importance", 0.5)
-
-            old_permanent = existing.get("permanent", False)
-
-            # Decay v2 — Rule 0: permanent ALWAYS wins. A non-permanent
-            # (auto-captured / observed) memory must never silently
-            # overwrite a permanent one the user explicitly locked in.
-            # Skip the overwrite and log so the LLM can flag it to the user.
-            if old_permanent and not permanent:
-                logger.info(
-                    f"Conflict: new non-permanent memory contradicts PERMANENT "
-                    f"#{old_id}. Keeping permanent, skipping new. "
-                    f"(new='{content[:50]}')"
-                )
-                return None
-
-            new_priority = self._source_priority(source)
-            old_priority = self._source_priority(old_source)
-
-            # Rule 1: Higher source priority wins
-            if new_priority > old_priority:
-                logger.info(
-                    f"Conflict resolved by source priority: "
-                    f"new '{source}'({new_priority}) > old '{old_source}'({old_priority}). "
-                    f"Updating #{old_id}."
-                )
-                return await self._update_memory(
-                    old_id, content, category, source, importance, vector=vector,
-                )
-
-            if new_priority < old_priority:
-                logger.info(
-                    f"Conflict resolved by source priority: "
-                    f"old '{old_source}'({old_priority}) > new '{source}'({new_priority}). "
-                    f"Keeping #{old_id}, skipping new."
-                )
-                return None
-
-            # Rule 2: Same priority → newer wins (data changes over time)
             logger.info(
-                f"Conflict resolved by recency (same source priority): "
-                f"old='{old_content[:50]}' → new='{content[:50]}'. "
-                f"Updating #{old_id}."
+                f"Similar memory #{existing['id']} (sim={sim:.3f}, "
+                f"category='{category}') — inserting as a new row, not "
+                f"overwriting. Conflict, if any, is resolved at recall."
             )
-            return await self._update_memory(
-                old_id, content, category, source, importance, vector=vector,
+            return await self._store_with_vector(
+                content, vector, category, source, user_id, importance, permanent
             )
 
         # No similar memory at all — insert new (reuse vector)
