@@ -1899,6 +1899,28 @@ class Conversation:
             eval_driver = await get_config("memory.evaluator_driver", "ollama")
         eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
 
+        # Which provider actually judges when driver == "provider".
+        #
+        # NOT self.provider: that one carries the per-group / per-user model
+        # override applied in ConversationManager.get_conversation(), so a
+        # chat pinned to an expensive model would silently drag the checker
+        # onto it too — while /checker keeps advertising the default model.
+        # The checker is a system-level guard, so it runs on the DEFAULT
+        # model (provider.active_model) held by the manager, independent of
+        # whatever model this particular chat is using.
+        checker_provider = getattr(self._mgr, "provider", None) if self._mgr else None
+        if checker_provider is None:
+            # No manager (sub-agent, CLI one-shot, tests) — fail-safe to the
+            # conversation provider rather than passing None, which the
+            # checker would report as ERROR and fail-open on every turn.
+            checker_provider = self.provider
+        if eval_driver == "provider":
+            logger.info(
+                "Rule checker driver=provider model="
+                f"{getattr(checker_provider, 'chat_model', '?')} "
+                f"(chat model={getattr(self.provider, 'chat_model', '?')})"
+            )
+
         current = response
         checker_warning = None
 
@@ -1909,7 +1931,7 @@ class Conversation:
                 hard_rules=hard_rules,
                 evaluator_driver=eval_driver,
                 evaluator_model=eval_model,
-                provider=self.provider,
+                provider=checker_provider,
                 tools_ran=tools_ran,
                 timeout=checker_timeout,
             )

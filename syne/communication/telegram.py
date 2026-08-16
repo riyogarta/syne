@@ -117,6 +117,31 @@ class _TypingIndicator:
                 pass
 
 
+
+async def _checker_default_model_label() -> str:
+    """Human label for the model the rule checker uses on driver='provider'.
+
+    Reads the model REGISTRY entry for provider.active_model — the same
+    default provider the ConversationManager holds — because the checker
+    deliberately ignores per-group/per-user model overrides. Legacy
+    provider.chat_model is only a last-resort fallback.
+    """
+    from ..db.models import get_config as _gc
+    try:
+        active_key = await _gc("provider.active_model", None)
+        models = await _gc("provider.models", None)
+        if active_key and models:
+            from ..llm.drivers import get_model_from_list
+            entry = get_model_from_list(models, active_key)
+            if entry:
+                return entry.get("model") or entry.get("key") or str(active_key)
+        if active_key:
+            return str(active_key)
+    except Exception:
+        pass
+    return await _gc("provider.chat_model", "?")
+
+
 class TelegramChannel:
     """Telegram bot adapter for Syne."""
 
@@ -297,7 +322,7 @@ class TelegramChannel:
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("compact", "Compact conversation history"),
-            BotCommand("checker", "Rule checker: off / evaluator / main LLM / timeout <sec> (owner only)"),
+            BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
@@ -2063,7 +2088,7 @@ class TelegramChannel:
 
 *Security* (owner)
 /consent — Toggle consent gate for destructive tools
-/checker — Rule checker: off, evaluator model, main LLM, or timeout <sec>
+/checker — Rule checker: off, evaluator model, default LLM, or timeout <sec>
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
 /denylist — Manage shell denylist (add/remove/list)
@@ -3662,7 +3687,7 @@ Or just send me a message!"""
         if isinstance(current, str):
             current = current.strip().lower()
         eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-        main_model = await get_config("provider.chat_model", "?")
+        main_model = await _checker_default_model_label()
         try:
             timeout_s = int(float(
                 await get_config("security.rule_checker_timeout", 120)
@@ -3687,7 +3712,7 @@ Or just send me a message!"""
                     callback_data="checker_set:evaluator",
                 ),
                 InlineKeyboardButton(
-                    f"{'✅ ' if active == 'provider' else ''}Main LLM ({main_model})",
+                    f"{'✅ ' if active == 'provider' else ''}Default LLM ({main_model})",
                     callback_data="checker_set:provider",
                 ),
             ]
@@ -3698,8 +3723,11 @@ Or just send me a message!"""
                 f"• **Off** — no checking. Responses are sent unevaluated.\n"
                 f"• **Evaluator** — `{eval_model}` (via `memory.evaluator_driver`). "
                 f"Cheap, local when driver is Ollama, no per-turn API cost.\n"
-                f"• **Main LLM** — `{main_model}`. More accurate, but every response "
-                f"costs an extra API call to your main model.\n\n"
+                f"• **Default LLM** — `{main_model}`. More accurate, but every "
+                f"response costs an extra API call. This is always the DEFAULT "
+                f"model (`provider.active_model`) — it does NOT follow a "
+                f"per-chat or per-group model override, so checker cost stays "
+                f"predictable no matter which model a chat is pinned to.\n\n"
                 f"Max wait per check is {timeout_s}s (both drivers), set via "
                 f"`/checker timeout <sec>`, range 5-120. On timeout the reply is "
                 f"sent with a warning rather than held.",
@@ -8860,7 +8888,7 @@ Or just send me a message!"""
                 await set_config("security.rule_checker_enabled", True)
                 await set_config("security.rule_checker_driver", choice)
             eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-            main_model = await get_config("provider.chat_model", "?")
+            main_model = await _checker_default_model_label()
             try:
                 timeout_s = int(float(
                     await get_config("security.rule_checker_timeout", 120)
@@ -8878,7 +8906,7 @@ Or just send me a message!"""
                     callback_data="checker_set:evaluator",
                 ),
                 InlineKeyboardButton(
-                    f"{'✅ ' if choice == 'provider' else ''}Main LLM ({main_model})",
+                    f"{'✅ ' if choice == 'provider' else ''}Default LLM ({main_model})",
                     callback_data="checker_set:provider",
                 ),
             ]
