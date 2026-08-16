@@ -95,3 +95,42 @@ def parse_openai_retry_delay(
                 pass
 
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Per-call retry budget override
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Some callers are guards, not answers: the rule checker is allowed to fail
+# open, so spending 6 attempts with 10-30s backoff on a 429 only holds the
+# user's reply hostage until the caller's own timeout fires. Such callers wrap
+# their LLM call in `retry_budget(n)` to fail fast instead.
+#
+# Drivers read `current_max_retries()` instead of MAX_RETRIES directly. With no
+# override active this returns MAX_RETRIES, so normal calls are unchanged.
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_retry_budget: ContextVar[Optional[int]] = ContextVar("_retry_budget", default=None)
+
+
+def current_max_retries() -> int:
+    """Retry count for the current context — the override if set, else MAX_RETRIES."""
+    override = _retry_budget.get()
+    return MAX_RETRIES if override is None else override
+
+
+@contextmanager
+def retry_budget(max_retries: int):
+    """Cap retries for LLM calls made inside this block.
+
+    ContextVars propagate into tasks created within the block (including
+    asyncio.wait_for), so the driver sees the override. Nested blocks restore
+    the outer value on exit.
+    """
+    token = _retry_budget.set(max(0, int(max_retries)))
+    try:
+        yield
+    finally:
+        _retry_budget.reset(token)

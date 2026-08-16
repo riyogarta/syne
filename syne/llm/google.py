@@ -68,6 +68,7 @@ _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 # Retry — import from global module
 from .retry import (
     MAX_RETRIES as _MAX_RETRIES,
+    current_max_retries,
     BASE_DELAY_MS as _BASE_DELAY_MS,
     MAX_RETRY_DELAY_MS as _MAX_RETRY_DELAY_MS,
     STREAM_IDLE_TIMEOUT as _STREAM_OVERALL_TIMEOUT,
@@ -349,7 +350,10 @@ class GoogleProvider(LLMProvider):
         _auth_refresh_attempted = False
         current_delay = _BASE_DELAY_MS
 
-        for attempt in range(_MAX_RETRIES + 1):
+        # Guard callers (rule checker) cap this via retry_budget() —
+        # unbounded retries on 429 would outlive their own timeout.
+        max_retries = current_max_retries()
+        for attempt in range(max_retries + 1):
             try:
                 # #4: Cycle through endpoints on retry
                 endpoint = _ENDPOINT_FALLBACKS[min(attempt, len(_ENDPOINT_FALLBACKS) - 1)]
@@ -399,7 +403,7 @@ class GoogleProvider(LLMProvider):
                     raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
 
                 # Retryable — backoff with jitter
-                if attempt < _MAX_RETRIES and classification.is_retryable:
+                if attempt < max_retries and classification.is_retryable:
                     # On 429: try next endpoint immediately if different
                     next_endpoint = _ENDPOINT_FALLBACKS[min(attempt + 1, len(_ENDPOINT_FALLBACKS) - 1)]
                     if status == 429 and next_endpoint != endpoint:
@@ -407,7 +411,7 @@ class GoogleProvider(LLMProvider):
                         logger.warning(
                             f"CCA 429 on {endpoint.split('//')[1].split('/')[0]}, "
                             f"switching to {next_endpoint.split('//')[1].split('/')[0]} "
-                            f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
+                            f"(attempt {attempt + 1}/{max_retries + 1})"
                         )
                     else:
                         # Use max of backoff delay and server-requested delay
@@ -420,7 +424,7 @@ class GoogleProvider(LLMProvider):
                         delay_ms = int(delay_ms * jitter)
                         logger.warning(
                             f"CCA {status} ({classification.reason}), retrying in {delay_ms}ms "
-                            f"(attempt {attempt + 1}/{_MAX_RETRIES + 1}, endpoint: {endpoint})"
+                            f"(attempt {attempt + 1}/{max_retries + 1}, endpoint: {endpoint})"
                         )
 
                     await asyncio.sleep(delay_ms / 1000)
@@ -430,7 +434,7 @@ class GoogleProvider(LLMProvider):
 
                 # Max retries exceeded
                 if status == 429:
-                    raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.") from e
+                    raise LLMRateLimitError(f"Rate limited (429) after {max_retries + 1} attempts.") from e
                 raise
 
             except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
@@ -438,7 +442,7 @@ class GoogleProvider(LLMProvider):
 
             except Exception as e:
                 last_error = e
-                if attempt < _MAX_RETRIES:
+                if attempt < max_retries:
                     delay_ms = int(current_delay * random.uniform(0.7, 1.3))
                     logger.warning(f"CCA network error: {e}, retrying in {delay_ms}ms")
                     await asyncio.sleep(delay_ms / 1000)
@@ -524,7 +528,10 @@ class GoogleProvider(LLMProvider):
 
         data = None
         current_delay = _BASE_DELAY_MS
-        for attempt in range(_MAX_RETRIES + 1):
+        # Guard callers (rule checker) cap this via retry_budget() —
+        # unbounded retries on 429 would outlive their own timeout.
+        max_retries = current_max_retries()
+        for attempt in range(max_retries + 1):
             async with httpx.AsyncClient(timeout=120) as client:
                 resp = await client.post(url, json=body, params={"key": self.api_key})
                 if resp.status_code == 200:
@@ -539,7 +546,7 @@ class GoogleProvider(LLMProvider):
                 if classification.is_terminal:
                     raise LLMRateLimitError(f"Terminal quota error: {classification.reason}")
 
-                if attempt < _MAX_RETRIES and classification.is_retryable:
+                if attempt < max_retries and classification.is_retryable:
                     delay_ms = max(current_delay, classification.delay_ms)
                     if classification.delay_ms > 0:
                         jitter = random.uniform(1.0, 1.2)
@@ -548,14 +555,14 @@ class GoogleProvider(LLMProvider):
                     delay_ms = int(delay_ms * jitter)
                     logger.warning(
                         f"Gemini API {resp.status_code} ({classification.reason}), retrying in {delay_ms}ms "
-                        f"(attempt {attempt + 1}/{_MAX_RETRIES + 1})"
+                        f"(attempt {attempt + 1}/{max_retries + 1})"
                     )
                     await asyncio.sleep(delay_ms / 1000)
                     current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
                     continue
 
                 if resp.status_code == 429:
-                    raise LLMRateLimitError(f"Rate limited (429) after {_MAX_RETRIES + 1} attempts.")
+                    raise LLMRateLimitError(f"Rate limited (429) after {max_retries + 1} attempts.")
                 if resp.status_code == 400:
                     _lower = error_text.lower()
                     if "exceeds the maximum" in _lower or "token count" in _lower or "too many tokens" in _lower:
@@ -563,7 +570,7 @@ class GoogleProvider(LLMProvider):
                 resp.raise_for_status()
 
         if data is None:
-            raise LLMRateLimitError(f"Rate limited after {_MAX_RETRIES + 1} attempts.")
+            raise LLMRateLimitError(f"Rate limited after {max_retries + 1} attempts.")
 
         candidate = data["candidates"][0]
         parts = candidate.get("content", {}).get("parts", [])

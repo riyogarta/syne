@@ -33,6 +33,7 @@ from typing import Optional
 
 import httpx
 
+from .llm.retry import retry_budget
 from .llm.provider import ChatMessage, LLMProvider
 
 logger = logging.getLogger("syne.rule_checker")
@@ -211,6 +212,10 @@ async def _check_via_ollama(
     return data.get("message", {}).get("content", "").strip()
 
 
+# One retry (2 attempts total) — see _check_via_provider docstring.
+_CHECKER_MAX_RETRIES = 1
+
+
 async def _check_via_provider(
     prompt: str, provider: LLMProvider, timeout: float = 120.0,
 ) -> str:
@@ -221,13 +226,20 @@ async def _check_via_provider(
     and an unbounded checker call would hold the user's reply hostage. On
     timeout this raises TimeoutError, which check_response turns into
     VerdictState.ERROR (fail-open with a warning) like any other failure.
+
+    Retries are capped at _CHECKER_MAX_RETRIES rather than the driver default.
+    The checker is a guard that may fail open, so a provider-wide 429 storm
+    should make it give up in seconds; the default budget (6 attempts, 10-30s
+    backoff each) would instead burn the full timeout and delay the user's
+    reply for no added safety.
     """
     async def _call() -> str:
-        response = await provider.chat(
-            messages=[ChatMessage(role="user", content=prompt)],
-            temperature=0.0,
-            thinking_budget=0,
-        )
+        with retry_budget(_CHECKER_MAX_RETRIES):
+            response = await provider.chat(
+                messages=[ChatMessage(role="user", content=prompt)],
+                temperature=0.0,
+                thinking_budget=0,
+            )
         return (response.content or "").strip()
 
     return await asyncio.wait_for(_call(), timeout=timeout)
