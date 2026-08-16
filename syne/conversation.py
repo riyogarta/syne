@@ -1995,6 +1995,17 @@ class Conversation:
                     new_resp = await self._handle_tool_calls(
                         new_resp, retry_ctx, access_level, tool_schemas,
                     )
+                    # A retry that actually ran tools makes the NEXT checker
+                    # pass a POST-tool one: the redraft may legitimately
+                    # summarise what just executed. Leaving tools_ran frozen
+                    # at its pre-loop value made the checker judge that honest
+                    # summary as NO_PHANTOM_ACTION — i.e. the retry nudge
+                    # ("call that tool first") punished its own instruction,
+                    # burning the remaining budget on an unwinnable draft.
+                    # Consent-held / queued calls did NOT execute, so a gate
+                    # left pending must NOT flip the flag.
+                    if not getattr(self, "_pending_consent_hash", ""):
+                        tools_ran = True
                 current = new_resp
             except Exception as retry_err:
                 logger.warning(
