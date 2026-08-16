@@ -297,7 +297,7 @@ class TelegramChannel:
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("compact", "Compact conversation history"),
-            BotCommand("checker", "Choose rule-checker driver: evaluator model or main LLM (owner only)"),
+            BotCommand("checker", "Rule checker: off / evaluator model / main LLM (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
@@ -2063,7 +2063,7 @@ class TelegramChannel:
 
 *Security* (owner)
 /consent — Toggle consent gate for destructive tools
-/checker — Choose rule-checker driver (evaluator model vs main LLM)
+/checker — Rule checker: off, evaluator model, or main LLM
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
 /denylist — Manage shell denylist (add/remove/list)
@@ -3592,13 +3592,15 @@ Or just send me a message!"""
         """Handle /checker — choose which model powers the rule compliance checker.
 
         Options:
+          * off — disable the checker entirely. Responses ship unevaluated.
           * evaluator — the model set under memory.evaluator_driver +
             memory.evaluator_model (default: qwen3:0.6b via Ollama, cheap
             and local).
           * provider — the main chat model that runs Molt (higher per-turn
             cost, but works when Ollama is not available).
 
-        Writes to security.rule_checker_driver. Owner-only.
+        Writes security.rule_checker_enabled (off vs on) and, when on,
+        security.rule_checker_driver. Owner-only.
         """
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
@@ -3610,47 +3612,85 @@ Or just send me a message!"""
         args = update.message.text.split(maxsplit=1)
         choice = args[1].strip().lower() if len(args) > 1 else None
 
+        enabled_raw = await get_config("security.rule_checker_enabled", True)
+        if isinstance(enabled_raw, str):
+            enabled = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            enabled = bool(enabled_raw)
+
         current = await get_config("security.rule_checker_driver", "evaluator")
         if isinstance(current, str):
             current = current.strip().lower()
         eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
         main_model = await get_config("provider.chat_model", "?")
+        try:
+            timeout_s = int(float(
+                await get_config("security.rule_checker_timeout", 30)
+            ))
+        except Exception:
+            timeout_s = 30
+        timeout_s = max(5, min(120, timeout_s))
+
+        # "off" is a state of its own: rule_checker_enabled=false wins over
+        # whatever driver stays pinned, so the displayed state must check
+        # enabled FIRST or the UI would claim a driver that never runs.
+        active = current if enabled else "off"
 
         if choice is None:
             buttons = [
                 InlineKeyboardButton(
-                    f"{'✅ ' if current == 'evaluator' else ''}Evaluator ({eval_model})",
+                    f"{'✅ ' if active == 'off' else ''}Off",
+                    callback_data="checker_set:off",
+                ),
+                InlineKeyboardButton(
+                    f"{'✅ ' if active == 'evaluator' else ''}Evaluator ({eval_model})",
                     callback_data="checker_set:evaluator",
                 ),
                 InlineKeyboardButton(
-                    f"{'✅ ' if current == 'provider' else ''}Main LLM ({main_model})",
+                    f"{'✅ ' if active == 'provider' else ''}Main LLM ({main_model})",
                     callback_data="checker_set:provider",
                 ),
             ]
             await update.message.reply_text(
-                f"🛡 **Rule-checker driver:** `{current}`\n\n"
+                f"🛡 **Rule checker:** `{active}`  ·  timeout `{timeout_s}s`\n\n"
                 f"The rule checker judges every final response against the hard rules "
-                f"before it is sent. Pick which model does the judging:\n\n"
+                f"before it is sent. Pick who does the judging:\n\n"
+                f"• **Off** — no checking. Responses are sent unevaluated.\n"
                 f"• **Evaluator** — `{eval_model}` (via `memory.evaluator_driver`). "
                 f"Cheap, local when driver is Ollama, no per-turn API cost.\n"
                 f"• **Main LLM** — `{main_model}`. More accurate, but every response "
-                f"costs an extra API call to your main model.",
+                f"costs an extra API call to your main model.\n\n"
+                f"Max wait per check is `security.rule_checker_timeout` "
+                f"(now {timeout_s}s, clamped 5-120). On timeout the reply is sent "
+                f"with a warning rather than held.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
             return
 
-        if choice not in ("evaluator", "provider"):
+        if choice not in ("off", "evaluator", "provider"):
             await update.message.reply_text(
-                "❌ Use: `evaluator` or `provider` (or call `/checker` with no argument for buttons).",
+                "❌ Use: `off`, `evaluator`, or `provider` "
+                "(or call `/checker` with no argument for buttons).",
                 parse_mode="Markdown",
             )
             return
 
+        if choice == "off":
+            await set_config("security.rule_checker_enabled", False)
+            await update.message.reply_text(
+                "🛡 Rule checker **off** — responses are no longer checked "
+                "against the hard rules before sending.",
+                parse_mode="Markdown",
+            )
+            return
+
+        await set_config("security.rule_checker_enabled", True)
         await set_config("security.rule_checker_driver", choice)
         picked_model = eval_model if choice == "evaluator" else main_model
         await update.message.reply_text(
-            f"🛡 Rule-checker driver set to **{choice}** (`{picked_model}`).",
+            f"🛡 Rule checker **on** — driver **{choice}** (`{picked_model}`), "
+            f"timeout {timeout_s}s.",
             parse_mode="Markdown",
         )
 
@@ -8771,14 +8811,28 @@ Or just send me a message!"""
 
         elif data.startswith("checker_set:"):
             choice = data.split(":", 1)[1]
-            if choice not in ("evaluator", "provider"):
-                await query.answer("Unknown driver", show_alert=True)
+            if choice not in ("off", "evaluator", "provider"):
+                await query.answer("Unknown option", show_alert=True)
                 return
-            await set_config("security.rule_checker_driver", choice)
+            if choice == "off":
+                await set_config("security.rule_checker_enabled", False)
+            else:
+                await set_config("security.rule_checker_enabled", True)
+                await set_config("security.rule_checker_driver", choice)
             eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
             main_model = await get_config("provider.chat_model", "?")
-            picked_model = eval_model if choice == "evaluator" else main_model
+            try:
+                timeout_s = int(float(
+                    await get_config("security.rule_checker_timeout", 30)
+                ))
+            except Exception:
+                timeout_s = 30
+            timeout_s = max(5, min(120, timeout_s))
             buttons = [
+                InlineKeyboardButton(
+                    f"{'✅ ' if choice == 'off' else ''}Off",
+                    callback_data="checker_set:off",
+                ),
                 InlineKeyboardButton(
                     f"{'✅ ' if choice == 'evaluator' else ''}Evaluator ({eval_model})",
                     callback_data="checker_set:evaluator",
@@ -8788,8 +8842,16 @@ Or just send me a message!"""
                     callback_data="checker_set:provider",
                 ),
             ]
+            if choice == "off":
+                headline = "🛡 **Rule checker:** `off` — responses sent unevaluated"
+            else:
+                picked_model = eval_model if choice == "evaluator" else main_model
+                headline = (
+                    f"🛡 **Rule checker:** `{choice}` (`{picked_model}`)  ·  "
+                    f"timeout `{timeout_s}s`"
+                )
             await query.edit_message_text(
-                f"🛡 **Rule-checker driver:** `{choice}` (`{picked_model}`)",
+                headline,
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )

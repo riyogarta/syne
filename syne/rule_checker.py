@@ -24,6 +24,7 @@ Design notes
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -187,15 +188,26 @@ async def _check_via_ollama(
     return data.get("message", {}).get("content", "").strip()
 
 
-async def _check_via_provider(prompt: str, provider: LLMProvider) -> str:
+async def _check_via_provider(
+    prompt: str, provider: LLMProvider, timeout: float = 30.0,
+) -> str:
     """Fallback: use the main chat provider. Same provider that runs Molt —
-    accepts a small overhead vs Ollama's dedicated cheap model."""
-    response = await provider.chat(
-        messages=[ChatMessage(role="user", content=prompt)],
-        temperature=0.0,
-        thinking_budget=0,
-    )
-    return (response.content or "").strip()
+    accepts a small overhead vs Ollama's dedicated cheap model.
+
+    Bounded by asyncio.wait_for: provider SDKs do not all honour a timeout,
+    and an unbounded checker call would hold the user's reply hostage. On
+    timeout this raises TimeoutError, which check_response turns into
+    VerdictState.ERROR (fail-open with a warning) like any other failure.
+    """
+    async def _call() -> str:
+        response = await provider.chat(
+            messages=[ChatMessage(role="user", content=prompt)],
+            temperature=0.0,
+            thinking_budget=0,
+        )
+        return (response.content or "").strip()
+
+    return await asyncio.wait_for(_call(), timeout=timeout)
 async def check_response(
     draft: str,
 
@@ -206,6 +218,7 @@ async def check_response(
     evaluator_model: str = "qwen3:0.6b",
     provider: Optional[LLMProvider] = None,
     tools_ran: bool = True,
+    timeout: float = 30.0,
 ) -> CheckResult:
     """Judge a draft response against every hard rule.
 
@@ -221,6 +234,10 @@ async def check_response(
             return ERROR and the caller prepends a warning to the response.
         evaluator_model: Ollama model name when driver == 'ollama'.
         provider: Main LLM provider — required when driver == 'provider'.
+        timeout: Max seconds for the checker LLM call, both drivers. Exceeding
+            it raises TimeoutError, caught below and returned as ERROR so the
+            caller fails open. The caller clamps this (5-120) from
+            security.rule_checker_timeout.
 
     Returns:
         CheckResult with state CLEAN / VIOLATED / ERROR.
@@ -238,14 +255,18 @@ async def check_response(
 
     try:
         if evaluator_driver == "ollama":
-            raw = await _check_via_ollama(prompt, model=evaluator_model)
+            raw = await _check_via_ollama(
+                prompt, model=evaluator_model, timeout=timeout,
+            )
         else:
             if provider is None:
                 return CheckResult(
                     VerdictState.ERROR,
                     reason="provider driver but no provider passed",
                 )
-            raw = await _check_via_provider(prompt, provider)
+            raw = await _check_via_provider(
+                prompt, provider, timeout=timeout,
+            )
     except Exception as e:
         logger.warning(
             f"Rule checker LLM call failed: {type(e).__name__}: {e}"

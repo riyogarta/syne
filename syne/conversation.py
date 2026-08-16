@@ -1871,6 +1871,18 @@ class Conversation:
             max_retries = 2
         max_retries = max(0, min(5, max_retries))  # sanity clamp
 
+        # Per-call ceiling for the checker LLM. Default 30s; owner may tune
+        # security.rule_checker_timeout down (fast fail-open) or up to 120s
+        # (slow local models). Clamped both ends so a bad config value can
+        # never hang a turn indefinitely nor make every check time out.
+        try:
+            checker_timeout = float(
+                await get_config("security.rule_checker_timeout", 30)
+            )
+        except Exception:
+            checker_timeout = 30.0
+        checker_timeout = max(5.0, min(120.0, checker_timeout))
+
         # Driver selection: /checker lets the owner pin the checker to
         # either the evaluator (default: local qwen3:0.6b via Ollama —
         # cheap) OR the main provider (main chat model — more accurate,
@@ -1898,6 +1910,7 @@ class Conversation:
                 evaluator_model=eval_model,
                 provider=self.provider,
                 tools_ran=tools_ran,
+                timeout=checker_timeout,
             )
             if verdict.state == _RCState.CLEAN:
                 logger.info(

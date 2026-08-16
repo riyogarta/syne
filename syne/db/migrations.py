@@ -641,6 +641,29 @@ async def _m23_fetch_url_config(conn) -> None:
     await conn.execute("DELETE FROM config WHERE key = 'web_fetch.timeout'")
 
 
+async def _m24_rule_checker_timeout(conn) -> None:
+    """Seed security.rule_checker_timeout (Riyo, 16 Aug 2026).
+
+    Pairs with the /checker 'off' option. Both checker drivers now run under
+    a per-call ceiling so a hung Ollama or a stalled provider API cannot hold
+    a user's reply; on timeout the checker fails open with a warning.
+
+    Seed-only (ON CONFLICT DO NOTHING) — this key is NEW, so there is no
+    prior value to converge and no assumed-old-default to guess wrong about.
+    Fresh installs get the same key from schema.sql.
+    """
+    await conn.execute("""
+        INSERT INTO config (key, value, description)
+        VALUES ('security.rule_checker_timeout', '30',
+                'Max seconds the rule checker may spend judging one draft '
+                'response, for both drivers. Read at check time and clamped '
+                'to 5-120. On timeout the checker returns ERROR and fails '
+                'open — the reply is sent with a warning tag rather than '
+                'held. Default 30.')
+        ON CONFLICT (key) DO NOTHING
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -665,6 +688,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (21, _m21_smart_hnsw_guard, "transactional"),
     (22, _m22_fk_index_and_autovacuum, "transactional"),
     (23, _m23_fetch_url_config, "transactional"),
+    (24, _m24_rule_checker_timeout, "transactional"),
 ]
 
 
