@@ -1010,5 +1010,5 @@ CREATE TABLE IF NOT EXISTS shell_denylist (
 -- hold a reply indefinitely, so both drivers (Ollama + main provider) run
 -- under this ceiling. Exceeding it fails open with a warning tag.
 INSERT INTO config (key, value, description) VALUES
-    ('security.rule_checker_timeout', '30', 'Max seconds the rule checker may spend judging one draft response, for both drivers. Read at check time and clamped to 5-120. On timeout the checker returns ERROR and fails open — the reply is sent with a warning tag rather than held. Default 30.')
+    ('security.rule_checker_timeout', '120', 'Max seconds the rule checker may spend judging one draft response, applied to both drivers (Ollama evaluator and main provider). Read at check time and clamped to 5-120. On timeout the checker returns ERROR and fails open — the reply is sent with a warning tag rather than held. Default 120; owner tunes it via /checker timeout <sec>.')
 ON CONFLICT (key) DO NOTHING;

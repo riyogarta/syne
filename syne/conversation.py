@@ -1871,16 +1871,17 @@ class Conversation:
             max_retries = 2
         max_retries = max(0, min(5, max_retries))  # sanity clamp
 
-        # Per-call ceiling for the checker LLM. Default 30s; owner may tune
-        # security.rule_checker_timeout down (fast fail-open) or up to 120s
-        # (slow local models). Clamped both ends so a bad config value can
-        # never hang a turn indefinitely nor make every check time out.
+        # Per-call ceiling for the checker LLM, applied to BOTH drivers
+        # (Ollama evaluator and main provider). Ships at 120s so slow local
+        # models are not cut off mid-verdict; owner tunes it down via
+        # /checker timeout <sec> for a faster fail-open. Clamped 5-120 so a
+        # bad config value can never hang a turn nor time out every check.
         try:
             checker_timeout = float(
-                await get_config("security.rule_checker_timeout", 30)
+                await get_config("security.rule_checker_timeout", 120)
             )
         except Exception:
-            checker_timeout = 30.0
+            checker_timeout = 120.0
         checker_timeout = max(5.0, min(120.0, checker_timeout))
 
         # Driver selection: /checker lets the owner pin the checker to

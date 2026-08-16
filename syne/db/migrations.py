@@ -650,16 +650,18 @@ async def _m24_rule_checker_timeout(conn) -> None:
 
     Seed-only (ON CONFLICT DO NOTHING) — this key is NEW, so there is no
     prior value to converge and no assumed-old-default to guess wrong about.
-    Fresh installs get the same key from schema.sql.
+    Fresh installs get the same key from schema.sql. Owner retunes it at
+    runtime via /checker timeout <sec>, which is why this only ever seeds.
     """
     await conn.execute("""
         INSERT INTO config (key, value, description)
-        VALUES ('security.rule_checker_timeout', '30',
+        VALUES ('security.rule_checker_timeout', '120',
                 'Max seconds the rule checker may spend judging one draft '
-                'response, for both drivers. Read at check time and clamped '
-                'to 5-120. On timeout the checker returns ERROR and fails '
-                'open — the reply is sent with a warning tag rather than '
-                'held. Default 30.')
+                'response, applied to both drivers (Ollama evaluator and '
+                'main provider). Read at check time and clamped to 5-120. '
+                'On timeout the checker returns ERROR and fails open — the '
+                'reply is sent with a warning tag rather than held. '
+                'Default 120; owner tunes it via /checker timeout <sec>.')
         ON CONFLICT (key) DO NOTHING
     """)
 

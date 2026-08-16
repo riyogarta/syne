@@ -297,7 +297,7 @@ class TelegramChannel:
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
             BotCommand("compact", "Compact conversation history"),
-            BotCommand("checker", "Rule checker: off / evaluator model / main LLM (owner only)"),
+            BotCommand("checker", "Rule checker: off / evaluator / main LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
@@ -2063,7 +2063,7 @@ class TelegramChannel:
 
 *Security* (owner)
 /consent — Toggle consent gate for destructive tools
-/checker — Rule checker: off, evaluator model, or main LLM
+/checker — Rule checker: off, evaluator model, main LLM, or timeout <sec>
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
 /denylist — Manage shell denylist (add/remove/list)
@@ -3599,8 +3599,13 @@ Or just send me a message!"""
           * provider — the main chat model that runs Molt (higher per-turn
             cost, but works when Ollama is not available).
 
-        Writes security.rule_checker_enabled (off vs on) and, when on,
-        security.rule_checker_driver. Owner-only.
+        Also accepts `timeout <seconds>` to retune how long a single check
+        may take before it fails open (clamped 5-120, ships at 120). The
+        ceiling applies to both drivers.
+
+        Writes security.rule_checker_enabled (off vs on), when on
+        security.rule_checker_driver, and security.rule_checker_timeout.
+        Owner-only.
         """
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
@@ -3609,8 +3614,43 @@ Or just send me a message!"""
             await update.message.reply_text("⚠️ Only the owner can change the rule-checker driver.")
             return
 
-        args = update.message.text.split(maxsplit=1)
-        choice = args[1].strip().lower() if len(args) > 1 else None
+        args = update.message.text.split()
+        tokens = [t.strip().lower() for t in args[1:]]
+        choice = tokens[0] if tokens else None
+
+        # `/checker timeout <sec>` — retune the ceiling without touching the
+        # driver. Handled before the driver branch since "timeout" is not a
+        # driver name and would otherwise fall through to the usage error.
+        if choice == "timeout":
+            if len(tokens) < 2:
+                current_t = await get_config("security.rule_checker_timeout", 120)
+                await update.message.reply_text(
+                    f"⏱ Rule-checker timeout is `{current_t}s`.\n"
+                    f"Set it with `/checker timeout <seconds>` (5-120).",
+                    parse_mode="Markdown",
+                )
+                return
+            try:
+                secs = int(float(tokens[1]))
+            except ValueError:
+                await update.message.reply_text(
+                    f"❌ `{tokens[1]}` is not a number. Use `/checker timeout <seconds>` (5-120).",
+                    parse_mode="Markdown",
+                )
+                return
+            clamped = max(5, min(120, secs))
+            await set_config("security.rule_checker_timeout", clamped)
+            note = (
+                f"\n\n(Clamped from {secs}s — allowed range is 5-120s.)"
+                if clamped != secs else ""
+            )
+            await update.message.reply_text(
+                f"⏱ Rule-checker timeout set to **{clamped}s**, for both drivers. "
+                f"A check that exceeds it fails open: the reply is sent with a "
+                f"warning tag rather than held.{note}",
+                parse_mode="Markdown",
+            )
+            return
 
         enabled_raw = await get_config("security.rule_checker_enabled", True)
         if isinstance(enabled_raw, str):
@@ -3625,10 +3665,10 @@ Or just send me a message!"""
         main_model = await get_config("provider.chat_model", "?")
         try:
             timeout_s = int(float(
-                await get_config("security.rule_checker_timeout", 30)
+                await get_config("security.rule_checker_timeout", 120)
             ))
         except Exception:
-            timeout_s = 30
+            timeout_s = 120
         timeout_s = max(5, min(120, timeout_s))
 
         # "off" is a state of its own: rule_checker_enabled=false wins over
@@ -3660,9 +3700,9 @@ Or just send me a message!"""
                 f"Cheap, local when driver is Ollama, no per-turn API cost.\n"
                 f"• **Main LLM** — `{main_model}`. More accurate, but every response "
                 f"costs an extra API call to your main model.\n\n"
-                f"Max wait per check is `security.rule_checker_timeout` "
-                f"(now {timeout_s}s, clamped 5-120). On timeout the reply is sent "
-                f"with a warning rather than held.",
+                f"Max wait per check is {timeout_s}s (both drivers), set via "
+                f"`/checker timeout <sec>`, range 5-120. On timeout the reply is "
+                f"sent with a warning rather than held.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([buttons]),
             )
@@ -3670,7 +3710,7 @@ Or just send me a message!"""
 
         if choice not in ("off", "evaluator", "provider"):
             await update.message.reply_text(
-                "❌ Use: `off`, `evaluator`, or `provider` "
+                "❌ Use: `off`, `evaluator`, `provider`, or `timeout <seconds>` "
                 "(or call `/checker` with no argument for buttons).",
                 parse_mode="Markdown",
             )
@@ -8823,10 +8863,10 @@ Or just send me a message!"""
             main_model = await get_config("provider.chat_model", "?")
             try:
                 timeout_s = int(float(
-                    await get_config("security.rule_checker_timeout", 30)
+                    await get_config("security.rule_checker_timeout", 120)
                 ))
             except Exception:
-                timeout_s = 30
+                timeout_s = 120
             timeout_s = max(5, min(120, timeout_s))
             buttons = [
                 InlineKeyboardButton(

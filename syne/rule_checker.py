@@ -170,7 +170,7 @@ def _build_prompt(
 
 async def _check_via_ollama(
     prompt: str, model: str, base_url: str = "http://localhost:11434",
-    timeout: float = 30.0,
+    timeout: float = 120.0,
 ) -> str:
     """Direct HTTP to Ollama /api/chat — same shape as evaluate_message_ollama."""
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -189,7 +189,7 @@ async def _check_via_ollama(
 
 
 async def _check_via_provider(
-    prompt: str, provider: LLMProvider, timeout: float = 30.0,
+    prompt: str, provider: LLMProvider, timeout: float = 120.0,
 ) -> str:
     """Fallback: use the main chat provider. Same provider that runs Molt —
     accepts a small overhead vs Ollama's dedicated cheap model.
@@ -218,7 +218,7 @@ async def check_response(
     evaluator_model: str = "qwen3:0.6b",
     provider: Optional[LLMProvider] = None,
     tools_ran: bool = True,
-    timeout: float = 30.0,
+    timeout: float = 120.0,
 ) -> CheckResult:
     """Judge a draft response against every hard rule.
 
