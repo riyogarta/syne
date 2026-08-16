@@ -134,7 +134,16 @@ async def _checker_default_model_label() -> str:
             from ..llm.drivers import get_model_from_list
             entry = get_model_from_list(models, active_key)
             if entry:
-                return entry.get("model") or entry.get("key") or str(active_key)
+                # Registry entries store the real model name under
+                # "model_id" ("gemini-2.5-flash"); "key" is only the slug
+                # ("gemini-2-5-flash"). Reading "model" always yielded None
+                # and silently degraded the panel to the slug.
+                return (
+                    entry.get("model_id")
+                    or entry.get("label")
+                    or entry.get("key")
+                    or str(active_key)
+                )
         if active_key:
             return str(active_key)
     except Exception:

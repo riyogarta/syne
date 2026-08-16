@@ -58,7 +58,7 @@ HARD RULES:
 
 TOOL-EXECUTION CONTEXT (authoritative — trust this over the draft's wording):
 {tool_context}
-
+{time_block}
 USER MESSAGE (for context — do NOT judge this, only the draft):
 {user_message}
 
@@ -126,7 +126,7 @@ def _parse_verdict_line(raw: str) -> CheckResult:
 
 def _build_prompt(
     draft: str, user_message: str, hard_rules: list[dict],
-    tools_ran: bool = True,
+    tools_ran: bool = True, time_context: str = "",
 ) -> str:
     """Compact prompt for the checker LLM. Keeps rule content in DB shape.
 
@@ -135,6 +135,14 @@ def _build_prompt(
     judged correctly — a genuine post-tool summary ('push sukses') is CLEAN
     when tools_ran is True, but a bare claim with no tool is a violation.
     Defaults True (conservative: assume a tool ran → never phantom-flag).
+
+    time_context: the SAME authoritative "Current Time" block that was
+    injected into the assistant's own context this turn. Without it a rule
+    like DATE_VERIFY ("you MUST read the Current Time block") is unjudgeable
+    — the checker cannot see the block, so a correct date looks unverified
+    and every retry re-fails, burning the retry budget on a compliant draft.
+    Empty string renders no TIME CONTEXT section at all (sub-agent / CLI
+    paths that never build a time block), leaving behaviour unchanged there.
     """
     rules_lines = []
     for r in hard_rules:
@@ -160,9 +168,24 @@ def _build_prompt(
     # Truncate to keep the checker request cheap. Real DATE_VERIFY-style
     # violations always sit in the first paragraph or two; long tail rarely
     # matters. If it does, we can raise these.
+    tc = (time_context or "").strip()
+    if tc:
+        time_block = (
+            "\nTIME CONTEXT (authoritative — this exact block WAS present in "
+            "the assistant's context this turn):\n"
+            f"{tc[:600]}\n"
+            "Judge any date, time or day-difference in the draft against the "
+            "block above. If it agrees, the draft DID verify — that is CLEAN, "
+            "not a violation. Flag only a date that contradicts this block or "
+            "that the block cannot support.\n"
+        )
+    else:
+        time_block = ""
+
     return _CHECKER_PROMPT_TEMPLATE.format(
         rules_block=rules_block,
         tool_context=tool_context,
+        time_block=time_block,
         user_message=(user_message or "").strip()[:1500],
         draft=(draft or "").strip()[:4000],
     )
@@ -218,6 +241,7 @@ async def check_response(
     evaluator_model: str = "qwen3:0.6b",
     provider: Optional[LLMProvider] = None,
     tools_ran: bool = True,
+    time_context: str = "",
     timeout: float = 120.0,
 ) -> CheckResult:
     """Judge a draft response against every hard rule.
@@ -234,6 +258,10 @@ async def check_response(
             return ERROR and the caller prepends a warning to the response.
         evaluator_model: Ollama model name when driver == 'ollama'.
         provider: Main LLM provider — required when driver == 'provider'.
+        time_context: The authoritative "Current Time" block from the
+            assistant's context this turn. Passing it lets time-related hard
+            rules actually be judged; omitting it makes them unjudgeable and
+            permanently VIOLATED. Empty = section omitted entirely.
         timeout: Max seconds for the checker LLM call, both drivers. Exceeding
             it raises TimeoutError, caught below and returned as ERROR so the
             caller fails open. The caller clamps this (5-120) from
@@ -251,7 +279,10 @@ async def check_response(
     if not (draft and draft.strip()):
         return CheckResult(VerdictState.CLEAN)
 
-    prompt = _build_prompt(draft, user_message, hard_rules, tools_ran=tools_ran)
+    prompt = _build_prompt(
+        draft, user_message, hard_rules,
+        tools_ran=tools_ran, time_context=time_context,
+    )
 
     try:
         if evaluator_driver == "ollama":

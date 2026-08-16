@@ -203,6 +203,12 @@ class Conversation:
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
+        # Last authoritative "Current Time" block injected into context by
+        # _build_context. Handed to the rule checker so time-related hard
+        # rules (DATE_VERIFY) are judgeable: without it the checker cannot
+        # see the block the rule tells it to read, so a CORRECT date reads
+        # as unverified and every retry re-fails on a compliant draft.
+        self._last_time_context: str = ""
         # Consent-system pending state — populated by consent.check_and_hold
         # when a tool/ability call is held pending confirmation. The
         # deterministic bypass at the top of chat() checks these on every turn
@@ -590,7 +596,10 @@ class Conversation:
             time_lines.append(f"UTC: {utc_full} | {utc_c['iso']}")
             time_lines.append("Time policy: default=SYNE (no tz label), 'server'=SERVER+' (Server)', 'UTC'=UTC+' UTC', multiple=answer all")
 
-            messages.append(ChatMessage(role='system', content='\n'.join(time_lines)))
+            _time_block = '\n'.join(time_lines)
+            messages.append(ChatMessage(role='system', content=_time_block))
+            # Same string the checker will judge against — see _last_time_context.
+            self._last_time_context = _time_block
         except Exception as e:
             logger.debug(f"Time context injection failed: {e}")
 
@@ -1933,6 +1942,7 @@ class Conversation:
                 evaluator_model=eval_model,
                 provider=checker_provider,
                 tools_ran=tools_ran,
+                time_context=self._last_time_context,
                 timeout=checker_timeout,
             )
             if verdict.state == _RCState.CLEAN:
