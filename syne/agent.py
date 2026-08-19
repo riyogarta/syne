@@ -2120,13 +2120,25 @@ class SyneAgent:
     # hot-reload the ability create/enable/disable paths already do.
     _SOUL_MUTATING_ACTIONS = {"set", "add", "remove"}
 
+    # Returns from _update_soul_impl that mean NOTHING was written. Rebuilding
+    # every cached prompt on these is pure waste. "Unknown target/action" is in
+    # here because no target accepts all three mutating actions -- identity has
+    # set only, soul and rules have add/remove only -- so a wrong pairing lands
+    # on that string while still looking like a mutation judged by action alone.
+    _SOUL_NOOP_PREFIXES = ("Error:", "Unknown ")
+
+    @classmethod
+    def _soul_write_missed(cls, result: str) -> bool:
+        """True when the write did not land, so no prompt refresh is needed."""
+        return result.startswith(cls._SOUL_NOOP_PREFIXES) or result.endswith("not found.")
+
     async def _tool_update_soul(self, target: str, action: str, key: str = "", value: str = "", severity: str = "soft") -> str:
         """Tool handler: update identity, soul, or rules (with prompt hot-reload)."""
         result = await self._update_soul_impl(target, action, key, value, severity)
 
         if action not in self._SOUL_MUTATING_ACTIONS:
             return result
-        if result.startswith("Error:") or result.endswith("not found."):
+        if self._soul_write_missed(result):
             return result
 
         try:
