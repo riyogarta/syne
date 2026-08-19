@@ -2113,7 +2113,35 @@ class SyneAgent:
 
         return f"Unknown action: {action}"
 
+    # Mutating soul/identity/rules writes must invalidate the cached system
+    # prompt. Without this, the DB write lands correctly but every active
+    # Conversation keeps serving the prompt built at session creation, so a new
+    # or edited rule only takes effect after a process restart. Mirrors the
+    # hot-reload the ability create/enable/disable paths already do.
+    _SOUL_MUTATING_ACTIONS = {"set", "add", "remove"}
+
     async def _tool_update_soul(self, target: str, action: str, key: str = "", value: str = "", severity: str = "soft") -> str:
+        """Tool handler: update identity, soul, or rules (with prompt hot-reload)."""
+        result = await self._update_soul_impl(target, action, key, value, severity)
+
+        if action not in self._SOUL_MUTATING_ACTIONS:
+            return result
+        if result.startswith("Error:") or result.endswith("not found."):
+            return result
+
+        try:
+            await self.conversations.refresh_system_prompts()
+        except Exception as e:
+            logger.error(f"update_soul: system prompt refresh failed: {e}")
+            return (
+                f"{result}\n\n"
+                f"⚠️ Written to the database, but the in-memory system prompt "
+                f"refresh failed ({e}). A restart is required for it to take effect."
+            )
+
+        return result
+
+    async def _update_soul_impl(self, target: str, action: str, key: str = "", value: str = "", severity: str = "soft") -> str:
         """Tool handler: update identity, soul, or rules."""
         from .db.connection import get_connection
 
