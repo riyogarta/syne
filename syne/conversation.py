@@ -202,6 +202,14 @@ class Conversation:
         self._processing: bool = False
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
+        # System-prompt hot-reload versioning. _sys_epoch is bumped by
+        # ConversationManager.refresh_system_prompts() whenever identity/soul/
+        # rules/abilities change. _ctx_sys_epoch records which epoch the system
+        # message currently sitting in the live context was built from. When
+        # they diverge mid-turn, the context is stale -> _sync_system_prompt()
+        # re-decorates it between tool rounds.
+        self._sys_epoch: int = 0
+        self._ctx_sys_epoch: int = -1
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
         # Last authoritative "Current Time" block injected into context by
         # _build_context. Handed to the rule checker so time-related hard
@@ -519,22 +527,13 @@ class Conversation:
             # in the log without any actionable context.
             logger.warning(f"_embed_message_row id={message_id} failed: {e}")
 
-    async def build_context(self, user_message: str, recall_query: Optional[str] = None) -> list[ChatMessage]:
-        """Build full context: system prompt + memories + history + current message.
+    def _decorate_system_prompt(self, access_level: str) -> str:
+        """Base system prompt + provider guardrails + group restrictions.
 
-        Args:
-            user_message: Full message (may include context prefix) for history.
-            recall_query: Clean text (without prefix) for memory recall. Falls back to user_message.
+        Single source of truth for prompt decoration, shared by build_context
+        (start of turn) and _sync_system_prompt (mid-turn hot reload) so both
+        paths can never drift apart.
         """
-        messages = []
-        access_level = self.user.get("access_level", "public")
-        # In group chats, the effective access level for memory is the SENDER (who asked),
-        # resolved from the group member registry in InboundContext.sender_access.
-        # If not available, fall back to the user record.
-        if self.is_group and self.inbound and self.inbound.sender_access:
-            access_level = self.inbound.sender_access
-
-        # 1. System prompt
         prompt = self.system_prompt
 
         # ═══════════════════════════════════════════════════════════════
@@ -552,8 +551,56 @@ class Conversation:
         # This reinforces that owner tools are DM-only when in groups
         # ═══════════════════════════════════════════════════════════════
         if self.is_group:
-            group_restrictions = get_group_context_restrictions(access_level, is_group=True)
-            prompt = prompt + group_restrictions
+            prompt = prompt + get_group_context_restrictions(access_level, is_group=True)
+
+        return prompt
+
+    def _sync_system_prompt(self, context: list[ChatMessage], access_level: str) -> bool:
+        """Re-apply the system prompt mid-turn if it changed since build_context.
+
+        A turn snapshots the system message once, then may run for many tool
+        rounds. If update_soul (or an ability change) fires refresh_system_prompts
+        during that turn, every remaining round would otherwise keep running on
+        the OLD rules. Rewriting context[0] in place closes that window.
+
+        Cheap by design: no DB work, no re-render — self.system_prompt was
+        already rebuilt by the refresher. Returns True if a swap happened.
+        """
+        if self._ctx_sys_epoch == self._sys_epoch:
+            return False
+        if not context or context[0].role != "system":
+            # Unexpected shape — never rewrite a non-system slot.
+            return False
+        context[0] = ChatMessage(
+            role="system",
+            content=self._decorate_system_prompt(access_level),
+        )
+        self._ctx_sys_epoch = self._sys_epoch
+        logger.info(
+            f"Session {self.session_id}: system prompt hot-reloaded mid-turn "
+            f"(epoch {self._sys_epoch})"
+        )
+        return True
+
+    async def build_context(self, user_message: str, recall_query: Optional[str] = None) -> list[ChatMessage]:
+        """Build full context: system prompt + memories + history + current message.
+
+        Args:
+            user_message: Full message (may include context prefix) for history.
+            recall_query: Clean text (without prefix) for memory recall. Falls back to user_message.
+        """
+        messages = []
+        access_level = self.user.get("access_level", "public")
+        # In group chats, the effective access level for memory is the SENDER (who asked),
+        # resolved from the group member registry in InboundContext.sender_access.
+        # If not available, fall back to the user record.
+        if self.is_group and self.inbound and self.inbound.sender_access:
+            access_level = self.inbound.sender_access
+
+        # 1. System prompt (decorated). Snapshot the epoch it was built from
+        # so a mid-turn refresh can be detected between tool rounds.
+        prompt = self._decorate_system_prompt(access_level)
+        self._ctx_sys_epoch = self._sys_epoch
 
         messages.append(ChatMessage(role="system", content=prompt))
 
@@ -2490,6 +2537,12 @@ class Conversation:
             # Small delay between tool call rounds to avoid rate limiting
             await asyncio.sleep(1.0)
 
+            # Hot-reload: identity/soul/rules may have changed mid-turn
+            # (update_soul -> refresh_system_prompts). The system message was
+            # snapshotted at build_context time, so without this the whole
+            # remainder of the turn would run under the OLD rules.
+            self._sync_system_prompt(context, access_level)
+
             # Get next response — may contain more tool calls
             # Auto-retry on vague 400 errors
             for _vague_attempt in range(3):
@@ -3115,6 +3168,8 @@ class ConversationManager:
                     inbound=conv.inbound,
                 )
                 conv.system_prompt = new_prompt
+                # Signal live turns that their snapshot is stale.
+                conv._sys_epoch += 1
                 logger.debug(f"Refreshed system prompt for session {key}")
             except Exception as e:
                 logger.error(f"Failed to refresh prompt for {key}: {e}")
