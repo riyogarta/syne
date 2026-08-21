@@ -142,6 +142,64 @@ def extract_media(text: str) -> tuple[str, Optional[str]]:
     return text, None
 
 
+# A MEDIA: trailer occupying a whole line. The path may contain spaces,
+# so everything up to end-of-line is the candidate.
+_MEDIA_LINE_RE = re.compile(r'^[ \t]*MEDIA:[ \t]*(.+?)[ \t]*$', re.MULTILINE)
+
+
+def extract_all_media(text: str) -> tuple[str, list[str]]:
+    """Extract EVERY MEDIA: path from response text, in emission order.
+
+    A single turn may attach more than one file (e.g. send_file called
+    twice). Each attachment arrives as its own "\\n\\nMEDIA: <path>"
+    trailer. The single-path `extract_media` only ever sees the LAST one,
+    so the earlier attachments were silently dropped: the tool reported
+    success, the channel sent one file, and the user was left to notice
+    the missing ones on their own.
+
+    Only trailers whose path actually exists on disk are consumed. A stray
+    or hallucinated "MEDIA:" line is left untouched in the text, so
+    user-facing content is never swallowed by a bad reference — same
+    guarantee `extract_media` makes.
+
+    Args:
+        text: Response text (may contain zero or more MEDIA: trailers)
+
+    Returns:
+        Tuple of (text_without_media, [media_path, ...]). When there is
+        nothing valid to attach the list is empty and the text is
+        returned unchanged.
+    """
+    if not text:
+        return text, []
+
+    paths: list[str] = []
+    consumed: list[tuple[int, int]] = []  # spans of the lines we take out
+
+    for m in _MEDIA_LINE_RE.finditer(text):
+        candidate = m.group(1).strip()
+        if candidate and os.path.isfile(candidate):
+            paths.append(candidate)
+            consumed.append(m.span())
+
+    if not paths:
+        return text, []
+
+    # Rebuild the text without the consumed trailer lines.
+    out: list[str] = []
+    cursor = 0
+    for start, end in consumed:
+        out.append(text[cursor:start])
+        cursor = end
+    out.append(text[cursor:])
+    remaining = "".join(out)
+
+    # Collapse the blank lines left behind by the removed trailers.
+    remaining = re.sub(r'\n{3,}', '\n\n', remaining).strip()
+
+    return remaining, paths
+
+
 # ============================================================
 # MESSAGE SPLITTING
 # ============================================================

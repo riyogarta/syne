@@ -29,7 +29,7 @@ from typing import Optional
 
 from .base import Ability
 from ..communication.inbound import InboundContext
-from ..communication.outbound import extract_media, process_outbound, split_message
+from ..communication.outbound import extract_media, extract_all_media, process_outbound, split_message
 
 logger = logging.getLogger("syne.whatsapp")
 
@@ -966,8 +966,12 @@ class WhatsAppAbility(Ability):
 
         Workaround: pause sync, send, then resume sync.
         """
-        # Extract MEDIA: path BEFORE process_outbound (which strips server paths)
-        text, media_path = extract_media(text)
+        # Extract MEDIA: paths BEFORE process_outbound (which strips server paths).
+        # A turn may carry several files; the first takes the caption, the
+        # rest follow it.
+        text, _all_media = extract_all_media(text)
+        media_path = _all_media[0] if _all_media else None
+        _extra_media = _all_media[1:]
 
         text = process_outbound(text)
         if not text and not media_path:
@@ -987,6 +991,15 @@ class WhatsAppAbility(Ability):
                 if media_path:
                     await self._send_file_locked(jid, media_path, caption=text)
                     text = None  # caption already sent with image
+
+                # Remaining attachments go bare — the caption already went
+                # out with the first file. One failure must not sink the rest.
+                for _extra in _extra_media:
+                    try:
+                        await self._send_file_locked(jid, _extra)
+                        await asyncio.sleep(0.3)
+                    except Exception as _ee:
+                        logger.error(f'Failed to send extra media {_extra}: {_ee}')
 
                 # Send remaining text (if any)
                 if text:

@@ -21,7 +21,7 @@ from telegram.ext import (
 
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
-from .outbound import strip_server_paths, extract_media, split_message, process_outbound
+from .outbound import strip_server_paths, extract_media, extract_all_media, split_message, process_outbound
 from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
 from ..db.models import (
     get_group,
@@ -9410,7 +9410,11 @@ Or just send me a message!"""
 
         # Use communication sub-core for universal processing
         _marker_in_input = "[[CONSENT_BUTTONS:hash=" in (text or "")
-        caption_text, media_path = extract_media(text)
+        # A turn may carry MORE THAN ONE attachment. The first file rides
+        # along with the caption; the extras are sent right after it.
+        caption_text, _all_media = extract_all_media(text)
+        media_path = _all_media[0] if _all_media else None
+        _extra_media = _all_media[1:]
         _marker_after_extract = "[[CONSENT_BUTTONS:hash=" in (caption_text or "")
         _keep_paths = await self._is_owner_dm(chat_id)
         caption_text = process_outbound(caption_text, strip_paths=not _keep_paths)
@@ -9487,6 +9491,33 @@ Or just send me a message!"""
                     except Exception:
                         sent_msg = await self._telegram_retry(_send_doc_plain, op="send_document_plain")
                 logger.info(f"Sent media: {media_path} to {chat_id}")
+                # Send the remaining attachments as follow-up messages. The
+                # caption already went out with the first file, so these go
+                # bare. Each one is isolated: a failure here must not sink
+                # the whole response (the primary file already landed).
+                for _extra in _extra_media:
+                    try:
+                        if not os.path.isfile(_extra):
+                            logger.warning(f"Extra media vanished before send: {_extra}")
+                            continue
+                        _eext = os.path.splitext(_extra)[1].lower()
+                        if _eext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                            async def _send_extra_photo(_p=_extra):
+                                with open(_p, "rb") as fh:
+                                    return await bot.send_photo(chat_id=chat_id, photo=fh)
+                            await self._telegram_retry(_send_extra_photo, op="send_photo_extra")
+                        else:
+                            from telegram import InputFile as _InputFile
+                            async def _send_extra_doc(_p=_extra):
+                                with open(_p, "rb") as fh:
+                                    return await bot.send_document(
+                                        chat_id=chat_id,
+                                        document=_InputFile(fh, filename=os.path.basename(_p)),
+                                    )
+                            await self._telegram_retry(_send_extra_doc, op="send_document_extra")
+                        logger.info(f"Sent extra media: {_extra} to {chat_id}")
+                    except Exception as _ee:
+                        logger.error(f"Failed to send extra media {_extra}: {_ee}")
                 return sent_msg
             except Exception as e:
                 logger.error(f"Failed to send media {media_path}: {e}")

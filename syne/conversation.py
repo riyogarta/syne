@@ -1664,9 +1664,19 @@ class Conversation:
             # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
             import re
             final_response = re.sub(r'\n*MEDIA:\s*\S*', '', final_response).rstrip()
-            last_media = self._pending_media[-1]
-            final_response = f"{final_response}\n\nMEDIA: {last_media}"
-            logger.info(f"Attached pending media to response: {last_media}")
+            # Attach EVERY file collected this turn, in tool-call order.
+            # Taking only [-1] here silently dropped the earlier attachments:
+            # send_file still reported success, the channel sent one file, and
+            # the user was left to notice the missing ones on their own.
+            _seen: set[str] = set()
+            _attached: list[str] = []
+            for _mp in self._pending_media:
+                if _mp and _mp not in _seen:
+                    _seen.add(_mp)
+                    _attached.append(_mp)
+            for _mp in _attached:
+                final_response = f"{final_response}\n\nMEDIA: {_mp}"
+            logger.info(f"Attached pending media to response: {_attached}")
 
         # Evaluate memory (only if auto_capture enabled)
         # Rule 760: Only owner and family can write to global memory.
