@@ -779,6 +779,29 @@ class Conversation:
         # Safety net — should rarely trigger after adaptive reduction
         messages = self.context_mgr.trim_context(messages)
 
+        # 7. Ordering guard — the conversation MUST end with the user turn.
+        #    A concurrent turn on the same session (see chat()'s 30s stuck-lock
+        #    replacement) can interleave writes into _message_cache, landing a
+        #    late assistant/tool message AFTER the current user message.
+        #    Anthropic rejects that as assistant-prefill ("The conversation must
+        #    end with a user message"). Re-anchor the last user message at the
+        #    tail instead of failing the whole turn. System blocks (memory /
+        #    graph) are ignored here — providers hoist them out anyway.
+        _nonsys = [i for i, m in enumerate(messages) if m.role != "system"]
+        if _nonsys and messages[_nonsys[-1]].role != "user":
+            _lu = next(
+                (i for i in reversed(_nonsys) if messages[i].role == "user"), None
+            )
+            if _lu is not None:
+                logger.warning(
+                    "Context ordering: non-user tail detected "
+                    f"(last={messages[_nonsys[-1]].role}) — re-anchoring last "
+                    "user message to the end (concurrent-turn interleave)"
+                )
+                _m = messages.pop(_lu)
+                _n2 = [i for i, m in enumerate(messages) if m.role != "system"]
+                messages.insert(_n2[-1] + 1, _m)
+
         return messages
 
     def _build_chat_kwargs(self) -> dict:

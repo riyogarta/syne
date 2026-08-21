@@ -351,6 +351,19 @@ class AnthropicProvider(LLMProvider):
             else:
                 merged.append(msg)
 
+        # Trailing-role guard — Anthropic reads a trailing assistant message as
+        # an assistant PREFILL and rejects it on models that don't support it
+        # ("The conversation must end with a user message"). This can happen
+        # when a concurrent turn on the same session interleaves a late
+        # assistant write after the current user message. conversation.py's
+        # ordering guard fixes the common case; this is the last line of
+        # defence so a malformed tail degrades instead of 400-ing the turn.
+        while len(merged) > 1 and merged[-1].get("role") == "assistant":
+            merged.pop()
+            logger.warning(
+                "Dropped trailing assistant message — would be read as prefill"
+            )
+
         return merged
 
     # Claude-specific defaults — tuned for quality over creativity
