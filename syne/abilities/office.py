@@ -31,6 +31,7 @@ import time
 from copy import deepcopy
 
 from syne.abilities.base import Ability
+from syne.abilities import _media
 
 logger = logging.getLogger("syne.ability.office")
 
@@ -81,6 +82,17 @@ def _ensure_ext(name: str, ext: str) -> str:
         n = n[: -len(ext)]
     n = n.rstrip(". ")
     return (n or "output") + ext
+
+
+def _with_image_stats(result: dict, images: dict) -> dict:
+    """Annotate a tool result with how many embedded images worked."""
+    if not images:
+        return result
+    result["images_embedded"] = sum(1 for pth, _ in images.values() if pth)
+    failed = {s: r for s, (pth, r) in images.items() if not pth}
+    if failed:
+        result["images_failed"] = failed
+    return result
 
 
 class OfficeAbility(Ability):
@@ -236,7 +248,11 @@ class OfficeAbility(Ability):
                             "description": (
                                 "For create_docx: body text. Markdown-style: "
                                 "# H1, ## H2, ### H3, - bullets, **bold**, *italic*. "
-                                "Paragraphs separated by blank line."
+                                "Paragraphs separated by blank line. "
+                                "Images: put ![Caption](source) on its own line, where "
+                                "source is a filename in workspace/ (e.g. photo.jpg), "
+                                "an https:// URL, or a data:image/...;base64 URI. "
+                                "Optional size: ![Caption](photo.jpg){width=60%}."
                             ),
                         },
                         "sheets": {
@@ -262,6 +278,11 @@ class OfficeAbility(Ability):
                                 "- icon_rows: {title, subtitle, items: [{name,desc}, ...]} (not exactly 4)\n"
                                 "- two_column (default): {title, subtitle, left, right} or {title, bullets}\n"
                                 "- closing (last slide, auto): {title:'Terima Kasih'|'Thank You'|..., subtitle, meta}\n"
+                                "Image on a slide: add \"image\": \"photo.jpg\" (filename in "
+                                "workspace/, https:// URL, or data: URI). Use "
+                                "{\"src\": \"photo.jpg\", \"caption\": \"...\"} to caption it. "
+                                "A slide with an image is rendered with the two_column "
+                                "layout: text on the left, picture on the right.\n"
                                 "Pass as JSON string."
                             ),
                         },
@@ -302,6 +323,10 @@ class OfficeAbility(Ability):
             "- Create Word: `office(action='create_docx', title='...', content='# Heading\\nText')`\n"
             "- Create Excel: `office(action='create_xlsx', title='...', sheets='[{\"name\":\"S1\",\"headers\":[\"A\"],\"rows\":[[1]]}]')`\n"
             "- Create PPT: `office(action='create_pptx', title='...', slides='[{\"title\":\"S1\",\"bullets\":[\"p1\"]}]')`\n"
+            "- Image in Word: `![Caption](photo.jpg)` on its own line — file in "
+            "workspace/, https:// URL, or data: URI. Size: `{width=60%}`\n"
+            "- Image in PPT: add `\"image\": \"photo.jpg\"` to the slide object "
+            "(or `{\"src\":\"photo.jpg\",\"caption\":\"...\"}`)\n"
             "- Read base64: `office(action='read_docx'|'read_xlsx'|'read_pptx', file_base64='...')`"
         )
 
@@ -319,8 +344,13 @@ class OfficeAbility(Ability):
                 content = params.get("content") or ""
                 name = _ensure_ext(_safe_filename(out_name or title or f"document_{_now_ts()}"), ".docx")
                 out_path = os.path.join(out_dir, name)
-                _make_docx(out_path, title, content)
-                return {"success": True, "result": {"file_path": out_path}, "media": out_path}
+                images = await _media.resolve_image_map(_media.collect_image_srcs(content))
+                _make_docx(out_path, title, content, images=images)
+                return {
+                    "success": True,
+                    "result": _with_image_stats({"file_path": out_path}, images),
+                    "media": out_path,
+                }
 
             if action == "create_xlsx":
                 sheets_str = params.get("sheets") or ""
@@ -349,8 +379,14 @@ class OfficeAbility(Ability):
                     raise ValueError("slides must be a non-empty JSON array")
                 name = _ensure_ext(_safe_filename(out_name or title or f"slides_{_now_ts()}"), ".pptx")
                 out_path = os.path.join(out_dir, name)
-                _make_pptx(out_path, title, slides)
-                return {"success": True, "result": {"file_path": out_path}, "media": out_path}
+                srcs = [s for s in (_slide_image_src(sd) for sd in slides if isinstance(sd, dict)) if s]
+                images = await _media.resolve_image_map(srcs)
+                _make_pptx(out_path, title, slides, images=images)
+                return {
+                    "success": True,
+                    "result": _with_image_stats({"file_path": out_path}, images),
+                    "media": out_path,
+                }
 
             if action in ("read_docx", "read_xlsx", "read_pptx"):
                 b64 = params.get("file_base64") or ""
@@ -771,6 +807,11 @@ def _normalize_md_blocks(content: str) -> str:
             i += 1
             continue
         s = ln.strip()
+        if _media.is_image_line(s):
+            # An image must be its own block so it is not glued to a paragraph.
+            in_special[i] = True
+            i += 1
+            continue
         if s.startswith("|") and "|" in s and i + 1 < n and "\x01" not in collapsed[i + 1]:
             if _is_pipe_separator_line(collapsed[i + 1].strip()):
                 in_special[i] = True
@@ -971,7 +1012,78 @@ def _add_docx_code_block(doc, code_text: str) -> None:
         if t is not None:
             t.set(qn("xml:space"), "preserve")
 
-def _make_docx(out_path: str, title: str, content: str) -> None:
+def _docx_available_width_in(doc) -> float:
+    """Usable text width of the current section, in inches."""
+    try:
+        section = doc.sections[-1]
+        emu = section.page_width - section.left_margin - section.right_margin
+        inches = float(emu) / 914400.0
+        if inches > 0:
+            return inches
+    except Exception:
+        pass
+    return 6.0
+
+
+def _add_docx_image(doc, info: dict, images: dict) -> None:
+    """Insert one markdown image into the document.
+
+    Falls back to a small italic placeholder paragraph when the image cannot
+    be resolved, so one bad reference never fails the whole document.
+    """
+    from docx.shared import Inches, Pt
+
+    src = info["src"]
+    path, reason = images.get(src, (None, "image was not resolved"))
+    if not path:
+        logger.warning("DOCX image skipped (%s): %s", src, reason)
+        p = doc.add_paragraph()
+        run = p.add_run(f"[image unavailable: {reason}]")
+        run.italic = True
+        return
+
+    avail_w = _docx_available_width_in(doc)
+    # Cap height so a portrait photo cannot eat a whole page.
+    w_in, _h_in = _media.fit_box(path, avail_w, 7.5, info.get("width"))
+
+    try:
+        doc.add_picture(path, width=Inches(w_in))
+    except Exception as e:
+        logger.warning("DOCX image render failed (%s): %s", src, e)
+        p = doc.add_paragraph()
+        run = p.add_run("[image could not be rendered]")
+        run.italic = True
+        return
+
+    # Center the picture paragraph.
+    try:
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+        doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+    except Exception:
+        pass
+
+    alt = (info.get("alt") or "").strip()
+    if alt:
+        cap_style = _docx_resolve_style(doc, "Caption", "Body Text", "Normal")
+        try:
+            cp = doc.add_paragraph(style=cap_style) if cap_style else doc.add_paragraph()
+        except KeyError:
+            cp = doc.add_paragraph()
+        _add_inline_runs(cp, alt)
+        try:
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+            cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        except Exception:
+            pass
+        if not (cap_style and cap_style.lower().startswith("caption")):
+            for run in cp.runs:
+                run.italic = True
+                run.font.size = Pt(9)
+
+
+def _make_docx(out_path: str, title: str, content: str, images: dict | None = None) -> None:
     from docx import Document
     from docx.shared import Pt
 
@@ -1003,6 +1115,12 @@ def _make_docx(out_path: str, title: str, content: str) -> None:
             if code_lines and code_lines[-1].strip().startswith("```"):
                 code_lines = code_lines[:-1]
             _add_docx_code_block(doc, "\n".join(code_lines))
+            continue
+
+        # Standalone image — ![alt](src) with optional {width=NN%}
+        _img_info = _media.parse_image_line(block)
+        if _img_info:
+            _add_docx_image(doc, _img_info, images or {})
             continue
 
         # Horizontal rule (---, ___, ***)
@@ -1178,6 +1296,119 @@ def _make_xlsx(out_path: str, sheets: list[dict]) -> None:
     wb.save(out_path)
 
 
+def _slide_image_src(data: dict) -> str:
+    """Return the image reference declared on a slide, or ''."""
+    for key in ("image", "picture", "photo", "img"):
+        v = data.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            s = v.get("src") or v.get("path") or v.get("url")
+            if isinstance(s, str) and s.strip():
+                return s.strip()
+    return ""
+
+
+def _slide_image_caption(data: dict) -> str:
+    for key in ("image", "picture", "photo", "img"):
+        v = data.get(key)
+        if isinstance(v, dict):
+            c = v.get("caption") or v.get("alt") or v.get("label")
+            if isinstance(c, str) and c.strip():
+                return c.strip()
+    cap = data.get("image_caption")
+    return cap.strip() if isinstance(cap, str) else ""
+
+
+def _pptx_place_image(slide, data: dict, images: dict) -> None:
+    """Drop a picture into the two_column layout's right-hand visual slot.
+
+    Template geometry (skeleton.pptx, slide index 2): shape[3] is the empty
+    visual frame and shape[4] is the '[ Tempat Gambar ]' label. The picture is
+    fitted inside shape[3] preserving aspect ratio and centred; the label is
+    removed on success. Failure leaves the slide untouched apart from a short
+    note in the label.
+    """
+    from pptx.util import Emu
+
+    src = _slide_image_src(data)
+    if not src:
+        return
+
+    path, reason = images.get(src, (None, "image was not resolved"))
+    shapes = list(slide.shapes)
+
+    # Locate the placeholder label (text mentioning Gambar/Image) and the
+    # empty frame that sits behind it.
+    label_idx = None
+    for i, sh in enumerate(shapes):
+        try:
+            t = (sh.text_frame.text or "").strip().lower()
+        except Exception:
+            continue
+        if t.startswith("[") and ("gambar" in t or "image" in t or "diagram" in t):
+            label_idx = i
+            break
+
+    if not path:
+        logger.warning("PPTX image skipped (%s): %s", src, reason)
+        if label_idx is not None:
+            try:
+                _set_shape_text(shapes[label_idx], f"[ gambar tidak tersedia: {reason} ]")
+            except Exception:
+                pass
+        return
+
+    # Frame: the empty shape just before the label, else the label's own box.
+    frame = None
+    if label_idx is not None and label_idx > 0:
+        cand = shapes[label_idx - 1]
+        try:
+            if not (cand.text_frame.text or "").strip():
+                frame = cand
+        except Exception:
+            frame = cand
+    if frame is None and label_idx is not None:
+        frame = shapes[label_idx]
+    if frame is None:
+        return
+
+    try:
+        box_l, box_t = int(frame.left), int(frame.top)
+        box_w, box_h = int(frame.width), int(frame.height)
+    except Exception:
+        return
+
+    # Fit in inches, then convert back to EMU (1 inch = 914400 EMU).
+    w_in, h_in = _media.fit_box(path, box_w / 914400.0, box_h / 914400.0)
+    pic_w, pic_h = int(w_in * 914400), int(h_in * 914400)
+    left = box_l + max(0, (box_w - pic_w) // 2)
+    top = box_t + max(0, (box_h - pic_h) // 2)
+
+    try:
+        slide.shapes.add_picture(path, Emu(left), Emu(top), Emu(pic_w), Emu(pic_h))
+    except Exception as e:
+        logger.warning("PPTX image render failed (%s): %s", src, e)
+        return
+
+    # Picture is in — drop the placeholder label, or reuse it as a caption.
+    caption = _slide_image_caption(data)
+    if label_idx is not None:
+        lbl = shapes[label_idx]
+        if caption:
+            try:
+                _set_shape_text(lbl, caption)
+                lbl.top = Emu(top + pic_h + 60000)
+            except Exception:
+                pass
+        else:
+            try:
+                el = lbl._element
+                el.getparent().remove(el)
+            except Exception:
+                pass
+
+
 def _pick_pptx_layout(idx: int, total: int, slide_data: dict) -> str:
     """Auto-pick the best demo layout for a slide based on its content shape."""
     # Cover always for first slide
@@ -1188,6 +1419,9 @@ def _pick_pptx_layout(idx: int, total: int, slide_data: dict) -> str:
         title = (slide_data.get("title") or "").lower()
         if any(k in title for k in ("terima kasih", "thank", "q&a", "questions", "tanya", "closing")):
             return "closing"
+    # An explicit image needs the layout that owns a visual slot.
+    if _slide_image_src(slide_data):
+        return "two_column"
     # Structured fields drive layout choice
     if "stats" in slide_data:
         return "stat_callouts"
@@ -1700,7 +1934,7 @@ _POPULATORS = {
 }
 
 
-def _make_pptx(out_path: str, title: str, slides: list[dict]) -> None:
+def _make_pptx(out_path: str, title: str, slides: list[dict], images: dict | None = None) -> None:
     from pptx import Presentation
 
     template = _pptx_template_path()
@@ -1735,6 +1969,8 @@ def _make_pptx(out_path: str, title: str, slides: list[dict]) -> None:
                 populator(clone, slide_data, section_counter)
             else:
                 populator(clone, slide_data)
+            if images and _slide_image_src(slide_data):
+                _pptx_place_image(clone, slide_data, images)
 
         # Remove the original demo slides (first demo_count slides)
         for _ in range(demo_count):

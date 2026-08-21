@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from syne.abilities.base import Ability
+from syne.abilities import _media
 
 logger = logging.getLogger("syne.ability.pdf")
 
@@ -262,11 +263,59 @@ def _md_is_block_start(line: str) -> bool:
         return True
     if s.startswith("|") and s.count("|") >= 2:
         return True
+    if _media.is_image_line(s):
+        return True
     return False
 
 
-def _md_to_rl_story(text: str, styles: dict) -> list:
-    """Parse markdown text into ReportLab flowables."""
+def _make_image_flowables(info: dict, styles: dict, images: dict) -> list:
+    """Build ReportLab flowables for one markdown image line.
+
+    Returns [Image, (caption), Spacer] on success, or a placeholder Paragraph
+    when the image cannot be resolved — a broken image never aborts the PDF.
+    """
+    from reportlab.platypus import Image as RLImage, Paragraph, Spacer
+
+    src = info["src"]
+    path, reason = images.get(src, (None, "image was not resolved"))
+    if not path:
+        logger.warning("PDF image skipped (%s): %s", src, reason)
+        safe = (reason or "unavailable").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        return [
+            Paragraph(f"<i>[image unavailable: {safe}]</i>", styles["quote"]),
+            Spacer(1, 4),
+        ]
+
+    avail_w = styles.get("_avail_w", 450.0)
+    avail_h = styles.get("_avail_h", 650.0)
+    w, h = _media.fit_box(path, avail_w, avail_h, info.get("width"))
+
+    out: list = []
+    try:
+        img = RLImage(path, width=w, height=h)
+        img.hAlign = "CENTER"
+        out.append(img)
+    except Exception as e:
+        logger.warning("PDF image render failed (%s): %s", src, e)
+        return [
+            Paragraph("<i>[image could not be rendered]</i>", styles["quote"]),
+            Spacer(1, 4),
+        ]
+
+    alt = (info.get("alt") or "").strip()
+    if alt:
+        out.append(Spacer(1, 3))
+        out.append(Paragraph(_md_inline_to_rl(alt), styles["caption"]))
+    out.append(Spacer(1, 8))
+    return out
+
+
+def _md_to_rl_story(text: str, styles: dict, images: dict | None = None) -> list:
+    """Parse markdown text into ReportLab flowables.
+
+    ``images`` maps an image src (as written in the markdown) to
+    ``(local_path | None, reason)`` from ``_media.resolve_image_map``.
+    """
     from reportlab.platypus import (
         Paragraph,
         Spacer,
@@ -304,6 +353,13 @@ def _md_to_rl_story(text: str, styles: dict) -> list:
                 i += 1  # skip closing fence
             story.append(Preformatted("\n".join(buf), styles["code"]))
             story.append(Spacer(1, 4))
+            continue
+
+        # Standalone image — ![alt](src) with optional {width=NN%}
+        img_info = _media.parse_image_line(s)
+        if img_info:
+            story.extend(_make_image_flowables(img_info, styles, images or {}))
+            i += 1
             continue
 
         # Horizontal rule
@@ -399,7 +455,13 @@ def _md_to_rl_story(text: str, styles: dict) -> list:
     return story
 
 
-def _make_pdf_from_text_platypus(out_path: str, title: str | None, text: str, pagesize) -> None:
+def _make_pdf_from_text_platypus(
+    out_path: str,
+    title: str | None,
+    text: str,
+    pagesize,
+    images: dict | None = None,
+) -> None:
     # Lazy imports
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
     from reportlab.lib.units import cm
@@ -453,8 +515,17 @@ def _make_pdf_from_text_platypus(out_path: str, title: str | None, text: str, pa
         borderColor="#cccccc", borderWidth=0,
         spaceBefore=4, spaceAfter=4,
     )
+    caption = ParagraphStyle(
+        "Caption", parent=body,
+        fontSize=9, leading=12, textColor="#666666",
+        alignment=1,  # centered under the image
+        spaceBefore=0, spaceAfter=0,
+    )
     md_styles = {"body": body, "h1": h1, "h2": h2, "h3": h3, "h4": h4,
-                 "code": code, "quote": quote}
+                 "code": code, "quote": quote, "caption": caption}
+    # Printable area (points) — images are scaled to fit inside this box.
+    md_styles["_avail_w"] = float(doc.width)
+    md_styles["_avail_h"] = float(doc.height) * 0.85
 
     story = []
     if title:
@@ -469,7 +540,7 @@ def _make_pdf_from_text_platypus(out_path: str, title: str | None, text: str, pa
     if not raw:
         raw = "(empty)"
 
-    story.extend(_md_to_rl_story(raw, md_styles))
+    story.extend(_md_to_rl_story(raw, md_styles, images))
 
     doc.build(story)
 
@@ -959,7 +1030,17 @@ class PdfAbility(Ability):
                         ],
                     },
                     "title": {"type": "string"},
-                    "text": {"type": "string"},
+                    "text": {
+                        "type": "string",
+                        "description": (
+                            "Body text (markdown-ish) for make_from_text. "
+                            "Embed images on their own line with "
+                            "![Caption](source) where source is a filename in "
+                            "workspace/ (e.g. photo.jpg), an https:// URL, or a "
+                            "data:image/...;base64 URI. Optional size: "
+                            "![Caption](photo.jpg){width=60%}."
+                        ),
+                    },
                     "url": {"type": "string"},
                     "pdf_base64": {"type": "string", "description": "Base64-encoded PDF (for read_from_base64)"},
                     "out_name": {"type": "string"},
@@ -998,6 +1079,8 @@ class PdfAbility(Ability):
             "- Status: **ready**\n"
             "- Auto-extracts text from PDFs uploaded by users (priority pre-process)\n"
             "- Make from text: `pdf(action='make_from_text', title='...', text='...')`\n"
+            "- Embed image (own line): `![Caption](photo.jpg)` — file in workspace/, "
+            "https:// URL, or data: URI. Size: `{width=60%}`\n"
             "- Make from URL: `pdf(action='make_from_url', url='https://...', out_name='file.pdf')`\n"
             "- Read PDF URL: `pdf(action='read_from_url', url='https://.../file.pdf')`\n"
             "- Read PDF base64: `pdf(action='read_from_base64', pdf_base64='...')`\n"
@@ -1024,8 +1107,20 @@ class PdfAbility(Ability):
 
                 name = _ensure_pdf_ext(_safe_filename(out_name or title or f"text_{_now_ts()}"))
                 out_path = os.path.join(out_dir, name)
-                _make_pdf_from_text_platypus(out_path, title, text or "", pagesize=A4)
-                return {"success": True, "result": {"file_path": out_path}, "media": out_path}
+                body = text or ""
+                # Resolve embedded ![alt](src) images before the (sync) build.
+                images = await _media.resolve_image_map(_media.collect_image_srcs(body))
+                _make_pdf_from_text_platypus(
+                    out_path, title, body, pagesize=A4, images=images
+                )
+                result = {"file_path": out_path}
+                embedded = sum(1 for pth, _ in images.values() if pth)
+                if images:
+                    result["images_embedded"] = embedded
+                    failed = {s: r for s, (pth, r) in images.items() if not pth}
+                    if failed:
+                        result["images_failed"] = failed
+                return {"success": True, "result": result, "media": out_path}
 
             if action == "make_from_url":
                 if not url:
