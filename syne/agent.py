@@ -2316,51 +2316,21 @@ class SyneAgent:
         "config", "configuration", "security", "soul",
     }
 
-    @staticmethod
-    def _memory_update_hash(memory_id: int, content: str) -> str:
-        """Stable digest binding a confirmation to THIS exact change."""
-        import hashlib
-        payload = f"{memory_id}\x00{content}".encode("utf-8", errors="replace")
-        return hashlib.sha256(payload).hexdigest()[:12]
-
-    def _memory_update_confirmed_recently(self, conv, memory_id: int, content: str) -> bool:
-        """Check that the actor of THIS session just confirmed THIS exact update.
-
-        Same confirmation-in-conversation pattern used by the exec consent
-        gate but scoped to memory_update:
-          - pending lives on THIS conversation (so it is bound to the actor —
-            owner cannot confirm someone else's session)
-          - TTL 120s
-          - pending hash must match (memory_id, content) about to be written
-          - latest user message in this session must be strict 'ya'/'yes'
-        One confirmation authorizes exactly one update.
-        """
-        import time as _time
-        pending_hash = getattr(conv, "_pending_memory_update_hash", "")
-        pending_at = getattr(conv, "_pending_memory_update_at", 0.0)
-        if not pending_hash or not pending_at:
-            return False
-        if _time.time() - pending_at > 120:
-            conv._pending_memory_update_hash = ""
-            conv._pending_memory_update_at = 0.0
-            return False
-        if pending_hash != self._memory_update_hash(memory_id, content):
-            return False
-        if not getattr(conv, "_message_cache", None):
-            return False
-        user_msgs = [m for m in conv._message_cache if m.role == "user"]
-        if not user_msgs:
-            return False
-        last_user = self._last_reply_token(user_msgs[-1].content or "")
-        if last_user in ("ya", "yes"):
-            conv._pending_memory_update_hash = ""
-            conv._pending_memory_update_at = 0.0
-            return True
-        return False
+    # NOTE: memory_update's private confirmation path (_memory_update_hash +
+    # _memory_update_confirmed_recently) was REMOVED. It predated the universal
+    # consent gate and had two costs:
+    #   1. No inline Yes/No buttons — it lived outside consent.py, so it never
+    #      emitted the [[CONSENT_BUTTONS:hash=…]] marker the channels scan for.
+    #      The owner had to TYPE "ya" for every memory edit.
+    #   2. No re-emit protection — a payload edited between prompt and approval
+    #      just overwrote the pending hash, so the owner was asked to approve
+    #      the same logical change twice.
+    # Confirmation now runs through consent.check_and_hold, where memory_update
+    # is listed in ALWAYS_GATE_TOOLS (gate fires even on a clean owner turn,
+    # because the defense here is irreversibility, not injection).
 
     async def _tool_memory_update(self, memory_id: int, content: str, category: str = "") -> str:
-        """Tool handler: overwrite an existing memory in place (confirmed)."""
-        import time as _time
+        """Tool handler: overwrite an existing memory in place (consent-gated)."""
         from .db.connection import get_connection
 
         content = (content or "").strip()
@@ -2393,38 +2363,23 @@ class SyneAgent:
                 f"'{new_category}' via memory_update."
             )
 
+        # Consent is enforced upstream by consent.check_and_hold (memory_update
+        # is in ALWAYS_GATE_TOOLS), so reaching this line means the owner has
+        # already pressed Yes for THIS exact payload.
+        #
+        # One guard stays here: that gate is a no-op without an interactive
+        # conversation (see its non-interactive skip). A headless caller —
+        # sub-agent, cron — must not overwrite a memory row unattended, since
+        # nobody is present to press Yes and the old content is unrecoverable.
         conv = self._get_active_conversation()
         if conv is None:
-            return "Error: no active conversation to confirm against."
-
-        # Confirmation gate: same-session actor must confirm THIS exact change.
-        if not self._memory_update_confirmed_recently(conv, memory_id, content):
-            cmd_hash = self._memory_update_hash(memory_id, content)
-            conv._pending_memory_update_hash = cmd_hash
-            conv._pending_memory_update_at = _time.time()
-
-            def _clip(s, n=280):
-                s = s.replace("\n", " ")
-                return s if len(s) <= n else s[:n] + "…"
-
-            cat_line = ""
-            if new_category != old_category:
-                cat_line = f"\nCategory: `{old_category}` → `{new_category}`"
-            logger.warning(
-                f"memory_update held for confirmation: id={memory_id}, "
-                f"hash={cmd_hash}"
-            )
             return (
-                f"⚠️ Confirm memory update for id **{memory_id}** "
-                "(this OVERWRITES the old content).\n\n"
-                f"**OLD:** {_clip(old_content)}\n\n"
-                f"**NEW:** {_clip(content)}"
-                f"{cat_line}\n\n"
-                "Reply **ya** or **yes** to apply. This confirmation must come "
-                "from you, in this chat."
+                "Error: memory_update requires an interactive session — "
+                "there is no one present to approve an irreversible overwrite. "
+                "Use memory_store to add a new memory instead."
             )
 
-        # Confirmed — commit.
+        # Approved — commit.
         await self.memory._update_memory(
             memory_id=memory_id,
             content=content,

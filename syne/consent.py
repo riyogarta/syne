@@ -228,6 +228,72 @@ def _send_family_should_skip(
     return False
 
 
+# ── Tools that ALWAYS require an explicit Yes/No ─────────────────────────────
+# Normally the gate fires only when the caller's octal has the x bit AND the
+# turn is tainted (see the clean-turn skip inside check_and_hold). These tools
+# are different: they overwrite or destroy existing state IN PLACE, so the
+# button is not injection defense — it is irreversibility defense. The owner
+# must see what is about to be lost even on a perfectly clean turn.
+#
+# memory_update: overwrites a memory row; the previous content is gone. Before
+# this list existed it carried a PRIVATE confirmation path in agent.py that
+# required the owner to TYPE "ya" — no buttons, and a payload edited between
+# prompt and approval silently opened a SECOND prompt for the same intent,
+# making the owner approve one logical change twice.
+ALWAYS_GATE_TOOLS = {"memory_update"}
+
+
+# Short-lived side table of human-readable context for a pending prompt, keyed
+# by payload hash. Populated by the async enricher in check_and_hold (which may
+# hit the DB); read by the SYNC format_consent_prompt. Keying by hash means
+# every re-render of the same pending — conversation.py's end-of-turn marker
+# guarantee, telegram.py's button re-attach — reproduces identical text without
+# threading extra state through those call sites.
+_PROMPT_EXTRA: Dict[str, str] = {}
+_PROMPT_EXTRA_MAX = 32
+
+
+def set_prompt_extra(hash_hex: str, text: str) -> None:
+    """Record prompt context for `hash_hex`, evicting oldest past the cap."""
+    if not hash_hex or not text:
+        return
+    _PROMPT_EXTRA[hash_hex] = text
+    while len(_PROMPT_EXTRA) > _PROMPT_EXTRA_MAX:
+        _PROMPT_EXTRA.pop(next(iter(_PROMPT_EXTRA)))
+
+
+def get_prompt_extra(hash_hex: str) -> str:
+    return _PROMPT_EXTRA.get(hash_hex or "", "")
+
+
+async def _build_prompt_extra(tool_name: str, args: Optional[dict]) -> str:
+    """Fetch the 'before' state so the owner approves with full information.
+
+    Returns a JSON string, or "" when there is nothing to add. Best-effort:
+    the caller wraps this in try/except, so a DB hiccup costs the OLD preview
+    but never the prompt itself.
+    """
+    if tool_name != "memory_update":
+        return ""
+    import json as _json
+    a = args or {}
+    try:
+        mid = int(a.get("memory_id"))
+    except (TypeError, ValueError):
+        return ""
+    from .db.connection import get_connection
+    async with get_connection() as conn:
+        row = await conn.fetchrow(
+            "SELECT content, category FROM memory WHERE id = $1", mid,
+        )
+    if not row:
+        return ""
+    old = (row["content"] or "").replace("\n", " ")
+    if len(old) > 400:
+        old = old[:400] + " …"
+    return _json.dumps({"old": old, "old_category": row["category"] or ""})
+
+
 async def check_and_hold(
     conv,
     agent,
@@ -270,6 +336,11 @@ async def check_and_hold(
     _log = logging.getLogger("syne.consent.gate")
     try:
         from .security import needs_consent  # local import to avoid cycles
+        # Irreversible in-place writes always ask, even on a clean owner
+        # turn: pre_decided both skips the needs_consent octal check and
+        # disables the clean-turn provenance skip below.
+        if tool_name in ALWAYS_GATE_TOOLS:
+            pre_decided = True
         if not pre_decided and not needs_consent(access_level, permission):
             return ("allow", None)
 
@@ -429,6 +500,16 @@ async def check_and_hold(
         conv._pending_consent_hash = incoming_hash
         conv._pending_consent_at = _time.time()
 
+        # Best-effort: pull the 'before' state (async, may hit the DB) so
+        # the rendered prompt can show what the Yes button destroys.
+        try:
+            _extra = await _build_prompt_extra(tool_name, args)
+            if _extra:
+                set_prompt_extra(incoming_hash, _extra)
+        except Exception as _e:
+            _log.debug(
+                f"consent: prompt enrichment skipped for {tool_name}: {_e}"
+            )
         prompt = format_consent_prompt(tool_name, args, conv._pending_consent_hash)
         _log.warning(
             f"consent held: tool={tool_name}, "
@@ -480,6 +561,39 @@ def format_consent_prompt(
     stdout) leave it as visible text — harmless.
     """
     a = args or {}
+
+    # memory_update: destructive in-place overwrite. Lead with WHAT IS LOST —
+    # the old row is unrecoverable once this runs, so OLD vs NEW is the point
+    # of the prompt, not decoration.
+    if tool_name == "memory_update":
+        import json as _json
+        _mid = a.get("memory_id")
+        _new = str(a.get("content") or "").replace("\n", " ")
+        if len(_new) > 400:
+            _new = _new[:400] + " …"
+        _new_cat = str(a.get("category") or "").strip()
+        _old, _old_cat = "", ""
+        try:
+            _x = _json.loads(get_prompt_extra(hash_hex) or "{}")
+            _old = _x.get("old", "")
+            _old_cat = _x.get("old_category", "")
+        except Exception:
+            pass
+        _lines = [
+            f"⚠️ Timpa memori #{_mid}?",
+            "Isi lama akan HILANG dan tidak bisa dikembalikan.",
+            "",
+        ]
+        if _old:
+            _lines.append(f"LAMA: {_old}")
+            _lines.append("")
+        _lines.append(f"BARU: {_new}")
+        if _new_cat and _old_cat and _new_cat != _old_cat:
+            _lines.append(f"Kategori: {_old_cat} → {_new_cat}")
+        elif _old_cat:
+            _lines.append(f"Kategori: {_old_cat}")
+        _lines.append(f"[[CONSENT_BUTTONS:hash={hash_hex}]]")
+        return _PENDING_STATUS_PREFIX + "\n".join(_lines)
 
     # Shell-style tools: show the command the way it would be typed at a
     # prompt, not as a raw JSON blob. Far easier to read at a glance.
