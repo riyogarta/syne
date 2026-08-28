@@ -1,7 +1,8 @@
 """Image Generation Ability — generate images via multiple providers.
 
 Supported providers:
-  Vertex AI: {"provider": "vertex", "model": "imagen-3.0-generate-002"}
+  Vertex AI: {"provider": "vertex", "model": "gemini-2.5-flash-image"}
+             (also supports Imagen, e.g. "imagen-3.0-generate-002")
   Together AI: {"provider": "together", "api_key": "...", "model": "black-forest-labs/FLUX.1-schnell"}
   OpenAI: {"provider": "openai", "api_key": "...", "model": "dall-e-3"}
 """
@@ -22,7 +23,7 @@ class ImageGenAbility(Ability):
 
     name = "image_gen"
     description = "Generate images from text descriptions using AI"
-    version = "2.0"
+    version = "2.1"
     # 0o770 — owner + family rwx. Digits contain x → consent gate fires
     # (calls external API + spends money + writes new image file).
     permission = 0o770
@@ -46,7 +47,7 @@ class ImageGenAbility(Ability):
 
         if provider == "vertex":
             image_bytes = await self._gen_vertex(
-                prompt, model=model or "imagen-3.0-generate-002",
+                prompt, model=model or "gemini-2.5-flash-image",
                 api_key=api_key, region=config.get("region", ""),
             )
         elif provider == "together":
@@ -83,7 +84,13 @@ class ImageGenAbility(Ability):
         }
 
     async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "") -> bytes | dict:
-        """Generate image via Vertex AI Imagen."""
+        """Generate image via Vertex AI.
+
+        Two different APIs live behind the same provider:
+          - Imagen models  → `:predict`         (instances / bytesBase64Encoded)
+          - Gemini models  → `:generateContent` (contents / inlineData)
+        They are not interchangeable, so dispatch on the model family.
+        """
         if not api_key or not region:
             try:
                 _key, _region = await self._load_vertex_credentials()
@@ -94,6 +101,9 @@ class ImageGenAbility(Ability):
 
         if not api_key:
             return {"success": False, "error": "No Vertex API key. Set via /imagegen or add Vertex model in /models."}
+
+        if model.startswith("gemini-"):
+            return await self._gen_vertex_gemini(prompt, model, api_key, region)
 
         url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:predict"
 
@@ -122,6 +132,55 @@ class ImageGenAbility(Ability):
                     return {"success": False, "error": "No image data in Vertex response"}
 
                 return base64.b64decode(b64)
+
+        except httpx.TimeoutException:
+            return {"success": False, "error": "Vertex timeout (60s)"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def _gen_vertex_gemini(self, prompt: str, model: str, api_key: str, region: str) -> bytes | dict:
+        """Generate image via Vertex AI Gemini image models (`:generateContent`).
+
+        Response shape:
+          candidates[0].content.parts[*].inlineData.data  → base64 image
+        Text parts may be interleaved, so scan parts for the first inlineData.
+        """
+        url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    url,
+                    params={"key": api_key},
+                    headers={"Content-Type": "application/json"},
+                    json={
+                        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                        "generationConfig": {"responseModalities": ["IMAGE"]},
+                    },
+                )
+
+                if resp.status_code != 200:
+                    return {"success": False, "error": f"Vertex HTTP {resp.status_code}: {resp.text[:200]}"}
+
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    # Prompt blocked by safety filters returns no candidates.
+                    feedback = data.get("promptFeedback", {})
+                    reason = feedback.get("blockReason", "no candidates returned")
+                    return {"success": False, "error": f"Vertex returned no image ({reason})"}
+
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for part in parts:
+                    b64 = part.get("inlineData", {}).get("data", "")
+                    if b64:
+                        return base64.b64decode(b64)
+
+                finish = candidates[0].get("finishReason", "")
+                return {
+                    "success": False,
+                    "error": f"No image data in Vertex response (finishReason: {finish or 'unknown'})",
+                }
 
         except httpx.TimeoutException:
             return {"success": False, "error": "Vertex timeout (60s)"}
