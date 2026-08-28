@@ -883,6 +883,7 @@ class Conversation:
 
         from .consent import (
             last_reply_token, make_key, canonical_payload, DEFAULT_CONSENT_ENABLED,
+            ALWAYS_GATE_TOOLS,
         )
         token = last_reply_token(user_message)
         if token not in ("ya", "yes"):
@@ -897,12 +898,17 @@ class Conversation:
 
         # Feature flag last so a lingering pending on a consent-off instance
         # doesn't accidentally intercept legit user text.
+        #
+        # Carve-out mirrors consent.check_and_hold: an ALWAYS_GATE_TOOLS pending
+        # is created even while the switch is OFF, so its "ya" MUST still be
+        # honoured here. Without this the owner sees buttons, presses Yes, and
+        # nothing happens — the gate would hold the call forever.
         try:
             from .db.models import get_config as _get_config
             enabled = await _get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
         except Exception:
             enabled = DEFAULT_CONSENT_ENABLED
-        if not enabled:
+        if not enabled and pending_tool not in ALWAYS_GATE_TOOLS:
             return None
 
         agent = getattr(self._mgr, "_agent", None) if self._mgr else None
@@ -2267,16 +2273,26 @@ class Conversation:
             # would spuriously queue legit parallel exec/file_write calls and
             # make the LLM think they "hadn't run yet". Only serialize when the
             # gate will actually hold something this turn.
+            # ALWAYS_GATE_TOOLS ignore the clean-turn skip (and the kill
+            # switch), so a batch containing one still creates a real pending.
+            # Serialization must stay ON for that batch or the single-pending
+            # model breaks again — the exact bug this phase exists to prevent.
+            from .consent import ALWAYS_GATE_TOOLS as _ALWAYS_GATE
+            _batch_has_always_gate = any(
+                _pname in _ALWAYS_GATE for _pname, _a, _c, _l in parsed_calls
+            )
             _gate_will_skip = (
                 access_level in ("owner", "family")
                 and not getattr(self, "_turn_untrusted", False)
+                and not _batch_has_always_gate
             )
             if not _gate_will_skip:
                 for _idx, (_pname, _pargs, _pcid, _pl) in enumerate(parsed_calls):
                     _ptool = self.tools.get(_pname)
                     if _ptool is None:
                         continue  # abilities routed elsewhere; skip for this check
-                    if not _needs_consent(access_level, _ptool.permission):
+                    if _pname not in _ALWAYS_GATE \
+                            and not _needs_consent(access_level, _ptool.permission):
                         continue  # read-only — no serialization needed
                     if not _first_gate_seen:
                         _first_gate_seen = True  # this one goes through as usual

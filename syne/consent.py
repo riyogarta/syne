@@ -372,14 +372,24 @@ async def check_and_hold(
             )
             return ("allow", None)
 
-        # Feature flag
+        # Feature flag (master kill switch) — with ONE carve-out.
+        # ALWAYS_GATE_TOOLS defend against IRREVERSIBILITY, not injection, so
+        # the switch does not disarm them. Turning consent off is a statement
+        # about friction on routine, repeatable actions; it is not consent to
+        # destroy a row that cannot be recovered afterwards. Every other tool
+        # still honours the switch exactly as before.
         try:
             from .db.models import get_config as _get_config
             enabled = await _get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
         except Exception:
             enabled = DEFAULT_CONSENT_ENABLED
         if not enabled:
-            return ("allow", None)
+            if tool_name not in ALWAYS_GATE_TOOLS:
+                return ("allow", None)
+            _log.info(
+                f"consent: kill switch is OFF but {tool_name} is in "
+                "ALWAYS_GATE_TOOLS (irreversible) — gating anyway"
+            )
 
         # No conv or no agent: non-interactive path (sub-agent, scheduled cron,
         # test harness). The consent gate is a defense for INTERACTIVE LLM-
