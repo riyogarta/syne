@@ -37,9 +37,22 @@ class ImageAnalysisAbility(Ability):
         self, input_type: str, input_data, user_prompt: str,
         config: Optional[dict] = None
     ) -> Optional[str]:
-        prompt = user_prompt if user_prompt and user_prompt.lower() not in (
-            "what's in this image?", "describe this image"
-        ) else "Describe this image in detail. If there is text, transcribe it."
+        base_instruction = (
+            "Describe this image in detail. If there is text, transcribe it."
+        )
+        generic = ("what's in this image?", "describe this image")
+        if user_prompt and user_prompt.lower() not in generic:
+            # The caption ADDS context, it must never REPLACE the describe
+            # instruction. A caption that is a statement rather than a
+            # question (e.g. "left is me, middle is Agha") used to become
+            # the entire prompt, so the model just echoed it back and
+            # returned no description of the image at all.
+            prompt = (
+                f"{base_instruction}\n\n"
+                f"User's note about this image: {user_prompt}"
+            )
+        else:
+            prompt = base_instruction
 
         # Album path: input_type 'images' carries a LIST of image dicts.
         # Analyze each one and concatenate, so a multi-photo message doesn't
