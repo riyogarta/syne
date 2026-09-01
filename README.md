@@ -2,7 +2,7 @@
 
 **The assistant that remembers what matters, and never leaves your server.**
 
-Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Near-zero API cost when paired with free OAuth providers or local Ollama.
+Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Zero-cost floor with local Ollama for memory + evaluation; bring a paid API key or use your existing Claude / ChatGPT subscription via OAuth for the chat model.
 
 *"I remember, therefore I am"* — named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), Greek goddess of memory.
 
@@ -16,7 +16,7 @@ A Telegram bot you self-host. You chat with it. It remembers what you tell it to
 - **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
 - **Multi-tier permissions** — owner / family / public with Linux-style 3-digit octal per tool. Public users by default get nothing from memory unless you explicitly open specific categories (Rule 765).
 - **Runtime configuration in PostgreSQL** — no `SOUL.md` or `CONFIG.yaml`. Identity, behavior, rules, and config all live in tables, changeable through conversation.
-- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google / OpenAI / Together / Vertex / Codex — paid API keys for resilience, OAuth options as bonus for personal use.
+- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google / OpenAI / Together / Vertex / Codex — bring a paid API key, or plug in your existing Claude Code / ChatGPT subscription via OAuth.
 
 ## Advanced capabilities (opt-in)
 
@@ -67,7 +67,7 @@ bash install.sh
 
 | Step | What happens |
 |------|---|
-| ① | Choose AI provider (OAuth free / API key) |
+| ① | Choose AI provider (API key or subscription OAuth) |
 | ② | Auto-detect hardware → recommend models |
 | ③ | Enter Telegram bot token |
 | ④ | Docker + PostgreSQL + pgvector |
