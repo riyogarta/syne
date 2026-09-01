@@ -1,8 +1,8 @@
 # Syne 🧠
 
-**Self-hosted personal AI assistant on Telegram with persistent long-term memory.**
+**The assistant that remembers what matters, and never leaves your server.**
 
-Runs on your own server. Stores everything in your own PostgreSQL. Near-zero API cost when paired with free OAuth providers or local Ollama. Designed for the case where you want an assistant that *remembers across sessions*, not a fresh chat each time.
+Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Near-zero API cost when paired with free OAuth providers or local Ollama.
 
 *"I remember, therefore I am"* — named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), Greek goddess of memory.
 
@@ -40,7 +40,7 @@ These are deliberately separate from the core. The headline use case is chat + m
 | Requirement | Details |
 |-------------|---------|
 | **CPU** | 1 vCPU minimum (2+ recommended for Ollama embedding + evaluator) |
-| **OS** | Linux (Ubuntu 22.04+, Debian 12+) |
+| **OS** | Linux (Ubuntu 22.04+, Debian 12+) — also runs on Windows through WSL2 |
 | **Python** | 3.11+ |
 | **RAM** | 2 GB minimum (Ollama loads one model at a time, ~1.3 GB per model). 4 GB recommended for smooth operation |
 | **Storage** | 1 GB base + ~1 GB for Ollama models (embedding + evaluator). ~2.5 GB total recommended |
@@ -49,7 +49,13 @@ These are deliberately separate from the core. The headline use case is chat + m
 
 ---
 
-## 🚀 Quick Start — 3 Commands
+## 🚀 Quick Start — One Command
+
+```bash
+curl -fsSL https://syne.codes/install.sh | bash
+```
+
+Or clone first if you'd rather read the installer before running it:
 
 ```bash
 git clone https://github.com/riyogarta/syne.git
@@ -110,7 +116,12 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 ## Memory System
 
-Syne's memory is **unlimited** — not by storing everything, but by intelligently deciding what to remember, how to find it, and when to forget. Three components work together: the **evaluator** decides what's worth storing, **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **decay engine** ensures only relevant memories survive.
+Syne's memory has one guarantee and one design consequence, stated up front so nothing surprises you later:
+
+- **Explicit facts never fade.** Anything you tell Syne to *remember* becomes a permanent memory and stays forever — no cap, no decay, no eviction.
+- **Casual mentions decay if unused.** Auto-captured facts (when `auto_capture=true`) enter a bounded pool that decays with disuse and eventually gets evicted when the pool exceeds `memory.max_records` (default 1000). Details in [Decay Engine](#3-decay-engine--what-should-i-forget).
+
+Three components work together: the **evaluator** decides what's worth storing, **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **decay engine** manages the transient pool.
 
 ### Memory Flow
 
@@ -180,7 +191,7 @@ A small, local LLM (default: Ollama qwen3:0.6b, **$0**) evaluates messages when 
 
 Two retrieval systems work together to find relevant memories:
 
-**Semantic Search (Embedding)** — Every memory is converted to a high-dimensional vector. When the user asks a question, pgvector finds the most similar memories using cosine distance with an HNSW index. This is what makes memory **unlimited** — millions of memories, millisecond lookup by meaning.
+**Semantic Search (Embedding)** — Every memory is converted to a high-dimensional vector. When the user asks a question, pgvector finds the most similar memories using cosine distance with an HNSW index. Millisecond lookup by meaning as the store grows.
 
 **Knowledge Graph** — Permanent memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts. KG extraction only runs for **permanent** memories — transient memories are too short-lived to justify the cost.
 
@@ -207,7 +218,7 @@ Syne:  Stored.
 
 **Ollama** is auto-installed during `syne init` — binary, server, and model are all set up automatically. The installer recommends the best model for your hardware (see [Server Tiers](#server-tiers)).
 
-> **Switching embedding providers deletes all stored memories.** Different models produce incompatible vector spaces. Use the `/embedding` command in Telegram to switch.
+> **Switching embedding providers is supported without losing data.** Different models produce incompatible vector spaces, so you must re-embed after switching: `syne memory reembed-memory --force` re-embeds every memory row (resumable, HNSW auto-rebuilt), and `syne memory reembed-history` re-embeds the messages table. Use the `/embedding` command in Telegram to change providers. See [Server Tiers](#server-tiers) for the same guidance.
 
 Graph extraction uses the main chat LLM by default, switchable to Ollama via `/graph` in Telegram. Manage extractors, toggle on/off, reprocess existing memories, and view stats from the same command.
 
@@ -247,7 +258,7 @@ A memory can have a **binary file attached** — image, PDF, document, anything 
 **Behavior:**
 - **Storage is explicit** — same as `memory_store`. Syne won't auto-attach files. User has to ask: *"simpan beserta filenya"* / *"save with the file"*.
 - **Retrieval is explicit** — `memory_search` results show a 📎 marker when attachment exists, but the file is NOT auto-sent. LLM tells the user "this memory has an attachment, want me to show it?". User confirms → Syne fetches the blob and sends.
-- **CASCADE on decay** — transient memories whose `recall_count` decays to 0 are deleted along with their attached blobs.
+- **CASCADE on eviction** — when a transient memory is evicted by the cap-based sweep (see [Decay Engine](#3-decay-engine--what-should-i-forget)), its attached blob is deleted at the same time via `ON DELETE CASCADE`. Note: decay v2 does NOT delete on `recall_count = 0` — life/death is decided by the cap, not by hitting zero.
 
 **Tools:**
 
@@ -311,7 +322,9 @@ When a public user searches memories, results outside the allowed categories are
 
 ### History & Recall — Raw Window + Semantic Search (No Compaction)
 
-Syne loads a **large raw window** each turn (default: 1000 messages via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
+Syne loads a **raw window** of recent messages each turn (default: 50 via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
+
+The default was chosen after measuring real production sessions: a 1000-message window cost ~316k tokens per request once a session got long (950 messages → 1.21M chars per call). At 50, the same session costs ~17k tokens per request — a ~95% cut with **no data loss**, since full history stays in the DB and remains reachable via `history_search`.
 
 **Why no compaction — architectural note:**
 
@@ -336,7 +349,7 @@ The retrieval is (a) unlimited in reach — full chat archive is searchable, (b)
 **Layers that still apply:**
 
 - `trim_context` — per-turn safety net that drops oldest non-system messages 4 at a time if the loaded window still exceeds the context budget. Non-destructive; nothing leaves the DB.
-- `session.history_limit` — the load window itself. 1000 default is generous but tunable. `syne config set session.history_limit 500` if your token budget is tight.
+- `session.history_limit` — the load window itself. 50 default is conservative; raise it (`syne config set session.history_limit 200`) if you want more raw context in the model's window and your token budget allows.
 - `run_compact()` — the summarizer stays in the code, dormant. If a specific installation observes that the raw window pattern is a poor fit (e.g. extremely high-throughput group chat), reactivating is one config change: `syne config set compaction.trigger_percent 60`.
 
 **How this shows up in behavior:**
@@ -711,12 +724,12 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `memory.auto_capture` | `false` | Auto-evaluate messages for storage |
+| `memory.auto_capture` | `true` | Auto-evaluate messages for storage (default ON since v1.19.6). Explicit stores are permanent regardless; only auto-captured rows are non-permanent and decay. |
 | `memory.recall_limit` | `5` | Max memories per query |
-| `memory.decay_interval` | `50` | Decay every N conversations |
-| `memory.decay_amount` | `1` | Recall count decrease per decay cycle |
-| `memory.initial_recall_count` | `5` | Starting durability for new memories |
-| `memory.promotion_threshold` | `10` | Promote to permanent when recall_count exceeds this |
+| `memory.max_records` | `1000` | Decay v2 cap: max non-permanent memories. Above this, LRU/LFU eviction runs during the next `decay_interval` sweep. Permanent memories are never counted or evicted. |
+| `memory.decay_interval` | `50` | Every N conversations, run the eviction sweep against `memory.max_records`. Decay itself is event-driven (per store + per recall) — this knob paces the CAP CHECK, not the decrement. |
+| `memory.initial_recall_count` | `1` | Starting `recall_count` for new non-permanent memories. |
+| `memory.promotion_threshold` | `1000` | Auto-promote a non-permanent memory to permanent when its `recall_count` crosses this. Default high = effectively dormant until tuned against real recall data. |
 | `memory.evaluator_driver` | `"ollama"` | Evaluator: "ollama" (local) or "provider" (main LLM) |
 | `memory.evaluator_model` | `"qwen3:0.6b"` | Ollama model for evaluation |
 
@@ -724,7 +737,7 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `session.history_limit` | `1000` | Max messages loaded into context per turn. Large raw window is Syne's replacement for compaction — see [History & Recall](#history--recall--raw-window--semantic-search-no-compaction). Tune down (e.g. `500`) if token budget is tight. |
+| `session.history_limit` | `50` | Max messages loaded into context per turn. Full history stays reachable via `history_search` — see [History & Recall](#history--recall--raw-window--semantic-search-no-compaction). Raise (e.g. `200`) if you want more raw context in the window and your token budget allows. |
 | `session.tool_loop_timeout` | `1800` | Tool loop timeout in seconds (30 min default) |
 | `compaction.trigger_percent` | `100` | Compaction trigger: fires when context usage reaches this % of the model window. **Default 100 = proactive compaction OFF.** Set to `60–80` to reactivate if you observe raw-window pattern is a poor fit for your workload. |
 | `session.compaction_keep_recent` | `40` | Messages preserved raw when compaction does run |
