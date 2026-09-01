@@ -165,6 +165,64 @@ def _serialize_messages(rows: list) -> str:
     return "\n\n".join(parts)
 
 
+def _serialized_part_lengths(rows: list) -> list:
+    """Per-row serialized length, mirroring _serialize_messages exactly.
+
+    A length of 0 marks a row that _serialize_messages skips entirely (a plain
+    system prompt), so it contributes neither text nor a separator. Every other
+    role always yields a non-empty label prefix, so 0 is unambiguous.
+    """
+    lengths = []
+    for row in rows:
+        role = row["role"]
+        content = row["content"]
+
+        if role == "tool":
+            content = _BASE64_PATTERN.sub("[base64 data removed]", content)
+
+        if role == "user":
+            lengths.append(len(f"[User]: {content}"))
+        elif role == "assistant":
+            lengths.append(len(f"[Assistant]: {content}"))
+        elif role == "tool":
+            lengths.append(len(f"[Tool result]: {content}"))
+        elif role == "system":
+            if "compaction_summary" in str(row.get("metadata", "")):
+                lengths.append(len(f"[Previous summary]: {content}"))
+            else:
+                lengths.append(0)  # skipped by _serialize_messages
+        else:
+            lengths.append(len(f"[{role}]: {content}"))
+
+    return lengths
+
+
+def _fit_offset(lengths: list, max_chars: int, step: int = 4, min_keep: int = 4) -> int:
+    """How many oldest rows to drop so the serialized batch fits max_chars.
+
+    Equivalent to repeatedly dropping `step` oldest rows and re-serializing
+    until the joined text fits (or fewer than min_keep rows remain), but
+    computed in O(n) via suffix sums. The joined length of a suffix is
+    sum(parts) + 2 * (count - 1), matching the "\n\n" join used by
+    _serialize_messages.
+    """
+    n = len(lengths)
+    suf_len = [0] * (n + 1)
+    suf_cnt = [0] * (n + 1)
+    for i in range(n - 1, -1, -1):
+        suf_len[i] = suf_len[i + 1] + lengths[i]
+        suf_cnt[i] = suf_cnt[i + 1] + (1 if lengths[i] else 0)
+
+    k = 0
+    while n - k > min_keep:
+        cnt = suf_cnt[k]
+        total = suf_len[k] + (2 * (cnt - 1) if cnt else 0)
+        if total <= max_chars:
+            break
+        k += step
+    return k
+
+
 async def get_session_stats(session_id: int) -> dict:
     """Get session statistics for compaction decisions.
     
@@ -308,16 +366,25 @@ async def compact_session(
 
         max_input_chars = max(1000, int(available_tokens * cpt))
 
-        # Adaptive reduction: if messages exceed context, reduce by 4 from
-        # oldest until they fit. Remaining messages stay in DB for next compact.
-        while len(old_rows) > 4:
-            conv_text = _serialize_messages(old_rows)
-            if len(conv_text) <= max_input_chars:
-                break
-            old_rows = old_rows[4:]  # drop 4 oldest
-            logger.info(f"Compact adaptive reduction: {len(old_rows)} msgs, {len(conv_text)} chars (max {max_input_chars})")
-        else:
-            conv_text = _serialize_messages(old_rows)
+        # Adaptive reduction: if the batch exceeds the summarizer input budget,
+        # drop the oldest messages (4 at a time) until it fits. The remainder
+        # stays in DB for the next compaction pass.
+        #
+        # The cut point is derived from precomputed per-message serialized
+        # lengths + suffix sums (O(n)) instead of re-serializing the whole
+        # batch on every iteration (O(n^2)). On a ~17k-message session the old
+        # loop ran thousands of iterations, emitted one log line each, and
+        # could stall the agent for many minutes with no visible progress and
+        # no messages actually archived.
+        drop = _fit_offset(_serialized_part_lengths(old_rows), max_input_chars)
+        if drop:
+            before_n = len(old_rows)
+            old_rows = old_rows[drop:]
+            logger.info(
+                f"Compact adaptive reduction: {before_n} -> {len(old_rows)} msgs "
+                f"(dropped {drop} oldest, budget {max_input_chars} chars)"
+            )
+        conv_text = _serialize_messages(old_rows)
 
         summarized_chars = sum(len(r["content"]) for r in old_rows)
 
