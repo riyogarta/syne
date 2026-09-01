@@ -243,7 +243,7 @@ Permanent memories are outside all of this. If a fact matters, tell Syne to *rem
 
 | Type | Decay | KG | Created by | Example |
 |------|-------|-----|------------|---------|
-| **Permanent** | Never | Yes | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
+| **Permanent** | Never | Yes | Explicit "remember this" command | "Remember: I'm allergic to shellfish" |
 | **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
 | **Conversation history** | Never — full log retained | No | Every message automatically | Full chat logs in `messages` table, reachable via `history_search` |
 
