@@ -242,6 +242,12 @@ def _send_family_should_skip(
 # making the owner approve one logical change twice.
 ALWAYS_GATE_TOOLS = {"memory_update"}
 
+# How long a completed consent-bypass dispatch stays replayable, in seconds.
+# Covers the LLM continuation that runs immediately after the user pressed
+# Yes; deliberately short so a stale entry can never stand in for a fresh
+# approval.
+REPLAY_WINDOW_SECONDS = 180
+
 
 # Short-lived side table of human-readable context for a pending prompt, keyed
 # by payload hash. Populated by the async enricher in check_and_hold (which may
@@ -468,6 +474,41 @@ async def check_and_hold(
         # instead of overwriting the slot. Same-payload re-emits just get
         # the existing prompt back (idempotent — no harm).
         incoming_hash = content_hash(payload)
+
+        # -- Replay guard ---------------------------------------------
+        # The bypass path (conversation._maybe_execute_pending_consent)
+        # runs the approved tool, revokes the single-use grant, then calls
+        # the LLM to summarize what happened. If that continuation re-emits
+        # the SAME payload, the revoked grant sends it right back here and
+        # the gate raises a fresh prompt for an action the user approved
+        # seconds ago. Pressing Yes runs it again, which summarizes again,
+        # which re-emits again: a consent loop the user cannot exit except
+        # by answering No.
+        #
+        # Observed 1 Sep 2026 (session 51): one memory_update executed three
+        # times across four prompts. Harmless only because memory_update is
+        # idempotent; the same loop on git push or sed -i compounds state.
+        #
+        # Deterministic fix: if THIS exact payload was dispatched via the
+        # bypass moments ago, return the stored result instead of gating.
+        # Bound to the exact payload hash AND a short window, so it can
+        # never authorize anything the user did not just approve.
+        _recent = getattr(conv, "_consent_recent_runs", None) or {}
+        _hit = _recent.get(incoming_hash) if isinstance(_recent, dict) else None
+        if _hit:
+            _age = time.time() - float(_hit.get("at", 0) or 0)
+            if 0 <= _age <= REPLAY_WINDOW_SECONDS:
+                _log.info(
+                    f"consent: replay hit for {tool_name} "
+                    f"hash={incoming_hash} age={_age:.1f}s - returning "
+                    "stored result instead of re-gating"
+                )
+                return ("held", (
+                    "ALREADY EXECUTED - the user approved this exact call "
+                    "moments ago and it has already run. Below is its real "
+                    "result. Do NOT re-issue this call; report this outcome "
+                    "to the user.\n\n"
+                ) + str(_hit.get("result", "")))
         existing_hash = getattr(conv, "_pending_consent_hash", "") or ""
         existing_tool = getattr(conv, "_pending_consent_tool", "") or ""
         if existing_hash:

@@ -229,6 +229,12 @@ class Conversation:
         self._pending_consent_args: dict = {}                  # full args dict
         self._pending_consent_hash: str = ""                   # sha256[:12] of payload
         self._pending_consent_at: float = 0.0                  # set-time
+        # Replay cache for consent-bypass dispatches (anti re-gate loop).
+        # Maps payload hash -> {tool, result, at}. Populated right after a
+        # bypass dispatch; read by consent.check_and_hold so an identical
+        # re-emit during the LLM continuation replays the stored result
+        # instead of raising a SECOND prompt for an action already run.
+        self._consent_recent_runs: dict = {}
         # Per-turn provenance taint. True when the current turn's INPUT carries
         # untrusted external content (image / uploaded file / URL in text) OR an
         # untrusted tool (web_search, fetch_url, file_read, pdf/office read,
@@ -996,6 +1002,26 @@ class Conversation:
                 agent._consent.revoke(ckey)
             except Exception as _e:
                 logger.warning(f"Consent bypass: revoke failed: {_e}")
+
+        # Record this dispatch so an identical re-emit inside the LLM
+        # continuation below replays this result instead of re-gating.
+        # The grant was revoked in the finally block above (single-use),
+        # so without this the re-emit falls straight back into the gate.
+        try:
+            self._consent_recent_runs[pending_hash] = {
+                "tool": pending_tool,
+                "result": result_str,
+                "at": _time.time(),
+            }
+            if len(self._consent_recent_runs) > 16:
+                _ordered = sorted(
+                    self._consent_recent_runs.items(),
+                    key=lambda kv: kv[1].get("at", 0),
+                )
+                for _k, _ in _ordered[: len(self._consent_recent_runs) - 16]:
+                    self._consent_recent_runs.pop(_k, None)
+        except Exception as _e:
+            logger.warning(f"Consent bypass: replay record failed: {_e}")
 
         # ─── Transcript surgery ────────────────────────────────────────────
         # When the gate held earlier, the tool loop saved the "balas ya"
