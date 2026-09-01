@@ -127,7 +127,7 @@ Three components work together: the **evaluator** decides what's worth storing, 
 
 Two modes, depending on whether `auto_capture` is enabled:
 
-#### Auto Capture OFF (default)
+#### Auto Capture OFF
 
 ```
 Chat ──→ "Ingat/Remember" detected?
@@ -139,7 +139,7 @@ Chat ──→ "Ingat/Remember" detected?
 
 Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") trigger memory storage. Zero cost when not storing.
 
-#### Auto Capture ON
+#### Auto Capture ON (default since v1.19.6)
 
 ```
 Chat ──→ "Ingat/Remember" detected?
@@ -245,7 +245,7 @@ Permanent memories are outside all of this. If a fact matters, tell Syne to *rem
 |------|-------|-----|------------|---------|
 | **Permanent** | Never | Yes | "Remember: I'm allergic to shellfish" | Important facts, preferences, decisions |
 | **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
-| **Conversation history** | Compacted when long | No | Every message automatically | Full chat logs in `messages` table |
+| **Conversation history** | Never — full log retained | No | Every message automatically | Full chat logs in `messages` table, reachable via `history_search` |
 
 ### Memory File Attachments
 
@@ -320,28 +320,28 @@ Set config memory.public_categories to ["alquran","bukhari","muslim","fiqih"]
 
 When a public user searches memories, results outside the allowed categories are silently filtered — they appear as if they don't exist.
 
-### History & Recall — Raw Window + Semantic Search (No Compaction)
+### History & Recall — Lean Window + Semantic Search Over Full Archive (No Compaction)
 
-Syne loads a **raw window** of recent messages each turn (default: 50 via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
+Syne loads a **lean window** of recent messages each turn (default: 50 via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
 
-The default was chosen after measuring real production sessions: a 1000-message window cost ~316k tokens per request once a session got long (950 messages → 1.21M chars per call). At 50, the same session costs ~17k tokens per request — a ~95% cut with **no data loss**, since full history stays in the DB and remains reachable via `history_search`.
+The 50-message default was chosen after measuring real production sessions: a 1000-message window cost ~316k tokens per request once a session got long (950 messages → 1.21M chars per call). At 50, the same session costs ~17k tokens per request — a ~95% cut with **no data loss**, since the full log stays in the DB and `history_search` can reach any turn on demand.
 
 **Why no compaction — architectural note:**
 
-Compaction is a workaround for a constraint Syne doesn't have. Other assistants use it because they can't reach messages outside their context window — so they must compress old history into a summary and hope the summarizer picks the right details to keep. That approach carries three tradeoffs Syne no longer wants:
+Compaction is a workaround for a constraint Syne doesn't have. Other assistants use it because they can't reach messages outside their context window — so they must compress old history into a summary and hope the summarizer picks the right details to keep. Syne removes the constraint at its root: every message stays in the DB forever and `history_search` retrieves specific past turns on demand. That means the raw window doesn't have to be big; a lean window plus reactive semantic retrieval is cheaper AND more faithful than a large window with periodic summarization. Three tradeoffs of the compaction approach that Syne no longer wants:
 
 - **Lossy by design.** A narrative summary can't preserve every detail. The summarizer decides what matters — sometimes it's wrong.
 - **Bias injection.** Summaries are LLM-generated text. If the summarizer hallucinates a claim ("we agreed to X"), that claim becomes "background context" for every subsequent turn — the model treats it as fact, not as one model's interpretation of a past exchange.
 - **Compounding drift.** Summaries of summaries progressively lose fidelity. Old decisions get restated in the summarizer's preferred framing rather than the owner's own words.
 
-Syne's tradeoff is different: it retains **every message forever** (marked `status='compacted'` only when a compaction summary was created historically — content is never deleted) and provides `history_search` to reach anything outside the raw window semantically. The tools loop is:
+Syne's tradeoff is different: it retains **every message forever** (marked `status='compacted'` only when a compaction summary was created historically — content is never deleted) and provides `history_search` to reach anything outside the lean window semantically. The tools loop is:
 
 ```
 history_search(query, ...)        → previews (user messages, ground truth)
-    ↓ (Molt picks the relevant anchors)
+    ↓ (Syne picks the relevant anchors)
 history_expand(anchor_ids, ...)   → full context around each anchor (all roles)
-    ↓ (Molt reads assistant reply, tool results, follow-ups)
-Molt answers grounded in what actually happened
+    ↓ (Syne reads assistant reply, tool results, follow-ups)
+Syne answers grounded in what actually happened
 ```
 
 The retrieval is (a) unlimited in reach — full chat archive is searchable, (b) grounded in the owner's literal words (embeds are on `role='user'` only), and (c) reactive — semantic work happens only when a specific turn actually needs it, not proactively on every batch of old messages.
@@ -354,8 +354,8 @@ The retrieval is (a) unlimited in reach — full chat archive is searchable, (b)
 
 **How this shows up in behavior:**
 
-- Molt can recall specific past turns by paraphrase, not just exact keyword. "What did we decide about the shell guard tier?" reaches the actual decision message, not a summarizer's interpretation of it.
-- Old sessions get less confidently-wrong narrative claims. Molt is more likely to say "let me search" (and actually search) than to synthesize from a lossy summary.
+- Syne can recall specific past turns by paraphrase, not just exact keyword. "What did we decide about the shell guard tier?" reaches the actual decision message, not a summarizer's interpretation of it.
+- Old sessions get less confidently-wrong narrative claims. Syne is more likely to say "let me search" (and actually search) than to synthesize from a lossy summary.
 - Session token cost scales linearly with `history_limit`, not exponentially with session length. Prompt caching (Anthropic) absorbs most of the extra tokens.
 
 ### Conflict Resolution
@@ -374,8 +374,8 @@ Source priority resolves conflicts: `user_confirmed` > `observed` > `auto_captur
 
 | Mode | Trigger | Cost impact |
 |------|---------|-------------|
-| `auto_capture = false` (default) | Only when user says "remember this" | No extra calls |
-| `auto_capture = true` | Every message evaluated | +1 evaluator call + 1 embedding per message |
+| `auto_capture = true` (default since v1.19.6) | Every message evaluated | +1 evaluator call + 1 embedding per message |
+| `auto_capture = false` | Only when user says "remember this" | No extra calls |
 
 With Ollama as both evaluator and embedding provider, auto-capture costs **$0** — both run locally.
 
