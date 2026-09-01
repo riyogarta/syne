@@ -350,7 +350,7 @@ The retrieval is (a) unlimited in reach — full chat archive is searchable, (b)
 
 - `trim_context` — per-turn safety net that drops oldest non-system messages 4 at a time if the loaded window still exceeds the context budget. Non-destructive; nothing leaves the DB.
 - `session.history_limit` — the load window itself. 50 default is conservative; raise it (`syne config set session.history_limit 200`) if you want more raw context in the model's window and your token budget allows.
-- `run_compact()` — the summarizer stays in the code, dormant. If a specific installation observes that the raw window pattern is a poor fit (e.g. extremely high-throughput group chat), reactivating is one config change: `syne config set compaction.trigger_percent 60`.
+- `run_compact()` — the summarizer stays in the code, dormant. If a specific installation observes that the lean-window + `history_search` pattern is a poor fit (e.g. extremely high-throughput group chat), reactivating is one config change: `syne config set compaction.trigger_percent 60`.
 
 **How this shows up in behavior:**
 
@@ -737,9 +737,9 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `session.history_limit` | `50` | Max messages loaded into context per turn. Full history stays reachable via `history_search` — see [History & Recall](#history--recall--raw-window--semantic-search-no-compaction). Raise (e.g. `200`) if you want more raw context in the window and your token budget allows. |
+| `session.history_limit` | `50` | Max messages loaded into context per turn. Full history stays reachable via `history_search` — see [History & Recall](#history--recall--lean-window--semantic-search-over-full-archive-no-compaction). Raise (e.g. `200`) if you want more raw context in the window and your token budget allows. |
 | `session.tool_loop_timeout` | `1800` | Tool loop timeout in seconds (30 min default) |
-| `compaction.trigger_percent` | `100` | Compaction trigger: fires when context usage reaches this % of the model window. **Default 100 = proactive compaction OFF.** Set to `60–80` to reactivate if you observe raw-window pattern is a poor fit for your workload. |
+| `compaction.trigger_percent` | `100` | Compaction trigger: fires when context usage reaches this % of the model window. **Default 100 = proactive compaction OFF.** Set to `60–80` to reactivate if you observe the lean-window + `history_search` pattern is a poor fit for your workload. |
 | `session.compaction_keep_recent` | `40` | Messages preserved raw when compaction does run |
 | `session.compaction_overlap_percent` | `15` | Overlap: % of summarized batch also kept raw as a verbatim bridge |
 | `session.thinking_budget` | `null` | Global default only — per-model thinking is set via `/models` |
