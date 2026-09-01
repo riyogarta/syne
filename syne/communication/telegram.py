@@ -2448,40 +2448,6 @@ Or just send me a message!"""
             logger.error(f"Compaction failed: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Compaction failed: {str(e)[:200]}")
 
-    async def _compact_active_conversations(self, trigger_chat_id=None):
-        """Auto-compact all active conversations after model switch.
-
-        Cleans up message history that may contain format incompatible
-        with the new model (e.g. tool_use blocks from Anthropic → OpenAI).
-        """
-        if not self.agent or not self.agent.conversations:
-            return
-        for key, conv in list(self.agent.conversations._active.items()):
-            # Load history if cache is empty (session not yet used this restart)
-            if not conv._message_cache:
-                try:
-                    await conv.load_history()
-                except Exception:
-                    continue
-            if len(conv._message_cache) < 10:
-                continue
-            try:
-                result = await conv.run_compact()
-                if result:
-                    logger.info(f"Model-switch compact {key}: {result['messages_before']} → {result['messages_after']} msgs")
-                    # Notify the chat
-                    try:
-                        chat_id = key.split(":", 1)[1] if ":" in key else None
-                        if chat_id:
-                            await self.app.bot.send_message(
-                                chat_id=int(chat_id),
-                                text=f"🧹 Auto-compacted: {result['messages_before']} → {result['messages_after']} messages",
-                            )
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.warning(f"Model-switch compact failed for {key}: {e}")
-
     async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /evaluator command — manage evaluator model for auto-capture."""
         user = update.effective_user
@@ -4087,8 +4053,6 @@ Or just send me a message!"""
             await set_config("provider.chat_model", entry["model_id"])
             if self.agent:
                 await self.agent.reload_provider()
-                # Auto-compact active conversations to avoid format mismatch
-                await self._compact_active_conversations(query.message.chat_id)
             await query.answer(f"Default → {entry.get('label', model_key)}")
             await self._models_menu_main(query)
 
@@ -5007,8 +4971,6 @@ Or just send me a message!"""
             
             # Hot-reload provider in the running agent (handles context manager + compaction adjustment)
             await self.agent.reload_provider()
-            # Auto-compact active conversations to avoid format mismatch
-            await self._compact_active_conversations(chat_id)
 
             return True, model_entry.get("label", model_key)
                 

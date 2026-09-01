@@ -1355,67 +1355,6 @@ class Conversation:
                     metadata=media_meta,
                 )
 
-        # ═══════════════════════════════════════════════════════════════
-        # PRE-FLIGHT COMPACTION CHECK
-        # Compact BEFORE building context so the LLM never sees a
-        # silently-trimmed conversation.  Old flow had compaction after
-        # the response, which meant trim_context could silently drop
-        # messages and cause amnesia.
-        # ═══════════════════════════════════════════════════════════════
-        # Compaction gate: SINGLE token-based trigger, configurable via
-        # config `compaction.trigger_percent` (1-100, default 40). Compact when
-        # the context the LLM will see reaches that % of the model's context window.
-        from .db.models import get_config as _gc_cp
-        _trig_pct = await _gc_cp("compaction.trigger_percent", 40)
-        try:
-            _trig_pct = float(_trig_pct)
-        except (TypeError, ValueError):
-            _trig_pct = 40.0
-        _trig_pct = max(1.0, min(100.0, _trig_pct))
-        _threshold = _trig_pct / 100.0
-
-        context_full = bool(self._message_cache) and self.context_mgr.should_compact(
-            self._message_cache,
-            threshold=_threshold,
-        )
-
-        if context_full:
-            logger.info(f"Compaction triggered for session {self.session_id}: context usage >= {_trig_pct:.0f}% of model context window")
-            if self._mgr and self._mgr._status_callbacks:
-                for cb in self._mgr._status_callbacks:
-                    try:
-                        await cb(
-                            self.session_id,
-                            "🧹 Compacting memory... please wait a moment."
-                        )
-                    except Exception as e:
-                        logger.debug(f"Status callback failed: {e}")
-            try:
-                result = await self.run_compact()
-            except Exception as e:
-                _err_msg = f"❌ Compaction failed: {e}"
-                logger.error(f"Auto-compact failed for session {self.session_id}: {e}")
-                if self._mgr and self._mgr._status_callbacks:
-                    for cb in self._mgr._status_callbacks:
-                        try:
-                            await cb(self.session_id, _err_msg)
-                        except Exception:
-                            pass
-                result = None
-            if result:
-                logger.info(
-                    f"Auto-compacted: {result['messages_before']} → {result['messages_after']} messages"
-                )
-                if self._mgr and self._mgr._status_callbacks:
-                    for cb in self._mgr._status_callbacks:
-                        try:
-                            await cb(
-                                self.session_id,
-                                f"✅ Compaction done ({result['messages_before']} → {result['messages_after']} messages)"
-                            )
-                        except Exception as e:
-                            logger.debug(f"Status callback failed: {e}")
-
         # Build context — use original text (without context prefix) for memory recall
         recall_query = (message_metadata or {}).get("original_text", user_message)
         context = await self.build_context(user_message, recall_query=recall_query)
@@ -1469,54 +1408,25 @@ class Conversation:
         response = None
         max_attempts = 1 if self.provider.name in ("google", "vertex") else 3
         for attempt in range(max_attempts):
-            try:
-                # Auto-retry on vague 400 errors (e.g. concurrent KG extraction)
-                _vague_retries = 3
-                for _vague_attempt in range(_vague_retries):
-                    try:
-                        response = await self.provider.chat(
-                            messages=context,
-                            tools=tool_schemas if tool_schemas else None,
-                            stream_callbacks=self.stream_callbacks,
-                            **chat_kwargs,
-                        )
-                        break  # success
-                    except (RuntimeError, LLMBadRequestError) as _re:
-                        _msg = str(_re)
-                        _is_vague = '"message":"Error"' in _msg or '"message": "Error"' in _msg
-                        if _is_vague and _vague_attempt < _vague_retries - 1:
-                            logger.warning(f"Vague 400 error, retrying in 2s ({_vague_attempt + 1}/{_vague_retries})")
-                            await asyncio.sleep(2.0)
-                            continue
-                        raise  # not vague or last attempt — let outer handler deal with it
-            except LLMContextWindowError:
-                # Input tokens exceeded model limit — emergency compact and retry once
-                logger.warning(f"Context window exceeded for session {self.session_id}, triggering emergency compaction")
-                if self._mgr and self._mgr._status_callbacks:
-                    for cb in self._mgr._status_callbacks:
-                        try:
-                            await cb(self.session_id, "Context limit hit — compacting memory...")
-                        except Exception:
-                            pass
-                result = await self.run_compact()
-                if result:
-                    logger.info(f"Emergency compaction: {result['messages_before']} → {result['messages_after']} messages")
-                    # Rebuild context after compaction
-                    context = await self.build_context(user_message, recall_query=recall_query)
-                    tool_schemas = self.tools.to_openai_schema(effective_access_level)
-                    if self.abilities:
-                        tool_schemas = tool_schemas + self.abilities.to_openai_schema(effective_access_level)
-                    if self.is_group and should_filter_tools_for_group(self.is_group):
-                        tool_schemas = filter_tools_for_group(tool_schemas)
-                    # Retry the chat call (no further catch — let it fail if still too big)
+            # Auto-retry on vague 400 errors (e.g. concurrent KG extraction)
+            _vague_retries = 3
+            for _vague_attempt in range(_vague_retries):
+                try:
                     response = await self.provider.chat(
                         messages=context,
                         tools=tool_schemas if tool_schemas else None,
                         stream_callbacks=self.stream_callbacks,
                         **chat_kwargs,
                     )
-                else:
-                    raise
+                    break  # success
+                except (RuntimeError, LLMBadRequestError) as _re:
+                    _msg = str(_re)
+                    _is_vague = '"message":"Error"' in _msg or '"message": "Error"' in _msg
+                    if _is_vague and _vague_attempt < _vague_retries - 1:
+                        logger.warning(f"Vague 400 error, retrying in 2s ({_vague_attempt + 1}/{_vague_retries})")
+                        await asyncio.sleep(2.0)
+                        continue
+                    raise  # not vague or last attempt — let outer handler deal with it
 
             # Check for auth failures (expired OAuth tokens etc.)
             auth_failure = getattr(self.provider, '_auth_failure', None)
