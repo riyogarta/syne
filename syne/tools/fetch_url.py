@@ -80,11 +80,20 @@ JS_SETTLE_MS = 2500       # let late XHR content land after DOMContentLoaded
 # remaining attributes leak into the output as visible text. Real pages hit
 # this constantly.
 #
-# This is the standard "unrolled loop" form: the alternatives start with
-# distinct characters, so there is no ambiguity and no catastrophic
-# backtracking. Quoted runs are length-capped so a single unbalanced quote
-# (malformed HTML) cannot swallow the rest of the document.
-_ATTRS = r"""[^>"']*(?:(?:"[^"]{0,4096}"|'[^']{0,4096}')[^>"']*)*"""
+# Standard "unrolled loop" form: alternatives start with distinct characters,
+# so there is no ambiguity and no catastrophic backtracking.
+#
+# The quoted runs are bounded by CONTENT, not by LENGTH. An earlier version
+# capped them at 4096 chars to stop a stray unbalanced quote from swallowing
+# the document -- but real pages carry legitimately huge attribute values
+# (a base64 data: URI image is tens of thousands of chars). Those blew past
+# the cap, the whole tag then failed to match, and the raw markup leaked --
+# the exact bug this function exists to prevent.
+#
+# Excluding "<" instead is both safer and unbounded: no real attribute value
+# contains a raw "<", while an unbalanced quote necessarily runs into the "<"
+# of the next tag and stops there. Damage stays local either way.
+_ATTRS = r"""[^>"']*(?:(?:"[^"<]*"|'[^'<]*')[^>"']*)*"""
 
 # Only treat "<" as a tag when a name-ish character follows, so prose such as
 # "5 < 10 and x > 3" is left alone instead of being eaten as a fake tag.
@@ -92,6 +101,13 @@ _TAG_RE = re.compile(r"<[/!?]?[a-zA-Z]" + _ATTRS + r">")
 _SCRIPT_RE = re.compile(r"<script" + _ATTRS + r">.*?</script\s*>", re.DOTALL | re.IGNORECASE)
 _STYLE_RE = re.compile(r"<style" + _ATTRS + r">.*?</style\s*>", re.DOTALL | re.IGNORECASE)
 _BLOCK_RE = re.compile(r"<(?:p|div|br|h[1-6]|li|tr)\b" + _ATTRS + r">", re.IGNORECASE)
+
+# Safety net for markup so malformed that the attribute-aware pattern gives up
+# (e.g. a quote opened and never closed). Falls back to the old naive
+# behaviour, which is imperfect but strips SOMETHING -- far better than
+# dumping raw HTML at the caller. "[^<>]*" keeps a runaway match from
+# swallowing across into the next tag.
+_TAG_FALLBACK_RE = re.compile(r"<[/!?]?[a-zA-Z][^<>]*>")
 
 
 def strip_html_tags(html: str) -> str:
@@ -101,6 +117,7 @@ def strip_html_tags(html: str) -> str:
     html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
     html = _BLOCK_RE.sub("\n", html)
     html = _TAG_RE.sub("", html)
+    html = _TAG_FALLBACK_RE.sub("", html)
     # Decode ALL HTML entities (named + numeric) via stdlib.
     html = html_unescape(html)
     html = re.sub(r"\n\s*\n+", "\n\n", html)
