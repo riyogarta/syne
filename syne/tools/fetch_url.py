@@ -72,13 +72,35 @@ JS_TIMEOUT_MS = 20000
 JS_SETTLE_MS = 2500       # let late XHR content land after DOMContentLoaded
 
 
+# Tail of an HTML tag, attribute-aware: runs of plain chars interleaved with
+# quoted attribute values, which MAY themselves contain ">".
+#
+# The naive r"<[^>]+>" stops at the first ">" even when that ">" sits inside an
+# attribute value (e.g. alt="a > b"). The tag is then cut in half and its
+# remaining attributes leak into the output as visible text. Real pages hit
+# this constantly.
+#
+# This is the standard "unrolled loop" form: the alternatives start with
+# distinct characters, so there is no ambiguity and no catastrophic
+# backtracking. Quoted runs are length-capped so a single unbalanced quote
+# (malformed HTML) cannot swallow the rest of the document.
+_ATTRS = r"""[^>"']*(?:(?:"[^"]{0,4096}"|'[^']{0,4096}')[^>"']*)*"""
+
+# Only treat "<" as a tag when a name-ish character follows, so prose such as
+# "5 < 10 and x > 3" is left alone instead of being eaten as a fake tag.
+_TAG_RE = re.compile(r"<[/!?]?[a-zA-Z]" + _ATTRS + r">")
+_SCRIPT_RE = re.compile(r"<script" + _ATTRS + r">.*?</script\s*>", re.DOTALL | re.IGNORECASE)
+_STYLE_RE = re.compile(r"<style" + _ATTRS + r">.*?</style\s*>", re.DOTALL | re.IGNORECASE)
+_BLOCK_RE = re.compile(r"<(?:p|div|br|h[1-6]|li|tr)\b" + _ATTRS + r">", re.IGNORECASE)
+
+
 def strip_html_tags(html: str) -> str:
     """Strip HTML/scripts/styles and return readable text."""
-    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    html = _SCRIPT_RE.sub("", html)
+    html = _STYLE_RE.sub("", html)
     html = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
-    html = re.sub(r"<(?:p|div|br|h[1-6]|li|tr)[^>]*>", "\n", html, flags=re.IGNORECASE)
-    html = re.sub(r"<[^>]+>", "", html)
+    html = _BLOCK_RE.sub("\n", html)
+    html = _TAG_RE.sub("", html)
     # Decode ALL HTML entities (named + numeric) via stdlib.
     html = html_unescape(html)
     html = re.sub(r"\n\s*\n+", "\n\n", html)
