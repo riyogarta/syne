@@ -57,7 +57,7 @@ def _stricter(a: Verdict, b: Verdict) -> Verdict:
 @dataclass
 class Analysis:
     """Result of analyze(). `candidates` = unknown binaries worth proposing to
-    the owner for /add-allowlist (populated even on HARD_DENY so the operator
+    the owner for /allowlist add (populated even on HARD_DENY so the operator
     sees what got blocked and can promote it)."""
     verdict: Verdict
     reason: str

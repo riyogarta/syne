@@ -1750,7 +1750,7 @@ class SyneAgent:
             return (
                 f"⛔ Blocked by shell guard: {_res.reason}{_cand}\n\n"
                 "This command is hard-denied and cannot be approved. If a listed "
-                "binary is legitimate, the owner can add it via /add-allowlist."
+                "binary is legitimate, the owner can add it via: /allowlist add BINARY"
             )
 
         if _res.outcome == Outcome.NEEDS_CONSENT:

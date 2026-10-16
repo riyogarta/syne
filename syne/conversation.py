@@ -1811,7 +1811,7 @@ class Conversation:
             return ToolResult(
                 f"⛔ Blocked by shell guard: {res.reason}{cand}\n\n"
                 "This command is hard-denied and cannot be approved. If a listed "
-                "binary is legitimate, the owner can add it via /add-allowlist.",
+                "binary is legitimate, the owner can add it via: /allowlist add BINARY",
                 ok=False, error_type="permission",
             )
 

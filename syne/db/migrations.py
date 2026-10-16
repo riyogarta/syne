@@ -326,7 +326,7 @@ async def _m15_shell_allowlist_tables(conn) -> None:
     shell_allowlist: binaries the OWNER has explicitly approved for shell
     execution. This is the ONLY thing that opens the default-deny gate at
     runtime (the hardcoded DEFAULT_ALLOWLIST in shell_guard.py is the release
-    floor). Rows are added via /add-allowlist (owner-only Telegram command).
+    floor). Rows are added via /allowlist add (owner-only Telegram command).
     `hits` counts real uses so proven entries can later be promoted into the
     hardcoded floor in a future release.
 
