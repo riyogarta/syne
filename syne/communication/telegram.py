@@ -5,6 +5,7 @@ import httpx
 import json
 import logging
 import re
+import secrets
 from collections import deque
 from typing import Optional, Tuple
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReactionTypeEmoji
@@ -60,13 +61,26 @@ def _classify_error(e: Exception, model: str = "") -> str:
 
 def _make_model_key(model_id: str, driver: str = "") -> str:
     """Generate a short unique key from model_id + driver prefix."""
-    slug = model_id.replace("/", "-").replace(".", "-").replace(":", "-").lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", model_id.lower()).strip("-")
     # Add driver prefix for non-default drivers to avoid key collision
     # (e.g. vertex-gemini-2-5-pro vs gemini-2-5-pro for google_cca)
     if driver and driver not in ("google_cca", "codex", "anthropic"):
         prefix = driver.split("_")[0]
         slug = f"{prefix}-{slug}"
-    return slug[:40]
+    return slug[:40].strip("-")
+
+
+def _new_model_key(existing_keys=()) -> str:
+    """Generate a random unique ID for a model entry.
+
+    Independent of model_id/driver/label so the key never has to change
+    when the model is renamed or re-pointed.  Retries on collision.
+    """
+    existing = set(existing_keys)
+    while True:
+        key = f"m-{secrets.token_hex(5)}"
+        if key not in existing:
+            return key
 
 
 class _TypingIndicator:
@@ -2667,6 +2681,12 @@ Or just send me a message!"""
         text = text.strip()
 
         if step == "model_id":
+            if not text or " " in text or "\n" in text:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\u274c Invalid model ID (no spaces or newlines). Resend it, or /cancel to abort.",
+                )
+                return True
             state["model_id"] = text
             state["step"] = "label"
             await bot.send_message(
@@ -3010,7 +3030,7 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton(
                 f"{prefix}{label}", callback_data=f"graph:detail:{key}"
             )])
-        buttons.append([InlineKeyboardButton("➕ Add Extractor", callback_data="graph:add_menu")])
+        buttons.append([InlineKeyboardButton("➕ Add Graph", callback_data="graph:add_menu")])
         buttons.append([InlineKeyboardButton("🔄 Reprocess Memories", callback_data="graph:reprocess_force")])
         buttons.append([InlineKeyboardButton(
             f"{'✅ ' if enabled else '⬜ '}Knowledge Graph: {en_label}",
@@ -3021,7 +3041,7 @@ Or just send me a message!"""
         count = len(graph_models)
         text = (
             f"🕸 <b>Knowledge Graph</b> — {count} registered | {en_label}\n"
-            f"Extractor: <b>{driver_label}</b>"
+            f"Graph: <b>{driver_label}</b>"
         )
         markup = InlineKeyboardMarkup(buttons)
 
@@ -3036,7 +3056,7 @@ Or just send me a message!"""
         active_key = await get_config("graph.active_extractor", "")
         entry = next((m for m in graph_models if m.get("key") == graph_key), None)
         if not entry:
-            await query.edit_message_text("Extractor not found.")
+            await query.edit_message_text("Graph not found.")
             return
 
         label = entry.get("label", graph_key)
@@ -3075,7 +3095,7 @@ Or just send me a message!"""
             graph_models = await get_config("graph.extractor_models", [])
             entry = next((m for m in graph_models if m.get("key") == graph_key), None)
             if not entry:
-                await query.answer("Extractor not found", show_alert=True)
+                await query.answer("Graph not found", show_alert=True)
                 return
             await set_config("graph.active_extractor", graph_key)
             await set_config("graph.extractor_driver", entry.get("driver", "provider"))
@@ -3094,7 +3114,7 @@ Or just send me a message!"""
             graph_models = await get_config("graph.extractor_models", [])
             entry = next((m for m in graph_models if m.get("key") == graph_key), None)
             if not entry:
-                await query.answer("Extractor not found", show_alert=True)
+                await query.answer("Graph not found", show_alert=True)
                 return
             await query.edit_message_text(
                 f"🗑 <b>Delete {entry.get('label', graph_key)}?</b>",
@@ -3123,7 +3143,7 @@ Or just send me a message!"""
                     await set_config("graph.active_extractor", "")
                     await set_config("graph.extractor_driver", "provider")
                     await set_config("graph.extractor_model", "")
-            await query.answer("Extractor deleted")
+            await query.answer("Graph deleted")
             await self._graph_menu_main(query)
 
         elif data == "graph:reprocess_force":
@@ -3183,7 +3203,7 @@ Or just send me a message!"""
             buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="graph:main"))
             keyboard = [[btn] for btn in buttons]
             await query.edit_message_text(
-                "🕸 <b>Add Graph Extractor</b>\n\nChoose a driver:",
+                "🕸 <b>Add Graph</b>\n\nChoose a driver:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -3231,7 +3251,7 @@ Or just send me a message!"""
                 await (query._bot or self.app.bot).send_message(
                     chat_id=query.message.chat_id,
                     text=(
-                        "🕸 <b>Add Graph Extractor — Ollama</b>\n\n"
+                        "🕸 <b>Add Graph — Ollama</b>\n\n"
                         "Send the model ID (e.g. <code>qwen3:8b</code>).\n\n"
                         "Send /cancel to abort."
                     ),
@@ -3245,6 +3265,12 @@ Or just send me a message!"""
         text = text.strip()
 
         if step == "model_id":
+            if not text or " " in text or "\n" in text:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\u274c Invalid model ID (no spaces or newlines). Resend it, or /cancel to abort.",
+                )
+                return True
             state["model_id"] = text
             state["step"] = "label"
             await bot.send_message(
@@ -3278,7 +3304,7 @@ Or just send me a message!"""
             if existing:
                 await bot.send_message(
                     chat_id=chat_id,
-                    text=f"Extractor <code>{entry['key']}</code> already exists.",
+                    text=f"Graph <code>{entry['key']}</code> already exists.",
                     parse_mode="HTML",
                 )
                 self._auth_state.pop(user_id, None)
@@ -7691,6 +7717,12 @@ Or just send me a message!"""
             return True
 
         elif step == "model_id":
+            if not text or " " in text or "\n" in text:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\u274c Invalid model ID (no spaces or newlines). Resend it, or /cancel to abort.",
+                )
+                return True
             state["model_id"] = text
             state["step"] = "label"
             await bot.send_message(
@@ -7731,7 +7763,7 @@ Or just send me a message!"""
             # Build model entry and save
             auth_type = state.get("auth_override") or self._DRIVER_AUTH_TYPES.get(driver, "api_key")
             entry = {
-                "key": _make_model_key(state["model_id"], state.get("driver", "")),
+                "key": _new_model_key([m.get("key") for m in (await get_config("provider.models", []))]),
                 "label": state["label"],
                 "driver": driver,
                 "model_id": state["model_id"],
@@ -8104,6 +8136,12 @@ Or just send me a message!"""
         text = text.strip()
 
         if step == "model_id":
+            if not text or " " in text or "\n" in text:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\u274c Invalid model ID (no spaces or newlines). Resend it, or /cancel to abort.",
+                )
+                return True
             state["model_id"] = text
             state["step"] = "dimensions"
             await bot.send_message(
