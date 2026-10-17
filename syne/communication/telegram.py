@@ -528,7 +528,10 @@ class TelegramChannel:
         # input here and SKIP history/memory entirely.
         # ═══════════════════════════════════════════════════════════════
         if user.id in self._auth_state and not is_group:
+            state_type = self._auth_state[user.id].get("type", "?")
+            logger.info(f"Auth input intercept: user={user.id} state={state_type!r}")
             handled = await self._handle_auth_input(update, context, text)
+            logger.info(f"Auth input intercept: state={state_type!r} handled={handled}")
             if handled:
                 return  # Credential processed — do NOT save to history
 
@@ -8743,6 +8746,7 @@ Or just send me a message!"""
 
         data = query.data or ""
         user = query.from_user
+        logger.info(f"Callback: data={data!r} from user={user.id}")
 
         # ─── Consent buttons run before the owner-only gate ─────────────────
         # A consent-required tool call might have been initiated by a family
