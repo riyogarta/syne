@@ -484,17 +484,53 @@ class AnthropicProvider(LLMProvider):
 
         conversation = self._sanitize_conversation(conversation)
 
-        # Cache last user message (Pi style — no beta header needed)
+        # Conversation cache breakpoints. Anthropic allows 4 in total; the
+        # system array uses 2, so 2 are available here and both are used:
+        #
+        #   1. The LAST message. It grows on every tool round and carries the
+        #      volatile tail behind it (see below).
+        #   2. The turn's REAL user message. Tool results are sent back as
+        #      role="user" as well, so breakpoint 1 shifts position on every
+        #      tool round and never matches the next request. A breakpoint
+        #      anchored on the actual user text does NOT shift, so it stays a
+        #      valid prefix across turns and lets prior history be READ
+        #      instead of rewritten at cache-write rates.
         _cache = {"type": "ephemeral"}
+
+        def _mark_cache(msg) -> bool:
+            """Attach a cache breakpoint to the end of msg's content."""
+            content = msg.get("content")
+            if isinstance(content, str):
+                msg["content"] = [{"type": "text", "text": content,
+                                   "cache_control": _cache}]
+                return True
+            if isinstance(content, list) and content and isinstance(content[-1], dict):
+                content[-1]["cache_control"] = _cache
+                return True
+            return False
+
+        def _is_tool_result(msg) -> bool:
+            c = msg.get("content")
+            return isinstance(c, list) and bool(c) and all(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in c
+            )
+
         _last_user = None
-        for msg in reversed(conversation):
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, str):
-                    msg["content"] = [{"type": "text", "text": content, "cache_control": _cache}]
-                elif isinstance(content, list) and content:
-                    content[-1]["cache_control"] = _cache
-                _last_user = msg
+        _last_user_idx = None
+        for _i in range(len(conversation) - 1, -1, -1):
+            if conversation[_i].get("role") == "user":
+                _mark_cache(conversation[_i])
+                _last_user = conversation[_i]
+                _last_user_idx = _i
+                break
+
+        # Stable anchor: the newest user message that is real text, not a
+        # batch of tool results. Skipped if it is already the last message.
+        for _i in range(len(conversation) - 1, -1, -1):
+            _msg = conversation[_i]
+            if _msg.get("role") == "user" and not _is_tool_result(_msg):
+                if _i != _last_user_idx:
+                    _mark_cache(_msg)
                 break
 
         # Volatile context rides AFTER the cache breakpoint, as trailing text
