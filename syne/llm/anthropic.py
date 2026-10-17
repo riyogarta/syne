@@ -982,14 +982,31 @@ class AnthropicProvider(LLMProvider):
                     i for i, b in enumerate(body.get("system", []))
                     if b.get("cache_control")
                 ]
+                # Conversation-side breakpoints. The system array is only half
+                # the picture: breakpoints also live on messages, and a
+                # breakpoint whose position shifts between requests can never
+                # match the next one. Log where they actually landed.
+                _msgs = body.get("messages", [])
+                _conv_marks = []
+                for _mi, _m in enumerate(_msgs):
+                    _mc = _m.get("content")
+                    if not isinstance(_mc, list):
+                        continue
+                    for _b in _mc:
+                        if isinstance(_b, dict) and _b.get("cache_control"):
+                            _conv_marks.append(
+                                "%d/%s/%s" % (_mi, _m.get("role", "?"),
+                                              _b.get("type", "?"))
+                            )
                 logger.warning(
                     "DIAG-CACHE in=%s cache_read=%s cache_write=%s out=%s | "
-                    "sys_blocks=%s cached_idx=%s",
+                    "sys_blocks=%s cached_idx=%s | msgs=%s conv_marks=%s",
                     usage.get("input_tokens", 0),
                     usage.get("cache_read_input_tokens", 0),
                     usage.get("cache_creation_input_tokens", 0),
                     usage.get("output_tokens", 0),
                     _sys_sizes, _cached_at,
+                    len(_msgs), _conv_marks,
                 )
             except Exception as _e:
                 logger.debug("DIAG-CACHE logging failed: %s", _e)
