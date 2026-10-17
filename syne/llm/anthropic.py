@@ -533,18 +533,18 @@ class AnthropicProvider(LLMProvider):
                     _mark_cache(_msg)
                 break
 
-        # Volatile context rides AFTER the cache breakpoint, as trailing text
-        # blocks on the last user message. Everything BEFORE a breakpoint is
-        # the cached prefix, so a wall-clock string (with seconds) sitting in
-        # there invalidates the whole prefix every turn and forces a full
-        # rewrite at cache-write rates. The content still reaches the model,
-        # only its position changes.
-        if volatile_parts and _last_user is not None:
-            _vc = _last_user.get("content")
-            if isinstance(_vc, list):
-                for vp in volatile_parts:
-                    _vc.append({"type": "text", "text": vp})
-                volatile_parts = []
+        # Volatile context does NOT ride on the last user message. Doing that
+        # mutates message content between turns: the clock/memory blocks are
+        # appended to whichever user message is last, so once that message
+        # becomes history its bytes no longer match what was cached, and the
+        # breakpoint anchored on it can never hit. Observed as cache_read
+        # pinned at exactly the system-block size on the first request of
+        # every new turn, with history rewritten at write rates.
+        #
+        # Instead it is appended to the END of the system array, past the last
+        # system breakpoint — see below. Anything after the final breakpoint is
+        # outside the cached prefix, so volatile content stays uncached while
+        # message history remains byte-stable and cacheable.
 
         body: dict = {
             "model": model,
@@ -564,7 +564,8 @@ class AnthropicProvider(LLMProvider):
         if system_blocks:
             if len(system_blocks) > 1:
                 system_blocks[-1]["cache_control"] = _cache
-            # Fallback: no user message was available to carry volatile context.
+            # Volatile context lands here, after the last breakpoint set above,
+            # so it is never part of the cached prefix.
             for vp in volatile_parts:
                 system_blocks.append({"type": "text", "text": vp})
             body["system"] = system_blocks
