@@ -387,15 +387,22 @@ class AnthropicProvider(LLMProvider):
     ) -> ChatResponse:
         model = model or self.chat_model
 
-        # Separate system messages from conversation messages
+        # Separate system messages from conversation messages.
+        # Volatile system blocks (wall-clock time, memory recall, knowledge
+        # graph) change every turn. They must NOT land inside the cached
+        # prefix - see the cache_control section below.
         system_parts = []
+        volatile_parts = []
         conversation = []
         pending_tool_results = []
 
         for m in messages:
             if m.role == "system":
                 if m.content:
-                    system_parts.append(m.content)
+                    if (m.metadata or {}).get("volatile"):
+                        volatile_parts.append(m.content)
+                    else:
+                        system_parts.append(m.content)
             elif m.role == "tool":
                 tool_call_id = (m.metadata or {}).get("tool_call_id", "unknown")
                 pending_tool_results.append({
@@ -479,6 +486,7 @@ class AnthropicProvider(LLMProvider):
 
         # Cache last user message (Pi style — no beta header needed)
         _cache = {"type": "ephemeral"}
+        _last_user = None
         for msg in reversed(conversation):
             if msg.get("role") == "user":
                 content = msg.get("content")
@@ -486,7 +494,21 @@ class AnthropicProvider(LLMProvider):
                     msg["content"] = [{"type": "text", "text": content, "cache_control": _cache}]
                 elif isinstance(content, list) and content:
                     content[-1]["cache_control"] = _cache
+                _last_user = msg
                 break
+
+        # Volatile context rides AFTER the cache breakpoint, as trailing text
+        # blocks on the last user message. Everything BEFORE a breakpoint is
+        # the cached prefix, so a wall-clock string (with seconds) sitting in
+        # there invalidates the whole prefix every turn and forces a full
+        # rewrite at cache-write rates. The content still reaches the model,
+        # only its position changes.
+        if volatile_parts and _last_user is not None:
+            _vc = _last_user.get("content")
+            if isinstance(_vc, list):
+                for vp in volatile_parts:
+                    _vc.append({"type": "text", "text": vp})
+                volatile_parts = []
 
         body: dict = {
             "model": model,
@@ -494,7 +516,10 @@ class AnthropicProvider(LLMProvider):
             "max_tokens": max_tokens or min(self.context_window // 3, self.DEFAULT_MAX_TOKENS),
         }
 
-        # Build system blocks — cache first + last (like Pi, max 2 cached)
+        # Build system blocks — cache first + last (like Pi, max 2 cached).
+        # system_parts holds STATIC content only; volatile blocks were moved
+        # onto the last user message above, which keeps this prefix
+        # byte-identical across turns.
         system_blocks = []
         if self._is_oauth:
             system_blocks.append({"type": "text", "text": "You are Claude Code, Anthropic's official CLI for Claude.", "cache_control": _cache})
@@ -503,6 +528,9 @@ class AnthropicProvider(LLMProvider):
         if system_blocks:
             if len(system_blocks) > 1:
                 system_blocks[-1]["cache_control"] = _cache
+            # Fallback: no user message was available to carry volatile context.
+            for vp in volatile_parts:
+                system_blocks.append({"type": "text", "text": vp})
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value.

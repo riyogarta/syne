@@ -650,7 +650,8 @@ class Conversation:
             time_lines.append("Time policy: default=SYNE (no tz label), 'server'=SERVER+' (Server)', 'UTC'=UTC+' UTC', multiple=answer all")
 
             _time_block = '\n'.join(time_lines)
-            messages.append(ChatMessage(role='system', content=_time_block))
+            messages.append(ChatMessage(role='system', content=_time_block,
+                                        metadata={'volatile': True}))
             # Same string the checker will judge against — see _last_time_context.
             self._last_time_context = _time_block
         except Exception as e:
@@ -739,7 +740,8 @@ class Conversation:
                 else:
                     flag = ""
                 memory_lines.append(f"- [{mem['category']}]{when} {mem['content']} {score}{flag}")
-            messages.append(ChatMessage(role="system", content="\n".join(memory_lines)))
+            messages.append(ChatMessage(role="system", content="\n".join(memory_lines),
+                                        metadata={"volatile": True}))
             # Log recalled memories for debugging
             _actual_query = recall_query or user_message
             logger.info(f"Recalled {len(memories)} memories for query: {_actual_query[:80]}")
@@ -756,7 +758,8 @@ class Conversation:
                 "Related entities and relationships from stored knowledge.",
                 "",
             ] + graph_lines)
-            messages.append(ChatMessage(role="system", content=graph_block))
+            messages.append(ChatMessage(role="system", content=graph_block,
+                                        metadata={"volatile": True}))
             logger.info(f"Graph: injected {len(graph_lines)} relations")
 
         # 5. Prune oversized tool results
