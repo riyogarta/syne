@@ -3876,7 +3876,7 @@ Or just send me a message!"""
         buttons = []
         if not is_default:
             buttons.append([InlineKeyboardButton("⭐ Set as Default", callback_data=f"models:set_default:{model_key}")])
-        buttons.append([InlineKeyboardButton(f"📐 Context Window: {ctx_display}", callback_data="models:ctx")])
+        buttons.append([InlineKeyboardButton(f"📐 Context Window: {ctx_display}", callback_data=f"models:ctx:{model_key}")])
         buttons.append([InlineKeyboardButton(f"💭 Thinking: {thinking_label}", callback_data=f"models:thinking:{model_key}")])
         buttons.append([InlineKeyboardButton(f"💬 Reasoning: {'ON' if reasoning_on else 'OFF'}", callback_data=f"models:reasoning:{model_key}")])
         if auth_type == "oauth":
@@ -3890,6 +3890,43 @@ Or just send me a message!"""
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="models:main")])
 
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _models_menu_ctx(self, query, model_key: str):
+        """Render the context window preset menu for a SPECIFIC model."""
+        models = await get_config("provider.models", [])
+        entry = next((m for m in models if m.get("key") == model_key), None)
+        if not entry:
+            await query.edit_message_text("❌ Model not found.")
+            return
+
+        label = entry.get("label", model_key)
+        current_ctx = int(entry.get("context_window", 0) or 0)
+
+        presets = [
+            (128000, "128K"),
+            (200000, "200K"),
+            (500000, "500K"),
+            (1000000, "1M"),
+            (1048576, "1M (exact)"),
+        ]
+        buttons = []
+        for value, display in presets:
+            check = " ✓" if value == current_ctx else ""
+            buttons.append(InlineKeyboardButton(
+                f"{display}{check}", callback_data=f"models:ctxset:{model_key}:{value}"
+            ))
+        keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data=f"models:ctxset:{model_key}:custom")])
+        keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data=f"models:detail:{model_key}")])
+
+        ctx_display = f"{current_ctx/1000000:.1f}M" if current_ctx >= 1000000 else f"{current_ctx//1000}K" if current_ctx else "?"
+        await query.edit_message_text(
+            f"📐 <b>Context Window — {label}</b>\n\n"
+            f"Current: <b>{ctx_display}</b> ({current_ctx:,} tokens)\n\n"
+            f"Select a preset or enter custom value:",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     async def _handle_consent_callback(self, query, data: str, context: ContextTypes.DEFAULT_TYPE):
         """Handle consent:yes:<hash> and consent:no:<hash> buttons.
@@ -4056,116 +4093,57 @@ Or just send me a message!"""
             await query.answer(f"Default → {entry.get('label', model_key)}")
             await self._models_menu_main(query)
 
-        elif data == "models:ctx":
-            # Show context window presets for active model
+        elif data.startswith("models:ctxset:"):
+            # Apply a context window value to a SPECIFIC model (preset or custom prompt)
+            rest = data[len("models:ctxset:"):]
+            model_key, _, ctx_action = rest.rpartition(":")
+            if not model_key:
+                await query.answer("Invalid callback", show_alert=True)
+                return
+
             models = await get_config("provider.models", [])
-            active_key = await get_config("provider.active_model", "gemini-pro")
-            current = next((m for m in models if m.get("key") == active_key), None)
-            current_ctx = int(current.get("context_window", 0)) if current else 0
-            label = current.get("label", active_key) if current else active_key
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
 
-            presets = [
-                (128000, "128K"),
-                (200000, "200K"),
-                (500000, "500K"),
-                (1000000, "1M"),
-                (1048576, "1M (exact)"),
-            ]
-            buttons = []
-            for value, display in presets:
-                check = " ✓" if value == current_ctx else ""
-                buttons.append(InlineKeyboardButton(
-                    f"{display}{check}", callback_data=f"models:ctx:{value}"
-                ))
-            keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-            keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="models:ctx:custom")])
-            keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="models:ctx:back")])
-
-            ctx_display = f"{current_ctx/1000000:.1f}M" if current_ctx >= 1000000 else f"{current_ctx//1000}K"
-            await query.edit_message_text(
-                f"📐 <b>Context Window — {label}</b>\n\n"
-                f"Current: <b>{ctx_display}</b> ({current_ctx:,} tokens)\n\n"
-                f"Select a preset or enter custom value:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-
-        elif data.startswith("models:ctx:"):
-            ctx_action = data.split(":", 2)[2]
-
-            if ctx_action == "back":
-                # Back to model detail (active model)
-                active_key = await get_config("provider.active_model", "gemini-pro")
-                await self._models_menu_detail(query, active_key)
-
-            elif ctx_action == "custom":
+            if ctx_action == "custom":
                 self._auth_state[user.id] = {
                     "type": "ctx_window",
                     "step": "input",
+                    "model_key": model_key,
                     "chat_id": query.message.chat_id,
                     "message_id": query.message.message_id,
                 }
                 await query.edit_message_text(
-                    "📐 <b>Custom Context Window</b>\n\n"
+                    f"📐 <b>Custom Context Window — {entry.get('label', model_key)}</b>\n\n"
                     "Send the context window size in tokens (number only).\n"
                     "Examples: <code>1000000</code>, <code>200000</code>, <code>2000000</code>\n\n"
                     "Send /cancel to abort.",
                     parse_mode="HTML",
                 )
+                return
 
-            else:
-                # Apply preset context window value
-                try:
-                    new_ctx = int(ctx_action)
-                except ValueError:
-                    await query.answer("Invalid value", show_alert=True)
-                    return
+            try:
+                new_ctx = int(ctx_action)
+            except ValueError:
+                await query.answer("Invalid value", show_alert=True)
+                return
 
-                models = await get_config("provider.models", [])
-                active_key = await get_config("provider.active_model", "gemini-pro")
-                updated = False
-                for m in models:
-                    if m.get("key") == active_key:
-                        m["context_window"] = new_ctx
-                        updated = True
-                        break
+            entry["context_window"] = new_ctx
+            await set_config("provider.models", models)
 
-                if updated:
-                    await set_config("provider.models", models)
-                    if self.agent:
-                        await self.agent.reload_provider()
+            active_key = await get_config("provider.active_model", "gemini-pro")
+            if self.agent and model_key == active_key:
+                await self.agent.reload_provider()
 
-                    ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
-                    model_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
-                    await query.answer(f"Context window set to {ctx_display}")
+            ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
+            await query.answer(f"Context window set to {ctx_display}")
+            await self._models_menu_ctx(query, model_key)
 
-                    # Re-render preset menu with updated checkmark
-                    presets = [
-                        (128000, "128K"),
-                        (200000, "200K"),
-                        (500000, "500K"),
-                        (1000000, "1M"),
-                        (1048576, "1M (exact)"),
-                    ]
-                    buttons = []
-                    for value, display in presets:
-                        check = " ✓" if value == new_ctx else ""
-                        buttons.append(InlineKeyboardButton(
-                            f"{display}{check}", callback_data=f"models:ctx:{value}"
-                        ))
-                    keyboard = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
-                    keyboard.append([InlineKeyboardButton("✏️ Custom", callback_data="models:ctx:custom")])
-                    keyboard.append([InlineKeyboardButton("⬅️ Back", callback_data="models:ctx:back")])
-
-                    await query.edit_message_text(
-                        f"📐 <b>Context Window — {model_label}</b>\n\n"
-                        f"Current: <b>{ctx_display}</b> ({new_ctx:,} tokens)\n\n"
-                        f"Select a preset or enter custom value:",
-                        parse_mode="HTML",
-                        reply_markup=InlineKeyboardMarkup(keyboard),
-                    )
-                else:
-                    await query.answer("Model not found", show_alert=True)
+        elif data.startswith("models:ctx:"):
+            # Show context window presets for a SPECIFIC model
+            await self._models_menu_ctx(query, data[len("models:ctx:"):])
 
         elif data.startswith("models:params:"):
             model_key = data.split(":", 2)[2]
@@ -7867,13 +7845,13 @@ Or just send me a message!"""
 
         # Update registry
         models = await get_config("provider.models", [])
-        active_key = await get_config("provider.active_model", "gemini-pro")
+        model_key = state.get("model_key") or await get_config("provider.active_model", "gemini-pro")
         updated = False
-        model_label = active_key
+        model_label = model_key
         for m in models:
-            if m.get("key") == active_key:
+            if m.get("key") == model_key:
                 m["context_window"] = new_ctx
-                model_label = m.get("label", active_key)
+                model_label = m.get("label", model_key)
                 updated = True
                 break
 
