@@ -147,8 +147,19 @@ async def create_provider(model_entry: dict) -> LLMProvider:
     # Anthropic Claude (OAuth via claude.ai)
     # ═══════════════════════════════════════════════════════════════
     elif driver_name == "anthropic":
+        # auth="api_key" must use the configured key, not DB OAuth creds.
+        anth_api_key = None
+        if model_entry.get("auth") == "api_key":
+            credential_key = model_entry.get("credential_key") or "credential.anthropic_api_key"
+            anth_api_key = await _load_api_key(credential_key)
+            if not anth_api_key:
+                raise RuntimeError(
+                    f"No API key found for {model_entry.get('label', model_id)}. "
+                    f"Set {credential_key} in config."
+                )
         provider = AnthropicProvider(
             chat_model=model_id,
+            api_key=anth_api_key,
         )
         # Pre-load token at init time — avoids lazy-load delay/error on first chat
         try:

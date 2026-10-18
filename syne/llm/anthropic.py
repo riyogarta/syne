@@ -99,15 +99,23 @@ class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using OAuth tokens from DB or API key.
 
     Token sources (priority order):
-    1. DB (Claude OAuth credentials from `syne init`)
-    2. Environment (ANTHROPIC_API_KEY)
+    1. Explicit api_key argument (model entry with auth="api_key")
+    2. DB (Claude OAuth credentials from `syne init`)
+    3. DB (credential.anthropic_api_key)
+    4. Environment (ANTHROPIC_API_KEY)
     """
 
     def __init__(
         self,
         chat_model: str = "claude-sonnet-4-20250514",
+        api_key: Optional[str] = None,
     ):
         self.chat_model = chat_model
+        # Explicit API key from the model entry (auth="api_key"). When set,
+        # it wins over any OAuth credentials sitting in the DB — otherwise a
+        # leftover claude.ai login would silently bill the subscription
+        # instead of the key the user configured.
+        self._explicit_api_key: Optional[str] = api_key
         self._access_token: Optional[str] = None
         self._is_oauth: bool = False
         self._expires_at: float = 0
@@ -152,6 +160,15 @@ class AnthropicProvider(LLMProvider):
         2. Environment — ANTHROPIC_API_KEY
         """
         now = time.time()
+
+        # Explicit API key from the model entry — highest priority. Checked
+        # before the cache so switching models takes effect immediately.
+        if self._explicit_api_key:
+            self._access_token = self._explicit_api_key
+            self._is_oauth = False
+            self._claude_creds = None
+            self._last_load = now
+            return self._explicit_api_key
 
         # Cache: re-check at most every 30 seconds
         if self._access_token and (now - self._last_load) < 30:
