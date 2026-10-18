@@ -5933,7 +5933,11 @@ Or just send me a message!"""
             # Clear cached conversation
             self._clear_group_conversation(group_id)
             
-            label = model_key if model_key != "__default__" else "default"
+            if model_key == "__default__":
+                label = "default"
+            else:
+                _models = await get_config("provider.models", [])
+                label = next((m.get("model_id", model_key) for m in _models if m.get("key") == model_key), model_key)
             await query.answer(f"Model set to {label}")
             
             # Refresh model list view
@@ -6157,10 +6161,11 @@ Or just send me a message!"""
         enabled = "✅ Enabled" if group.get("enabled") else "⛔ Disabled"
         mention = "Yes" if group.get("require_mention") else "No"
 
+        _models = await get_config("provider.models", [])
         if model_key:
-            model_display = f"<code>{model_key}</code>"
+            _mid = next((m.get("model_id", model_key) for m in _models if m.get("key") == model_key), model_key)
+            model_display = f"<code>{_mid}</code>"
         else:
-            _models = await get_config("provider.models", [])
             _active = await get_config("provider.active_model", "gemini-pro")
             _def_lbl = next((m.get("label", _active) for m in _models if m.get("key") == _active), _active)
             model_display = f"Default ({_def_lbl})"
@@ -6997,7 +7002,11 @@ Or just send me a message!"""
             else:
                 by_jid[jid]['model'] = model_key
             await self._wa_save_allowlist(by_jid)
-            label = model_key if model_key != "__default__" else "default"
+            if model_key == "__default__":
+                label = "default"
+            else:
+                _models = await get_config("provider.models", [])
+                label = next((m.get("model_id", model_key) for m in _models if m.get("key") == model_key), model_key)
             await query.answer(f"Model set to {label}")
             await self._wamembers_menu_detail(query, jid)
 
@@ -7175,12 +7184,13 @@ Or just send me a message!"""
         first_owner = await get_first_owner("telegram")
         is_first_owner = first_owner and first_owner.get("platform_id") == platform_id
         
+        from ..db.models import get_config as _gc
+        _models = await _gc("provider.models", [])
         user_model = ((user.get("preferences") or {}).get("model"))
         if user_model:
-            model_label = f"<code>{user_model}</code>"
+            _mid = next((m.get("model_id", user_model) for m in _models if m.get("key") == user_model), user_model)
+            model_label = f"<code>{_mid}</code>"
         else:
-            from ..db.models import get_config as _gc
-            _models = await _gc("provider.models", [])
             _active = await _gc("provider.active_model", "gemini-pro")
             _def_lbl = next((m.get("label", _active) for m in _models if m.get("key") == _active), _active)
             model_label = f"<i>Default ({_def_lbl})</i>"
@@ -7370,7 +7380,11 @@ Or just send me a message!"""
                     del self.agent.conversations._active[key]
                     logger.info(f"Cleared cached conversation for user {platform_id}")
 
-            label = model_key if model_key != "__default__" else "default"
+            if model_key == "__default__":
+                label = "default"
+            else:
+                _models = await get_config("provider.models", [])
+                label = next((m.get("model_id", model_key) for m in _models if m.get("key") == model_key), model_key)
             await query.answer(f"Model set to {label}")
             await self._members_menu_detail(query, platform_id)
 
