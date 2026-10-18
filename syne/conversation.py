@@ -2501,29 +2501,33 @@ class Conversation:
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
                 await self.save_message("tool", result_str, metadata=tool_meta)
-                context.append(ChatMessage(role="tool", content=result_str, metadata=tool_meta))
 
-            # ── On-demand guide injection ──
-            # Inject reference guides as system messages when relevant tools are called.
-            # Each guide is injected at most once per turn to avoid bloating context.
-            for name, args, _, _ in parsed_calls:
-                guide = self._get_on_demand_guide(name, args, _injected_guides)
-                if guide:
-                    context.append(ChatMessage(role="system", content=guide))
-
-                # Anti-hallucination: after spawning a sub-agent, inject hard constraint
+                # On-demand guide and the sub-agent constraint ride on this
+                # tool result instead of a mid-turn system message. Providers
+                # hoist system messages into the system prompt (Anthropic
+                # system array, Gemini systemInstruction, Codex instructions),
+                # which changed the prompt mid-turn and invalidated every
+                # cached history prefix after it. Context copy only: the raw
+                # result is what gets persisted, so history does not carry
+                # the guide on every turn that calls shell/read_source.
+                _ctx_result = result_str
+                _guide = self._get_on_demand_guide(name, args, _injected_guides)
+                if _guide:
+                    _ctx_result = f"{_ctx_result}\n\n{_guide}"
                 if name == "spawn_subagent":
-                    context.append(ChatMessage(
-                        role="system",
-                        content=(
-                            "CRITICAL: A sub-agent has been spawned and is running in the background. "
-                            "You do NOT know its progress or results yet. "
-                            "NEVER claim the task is done, report numbers (e.g. '110 processed'), "
-                            "or fabricate progress. Only say: the task has been delegated and the user "
-                            "will be notified when it completes. If the user asks for progress, "
-                            "use the subagent_status tool to check — do NOT guess."
-                        ),
-                    ))
+                    _ctx_result = (
+                        f"{_ctx_result}\n\n"
+                        "CRITICAL: A sub-agent has been spawned and is running in the background. "
+                        "You do NOT know its progress or results yet. "
+                        "NEVER claim the task is done, report numbers (e.g. '110 processed'), "
+                        "or fabricate progress. Only say: the task has been delegated and the user "
+                        "will be notified when it completes. If the user asks for progress, "
+                        "use the subagent_status tool to check — do NOT guess."
+                    )
+                context.append(ChatMessage(role="tool", content=_ctx_result, metadata=tool_meta))
+
+            # On-demand guides / sub-agent constraint: appended to the tool
+            # result above (cache-safe), no longer injected as system messages.
 
             # Early exit — a consent gate held mid-loop. Do NOT let the
             # model iterate again in the same turn: its next tool_result
