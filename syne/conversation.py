@@ -2151,6 +2151,7 @@ class Conversation:
 
             # ── Phase 1: Parse + Loop Detection (sequential, cheap) ──
             parsed_calls = []
+            _call_notes: dict[int, list[str]] = {}
             for tc_idx, tool_call in enumerate(tool_calls_list):
                 if "function" in tool_call:
                     func = tool_call["function"]
@@ -2185,10 +2186,11 @@ class Conversation:
 
                 if loop_check.level == "warning":
                     logger.warning(f"Tool loop warning: {loop_check.message}")
-                    context.append(ChatMessage(
-                        role="system",
-                        content=f"WARNING: {loop_check.message}. Try a different approach or stop using this tool.",
-                    ))
+                    # Attached to this call's tool result (index = position in
+                    # parsed_calls), not a system message: see _ctx_result below.
+                    _call_notes.setdefault(len(parsed_calls), []).append(
+                        f"WARNING: {loop_check.message}. Try a different approach or stop using this tool."
+                    )
 
                 # Notify channel about tool activity (before execution for fast typing indicator)
                 if self._mgr and self._mgr._tool_callback:
@@ -2436,12 +2438,13 @@ class Conversation:
                 # Record result for loop detection
                 detector.record_result(loop_record, result.content)
 
-                # Inject system hint for permanent failures
+                _notes = list(_call_notes.get(i, []))
+
+                # Hint for permanent failures (rides on the tool result)
                 if not result.ok and not result.retryable:
-                    context.append(ChatMessage(
-                        role="system",
-                        content=f"Tool '{name}' failed permanently ({result.error_type}). Try an alternative approach.",
-                    ))
+                    _notes.append(
+                        f"Tool '{name}' failed permanently ({result.error_type}). Try an alternative approach."
+                    )
 
                 # Anti-hallucination: flag exec results with non-zero exit code
                 # The LLM sometimes claims success despite error output.
@@ -2449,14 +2452,11 @@ class Conversation:
                     import re as _re
                     _ec_match = _re.search(r'exit_code:\s*(\d+)', result.content)
                     if _ec_match and _ec_match.group(1) != "0":
-                        context.append(ChatMessage(
-                            role="system",
-                            content=(
-                                f"IMPORTANT: The exec command exited with code {_ec_match.group(1)} "
-                                f"(non-zero = error). Report the ACTUAL output to the user. "
-                                f"Do NOT claim the command succeeded."
-                            ),
-                        ))
+                        _notes.append(
+                            f"IMPORTANT: The exec command exited with code {_ec_match.group(1)} "
+                            f"(non-zero = error). Report the ACTUAL output to the user. "
+                            f"Do NOT claim the command succeeded."
+                        )
 
                 result_str = result.content
 
@@ -2511,6 +2511,8 @@ class Conversation:
                 # result is what gets persisted, so history does not carry
                 # the guide on every turn that calls shell/read_source.
                 _ctx_result = result_str
+                if _notes:
+                    _ctx_result = f"{_ctx_result}\n\n" + "\n".join(_notes)
                 _guide = self._get_on_demand_guide(name, args, _injected_guides)
                 if _guide:
                     _ctx_result = f"{_ctx_result}\n\n{_guide}"
@@ -2580,10 +2582,18 @@ class Conversation:
             reason = "tool call loop detected" if loop_stuck else f"tool loop timeout ({_timeout_sec}s, {round_num} rounds)"
             logger.warning(f"Forcing final response: {reason}")
 
-            context.append(ChatMessage(
-                role="system",
-                content=f"STOP. {reason.capitalize()}. Summarize what you've done so far and respond to the user with what you have.",
-            ))
+            _stop = f"STOP. {reason.capitalize()}. Summarize what you've done so far and respond to the user with what you have."
+            # Ride on the last tool result (cache-safe); a system message
+            # would be hoisted into the system prompt and rewrite history.
+            if context and context[-1].role == "tool":
+                _last = context[-1]
+                context[-1] = ChatMessage(
+                    role="tool",
+                    content=f"{_last.content}\n\n{_stop}" if _last.content else _stop,
+                    metadata=_last.metadata,
+                )
+            else:
+                context.append(ChatMessage(role="system", content=_stop))
 
             # Disable thinking for forced final — all output budget goes to text
             _forced_kwargs = self._build_chat_kwargs()
