@@ -65,8 +65,22 @@ _VERTEX_REGIONS = [
 ]
 
 
-def _vertex_endpoint(region: str, model: str) -> str:
-    """Build Vertex AI endpoint URL."""
+def _vertex_endpoint(region: str, model: str, project_id: str = "") -> str:
+    """Build Vertex AI endpoint URL.
+
+    Regional: https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}
+    Global:   https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/global/publishers/google/models/{model}
+
+    Verified 2026-10-18: the bare host without projects/locations is routed to the
+    nearest region (not global), so global-only models (e.g. gemini-4-argon) 404 there.
+    """
+    if region == "global":
+        if not project_id:
+            raise ValueError("Vertex region 'global' requires project_id in the model entry")
+        return (
+            f"https://aiplatform.googleapis.com/v1/projects/{project_id}"
+            f"/locations/global/publishers/google/models/{model}"
+        )
     return f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}"
 
 
@@ -129,11 +143,13 @@ class VertexProvider(LLMProvider):
         region: str = "us-central1",
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
+        project_id: str = "",
     ):
         self.api_key = api_key
         self.region = region
         self.chat_model = chat_model
         self.embedding_model = embedding_model
+        self.project_id = project_id
 
     @property
     def name(self) -> str:
@@ -211,7 +227,7 @@ class VertexProvider(LLMProvider):
             if gemini_tools:
                 body["tools"] = gemini_tools
 
-        url = f"{_vertex_endpoint(self.region, model)}:streamGenerateContent"
+        url = f"{_vertex_endpoint(self.region, model, self.project_id)}:streamGenerateContent"
         headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
         params = {"alt": "sse", "key": self.api_key}
 
@@ -409,7 +425,7 @@ class VertexProvider(LLMProvider):
     ) -> EmbeddingResponse:
         """Embedding via Vertex AI :predict endpoint with retry."""
         model = model or self.embedding_model
-        url = f"{_vertex_endpoint(self.region, model)}:predict"
+        url = f"{_vertex_endpoint(self.region, model, self.project_id)}:predict"
 
         body = {
             "instances": [{"content": text}],
@@ -467,7 +483,7 @@ class VertexProvider(LLMProvider):
     ) -> list[EmbeddingResponse]:
         """Batch embedding via Vertex AI :predict with multiple instances."""
         model = model or self.embedding_model
-        url = f"{_vertex_endpoint(self.region, model)}:predict"
+        url = f"{_vertex_endpoint(self.region, model, self.project_id)}:predict"
 
         body = {
             "instances": [{"content": t} for t in texts],

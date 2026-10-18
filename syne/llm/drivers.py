@@ -127,6 +127,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
         return VertexProvider(
             api_key=api_key,
             region=region,
+            project_id=model_entry.get("project_id", ""),
             chat_model=model_id,
         )
 

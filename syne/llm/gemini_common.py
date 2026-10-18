@@ -618,19 +618,24 @@ def _sanitize_turn_ordering(contents: list[dict]) -> list[dict]:
 # Build thinking config
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _uses_thinking_level(model: str) -> bool:
+    """Gemini 3+ uses thinkingLevel. Sending thinkingBudget returns HTTP 400
+    (verified 2026-10-18 on gemini-4-argon)."""
+    m = (model or "").lower()
+    return "gemini-3" in m or "gemini-4" in m
+
+
 def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Optional[dict]:
     """Build thinkingConfig for Gemini models.
 
     Defaults (when thinking_budget is None):
-      - Gemini 3: thinkingLevel HIGH
+      - Gemini 3/4: thinkingLevel HIGH (also for negative = dynamic budget)
       - Gemini 2.5: thinkingBudget -1 (dynamic, model decides, max 8192)
 
     Explicit thinking_budget=0 → minimal thinking (LOW / budget 128).
     """
-    is_gemini_3 = "gemini-3" in model.lower()
-
-    if is_gemini_3:
-        if thinking_budget is None:
+    if _uses_thinking_level(model):
+        if thinking_budget is None or thinking_budget < 0:
             level = "HIGH"
         elif thinking_budget == 0:
             level = "LOW"
@@ -674,7 +679,7 @@ def format_messages_for_gemini(
     system_text = None
     contents = []
 
-    is_gemini_3 = "gemini-3" in model.lower() if model else False
+    is_gemini_3 = _uses_thinking_level(model)
 
     for msg in messages:
         if msg.role == "system":
