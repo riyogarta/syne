@@ -555,18 +555,22 @@ class AnthropicProvider(LLMProvider):
                     _mark_cache(_msg)
                 break
 
-        # Volatile context does NOT ride on the last user message. Doing that
-        # mutates message content between turns: the clock/memory blocks are
-        # appended to whichever user message is last, so once that message
-        # becomes history its bytes no longer match what was cached, and the
-        # breakpoint anchored on it can never hit. Observed as cache_read
-        # pinned at exactly the system-block size on the first request of
-        # every new turn, with history rewritten at write rates.
-        #
-        # Instead it is appended to the END of the system array, past the last
-        # system breakpoint — see below. Anything after the final breakpoint is
-        # outside the cached prefix, so volatile content stays uncached while
-        # message history remains byte-stable and cacheable.
+        # Volatile context (clock, memory recall, knowledge graph) rides on
+        # the LAST user message as its own block, placed AFTER that message's
+        # cache breakpoint. Anthropic builds the cache prefix in the order
+        # tools -> system -> messages, so volatile text anywhere in the system
+        # array is covered by every message breakpoint and kills the history
+        # cache (1.20.70 did exactly that). After the final breakpoint it is
+        # outside every cached prefix. It is rebuilt per request and never
+        # persisted, so once this message becomes history its bytes match
+        # what was cached and the breakpoint can be READ.
+        _volatile_in_msgs = False
+        if volatile_parts and _last_user is not None:
+            _lc = _last_user.get("content")
+            if (isinstance(_lc, list) and _lc and isinstance(_lc[-1], dict)
+                    and _lc[-1].get("cache_control")):
+                _lc.append({"type": "text", "text": "\n\n".join(volatile_parts)})
+                _volatile_in_msgs = True
 
         body: dict = {
             "model": model,
@@ -584,12 +588,16 @@ class AnthropicProvider(LLMProvider):
         for sp in system_parts:
             system_blocks.append({"type": "text", "text": sp})
         if system_blocks:
-            if len(system_blocks) > 1:
-                system_blocks[-1]["cache_control"] = _cache
-            # Volatile context lands here, after the last breakpoint set above,
-            # so it is never part of the cached prefix.
+            # Breakpoint on the last STATIC block, whatever the count. The old
+            # len > 1 guard only passed in OAuth mode (extra Claude Code
+            # block), so API-key requests never cached the system prompt.
+            system_blocks[-1]["cache_control"] = _cache
+        if volatile_parts and not _volatile_in_msgs:
+            # Fallback only (no user message to carry it): keep it after the
+            # system breakpoint so at least the system prefix stays cached.
             for vp in volatile_parts:
                 system_blocks.append({"type": "text", "text": vp})
+        if system_blocks:
             body["system"] = system_blocks
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value.
