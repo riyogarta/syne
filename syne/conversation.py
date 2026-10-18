@@ -167,6 +167,11 @@ async def _load_time_config() -> dict:
     return result
 
 
+# Fraction of session.history_limit kept after a trim. See
+# Conversation._trim_message_cache.
+_TRIM_KEEP_RATIO = 0.7
+
+
 class Conversation:
     """Manages a single conversation session."""
 
@@ -363,9 +368,17 @@ class Conversation:
         if not isinstance(limit, int) or limit <= 0:
             return
 
+        # Chunked, not sliding. Trimming to exactly `limit` on every append
+        # drops one message per append, so the head of history shifts every
+        # turn and the provider prefix cache (Anthropic) can never READ old
+        # history - it is rewritten at cache-write rates each turn (observed
+        # 18 Oct 2026: ~46K tokens rewritten per user message). Dropping down
+        # to a fraction of the limit keeps the head byte-stable until the
+        # cache refills, so history is rewritten once per chunk instead.
         if len(self._message_cache) > limit:
-            dropped = len(self._message_cache) - limit
-            self._message_cache = self._message_cache[-limit:]
+            keep = max(1, int(limit * _TRIM_KEEP_RATIO))
+            dropped = len(self._message_cache) - keep
+            self._message_cache = self._message_cache[-keep:]
             logger.debug(
                 f"_trim_message_cache: dropped {dropped} msg(s), "
                 f"cache now {len(self._message_cache)} (limit={limit})"
