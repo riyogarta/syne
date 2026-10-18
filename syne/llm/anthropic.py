@@ -243,12 +243,17 @@ class AnthropicProvider(LLMProvider):
     def _build_headers(self, token: str, model_id: str = "") -> dict:
         is_oauth = token.startswith("sk-ant-oat") or self._is_oauth
         headers = {
-            "Authorization": f"Bearer {token}",
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
             "accept": "application/json",
             "anthropic-beta": _build_beta_header(is_oauth, model_id),
         }
+        if is_oauth:
+            headers["Authorization"] = f"Bearer {token}"
+        else:
+            # Plain API keys must be sent as x-api-key — Anthropic returns
+            # 401 when they arrive as a Bearer token.
+            headers["x-api-key"] = token
         if is_oauth:
             headers["anthropic-dangerous-direct-browser-access"] = "true"
             headers["user-agent"] = self._user_agent
