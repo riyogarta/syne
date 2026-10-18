@@ -166,3 +166,47 @@ class LLMProvider(ABC):
         Override in providers that need more room (e.g. extended thinking).
         """
         return 4096
+
+
+def hoist_volatile(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Move volatile system context onto the last user message.
+
+    Volatile system messages (metadata={"volatile": True}: wall clock,
+    memory recall, knowledge graph) change every turn. Providers with
+    automatic prefix caching (OpenAI, Codex, Gemini, Vertex) reuse a cached
+    prefix only up to the first differing byte, so a volatile block in the
+    system prompt or ahead of history keeps the history from ever being
+    read from cache. Appending them to the last user message keeps
+    everything before it byte-stable. They are rebuilt per request and never
+    persisted, so when that message becomes history it matches what was
+    cached up to its own text.
+
+    Returns a new list; input messages are not mutated. If there is no user
+    message, the input is returned unchanged.
+    """
+    volatile = [
+        m.content for m in messages
+        if m.role == "system" and m.content and (m.metadata or {}).get("volatile")
+    ]
+    if not volatile:
+        return messages
+    last_user = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].role == "user"),
+        None,
+    )
+    if last_user is None:
+        return messages
+    out: list[ChatMessage] = []
+    for i, m in enumerate(messages):
+        if m.role == "system" and (m.metadata or {}).get("volatile"):
+            continue
+        if i == last_user:
+            base = m.content or ""
+            text = "\n\n".join(volatile)
+            m = ChatMessage(
+                role=m.role,
+                content=f"{base}\n\n{text}" if base else text,
+                metadata=m.metadata,
+            )
+        out.append(m)
+    return out

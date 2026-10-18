@@ -12,7 +12,7 @@ from typing import Optional
 
 import httpx
 
-from .provider import ChatMessage
+from .provider import ChatMessage, hoist_volatile
 
 logger = logging.getLogger("syne.llm.gemini_common")
 
@@ -669,7 +669,7 @@ def format_messages_for_gemini(
     - thoughtSignature preserved & replayed
     - transformMessages (skip errored/aborted, synthetic orphan results)
     """
-    messages = _transform_messages(messages)
+    messages = _transform_messages(hoist_volatile(messages))
 
     system_text = None
     contents = []

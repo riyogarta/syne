@@ -223,6 +223,8 @@ class VertexProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
 
+        _cache_stat = {"cached": 0}
+
         def _reset_output():
             nonlocal input_tokens, output_tokens
             text_parts.clear()
@@ -294,6 +296,8 @@ class VertexProvider(LLMProvider):
                             input_tokens = usage["promptTokenCount"]
                         if usage.get("candidatesTokenCount"):
                             output_tokens = usage["candidatesTokenCount"]
+                        if usage.get("cachedContentTokenCount"):
+                            _cache_stat["cached"] = usage["cachedContentTokenCount"]
 
             return has_content
 
@@ -383,6 +387,11 @@ class VertexProvider(LLMProvider):
 
         content = "".join(text_parts)
         thinking = "".join(thinking_parts) if thinking_parts else None
+
+        logger.info(
+            "DIAG-CACHE provider=vertex model=%s in=%s cached=%s out=%s",
+            model, input_tokens, _cache_stat["cached"], output_tokens,
+        )
 
         return ChatResponse(
             content=content,

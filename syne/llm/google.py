@@ -255,6 +255,8 @@ class GoogleProvider(LLMProvider):
         input_tokens = 0
         output_tokens = 0
 
+        _cache_stat = {"cached": 0}
+
         def _reset_output():
             nonlocal input_tokens, output_tokens
             text_parts.clear()
@@ -340,6 +342,8 @@ class GoogleProvider(LLMProvider):
                             input_tokens = usage["promptTokenCount"]
                         if usage.get("candidatesTokenCount"):
                             output_tokens = usage["candidatesTokenCount"]
+                        if usage.get("cachedContentTokenCount"):
+                            _cache_stat["cached"] = usage["cachedContentTokenCount"]
 
             return has_content
 
@@ -472,6 +476,11 @@ class GoogleProvider(LLMProvider):
         content = "".join(text_parts)
         thinking = "".join(thinking_parts) if thinking_parts else None
 
+        logger.info(
+            "DIAG-CACHE provider=google-cca model=%s in=%s cached=%s out=%s",
+            model, input_tokens, _cache_stat["cached"], output_tokens,
+        )
+
         return ChatResponse(
             content=content,
             model=model,
@@ -603,6 +612,11 @@ class GoogleProvider(LLMProvider):
                 stream_callbacks.on_text("".join(text_parts))
 
         usage = data.get("usageMetadata", {})
+        logger.info(
+            "DIAG-CACHE provider=google-api model=%s in=%s cached=%s out=%s",
+            model, usage.get("promptTokenCount", 0),
+            usage.get("cachedContentTokenCount", 0), usage.get("candidatesTokenCount", 0),
+        )
 
         return ChatResponse(
             content="".join(text_parts),

@@ -7,6 +7,7 @@ import time
 import httpx
 from typing import Optional
 from .provider import (
+    hoist_volatile,
     LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
     LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, StreamCallbacks,
 )
@@ -216,7 +217,7 @@ class OpenAIProvider(LLMProvider):
 
         body: dict = {
             "model": model,
-            "messages": self._format_messages(messages, tools),
+            "messages": self._format_messages(hoist_volatile(messages), tools),
         }
 
         # Reasoning models (GPT-5.x, o3, o1) ignore temperature; use reasoning_effort instead.
@@ -367,6 +368,13 @@ class OpenAIProvider(LLMProvider):
             break
           else:
             raise RuntimeError(f"OpenAI API failed after {_TOTAL_ATTEMPTS} attempts")
+
+        _ptd = usage.get("prompt_tokens_details") or {}
+        logger.info(
+            "DIAG-CACHE provider=%s model=%s in=%s cached=%s out=%s",
+            self._provider_name, resp_model, usage.get("prompt_tokens", 0),
+            _ptd.get("cached_tokens", 0), usage.get("completion_tokens", 0),
+        )
 
         # Parse accumulated tool calls
         tool_calls = None

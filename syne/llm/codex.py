@@ -8,6 +8,7 @@ import time
 import httpx
 from typing import Optional
 from .provider import (
+    hoist_volatile,
     LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse,
     LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, StreamCallbacks,
 )
@@ -177,7 +178,13 @@ class CodexProvider(LLMProvider):
 
         for msg in messages:
             if msg.role == "system":
-                instructions = msg.content
+                # Concatenate, never overwrite. Overwriting left only the LAST
+                # system message (memory recall / knowledge graph / a guide),
+                # silently dropping the main prompt: identity, rules, soul.
+                if msg.content:
+                    instructions = (
+                        f"{instructions}\n\n{msg.content}" if instructions else msg.content
+                    )
             elif msg.role == "user":
                 # Check for image metadata (vision). Supports "image" (single,
                 # legacy) and "images" (list, from Telegram media-group albums).
@@ -269,7 +276,7 @@ class CodexProvider(LLMProvider):
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
-        instructions, input_msgs = self._format_input(messages)
+        instructions, input_msgs = self._format_input(hoist_volatile(messages))
 
         body: dict = {
             "model": model,
@@ -490,6 +497,7 @@ class CodexProvider(LLMProvider):
                             u = resp_data.get("usage", {})
                             usage["input_tokens"] = u.get("input_tokens", 0)
                             usage["output_tokens"] = u.get("output_tokens", 0)
+                            usage["cached_tokens"] = (u.get("input_tokens_details") or {}).get("cached_tokens", 0)
 
             except _RetrySignal:
                 continue
@@ -508,7 +516,7 @@ class CodexProvider(LLMProvider):
                 f"Codex stream summary: text={len(content_text)} chars, "
                 f"tool_calls={len(tool_calls)}, thinking={len(thinking_text)} chars, "
                 f"events={dict(event_counts)}, "
-                f"usage=in:{usage['input_tokens']}/out:{usage['output_tokens']}"
+                f"usage=in:{usage['input_tokens']}/cached:{usage.get('cached_tokens', 0)}/out:{usage['output_tokens']}"
             )
             if current_tool_call is not None:
                 logger.warning(f"Codex ORPHANED tool call (never completed): {current_tool_call}")
