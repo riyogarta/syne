@@ -164,6 +164,18 @@ class TestEvaluateMessageLLM:
 
 
 class TestEvaluateAndStore:
+    @pytest.fixture(autouse=True)
+    def _config(self):
+        # Non-explicit stores read memory.auto_capture_category from the DB;
+        # tests run without one, so serve config defaults (overridable).
+        self.config = {}
+        with patch(
+            "syne.db.models.get_config",
+            new_callable=AsyncMock,
+            side_effect=lambda key, default=None: self.config.get(key, default),
+        ):
+            yield
+
     async def test_evaluator_returns_none(self, mock_provider):
         memory_engine = AsyncMock()
         with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=None):
@@ -226,3 +238,41 @@ class TestEvaluateAndStore:
             result = await evaluate_and_store(mock_provider, memory_engine, "some message", user_id=1)
 
         assert result is None
+
+    async def test_auto_capture_quarantine_category(self, mock_provider):
+        memory_engine = AsyncMock()
+        memory_engine.store_if_new.return_value = 42
+        eval_result = {"category": "personal facts", "importance": 0.5, "content": "casual info"}
+        self.config["memory.auto_capture_category"] = "auto"
+
+        with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result):
+            await evaluate_and_store(mock_provider, memory_engine, "I like coffee", user_id=1)
+
+        assert memory_engine.store_if_new.call_args[1]["category"] == "auto"
+
+    async def test_auto_capture_quarantine_disabled(self, mock_provider):
+        memory_engine = AsyncMock()
+        memory_engine.store_if_new.return_value = 42
+        eval_result = {"category": "personal facts", "importance": 0.5, "content": "casual info"}
+        self.config["memory.auto_capture_category"] = ""
+
+        with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result):
+            await evaluate_and_store(mock_provider, memory_engine, "I like coffee", user_id=1)
+
+        assert memory_engine.store_if_new.call_args[1]["category"] == "personal facts"
+
+    async def test_explicit_remember_keeps_category(self, mock_provider):
+        memory_engine = AsyncMock()
+        memory_engine.store_if_new.return_value = 42
+        eval_result = {"category": "personal facts", "importance": 0.9, "content": "birthday info"}
+        self.config["memory.auto_capture_category"] = "auto"
+
+        with patch("syne.memory.evaluator.evaluate_message", new_callable=AsyncMock, return_value=eval_result), \
+             patch("asyncio.create_task", side_effect=lambda coro: coro.close()):
+            await evaluate_and_store(
+                mock_provider, memory_engine,
+                "ingat ini: ulang tahun saya 18 April",
+                user_id=1,
+            )
+
+        assert memory_engine.store_if_new.call_args[1]["category"] == "personal facts"
