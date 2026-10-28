@@ -47,6 +47,7 @@ def db_init():
             await conn.execute(schema)
 
         console.print("[green]✓ Database schema initialized[/green]")
+        console.print("[dim]Run 'syne init' to choose a chat provider and Telegram bot.[/dim]")
         await close_db()
 
     asyncio.run(_init())
@@ -91,6 +92,9 @@ def db_reset():
             await conn.execute(schema)
 
         console.print("[green]✓ Database re-initialized[/green]")
+        # Credentials (API keys, OAuth tokens, Telegram token) live in the
+        # config table, so they are gone too.
+        console.print("[yellow]All credentials were deleted. Run 'syne init' to set up the provider and Telegram bot again.[/yellow]")
         await close_db()
 
     asyncio.run(_reset())

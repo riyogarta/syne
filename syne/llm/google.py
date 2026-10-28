@@ -1,42 +1,21 @@
-"""Google Gemini provider via Cloud Code Assist (OAuth) or Gemini API (key).
+"""Google Gemini provider via the Gemini API (API key).
 
-Aligned with OpenClaw's google-gemini-cli.js + google-shared.js implementation.
-All 14 differences resolved:
-  1. parametersJsonSchema (not parameters) for tool schemas
-  2. Server-parsed retry delays (extractRetryDelay)
-  3. Full retryable error detection (429,500,502,503,504 + regex)
-  4. Endpoint fallback (daily-cloudcode-pa + cloudcode-pa)
-  5. Empty stream retry (MAX_EMPTY_STREAM_RETRIES=2)
-  6. Unicode surrogate sanitization
-  7. sessionId in request
-  8. Thinking config (includeThoughts + thinkingLevel for Gemini 3)
-  9. functionResponse format ({output: value} / {error: value})
- 10. Empty text blocks skipped
- 11. thoughtSignature preserved & replayed
- 12. transformMessages (skip errored/aborted, synthetic orphan results)
- 13. generationConfig conditional (only if non-empty)
- 14. Temperature only if defined (not always 0.7)
+Google has closed all OAuth access paths for Gemini, so the former Cloud Code
+Assist (OAuth) mode has been removed.
+
+Message formatting, tool schemas, thinking config and error classification are
+shared with VertexProvider via gemini_common.
 """
 
 import asyncio
 import json
 import logging
-import re
-import time
 import random
 import httpx
 from typing import Optional
-from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, LLMEmptyResponseError, StreamCallbacks
-from ..auth.google_oauth import GoogleCredentials
+from .provider import LLMProvider, ChatMessage, ChatResponse, EmbeddingResponse, LLMRateLimitError, LLMContextWindowError, StreamCallbacks
 from .gemini_common import (
-    _sanitize_surrogates,
-    _extract_retry_delay,
-    _is_retryable_error,
-    _is_valid_thought_signature,
-    _clean_schema_for_gemini,
     _convert_tools_to_gemini,
-    _transform_messages,
-    _sanitize_turn_ordering,
     _build_thinking_config,
     format_messages_for_gemini,
     _classify_google_error,
@@ -48,20 +27,6 @@ logger = logging.getLogger("syne.llm.google")
 # Constants — match OpenClaw exactly
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_DEFAULT_ENDPOINT = "https://cloudcode-pa.googleapis.com"
-_ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com"
-_ENDPOINT_FALLBACKS = [_ANTIGRAVITY_DAILY_ENDPOINT, _DEFAULT_ENDPOINT]
-
-_CCA_HEADERS = {
-    "User-Agent": "google-cloud-sdk vscode_cloudshelleditor/0.1",
-    "X-Goog-Api-Client": "gl-node/22.17.0",
-    "Client-Metadata": json.dumps({
-        "ideType": "IDE_UNSPECIFIED",
-        "platform": "PLATFORM_UNSPECIFIED",
-        "pluginType": "GEMINI",
-    }),
-}
-
 # Standard Gemini API endpoint (used with API keys)
 _GEMINI_API = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -71,31 +36,10 @@ from .retry import (
     current_max_retries,
     BASE_DELAY_MS as _BASE_DELAY_MS,
     MAX_RETRY_DELAY_MS as _MAX_RETRY_DELAY_MS,
-    STREAM_IDLE_TIMEOUT as _STREAM_OVERALL_TIMEOUT,
-    EMPTY_STREAM_BASE_DELAY_MS as _EMPTY_STREAM_BASE_DELAY_MS,
-    backoff_delay,
 )
-_MAX_EMPTY_STREAM_RETRIES = 1
-
-# CCA rate limiting is handled server-side. No client-side throttle —
-# if the server returns 429, the retry loop handles it with backoff.
 
 # Limit concurrent Google LLM calls to avoid quota burst
 _chat_semaphore = asyncio.Semaphore(2)
-
-# Tool call ID counter
-_tool_call_counter = 0
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# Shared helpers imported from gemini_common — re-exported for backward compat
-# _sanitize_surrogates, _extract_retry_delay, _is_retryable_error,
-# _is_valid_thought_signature, _clean_schema_for_gemini, _convert_tools_to_gemini,
-# _transform_messages, _sanitize_turn_ordering, _build_thinking_config,
-# format_messages_for_gemini, _classify_google_error
-# ═══════════════════════════════════════════════════════════════════════════════
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,30 +47,22 @@ _tool_call_counter = 0
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class GoogleProvider(LLMProvider):
-    """Google Gemini via Cloud Code Assist OAuth (free) or Gemini API key (paid).
-
-    OAuth mode uses the Cloud Code Assist wrapper API.
-    API key mode uses the standard Gemini API directly.
-    """
+    """Google Gemini via the standard Gemini API (API key)."""
 
     def __init__(
         self,
-        credentials: Optional[GoogleCredentials] = None,
         api_key: Optional[str] = None,
         chat_model: str = "gemini-2.5-pro",
         embedding_model: str = "text-embedding-004",
         base_url: Optional[str] = None,
     ):
-        self.credentials = credentials
         self.api_key = api_key
         self.chat_model = chat_model
         self.embedding_model = embedding_model
         self._base_url = base_url or _GEMINI_API
 
-        if not credentials and not api_key:
-            raise ValueError("Either credentials (OAuth) or api_key is required")
-
-        self._use_cca = credentials is not None
+        if not api_key:
+            raise ValueError("api_key is required (Gemini OAuth is no longer available)")
 
     @property
     def name(self) -> str:
@@ -161,334 +97,7 @@ class GoogleProvider(LLMProvider):
         model = model or self.chat_model
 
         async with _chat_semaphore:
-            if self._use_cca:
-                return await self._chat_cca(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
-            else:
-                return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
-
-    async def _chat_cca(
-        self,
-        messages: list[ChatMessage],
-        model: str,
-        temperature: float,
-        max_tokens: Optional[int],
-        tools: Optional[list[dict]] = None,
-        thinking_budget: Optional[int] = None,
-        top_p: Optional[float] = None,
-        top_k: Optional[int] = None,
-        stream_callbacks: Optional[StreamCallbacks] = None,
-    ) -> ChatResponse:
-        """Chat via Cloud Code Assist (OAuth, free)."""
-        token = await self.credentials.get_token()
-        system_text, contents = self._format_messages(messages, model)
-
-        # Build inner request
-        inner: dict = {"contents": contents}
-
-        # #7: sessionId in request
-        session_id = f"syne-{int(time.time())}-{random.randint(1000, 9999)}"
-        inner["sessionId"] = session_id
-
-        if system_text:
-            inner["systemInstruction"] = {"parts": [{"text": system_text}]}
-
-        # #13 & #14: generationConfig conditional — only include if non-empty
-        # #14: Temperature only if explicitly set (not always 0.7)
-        gen_config: dict = {}
-        if temperature is not None:
-            gen_config["temperature"] = temperature
-        if max_tokens:
-            gen_config["maxOutputTokens"] = max_tokens
-        if top_p is not None:
-            gen_config["topP"] = top_p
-        if top_k is not None:
-            gen_config["topK"] = top_k
-
-        # #8: Thinking config — always on, model-appropriate defaults
-        gen_config["thinkingConfig"] = _build_thinking_config(model, thinking_budget)
-
-        # #13: Only set generationConfig if non-empty
-        if gen_config:
-            inner["generationConfig"] = gen_config
-
-        # #1: Add tools — use parametersJsonSchema (not parameters)
-        if tools:
-            # Claude models on CCA need legacy `parameters` field
-            use_params = model.startswith("claude-")
-            gemini_tools = _convert_tools_to_gemini(tools, use_parameters=use_params)
-            if gemini_tools:
-                inner["tools"] = gemini_tools
-
-        # Wrap in CCA envelope
-        request_id = f"syne-{int(time.time())}-{random.randint(1000, 9999)}"
-        body = {
-            "project": self.credentials.project_id,
-            "model": model,
-            "request": inner,
-            "userAgent": "syne-agent",
-            "requestId": request_id,
-        }
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            **_CCA_HEADERS,
-        }
-
-        return await self._chat_cca_streaming(body, headers, model, stream_callbacks=stream_callbacks)
-
-    async def _chat_cca_streaming(self, body: dict, headers: dict, model: str, stream_callbacks: Optional[StreamCallbacks] = None) -> ChatResponse:
-        """Chat via CCA streaming endpoint with full OpenClaw-style retry logic.
-
-        Implements:
-        - #2: Server-parsed retry delays
-        - #3: Full retryable error detection
-        - #4: Endpoint fallback
-        - #5: Empty stream retry
-        """
-        headers["Accept"] = "text/event-stream"
-        body_json = json.dumps(body)
-
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        tool_calls: list[dict] = []
-        input_tokens = 0
-        output_tokens = 0
-
-        _cache_stat = {"cached": 0}
-
-        def _reset_output():
-            nonlocal input_tokens, output_tokens
-            text_parts.clear()
-            thinking_parts.clear()
-            tool_calls.clear()
-            input_tokens = 0
-            output_tokens = 0
-
-        async def _do_streaming_request(url: str) -> bool:
-            """Execute one streaming request, parse SSE, return True if content received."""
-            nonlocal input_tokens, output_tokens
-            has_content = False
-
-            # Overall stream timeout — prevents keep-alive lines from holding
-            # the connection open forever (httpx read timeout only checks for
-            # ANY data, including empty keep-alive lines).
-            stream_deadline = time.monotonic() + _STREAM_OVERALL_TIMEOUT
-
-            async with httpx.AsyncClient(timeout=180) as client:
-                async with client.stream("POST", url, content=body_json, headers=headers) as resp:
-                    # Check status BEFORE consuming stream.
-                    # On error, read body for retry delay info, then raise.
-                    if resp.status_code >= 400:
-                        await resp.aread()
-                        resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if time.monotonic() > stream_deadline:
-                            logger.warning(f"CCA stream exceeded {_STREAM_OVERALL_TIMEOUT}s overall — aborting")
-                            break
-                        if not line.startswith("data:"):
-                            continue
-                        data_str = line[5:].strip()
-                        if not data_str or data_str == "[DONE]":
-                            continue
-
-                        try:
-                            chunk = json.loads(data_str)
-                        except json.JSONDecodeError:
-                            continue
-
-                        # Unwrap response envelope
-                        response_data = chunk.get("response")
-                        if not response_data:
-                            continue
-
-                        # Log first chunk
-                        if not has_content:
-                            logger.debug(f"CCA first chunk: {data_str[:500]}")
-
-                        for candidate in response_data.get("candidates", []):
-                            for part in candidate.get("content", {}).get("parts", []):
-                                if "text" in part:
-                                    has_content = True
-                                    if part.get("thought"):
-                                        thinking_parts.append(part["text"])
-                                        if stream_callbacks and stream_callbacks.on_thinking:
-                                            stream_callbacks.on_thinking(part["text"])
-                                    else:
-                                        # #10: Skip empty text blocks
-                                        if part["text"].strip():
-                                            text_parts.append(part["text"])
-                                            if stream_callbacks and stream_callbacks.on_text:
-                                                stream_callbacks.on_text(part["text"])
-                                elif "functionCall" in part:
-                                    has_content = True
-                                    fc = part["functionCall"]
-                                    tc_id = fc.get("id") or f"{fc.get('name', 'unknown')}_{time.time_ns()}"
-                                    tc_entry: dict = {
-                                        "id": tc_id,
-                                        "function": {
-                                            "name": fc.get("name", ""),
-                                            "arguments": json.dumps(fc.get("args", {})),
-                                        },
-                                    }
-                                    # #11: Preserve thoughtSignature
-                                    if part.get("thoughtSignature"):
-                                        tc_entry["thoughtSignature"] = part["thoughtSignature"]
-                                    tool_calls.append(tc_entry)
-
-                        # Extract usage
-                        usage = response_data.get("usageMetadata", {})
-                        if usage.get("promptTokenCount"):
-                            input_tokens = usage["promptTokenCount"]
-                        if usage.get("candidatesTokenCount"):
-                            output_tokens = usage["candidatesTokenCount"]
-                        if usage.get("cachedContentTokenCount"):
-                            _cache_stat["cached"] = usage["cachedContentTokenCount"]
-
-            return has_content
-
-        # ─── Retry loop with endpoint fallback (#3, #4) ───
-        last_error: Optional[Exception] = None
-        request_url: Optional[str] = None
-        streamed = False
-        _auth_refresh_attempted = False
-        current_delay = _BASE_DELAY_MS
-
-        # Guard callers (rule checker) cap this via retry_budget() —
-        # unbounded retries on 429 would outlive their own timeout.
-        max_retries = current_max_retries()
-        for attempt in range(max_retries + 1):
-            try:
-                # #4: Cycle through endpoints on retry
-                endpoint = _ENDPOINT_FALLBACKS[min(attempt, len(_ENDPOINT_FALLBACKS) - 1)]
-                request_url = f"{endpoint}/v1internal:streamGenerateContent?alt=sse"
-
-                streamed = await _do_streaming_request(request_url)
-                break  # Success
-
-            except httpx.HTTPStatusError as e:
-                try:
-                    await e.response.aread()
-                    error_text = e.response.text
-                except Exception:
-                    error_text = str(e)
-                status = e.response.status_code
-
-                # Classify the error
-                classification = _classify_google_error(status, error_text, e.response.headers)
-
-                # Terminal errors — raise immediately
-                if classification.is_terminal:
-                    raise LLMRateLimitError(
-                        f"Terminal quota error: {classification.reason}"
-                    ) from e
-
-                # Auth errors — try token refresh once
-                if status in (401, 403):
-                    if not _auth_refresh_attempted and self.credentials:
-                        _auth_refresh_attempted = True
-                        logger.info(f"CCA {status} — attempting token refresh...")
-                        try:
-                            self.credentials.expires_at = 0
-                            new_token = await self.credentials.get_token()
-                            headers["Authorization"] = f"Bearer {new_token}"
-                            logger.info("CCA token refreshed, retrying...")
-                            _reset_output()
-                            continue
-                        except Exception as refresh_err:
-                            logger.error(f"CCA token refresh failed: {refresh_err}")
-                    raise LLMAuthError(f"Authentication failed ({status}): {error_text[:200]}") from e
-
-                if status == 400:
-                    logger.error(f"Gemini 400 Bad Request (full): {error_text[:2000]}")
-                    combined = (error_text + " " + str(e)).lower()
-                    if "exceeds the maximum" in combined or "token count" in combined or "too many tokens" in combined:
-                        raise LLMContextWindowError(f"Input tokens exceed limit: {error_text[:300]}") from e
-                    raise LLMBadRequestError(f"Bad request (400): {error_text[:500]}") from e
-
-                # Retryable — backoff with jitter
-                if attempt < max_retries and classification.is_retryable:
-                    # On 429: try next endpoint immediately if different
-                    next_endpoint = _ENDPOINT_FALLBACKS[min(attempt + 1, len(_ENDPOINT_FALLBACKS) - 1)]
-                    if status == 429 and next_endpoint != endpoint:
-                        delay_ms = random.randint(1500, 2500)
-                        logger.warning(
-                            f"CCA 429 on {endpoint.split('//')[1].split('/')[0]}, "
-                            f"switching to {next_endpoint.split('//')[1].split('/')[0]} "
-                            f"(attempt {attempt + 1}/{max_retries + 1})"
-                        )
-                    else:
-                        # Use max of backoff delay and server-requested delay
-                        delay_ms = max(current_delay, classification.delay_ms)
-                        # Jitter: +0-20% for quota w/ server delay, ±30% for others
-                        if classification.delay_ms > 0:
-                            jitter = random.uniform(1.0, 1.2)
-                        else:
-                            jitter = random.uniform(0.7, 1.3)
-                        delay_ms = int(delay_ms * jitter)
-                        logger.warning(
-                            f"CCA {status} ({classification.reason}), retrying in {delay_ms}ms "
-                            f"(attempt {attempt + 1}/{max_retries + 1}, endpoint: {endpoint})"
-                        )
-
-                    await asyncio.sleep(delay_ms / 1000)
-                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
-                    _reset_output()
-                    continue
-
-                # Max retries exceeded
-                if status == 429:
-                    raise LLMRateLimitError(f"Rate limited (429) after {max_retries + 1} attempts.") from e
-                raise
-
-            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError):
-                raise
-
-            except Exception as e:
-                last_error = e
-                if attempt < max_retries:
-                    delay_ms = int(current_delay * random.uniform(0.7, 1.3))
-                    logger.warning(f"CCA network error: {e}, retrying in {delay_ms}ms")
-                    await asyncio.sleep(delay_ms / 1000)
-                    current_delay = min(_MAX_RETRY_DELAY_MS, current_delay * 2)
-                    _reset_output()
-                    continue
-                raise
-
-        # ─── Empty stream retry (#5) ───
-        if not streamed and request_url:
-            for empty_attempt in range(1, _MAX_EMPTY_STREAM_RETRIES + 1):
-                backoff_ms = _EMPTY_STREAM_BASE_DELAY_MS * (2 ** (empty_attempt - 1))
-                logger.warning(f"CCA empty stream, retry {empty_attempt}/{_MAX_EMPTY_STREAM_RETRIES} in {backoff_ms}ms")
-                await asyncio.sleep(backoff_ms / 1000)
-                _reset_output()
-
-                try:
-                    streamed = await _do_streaming_request(request_url)
-                    if streamed:
-                        break
-                except Exception as e:
-                    logger.warning(f"CCA empty stream retry failed: {e}")
-
-        if not streamed:
-            raise LLMEmptyResponseError(f"Cloud Code Assist API returned an empty response for {model}")
-
-        content = "".join(text_parts)
-        thinking = "".join(thinking_parts) if thinking_parts else None
-
-        logger.info(
-            "DIAG-CACHE provider=google-cca model=%s in=%s cached=%s out=%s",
-            model, input_tokens, _cache_stat["cached"], output_tokens,
-        )
-
-        return ChatResponse(
-            content=content,
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            tool_calls=tool_calls if tool_calls else None,
-            thinking=thinking,
-        )
+            return await self._chat_api(messages, model, temperature, max_tokens, tools, thinking_budget, top_p, top_k, stream_callbacks=stream_callbacks)
 
     async def _chat_api(
         self,
@@ -502,7 +111,7 @@ class GoogleProvider(LLMProvider):
         top_k: Optional[int] = None,
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
-        """Chat via standard Gemini API (API key, paid)."""
+        """Chat via standard Gemini API (API key)."""
         system_text, contents = self._format_messages(messages, model)
 
         body: dict = {
@@ -632,7 +241,7 @@ class GoogleProvider(LLMProvider):
         text: str,
         model: Optional[str] = None,
     ) -> EmbeddingResponse:
-        """Embedding — always uses Gemini API (CCA doesn't have embed endpoint).
+        """Embedding via the Gemini API.
 
         Includes retry with exponential backoff for transient errors (429, 5xx).
         """
@@ -646,13 +255,8 @@ class GoogleProvider(LLMProvider):
 
         current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
-            if self._use_cca:
-                token = await self.credentials.get_token()
-                headers = {"Authorization": f"Bearer {token}"}
-                params = {}
-            else:
-                headers = {}
-                params = {"key": self.api_key}
+            headers = {}
+            params = {"key": self.api_key}
 
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
@@ -709,13 +313,8 @@ class GoogleProvider(LLMProvider):
 
         current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
-            if self._use_cca:
-                token = await self.credentials.get_token()
-                headers = {"Authorization": f"Bearer {token}"}
-                params = {}
-            else:
-                headers = {}
-                params = {"key": self.api_key}
+            headers = {}
+            params = {"key": self.api_key}
 
             try:
                 async with httpx.AsyncClient(timeout=60) as client:

@@ -82,7 +82,7 @@ async def create_provider(model_entry: dict) -> LLMProvider:
         raise RuntimeError(f"Unknown driver: {driver_name}")
     
     # ═══════════════════════════════════════════════════════════════
-    # Google CCA (OAuth or API key)
+    # Google Gemini (API key only — Gemini OAuth was shut down by Google)
     # ═══════════════════════════════════════════════════════════════
     if driver_name == "google_cca":
         auth = model_entry.get("auth", "oauth")
@@ -100,13 +100,9 @@ async def create_provider(model_entry: dict) -> LLMProvider:
                 base_url=model_entry.get("base_url"),
             )
         else:
-            from ..auth.google_oauth import get_credentials
-            creds = await get_credentials()
-            if not creds:
-                raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
-            return GoogleProvider(
-                credentials=creds,
-                chat_model=model_id,
+            raise RuntimeError(
+                f"{model_entry.get('label', model_id)} uses Gemini OAuth, which Google has shut down. "
+                "Add the model again with a Gemini API key (or use Vertex AI) via /models."
             )
     
     # ═══════════════════════════════════════════════════════════════

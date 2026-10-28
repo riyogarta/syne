@@ -356,8 +356,9 @@ Active chat and embedding models. These reference keys in `provider.models` and
 - **Change chat model when**: Owner wants different quality/cost tradeoff, or current model
   has issues (rate limits, downtime).
 - **Change embedding model when**: Switching embedding providers. **CRITICAL**: changing
-  embedding model requires re-embedding ALL memories. This is automatic but takes time
-  and may temporarily affect memory recall quality.
+  embedding model requires re-embedding ALL memories. Same dimension: the owner runs
+  `syne memory reembed-memory --force` (not automatic). Different dimension: all
+  memories are deleted — re-embedding across dimensions is not supported.
 - **Warning**: Changing models mid-conversation does not affect existing sessions —
   only new sessions use the new model.
 

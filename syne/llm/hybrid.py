@@ -1,6 +1,6 @@
 """Hybrid provider — chat from one provider, embedding from another.
 
-Default setup: Google CCA (free OAuth chat) + Together AI (cheap embedding).
+Example: Gemini or Claude for chat + Together AI or Ollama for embedding.
 """
 
 from typing import Optional

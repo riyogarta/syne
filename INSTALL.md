@@ -201,14 +201,15 @@ syne/
 ├── compaction.py     # Message compaction
 ├── subagent.py       # Sub-agent manager
 ├── auth/
-│   └── google_oauth.py  # Google CCA OAuth
+│   ├── codex_oauth.py   # ChatGPT/Codex OAuth
+│   └── claude_oauth.py  # Claude OAuth
 ├── db/
 │   ├── connection.py    # DB pool
 │   ├── models.py        # Data access
 │   └── schema.sql       # Table definitions
 ├── llm/
 │   ├── provider.py      # Base provider
-│   ├── google.py        # Gemini CCA + API
+│   ├── google.py        # Gemini (API key)
 │   ├── openai.py        # OpenAI
 │   ├── together.py      # Together AI
 │   └── hybrid.py        # Chat + Embed split

@@ -106,18 +106,15 @@ def status():
                 import time as _time
                 driver = provider_cfg.get("driver", "") if isinstance(provider_cfg, dict) else ""
                 auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
-                if auth_type == "oauth" and driver in ("codex", "google", "google_cca", "anthropic"):
+                if auth_type == "oauth" and driver in ("google", "google_cca"):
+                    table.add_row("OAuth Token", "[red]Gemini OAuth is no longer available — switch model via /models[/red]")
+                elif auth_type == "oauth" and driver in ("codex", "anthropic"):
                     if driver == "codex":
                         expires_at = await get_config("credential.codex_expires_at", 0)
-                    elif driver in ("google", "google_cca"):
-                        expires_at_str = await get_config("credential.google_token_expiry", "")
-                        try:
-                            from datetime import datetime
-                            expires_at = datetime.fromisoformat(expires_at_str).timestamp() if expires_at_str else 0
-                        except Exception:
-                            expires_at = 0
                     else:
-                        expires_at = 0
+                        from syne.db.credentials import get_claude_oauth_credentials
+                        _claude = await get_claude_oauth_credentials()
+                        expires_at = (_claude or {}).get("expires_at", 0)
 
                     expires_at = float(expires_at or 0)
                     now = _time.time()
@@ -144,13 +141,8 @@ def status():
                 # Credentials summary
                 try:
                     import time as _cred_time
-                    from syne.db.credentials import get_google_oauth_credentials, get_credential
+                    from syne.db.credentials import get_credential
                     cred_parts = []
-                    g_creds = await get_google_oauth_credentials()
-                    if g_creds and g_creds.get("refresh_token"):
-                        exp = g_creds.get("expires_at", 0)
-                        status_str = "[green]OK[/green]" if _cred_time.time() < exp else "[yellow]expired[/yellow]"
-                        cred_parts.append(f"Google {status_str}")
                     codex_token = await get_credential("credential.codex_access_token")
                     if codex_token:
                         exp = float(await get_credential("credential.codex_expires_at", 0) or 0)

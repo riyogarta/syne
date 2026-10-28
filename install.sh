@@ -71,6 +71,12 @@ if [ -z "$PY" ]; then
     echo "Python 3.11+ not found. Installing..."
     sudo apt-get update -qq && sudo apt-get install -y -qq python3 python3-venv python3-pip
     PY="python3"
+    # The distro's python3 may still be too old (e.g. Ubuntu 22.04 ships 3.10).
+    if [ "$($PY -c "import sys; print(sys.version_info >= (3,11))" 2>/dev/null)" != "True" ]; then
+        echo "Syne requires Python 3.11+, but this system provides $($PY --version 2>&1)."
+        echo "Supported: Ubuntu 24.04+ or Debian 12+."
+        exit 1
+    fi
 fi
 
 echo "Using Python: $PY ($($PY --version 2>&1))"
@@ -123,6 +129,11 @@ if [ "$INSTALL_MODE" = "node" ]; then
 elif [ -t 0 ]; then
     source .venv/bin/activate
     exec syne init
+elif (exec </dev/tty) 2>/dev/null; then
+    # Piped install (curl ... | bash): stdin is the script itself, so read
+    # the wizard's answers from the terminal instead.
+    source .venv/bin/activate
+    exec syne init </dev/tty
 else
     echo "Next: source .venv/bin/activate && syne init"
 fi

@@ -355,14 +355,15 @@ def memory_reembed_history(batch, limit, sleep):
 @click.option("--batch", "-b", default=50, help="Rows to embed per batch (default 50)")
 @click.option("--limit", "-l", default=None, type=int, help="Cap total rows processed (default: no cap)")
 @click.option("--sleep", "-s", default=0.0, type=float, help="Seconds to sleep between batches (throttle if Ollama shared)")
-@click.option("--force", "-f", is_flag=True, help="Re-embed EVERY memory row, not just rows with NULL embedding. Use this when switching embedding models with a different vector dimension.")
+@click.option("--force", "-f", is_flag=True, help="Re-embed EVERY memory row, not just rows with NULL embedding. Use this after switching to an embedding model with the same vector dimension.")
 def memory_reembed_memory(batch, limit, sleep, force):
     """Backfill (or re-embed) embeddings for rows in the memory table.
 
     By default only rows whose embedding is NULL are processed. Pass --force
-    to re-embed every memory row — needed when switching embedding models
-    with a different vector dimension (e.g. moving off qwen3-embedding:0.6b
-    to a higher-dimension model). Resumable: safe to Ctrl-C.
+    to re-embed every memory row — needed after switching to an embedding
+    model with the SAME vector dimension. A different dimension is not
+    supported here: the column is typed vector(N) once indexed, so rows of
+    another size are rejected. Resumable: safe to Ctrl-C.
 
     HNSW index is refreshed automatically after the batch (idempotent).
     Companion to `reembed-history` (which does the messages table).

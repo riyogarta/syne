@@ -4,9 +4,11 @@
 # (any invocation of a file literally named rollback.sh -> HARD_DENY). That is
 # intentional: recovery must be a conscious human act, never agent-driven.
 #
-# Place at:  /home/syne/syne/rollback.sh   (chmod +x)
-# Run as the syne user:  ~/syne/rollback.sh            (previous commit)
-#                        ~/syne/rollback.sh <git-ref>  (explicit target)
+# Lives in the Syne checkout (e.g. ~/syne/rollback.sh). Run as the user
+# that owns the install:  ~/syne/rollback.sh            (previous commit)
+#                         ~/syne/rollback.sh <git-ref>  (explicit target)
+# The checkout is the directory containing this script; override with
+# SYNE_DIR=/path/to/syne if needed.
 #
 # What it does:
 #   1. Snapshots the current HEAD (so you can roll *forward* again).
@@ -20,7 +22,7 @@
 
 set -euo pipefail
 
-SYNE_DIR="/home/syne/syne"
+SYNE_DIR="${SYNE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 VENV_PY="${SYNE_DIR}/.venv/bin/python"
 TARGET="${1:-HEAD~1}"
 

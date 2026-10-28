@@ -960,8 +960,6 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             agent._cli_cwd = os.getcwd()
             from ..tools.file_ops import set_workspace
             set_workspace(os.getcwd())
-            from ..main import _auto_migrate_google_oauth
-            await _auto_migrate_google_oauth()
 
             username = getpass.getuser()
             user = await get_or_create_user(

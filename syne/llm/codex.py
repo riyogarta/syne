@@ -1,4 +1,4 @@
-"""OpenAI Codex Responses API provider (ChatGPT OAuth, free)."""
+"""OpenAI Codex Responses API provider (ChatGPT OAuth, uses your ChatGPT subscription)."""
 
 import asyncio
 import json
@@ -38,7 +38,7 @@ _RETRYABLE_CODES = {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}
 class CodexProvider(LLMProvider):
     """OpenAI Codex via ChatGPT backend (Responses API, OAuth).
 
-    Free via ChatGPT subscription (Plus/Pro/Team).
+    Uses your ChatGPT subscription (Plus/Pro/Team) via OAuth.
     Tokens stored in DB (credential.codex_access_token, credential.codex_refresh_token).
     """
 

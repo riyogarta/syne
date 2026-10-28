@@ -40,7 +40,7 @@ syne/
 │
 ├── llm/                 — LLM provider drivers
 │   ├── provider.py      — Abstract LLMProvider interface
-│   ├── google.py        — Google Gemini (CCA + API key)
+│   ├── google.py        — Google Gemini (API key)
 │   ├── anthropic.py     — Anthropic Claude
 │   ├── openai.py        — OpenAI GPT
 │   ├── codex.py         — ChatGPT via Codex OAuth
@@ -88,7 +88,6 @@ syne/
 │   └── credentials.py   — Encrypted credential storage
 │
 ├── auth/                — OAuth providers
-│   ├── google_oauth.py  — Google OAuth2 (for Gemini CCA)
 │   ├── codex_oauth.py   — ChatGPT/Codex OAuth
 │   └── claude_oauth.py  — Anthropic Claude OAuth
 │

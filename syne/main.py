@@ -65,15 +65,6 @@ async def _get_telegram_bot_token(settings) -> str | None:
     return None
 
 
-async def _auto_migrate_google_oauth():
-    """Auto-migrate Google OAuth credentials from file to DB if needed."""
-    from .migrate_credentials import migrate_google_oauth
-    try:
-        await migrate_google_oauth()
-    except Exception as e:
-        logger.debug(f"Google OAuth migration check: {e}")
-
-
 async def _scheduler_callback(
     task_id: int,
     payload: str,
@@ -168,9 +159,6 @@ async def run():
 
     try:
         await agent.start()
-        
-        # Auto-migrate Google OAuth after DB is ready
-        await _auto_migrate_google_oauth()
 
         # Get Telegram bot token (DB first, then .env with auto-migrate)
         bot_token = await _get_telegram_bot_token(settings)

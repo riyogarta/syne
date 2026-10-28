@@ -1,6 +1,7 @@
 """Telegram channel adapter."""
 
 import asyncio
+import base64
 import httpx
 import json
 import logging
@@ -2288,12 +2289,8 @@ Or just send me a message!"""
         # Credential summary
         try:
             cred_parts = []
-            from ..db.credentials import get_google_oauth_credentials, get_credential
+            from ..db.credentials import get_credential
             import time as _time
-            g_creds = await get_google_oauth_credentials()
-            if g_creds and g_creds.get("refresh_token"):
-                exp = g_creds.get("expires_at", 0)
-                cred_parts.append("Google " + ("✅" if _time.time() < exp else "⚠️"))
             codex_token = await get_credential("credential.codex_access_token")
             if codex_token:
                 exp = float(await get_credential("credential.codex_expires_at", 0) or 0)
@@ -3788,8 +3785,8 @@ Or just send me a message!"""
             current = await get_config("abilities.self_modification_enabled", False)
             state = "ON" if current else "OFF"
             buttons = [
-                InlineKeyboardButton(f"{'\u2705 ' if current else ''}ON", callback_data="createability_toggle:on"),
-                InlineKeyboardButton(f"{'\u2705 ' if not current else ''}OFF", callback_data="createability_toggle:off"),
+                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="createability_toggle:on"),
+                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="createability_toggle:off"),
             ]
             await update.message.reply_text(
                 f"\U0001f9ea **Ability creation gate:** {state}\n\n"
@@ -4660,9 +4657,9 @@ Or just send me a message!"""
         count = len(models)
         text = (
             f"🧬 <b>Embedding</b> — {count} registered\n\n"
-            f"⚠️ <b>Warning:</b> Changing the active embedding model may "
-            f"require resetting ALL memories (re-embedding is not yet supported). "
-            f"Only switch if you understand the consequences."
+            f"⚠️ <b>Warning:</b> Switching to a model with a different vector "
+            f"dimension deletes ALL memories. Same-dimension switches keep them — "
+            f"run <code>syne memory reembed-memory --force</code> afterwards."
         )
         markup = InlineKeyboardMarkup(buttons)
 
@@ -4739,14 +4736,17 @@ Or just send me a message!"""
                     f"Dimension change: {current_dims} → {new_dims}\n"
                     f"Memories affected: <b>{mem_count}</b>\n\n"
                     f"Vectors from different embedding models are incompatible. "
-                    f"Re-embedding is not yet supported — all existing memories "
-                    f"will be permanently deleted.\n\n"
+                    f"Re-embedding across dimensions is not supported — all existing "
+                    f"memories will be permanently deleted.\n\n"
                     f"Are you sure?"
                 )
             else:
                 warn = (
                     f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
-                    f"Same dimensions ({new_dims}), memories will be preserved."
+                    f"Same dimensions ({new_dims}), memories will be preserved.\n"
+                    f"Vectors from different models are not comparable — run "
+                    f"<code>syne memory reembed-memory --force</code> and "
+                    f"<code>syne memory reembed-history</code> afterwards so search keeps working."
                 )
             await query.edit_message_text(
                 warn,
@@ -7589,10 +7589,7 @@ Or just send me a message!"""
             await bot.send_message(chat_id=chat_id, text="🔄 Exchanging authorization code...")
 
         try:
-            if provider == "google":
-                await self._exchange_google_oauth(code, state)
-                await bot.send_message(chat_id=chat_id, text="✅ Google OAuth configured successfully!")
-            elif provider == "codex":
+            if provider == "codex":
                 await self._exchange_codex_oauth(code, state)
                 await bot.send_message(chat_id=chat_id, text="✅ OpenAI/Codex OAuth configured successfully!")
             elif provider == "claude":
@@ -8279,7 +8276,6 @@ Or just send me a message!"""
 
         # Map oauth_driver → URL generator
         _generators = {
-            "google": self._generate_google_oauth_url,
             "codex": self._generate_codex_oauth_url,
             "claude": self._generate_claude_oauth_url,
         }
@@ -8340,39 +8336,6 @@ Or just send me a message!"""
             )
             self._auth_state.pop(user_id, None)
 
-    async def _generate_google_oauth_url(self) -> tuple[str, dict]:
-        """Generate Google OAuth URL with PKCE."""
-        import base64, hashlib, secrets
-        from urllib.parse import urlencode
-
-        verifier = secrets.token_urlsafe(64)
-        digest = hashlib.sha256(verifier.encode()).digest()
-        challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-
-        # Same credentials as google_oauth.py
-        client_id = base64.b64decode(
-            "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLm"
-            "FwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"
-        ).decode()
-
-        params = urlencode({
-            "client_id": client_id,
-            "response_type": "code",
-            "redirect_uri": "http://localhost:8085/oauth2callback",
-            "scope": " ".join([
-                "https://www.googleapis.com/auth/cloud-platform",
-                "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile",
-            ]),
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "state": verifier,
-            "access_type": "offline",
-            "prompt": "consent",
-        })
-        url = f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
-        return url, {"verifier": verifier, "challenge": challenge}
-
     async def _generate_codex_oauth_url(self) -> tuple[str, dict]:
         """Generate Codex/OpenAI OAuth URL with PKCE."""
         import base64, hashlib, secrets
@@ -8422,51 +8385,6 @@ Or just send me a message!"""
         })
         url = f"{_AUTHORIZE_URL}?{params}"
         return url, {"verifier": verifier, "challenge": challenge, "state": verifier}
-
-    async def _exchange_google_oauth(self, code: str, state: dict):
-        """Exchange Google auth code for tokens and save to DB."""
-        import base64, time
-        from ..auth.google_oauth import GoogleCredentials, _discover_project, _get_user_email
-
-        client_id = base64.b64decode(
-            "NjgxMjU1ODA5Mzk1LW9vOGZ0Mm9wcmRybnA5ZTNhcWY2YXYzaG1kaWIxMzVqLm"
-            "FwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29t"
-        ).decode()
-        client_secret = base64.b64decode("R09DU1BYLTR1SGdNUG0tMW83U2stZ2VWNkN1NWNsWEZzeGw=").decode()
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "code": code,
-                    "grant_type": "authorization_code",
-                    "redirect_uri": "http://localhost:8085/oauth2callback",
-                    "code_verifier": state["verifier"],
-                },
-            )
-            resp.raise_for_status()
-            token_data = resp.json()
-
-        if not token_data.get("refresh_token"):
-            raise RuntimeError("No refresh token received. Try again with prompt=consent.")
-
-        access_token = token_data["access_token"]
-        expires_at = time.time() + token_data["expires_in"] - 300
-
-        email = await _get_user_email(access_token)
-        project_id = await _discover_project(access_token)
-
-        creds = GoogleCredentials(
-            access_token=access_token,
-            refresh_token=token_data["refresh_token"],
-            expires_at=expires_at,
-            project_id=project_id,
-            email=email,
-        )
-        await creds.save_to_db()
-        logger.info(f"Google OAuth credentials saved for {email}")
 
     async def _exchange_codex_oauth(self, code: str, state: dict):
         """Exchange Codex auth code for tokens and save to DB."""
@@ -8563,7 +8481,6 @@ Or just send me a message!"""
         """Get formatted status of all credentials from DB provider registry."""
         import time
         from ..db.credentials import (
-            get_google_oauth_credentials,
             get_claude_oauth_credentials,
             get_credential,
         )
@@ -8578,17 +8495,7 @@ Or just send me a message!"""
 
             if auth_type == "oauth":
                 driver = p.get("oauth_driver", key)
-                if driver == "google":
-                    creds = await get_google_oauth_credentials()
-                    if creds and creds.get("refresh_token"):
-                        exp = creds.get("expires_at", 0)
-                        expired = time.time() >= exp
-                        email = creds.get("email", "?")
-                        status = "⚠️ expired" if expired else "✅ active"
-                        lines.append(f"🔑 **{label}:** {status} ({email})")
-                    else:
-                        lines.append(f"🔑 **{label}:** ❌ not configured")
-                elif driver == "claude":
+                if driver == "claude":
                     creds = await get_claude_oauth_credentials()
                     if creds and creds.get("refresh_token"):
                         exp = creds.get("expires_at", 0)
@@ -8953,8 +8860,8 @@ Or just send me a message!"""
                 else "Ability creation blocked (creation vector closed)."
             )
             buttons = [
-                InlineKeyboardButton(f"{'\u2705 ' if enabled else ''}ON", callback_data="createability_toggle:on"),
-                InlineKeyboardButton(f"{'\u2705 ' if not enabled else ''}OFF", callback_data="createability_toggle:off"),
+                InlineKeyboardButton(f"{'✅ ' if enabled else ''}ON", callback_data="createability_toggle:on"),
+                InlineKeyboardButton(f"{'✅ ' if not enabled else ''}OFF", callback_data="createability_toggle:off"),
             ]
             await query.edit_message_text(
                 f"\U0001f9ea **Ability creation gate:** {state}\n{detail}",

@@ -176,8 +176,8 @@ def init():
     ollama_available = tier_name != "cloud"
 
     # Permanent warning
-    console.print("  [bold yellow]Warning:[/bold yellow] Your embedding model choice is [bold]permanent[/bold] for this installation.")
-    console.print("  [dim]Changing it later requires resetting ALL memories (re-embedding is not yet supported).[/dim]")
+    console.print("  [bold yellow]Warning:[/bold yellow] Choose your embedding model for the long term.")
+    console.print("  [dim]Switching later to a model with a different vector dimension deletes ALL memories.[/dim]")
     console.print("  [dim]Choose based on your server's long-term capacity.[/dim]")
     console.print()
 
@@ -469,7 +469,9 @@ def init():
                     k, v = line.split("=", 1)
                     existing_env[k.strip()] = _strip_env_quotes(v)
 
+    reused_creds = False
     if existing_env.get("SYNE_DB_USER") and existing_env.get("SYNE_DB_PASSWORD"):
+        reused_creds = True
         db_user = existing_env["SYNE_DB_USER"]
         db_password = existing_env["SYNE_DB_PASSWORD"]
         db_name = existing_env.get("SYNE_DB_NAME", "mnemosyne")
@@ -482,6 +484,7 @@ def init():
             db_user = parsed.username or f"syne_{secrets.token_hex(4)}"
             db_password = parsed.password or secrets.token_hex(16)
             db_name = (parsed.path or "/mnemosyne").lstrip("/") or "mnemosyne"
+            reused_creds = bool(parsed.username and parsed.password)
             console.print(f"  [dim]Reusing DB credentials from DATABASE_URL ({db_user})[/dim]")
         except Exception:
             db_suffix = secrets.token_hex(4)
@@ -495,6 +498,36 @@ def init():
         db_name = "mnemosyne"
 
     db_url = f"postgresql://{db_user}:{db_password}@localhost:5433/{db_name}"
+
+    # PostgreSQL bakes credentials into the volume at FIRST creation;
+    # later starts with different POSTGRES_USER/PASSWORD are ignored.
+    # Reused credentials still open an existing volume, so it is kept.
+    # Fresh credentials cannot, so the old volume would have to go — that
+    # deletes every memory, so ask first and never do it silently.
+    # Volume name = <compose project>_syne_pgdata; compose derives the
+    # project from the directory name (lowercased, [a-z0-9_-] only).
+    import re as _re
+    project = _re.sub(r"[^a-z0-9_-]", "", os.path.basename(syne_dir).lower())
+    volume_check = subprocess.run(
+        f"{docker_prefix}docker volume ls -q", shell=True, capture_output=True, text=True,
+    )
+    volume_exists = f"{project}_syne_pgdata" in (volume_check.stdout or "").split()
+    remove_volume = False
+    if volume_exists and not reused_creds:
+        console.print()
+        console.print(Panel(
+            "An existing Syne database was found, but .env has no credentials for it.\n"
+            "It can only be used with its original credentials, so continuing means\n"
+            "[bold]deleting it — ALL memories, chat history and settings.[/bold]\n\n"
+            "To keep it: restore the previous .env (SYNE_DB_USER / SYNE_DB_PASSWORD)\n"
+            "and run 'syne init' again.",
+            title="Existing database",
+            style="bold yellow",
+        ))
+        if not click.confirm("Delete the existing Syne database and start fresh?", default=False):
+            console.print("[dim]Aborted — the database and .env were not changed.[/dim]")
+            return
+        remove_volume = True
 
     env_lines.append(f"SYNE_DB_USER={db_user}")
     env_lines.append(f"SYNE_DB_PASSWORD={db_password}")
@@ -519,21 +552,11 @@ def init():
     # 5. Start DB (Docker — uses prefix from _ensure_docker)
     docker_cmd = f"{docker_prefix}docker compose"
 
-    # PostgreSQL bakes credentials into the volume at FIRST creation.
-    # Subsequent starts with different POSTGRES_USER/PASSWORD are IGNORED.
-    # So we must always clean up stale volumes before starting.
-
-    # Check for existing volume (docker volume, not docker compose)
-    vol_cmd = f"{docker_prefix}docker volume ls -q"
-    volume_check = subprocess.run(
-        vol_cmd, shell=True, capture_output=True, text=True,
-    )
-    volume_exists = "syne_syne_pgdata" in (volume_check.stdout or "")
-
-    if volume_exists:
-        console.print("[yellow]Found existing Syne DB volume — removing to apply fresh credentials...[/yellow]")
-        # Stop container + remove volume (credentials are baked in, can't change)
+    if remove_volume:
+        console.print("[yellow]Removing the existing Syne DB volume (confirmed)...[/yellow]")
         subprocess.run(f"{docker_cmd} down -v", shell=True, cwd=syne_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif volume_exists:
+        console.print("[dim]Existing Syne DB volume kept (credentials reused from .env)[/dim]")
 
     console.print("\n[bold]Starting database...[/bold]")
     result = subprocess.run(f"{docker_cmd} up -d db", shell=True, cwd=syne_dir).returncode
@@ -577,7 +600,7 @@ def init():
     # Save identity + credentials to DB
     async def _save_identity():
         from syne.db.connection import init_db, close_db
-        from syne.db.models import set_identity, set_config
+        from syne.db.models import set_identity, set_config, get_config
         pool = await init_db(db_url)
         await set_identity("name", name)
         await set_identity("motto", motto)
@@ -644,18 +667,13 @@ def init():
                 ]
                 active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
             elif driver == "google_cca":
-                if auth == "api_key":
-                    cred_key = provider_config.get("_credential_key", "credential.google_cca_api_key")
-                    base_entry = {"key": "", "label": "", "driver": "google_cca", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576}
-                    models_registry = [
-                        {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
-                        {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},
-                    ]
-                else:
-                    models_registry = [
-                        {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
-                        {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
-                    ]
+                # API key only — Google has closed all OAuth access for Gemini.
+                cred_key = provider_config.get("_credential_key", "credential.google_cca_api_key")
+                base_entry = {"key": "", "label": "", "driver": "google_cca", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576}
+                models_registry = [
+                    {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
+                    {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},
+                ]
                 active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
             elif driver == "codex":
                 models_registry = [
@@ -744,7 +762,14 @@ def init():
             console.print("[green]✓ Embedding config saved to database[/green]")
         # Save auto_capture setting
         await set_config("memory.auto_capture", auto_capture_enabled)
-        if auto_capture_enabled:
+        # The evaluator model also powers the rule checker, so point the
+        # config at the model that was actually pulled, whether or not
+        # auto-capture is on (same writes as /evaluator).
+        if can_run_ollama:
+            eval_models = await get_config("memory.evaluator_models", []) or []
+            eval_entry = next((m for m in eval_models if m.get("model_id") == selected_eval_model), None)
+            if eval_entry:
+                await set_config("memory.active_evaluator", eval_entry["key"])
             await set_config("memory.evaluator_driver", "ollama")
             await set_config("memory.evaluator_model", selected_eval_model)
         # Save vision/image_analysis config

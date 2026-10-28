@@ -10,7 +10,6 @@ from .config import SyneSettings
 from .db.connection import init_db, close_db
 from .db.models import get_config, set_config, get_or_create_user, migrate_access_levels
 from .llm.provider import LLMProvider
-from .llm.google import GoogleProvider
 from .llm.openai import OpenAIProvider
 from .llm.codex import CodexProvider
 from .llm.together import TogetherProvider
@@ -19,7 +18,6 @@ from .llm.drivers import (
     create_hybrid_provider,
     get_model_from_list,
 )
-from .auth.google_oauth import get_credentials
 from .memory.engine import MemoryEngine
 from .tools.registry import ToolRegistry
 from .abilities import AbilityRegistry
@@ -328,9 +326,8 @@ class SyneAgent:
     def _get_oauth_provider(self):
         """Get the actual OAuth-capable provider (unwrap HybridProvider if needed).
 
-        Recognizes three provider types:
+        Recognizes two provider types:
         - Codex: has _refresh_token (sync) + _token_expires_at
-        - Google: has credentials (GoogleCredentials with async get_token + expires_at)
         - Claude: has _claude_creds (ClaudeCredentials with async get_token + expires_at)
         """
         provider = self.provider
@@ -339,9 +336,6 @@ class SyneAgent:
             provider = provider._chat
         # Codex
         if hasattr(provider, '_refresh_token') and hasattr(provider, '_token_expires_at'):
-            return provider
-        # Google CCA
-        if hasattr(provider, 'credentials') and provider.credentials is not None:
             return provider
         # Claude OAuth
         if hasattr(provider, '_claude_creds') and provider._claude_creds is not None:
@@ -354,9 +348,6 @@ class SyneAgent:
         # Codex
         if hasattr(oauth, '_token_expires_at'):
             return oauth._token_expires_at
-        # Google CCA
-        if hasattr(oauth, 'credentials') and oauth.credentials:
-            return oauth.credentials.expires_at
         # Claude OAuth
         if hasattr(oauth, '_claude_creds') and oauth._claude_creds:
             return oauth._claude_creds.expires_at
@@ -369,11 +360,6 @@ class SyneAgent:
             # Codex (sync)
             if hasattr(oauth, '_refresh_token'):
                 return oauth._refresh_token()
-            # Google CCA (async)
-            if hasattr(oauth, 'credentials') and oauth.credentials:
-                oauth.credentials.expires_at = 0  # force invalidate
-                await oauth.credentials.get_token()
-                return True
             # Claude OAuth (async)
             if hasattr(oauth, '_claude_creds') and oauth._claude_creds:
                 oauth._claude_creds.expires_at = 0  # force invalidate
@@ -391,8 +377,7 @@ class SyneAgent:
         or about to expire. If so, triggers a refresh immediately — before
         the first API call — so the user never sees an auth error.
 
-        Supports Codex (sync _refresh_token), Google (async credentials.get_token),
-        and Claude (async _claude_creds.get_token).
+        Supports Codex (sync _refresh_token) and Claude (async _claude_creds.get_token).
         """
         import time
         try:
@@ -561,7 +546,12 @@ class SyneAgent:
         # Backward compatibility: old provider.primary system
         # Migrate to new format if possible
         # ═══════════════════════════════════════════════════════════════
-        provider_config = await get_config("provider.primary", {"name": "google", "auth": "oauth"})
+        provider_config = await get_config("provider.primary", None)
+        if provider_config is None:
+            # Fresh DB (`syne db init` / `syne db reset`) or init never
+            # finished: there is no legacy config to migrate, and no provider
+            # works without credentials chosen in `syne init`.
+            raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
         provider_name = provider_config.get("name", "google") if isinstance(provider_config, dict) else "google"
         chat_model = await get_config("provider.chat_model", "gemini-2.5-pro")
         
@@ -641,25 +631,10 @@ class SyneAgent:
         embedding_model = await get_config("provider.embedding_model", "text-embedding-004")
 
         if provider_name == "google":
-            creds = await get_credentials()
-            if not creds:
-                raise RuntimeError("No Google OAuth credentials found. Run 'syne init' to authenticate.")
-            chat_provider = GoogleProvider(
-                credentials=creds,
-                chat_model=chat_model,
+            raise RuntimeError(
+                "This install is configured for Gemini OAuth, which Google has shut down. "
+                "Run 'syne init' and choose another provider (Gemini is available via API key)."
             )
-            
-            together_key = os.environ.get("TOGETHER_API_KEY")
-            if not together_key:
-                together_key = await get_config("credential.together_api_key", None)
-
-            if together_key:
-                embed_provider = TogetherProvider(
-                    api_key=together_key,
-                    embedding_model="BAAI/bge-base-en-v1.5",
-                )
-                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            return chat_provider
 
         elif provider_name == "codex":
             access_token = await get_config("credential.codex_access_token", "")
