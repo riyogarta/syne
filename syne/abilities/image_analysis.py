@@ -6,7 +6,6 @@ No hardcoded providers or models. Owner decides everything.
 Example configs:
   Ollama:      {"provider": "ollama", "model": "gemma3:4b"}
   Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen2.5-VL-72B-Instruct"}
-  Google:      {"provider": "google"}  (uses OAuth, model defaults to gemini-2.5-flash)
   OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-4o"}
 """
 
@@ -159,12 +158,12 @@ class ImageAnalysisAbility(Ability):
                 base_url="https://api.openai.com/v1",
             )
 
-        if provider == "google" or (not provider and not api_key):
-            # Google Gemini via OAuth — no API key needed
-            return await self._call_gemini(
-                image_base64, mime_type, prompt,
-                model=model or "gemini-2.5-flash",
-            )
+        if provider == "google":
+            # Google has closed all OAuth access paths for Gemini.
+            return {"success": False, "error": "Gemini OAuth is no longer available from Google. Choose another vision provider via /vision."}
+
+        if not provider:
+            return {"success": False, "error": "No vision provider configured. Choose one via /vision."}
 
         return {"success": False, "error": f"Unknown provider '{provider}' or missing api_key"}
 
@@ -354,47 +353,6 @@ class ImageAnalysisAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _call_gemini(self, b64: str, mime: str, prompt: str, model: str) -> dict:
-        """Call Google Gemini via OAuth."""
-        try:
-            from ..auth.google_oauth import get_credentials
-            creds = await get_credentials()
-            if not creds:
-                return {"success": False, "error": "No Google OAuth credentials"}
-            token = await creds.get_token()
-        except Exception as e:
-            return {"success": False, "error": f"Google auth: {str(e)}"}
-
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "contents": [{"role": "user", "parts": [
-                            {"text": prompt},
-                            {"inlineData": {"mimeType": mime, "data": b64}},
-                        ]}],
-                        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 4096},
-                    },
-                )
-
-                if resp.status_code != 200:
-                    return {"success": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
-
-                text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-                return {"success": True, "result": text}
-
-        except httpx.TimeoutException:
-            return {"success": False, "error": "Timeout"}
-        except (KeyError, IndexError):
-            return {"success": False, "error": "Unexpected response format"}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
     async def _load_config_from_db(self) -> dict:
         try:
             from ..db.connection import get_connection
@@ -440,17 +398,21 @@ class ImageAnalysisAbility(Ability):
     def get_guide(self, enabled: bool, config: dict) -> str:
         provider = config.get("provider", "")
         has_key = bool(config.get("api_key"))
-        ready = enabled and (provider == "google" or has_key)
+        # vertex reads its key from /models, ollama needs none; the others
+        # need an api_key in the ability config.
+        ready = enabled and (
+            provider in ("vertex", "ollama")
+            or (provider in ("together", "openai") and has_key)
+        )
         if ready:
-            label = provider or "google"
             return (
-                f"- Status: **ready** (provider: {label})\n"
+                f"- Status: **ready** (provider: {provider})\n"
                 "- Automatically analyzes images sent by users (ability-first)\n"
                 "- Also callable: `image_analysis(image_url='...', prompt='...')`"
             )
         return (
             "- Status: **not ready**\n"
-            "- Providers: vertex (auto-reads key from /models), ollama (local), google (OAuth), together, openai\n"
+            "- Providers: vertex (auto-reads key from /models), ollama (local), together, openai\n"
             "- Setup: `update_ability(action='config', name='image_analysis', "
             "config='{\"provider\": \"vertex\"}')`"
         )

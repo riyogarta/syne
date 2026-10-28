@@ -140,6 +140,23 @@ def reauth():
                 console.print(f"[red]Codex re-auth failed: {e}[/red]")
                 return
 
+        elif driver == "anthropic" and isinstance(primary, dict) and primary.get("auth") == "oauth":
+            console.print("[bold]Re-authenticating Claude OAuth...[/bold]")
+            from syne.auth.claude_oauth import login_claude
+            from syne.db.credentials import set_claude_oauth_credentials
+            try:
+                creds = await login_claude()
+                await set_claude_oauth_credentials(
+                    access_token=creds.access_token,
+                    refresh_token=creds.refresh_token,
+                    expires_at=creds.expires_at,
+                    email=creds.email,
+                )
+                console.print("[green]Claude OAuth tokens refreshed.[/green]")
+            except Exception as e:
+                console.print(f"[red]Claude re-auth failed: {e}[/red]")
+                return
+
         elif driver in ("google", "google_cca") and isinstance(primary, dict) and primary.get("auth", "oauth") == "oauth":
             # Google has closed all OAuth access paths for Gemini — there is
             # nothing to re-authenticate against.

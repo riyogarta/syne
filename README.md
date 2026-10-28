@@ -93,7 +93,7 @@ During `syne init`, the installer detects your server's CPU and RAM to recommend
 ### Verify Installation
 
 ```bash
-syne repair     # Diagnose: DB, OAuth, Telegram, abilities
+syne repair     # Diagnose: DB, chat provider, Telegram, abilities
 syne status     # Quick status check
 ```
 

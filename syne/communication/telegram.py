@@ -2922,7 +2922,6 @@ Or just send me a message!"""
             defaults = {
                 "vertex": {"provider": "vertex", "model": "gemini-2.5-flash"},
                 "ollama": {"provider": "ollama", "model": "gemma3:4b"},
-                "google": {"provider": "google", "model": "gemini-2.5-flash"},
                 "together": {"provider": "together"},
                 "openai": {"provider": "openai"},
             }
@@ -4369,9 +4368,9 @@ Or just send me a message!"""
             await self._models_menu_main(query)
 
         elif data == "models:add_menu":
-            # Show 3 top-level auth categories
+            # Top-level auth categories. No Google OAuth: Google has closed
+            # all OAuth access paths for Gemini (use the API key menu).
             keyboard = [
-                [InlineKeyboardButton("Google (OAuth)", callback_data="models:add:google_cca")],
                 [InlineKeyboardButton("OpenAI (OAuth)", callback_data="models:add:codex")],
                 [InlineKeyboardButton("Claude (OAuth)", callback_data="models:add:anthropic")],
                 [InlineKeyboardButton("🔑 AI API Key", callback_data="models:add_apikey")],
@@ -4415,7 +4414,7 @@ Or just send me a message!"""
                 "google_ai": {
                     "label": "Google AI Studio",
                     "driver": "google_cca",
-                    "credential_key": "credential.google_ai_api_key",
+                    "credential_key": "credential.google_cca_api_key",
                     "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
                 },
                 "vertex_ai": {
@@ -4490,6 +4489,7 @@ Or just send me a message!"""
                     "type": "models_add",
                     "driver": meta["driver"],
                     "credential_key": meta["credential_key"],
+                    "auth_override": "api_key",
                     "step": "apikey" if not existing_key else "model_id",
                 }
                 if meta.get("base_url"):
@@ -4534,9 +4534,14 @@ Or just send me a message!"""
                 await query.answer("Model not found", show_alert=True)
                 return
             driver = entry.get("driver", "")
+            if driver == "google_cca":
+                await query.answer(
+                    "Gemini OAuth is no longer available from Google. Add this model again via API Key → Google AI Studio.",
+                    show_alert=True,
+                )
+                return
             # Map driver to auth provider key
             _driver_to_auth = {
-                "google_cca": "google",
                 "codex": "codex",
                 "anthropic": "claude",
             }
@@ -4593,9 +4598,14 @@ Or just send me a message!"""
         elif data.startswith("models:add:"):
             # OAuth driver selected — ask for model ID
             driver = data.split(":", 2)[2]
+            if driver == "google_cca":
+                await query.answer(
+                    "Gemini OAuth is no longer available from Google. Use API Key → Google AI Studio or Vertex AI.",
+                    show_alert=True,
+                )
+                return
             logger.info(f"Add model (OAuth): driver={driver}, user={user.id}")
             _oauth_meta = {
-                "google_cca": ("Google (OAuth)", "gemini-2.5-pro, gemini-2.5-flash, gemini-3-pro-preview"),
                 "codex": ("OpenAI (OAuth)", "gpt-5.2, o3-pro"),
                 "anthropic": ("Claude (OAuth)", "claude-opus-4-8, claude-sonnet-4-7, claude-opus-4-6"),
             }
@@ -5318,7 +5328,6 @@ Or just send me a message!"""
     # Default auth providers — used when auth.providers not configured in DB.
     # After first init, these are seeded into DB and DB becomes source of truth.
     _DEFAULT_AUTH_PROVIDERS = [
-        {"key": "google", "label": "Google (Gemini)", "auth_type": "oauth", "oauth_driver": "google"},
         {"key": "codex", "label": "OpenAI / Codex", "auth_type": "oauth", "oauth_driver": "codex"},
         {"key": "claude", "label": "Claude / Anthropic", "auth_type": "oauth", "oauth_driver": "claude"},
         {"key": "groq", "label": "Groq", "auth_type": "api_key", "credential_key": "credential.groq_api_key"},
@@ -5336,7 +5345,12 @@ Or just send me a message!"""
             # Seed defaults into DB
             await set_config("auth.providers", self._DEFAULT_AUTH_PROVIDERS, "Auth provider registry")
             return self._DEFAULT_AUTH_PROVIDERS
-        return providers
+        # Older installs seeded a Google (Gemini) OAuth entry. Google has
+        # closed all OAuth access paths for Gemini, so hide it everywhere.
+        return [
+            p for p in providers
+            if not (p.get("auth_type") == "oauth" and p.get("oauth_driver", p.get("key")) == "google")
+        ]
 
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /cancel command — abort active operation, auth flow, or running sub-agents."""
@@ -7665,7 +7679,7 @@ Or just send me a message!"""
 
     # Default auth type per driver
     _DRIVER_AUTH_TYPES = {
-        "google_cca": "oauth",
+        "google_cca": "api_key",  # Gemini OAuth closed by Google
         "vertex": "api_key",
         "codex": "oauth",
         "anthropic": "api_key",
@@ -7848,7 +7862,6 @@ Or just send me a message!"""
             # Auto-start OAuth flow for OAuth models
             if auth_type == "oauth":
                 _driver_to_auth = {
-                    "google_cca": "google",
                     "codex": "codex",
                     "anthropic": "claude",
                 }
