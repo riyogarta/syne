@@ -27,8 +27,6 @@ class SyneSettings(BaseSettings):
     debug: bool = Field(default=False, description="Debug mode")
 
     # Auth — at least one provider needed
-    # Google OAuth
-    google_oauth_token: Optional[str] = Field(default=None, description="Google OAuth token path")
 
     # OpenAI
     openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
