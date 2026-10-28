@@ -5,7 +5,7 @@
 - Python 3.11+
 - Docker (for PostgreSQL + pgvector)
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
-- Google account (for free Gemini OAuth)
+- A chat LLM: a ChatGPT or Claude subscription (OAuth), or an API key (Gemini, Vertex AI, OpenAI, Anthropic, Together AI, Groq)
 
 ## Quick Install
 
@@ -61,13 +61,13 @@ SYNE_DATABASE_URL=postgresql://syne_<random>:<random>@localhost:5433/mnemosyne
 
 That's it — only database credentials. All other config (provider, Telegram token, API keys) is stored securely in PostgreSQL.
 
-### 3. Google OAuth
+### 3. Chat Provider
 
 ```bash
-syne init  # Follow the OAuth flow
+syne init  # Choose a provider: ChatGPT / Claude OAuth, or an API key
 ```
 
-Or if you already have OpenClaw installed, Syne auto-detects and reuses OpenClaw's Google credentials.
+Google Gemini is available via API key or Vertex AI only — Google has closed all OAuth access paths for Gemini.
 
 Credentials are stored in your local PostgreSQL, in the `config` table (keys prefixed `credential.` — same DB as memory and other config). Encrypt at the disk level (e.g. LUKS) if your threat model requires at-rest encryption; see SECURITY.md. Nothing is written to disk under `~/.syne/`; if a legacy `~/.syne/google_credentials.json` from an older install exists, Syne auto-migrates it into the DB on next start and tells you to delete the file.
 
@@ -124,7 +124,7 @@ syne repair --fix    # Diagnose + auto-fix
 
 `syne repair` checks:
 1. **Database** — Connection, pgvector, tables, seed data
-2. **Google OAuth** — Credentials, token validity
+2. **Chat Provider** — Active model, API key present
 3. **Telegram Bot** — Token validity, bot info
 4. **Abilities** — All loaded, config status (ready vs needs API key)
 5. **Process** — Running? Autostart enabled?

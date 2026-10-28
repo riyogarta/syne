@@ -108,13 +108,13 @@ def repair(fix):
                 console.print("   [yellow]⚠ Config table empty[/yellow]")
                 if fix:
                     from syne.db.models import set_config
+                    # No chat provider is seeded here: the provider and its
+                    # credentials can only be chosen interactively in `syne init`.
                     defaults = {
                         "memory.auto_capture": False,
                         "memory.auto_evaluate": True,
                         "memory.recall_limit": 10,
                         "memory.max_importance": 1.0,
-                        "provider.primary": {"name": "google", "auth": "oauth"},
-                        "provider.chat_model": "gemini-2.5-pro",
                         "provider.embedding_model": "text-embedding-004",
                         "provider.embedding_dimensions": 768,
                         "subagents.enabled": True,
@@ -127,6 +127,7 @@ def repair(fix):
                         await set_config(k, v)
                     fixed.append("Seeded config defaults")
                     console.print("   [green]  → Fixed: config seeded[/green]")
+                    console.print("   [dim]  → Run 'syne init' to choose a chat provider[/dim]")
             else:
                 console.print(f"   [green]✓ Config: {config_count} entries[/green]")
 
@@ -139,23 +140,46 @@ def repair(fix):
             console.print(f"   [red]✗ Connection failed: {e}[/red]")
             console.print(f"   [dim]URL: {settings.database_url[:30]}...[/dim]")
 
-        # -- 2. Google OAuth --
-        console.print("\n[bold]2. Google OAuth[/bold]")
+        # -- 2. Chat Provider --
+        # Checks the active model entry (per-model config in provider.models).
+        # Gemini OAuth is flagged explicitly: Google has closed all OAuth
+        # access paths for Gemini, so such an entry can no longer work.
+        console.print("\n[bold]2. Chat Provider[/bold]")
         try:
-            from syne.auth.google_oauth import get_credentials
-            creds = await get_credentials(auto_refresh=False)
-            if creds:
-                token = await creds.get_token()
-                console.print(f"   [green]✓ Authenticated as {creds.email}[/green]")
-                console.print(f"   [dim]Token valid (first 8): {token[:8]}...[/dim]")
+            from syne.db.connection import init_db, close_db
+            from syne.db.models import get_config
+            from syne.llm.drivers import get_model_from_list, _load_api_key
+            await init_db(settings.database_url)
+
+            models = await get_config("provider.models", None) or []
+            active_key = await get_config("provider.active_model", None)
+            entry = get_model_from_list(models, active_key) if active_key else None
+
+            if not entry:
+                issues.append("No active chat model configured")
+                console.print("   [yellow]⚠ No active chat model configured[/yellow]")
+                console.print("   [dim]Run 'syne init' to choose a provider[/dim]")
             else:
-                issues.append("No Google OAuth credentials found")
-                console.print("   [yellow]⚠ No credentials found[/yellow]")
-                console.print("   [dim]Run 'syne init' to authenticate[/dim]")
+                driver = entry.get("driver", "?")
+                auth = entry.get("auth", "?")
+                label = entry.get("label") or entry.get("model_id", "?")
+                console.print(f"   [dim]Active model: {label} (driver={driver}, auth={auth})[/dim]")
+                if driver == "google_cca" and auth == "oauth":
+                    issues.append("Active model uses Gemini OAuth, which Google has shut down")
+                    console.print("   [red]✗ Gemini OAuth is no longer available from Google[/red]")
+                    console.print("   [dim]Switch to a Gemini API key or Vertex AI model via /models in Telegram[/dim]")
+                elif auth == "api_key" and entry.get("credential_key"):
+                    if await _load_api_key(entry["credential_key"]):
+                        console.print(f"   [green]✓ API key present ({entry['credential_key']})[/green]")
+                    else:
+                        issues.append(f"API key missing for active model ({entry['credential_key']})")
+                        console.print(f"   [red]✗ API key missing ({entry['credential_key']})[/red]")
+                else:
+                    console.print("   [green]✓ Configured[/green]")
+
+            await close_db()
         except Exception as e:
-            issues.append(f"OAuth token refresh failed: {e}")
-            console.print(f"   [red]✗ Token refresh failed: {e}[/red]")
-            console.print("   [dim]Run 'syne init' to re-authenticate[/dim]")
+            console.print(f"   [red]✗ Error checking chat provider: {e}[/red]")
 
         # -- 3. Telegram Bot --
         console.print("\n[bold]3. Telegram Bot[/bold]")

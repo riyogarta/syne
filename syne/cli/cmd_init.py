@@ -66,40 +66,28 @@ def init():
     # 1. Provider selection
     console.print("[bold]Step 1: Choose your chat AI provider[/bold]")
     console.print()
-    console.print("  [bold cyan]OAuth (free, rate limited):[/bold cyan]")
-    console.print("  1. Google Gemini [green](recommended — free via OAuth)[/green]")
-    console.print("  2. ChatGPT / GPT [green](free via Codex OAuth)[/green]")
-    console.print("  3. Claude [green](free via claude.ai OAuth)[/green]")
-    console.print("  [dim]     Google/GPT OAuth need SSH port forwarding on headless servers.[/dim]")
-    console.print("  [dim]       Claude works everywhere — no forwarding needed![/dim]")
+    # Google Gemini OAuth is not offered: Google has closed all OAuth access
+    # paths for Gemini. Use the Gemini API key or Vertex AI options instead.
+    console.print("  [bold cyan]OAuth (uses your existing subscription):[/bold cyan]")
+    console.print("  1. ChatGPT / GPT")
+    console.print("  2. Claude")
     console.print()
     console.print("  [bold yellow]API Key (paid per token):[/bold yellow]")
-    console.print("  4. Google Gemini [yellow](API key, free tier available)[/yellow]")
-    console.print("  5. Google Vertex AI [yellow](API key, GCP)[/yellow]")
-    console.print("  6. OpenAI [yellow](API key, paid)[/yellow]")
-    console.print("  7. Anthropic Claude [yellow](API key, paid)[/yellow]")
-    console.print("  8. Together AI [yellow](API key, paid)[/yellow]")
-    console.print("  9. Groq [yellow](API key, free tier available)[/yellow]")
+    console.print("  3. Google Gemini")
+    console.print("  4. Google Vertex AI")
+    console.print("  5. OpenAI")
+    console.print("  6. Anthropic Claude")
+    console.print("  7. Together AI")
+    console.print("  8. Groq")
     console.print()
 
-    choice = click.prompt("Select provider", type=click.IntRange(1, 9), default=1)
+    choice = click.prompt("Select provider", type=click.IntRange(1, 8))
 
     env_lines = []
     provider_config = None  # Will be saved to DB after schema init
-    google_creds = None  # Only set for Google OAuth provider
     codex_creds = None  # Only set for Codex OAuth provider
 
     if choice == 1:
-        console.print("\n[bold green]✓ Google Gemini selected (OAuth)[/bold green]")
-        console.print("  [dim]Sign in with your Google account to get free Gemini access.[/dim]")
-
-        from syne.auth.google_oauth import login_google
-        google_creds = asyncio.run(login_google())
-        # Credentials saved to DB after schema init (Step 6)
-
-        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "oauth"}
-
-    elif choice == 2:
         console.print("\n[bold green]✓ ChatGPT selected (Codex OAuth)[/bold green]")
         console.print("  [dim]Requires ChatGPT Plus/Pro/Team subscription.[/dim]")
 
@@ -109,14 +97,14 @@ def init():
 
         provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
 
-    elif choice == 3:
+    elif choice == 2:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
         console.print("  [dim]Requires claude.ai Pro/Max subscription.[/dim]")
         console.print()
         console.print("  [bold yellow]⚠️  WARNING: Using Claude OAuth in third-party applications[/bold yellow]")
         console.print("  [yellow]may violate Anthropic's Terms of Service. Your account could[/yellow]")
         console.print("  [yellow]be suspended or terminated. Proceed at your own risk.[/yellow]")
-        console.print("  [dim]Alternative: use option 7 (Anthropic API key) for ToS-compliant access.[/dim]")
+        console.print("  [dim]Alternative: use option 6 (Anthropic API key) for ToS-compliant access.[/dim]")
         console.print()
         confirm = input("  Continue with Claude OAuth? (y/N): ").strip().lower()
         if confirm != "y":
@@ -133,34 +121,34 @@ def init():
             "_claude_creds": claude_creds.to_dict(),
         }
 
-    elif choice == 4:
+    elif choice == 3:
         console.print("\n[bold green]✓ Google Gemini selected (API key)[/bold green]")
-        console.print("  [dim]Get your key at aistudio.google.com/apikey — free tier available.[/dim]")
+        console.print("  [dim]Get your key at aistudio.google.com/apikey.[/dim]")
         api_key = click.prompt("Google AI API key")
         provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.google_cca_api_key"}
 
-    elif choice == 5:
+    elif choice == 4:
         console.print("\n[bold green]✓ Google Vertex AI selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.cloud.google.com (APIs & Services > Credentials).[/dim]")
         api_key = click.prompt("Google Cloud API key")
         provider_config = {"driver": "vertex", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key"}
 
-    elif choice == 6:
+    elif choice == 5:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key")
         provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.openai.com/v1"}
 
-    elif choice == 7:
+    elif choice == 6:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key")
         provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
 
-    elif choice == 8:
+    elif choice == 7:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key")
         provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.together.xyz/v1"}
 
-    elif choice == 9:
+    elif choice == 8:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.groq.com[/dim]")
         api_key = click.prompt("Groq API key")
@@ -604,10 +592,6 @@ def init():
             if web_search_driver:
                 await set_config("web_search.driver", web_search_driver)
             console.print("[green]✓ Web search API key saved to database[/green]")
-        # Save Google OAuth credentials to DB if collected
-        if google_creds:
-            await google_creds.save_to_db()
-            console.print(f"[green]✓ Google OAuth credentials saved to database ({google_creds.email})[/green]")
         # Save Codex OAuth credentials to DB if collected
         if codex_creds:
             await set_config("credential.codex_access_token", codex_creds["access_token"])

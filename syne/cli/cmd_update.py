@@ -115,7 +115,7 @@ def reauth():
             console.print("[red]No provider configured. Run `syne init` first.[/red]")
             return
 
-        driver = primary.get("driver", "") if isinstance(primary, dict) else ""
+        driver = (primary.get("driver") or primary.get("name", "")) if isinstance(primary, dict) else ""
 
         if driver == "codex":
             console.print("[bold]Re-authenticating Codex (GPT) OAuth...[/bold]")
@@ -130,21 +130,12 @@ def reauth():
                 console.print(f"[red]Codex re-auth failed: {e}[/red]")
                 return
 
-        elif driver in ("google", "google_cca"):
-            console.print("[bold]Re-authenticating Google Gemini OAuth...[/bold]")
-            from syne.auth.google_oauth import login_google
-            try:
-                creds = await login_google()
-                await set_config("credential.google_oauth_access_token", creds.access_token)
-                await set_config("credential.google_oauth_refresh_token", creds.refresh_token)
-                await set_config("credential.google_oauth_expires_at", creds.expires_at)
-                await set_config("credential.google_oauth_project_id", creds.project_id)
-                if creds.email:
-                    await set_config("credential.google_oauth_email", creds.email)
-                console.print("[green]Google OAuth tokens refreshed.[/green]")
-            except Exception as e:
-                console.print(f"[red]Google re-auth failed: {e}[/red]")
-                return
+        elif driver in ("google", "google_cca") and primary.get("auth", "oauth") == "oauth":
+            # Google has closed all OAuth access paths for Gemini — there is
+            # nothing to re-authenticate against.
+            console.print("[yellow]Gemini OAuth is no longer available from Google.[/yellow]")
+            console.print("[dim]Switch to a Gemini API key or Vertex AI model via /models in Telegram.[/dim]")
+            return
 
         else:
             console.print(f"[yellow]Provider '{driver}' doesn't use OAuth. No re-auth needed.[/yellow]")
