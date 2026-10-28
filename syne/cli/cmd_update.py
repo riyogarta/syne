@@ -109,13 +109,23 @@ def reauth():
 
         await init_db(dsn)
 
-        # Determine current provider
-        primary = await get_config("provider.primary", None)
-        if not primary:
-            console.print("[red]No provider configured. Run `syne init` first.[/red]")
-            return
-
-        driver = (primary.get("driver") or primary.get("name", "")) if isinstance(primary, dict) else ""
+        # Determine current provider from the ACTIVE model entry (the same
+        # source the agent uses). provider.primary is only a legacy fallback:
+        # it is written once by `syne init` and never updated by /models, so
+        # it can point at a provider that is no longer in use.
+        from syne.llm.drivers import get_model_from_list
+        models = await get_config("provider.models", None) or []
+        active_key = await get_config("provider.active_model", None)
+        entry = get_model_from_list(models, active_key) if active_key else None
+        if entry:
+            primary = entry
+            driver = entry.get("driver", "")
+        else:
+            primary = await get_config("provider.primary", None)
+            if not primary:
+                console.print("[red]No provider configured. Run `syne init` first.[/red]")
+                return
+            driver = (primary.get("driver") or primary.get("name", "")) if isinstance(primary, dict) else ""
 
         if driver == "codex":
             console.print("[bold]Re-authenticating Codex (GPT) OAuth...[/bold]")
@@ -130,7 +140,7 @@ def reauth():
                 console.print(f"[red]Codex re-auth failed: {e}[/red]")
                 return
 
-        elif driver in ("google", "google_cca") and primary.get("auth", "oauth") == "oauth":
+        elif driver in ("google", "google_cca") and isinstance(primary, dict) and primary.get("auth", "oauth") == "oauth":
             # Google has closed all OAuth access paths for Gemini — there is
             # nothing to re-authenticate against.
             console.print("[yellow]Gemini OAuth is no longer available from Google.[/yellow]")

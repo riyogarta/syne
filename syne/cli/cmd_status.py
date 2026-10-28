@@ -87,8 +87,14 @@ def status():
                 table.add_row("Active Sessions", str(sessions["c"]))
                 table.add_row("Total Messages", str(msgs["c"]))
 
-                # Provider
-                provider_cfg = await get_config("provider.primary")
+                # Provider — read the ACTIVE model entry first (what the agent
+                # actually uses); provider.primary is a legacy fallback that
+                # /models never updates.
+                from syne.llm.drivers import get_model_from_list
+                _models = await get_config("provider.models", None) or []
+                _active_key = await get_config("provider.active_model", None)
+                _entry = get_model_from_list(_models, _active_key) if _active_key else None
+                provider_cfg = _entry if _entry else await get_config("provider.primary")
                 if isinstance(provider_cfg, dict):
                     table.add_row("Provider", f"{provider_cfg.get('driver', '?')} ({provider_cfg.get('auth', '?')})")
                 elif provider_cfg:

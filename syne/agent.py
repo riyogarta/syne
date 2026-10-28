@@ -626,6 +626,12 @@ class SyneAgent:
         await set_config("provider.models", default_models)
         await set_config("provider.active_model", active_key)
         logger.info(f"Migrated to driver-based model system: {active_key}")
+        _active = next((m for m in default_models if m["key"] == active_key), None)
+        if _active and _active.get("driver") == "google_cca" and _active.get("auth") == "oauth":
+            logger.warning(
+                "Legacy config migrated to Gemini OAuth, which Google has shut down. "
+                "Switch to a Gemini API key, Vertex AI, or another provider via /models."
+            )
 
     async def _init_provider_legacy(self, provider_name: str, chat_model: str) -> LLMProvider:
         """Legacy provider initialization for backward compatibility."""

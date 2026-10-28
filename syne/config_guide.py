@@ -377,13 +377,13 @@ and reasoning_visible.
 ### Legacy Provider Keys
 | Key | Default | Type |
 |-----|---------|------|
-| `provider.primary` | `{"name": "google", "auth": "oauth"}` | JSON object |
+| `provider.primary` | *(written by `syne init`)* | JSON object |
 | `provider.chat_model` | `"gemini-2.5-pro"` | string |
 | `provider.embedding_model` | `"text-embedding-004"` | string |
 | `provider.embedding_dimensions` | `768` | integer |
 
 Legacy keys from before the model registry system. Still read as fallback by some components.
-- `provider.primary` — primary LLM provider name and auth method.
+- `provider.primary` — provider chosen at `syne init`. Written once and NOT updated by `/model`, so it can differ from the active model. The active model is `provider.active_model` → entry in `provider.models`. Gemini OAuth is no longer available (Google closed all OAuth access).
 - `provider.chat_model` / `provider.embedding_model` — model identifiers (superseded by registries).
 - `provider.embedding_dimensions` — vector dimensions for embeddings.
 - **Do not change directly** — use `/model` and `/embedding` commands instead.
