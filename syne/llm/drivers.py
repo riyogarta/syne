@@ -23,7 +23,7 @@ from .ollama import OllamaProvider
 
 logger = logging.getLogger("syne.llm.drivers")
 
-# Cache for auto-detected Vertex AI region (keyed by API key)
+# Cache for auto-detected Vertex AI region (keyed by API key + model ID)
 _vertex_region_cache: dict[str, str] = {}
 
 # Driver name → Provider class mapping
@@ -116,10 +116,11 @@ async def create_provider(model_entry: dict) -> LLMProvider:
                 f"No API key found for {model_entry.get('label', model_id)}. "
                 f"Set {credential_key} in config."
             )
-        region = model_entry.get("region", "") or _vertex_region_cache.get(api_key, "")
+        _cache_key = f"{api_key}|{model_id}"
+        region = model_entry.get("region", "") or _vertex_region_cache.get(_cache_key, "")
         if not region:
-            region = await detect_vertex_region(api_key, model_id)
-            _vertex_region_cache[api_key] = region
+            region = await detect_vertex_region(api_key, model_id, model_entry.get("project_id", ""))
+            _vertex_region_cache[_cache_key] = region
         return VertexProvider(
             api_key=api_key,
             region=region,

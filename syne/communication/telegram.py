@@ -7778,11 +7778,48 @@ Or just send me a message!"""
             state["label"] = label
             state["step"] = "context_window"
             driver = state.get("driver", "")
+
+            # Vertex without a known project ID: ask for it, otherwise the
+            # global endpoint (where current Gemini models live) is unreachable.
+            if driver == "vertex" and not any(
+                m.get("driver") == "vertex" and m.get("region") == "global" and m.get("project_id")
+                for m in (await get_config("provider.models", []) or [])
+            ):
+                state["step"] = "vertex_project"
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Label: <b>{label}</b>\n\n"
+                         f"Send your <b>Google Cloud project ID</b> (e.g. <code>my-project-123456</code>).\n"
+                         f"Current Gemini models are served from the global endpoint, which needs it.\n"
+                         f"Or send <code>.</code> to skip (regional endpoints only).",
+                    parse_mode="HTML",
+                )
+                return True
+
             default_ctx = self._DEFAULT_CONTEXT_WINDOWS.get(driver, 128000)
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"Label: <b>{label}</b>\n\n"
                      f"Send <b>context window</b> in tokens (number only).\n"
+                     f"Or send <code>.</code> for default ({default_ctx:,}).",
+                parse_mode="HTML",
+            )
+            return True
+
+        elif step == "vertex_project":
+            if text != "." and (not text or " " in text or "\n" in text):
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="\u274c Invalid project ID (no spaces). Resend it, <code>.</code> to skip, or /cancel.",
+                    parse_mode="HTML",
+                )
+                return True
+            state["project_id"] = "" if text == "." else text
+            state["step"] = "context_window"
+            default_ctx = self._DEFAULT_CONTEXT_WINDOWS.get("vertex", 128000)
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"Send <b>context window</b> in tokens (number only).\n"
                      f"Or send <code>.</code> for default ({default_ctx:,}).",
                 parse_mode="HTML",
             )
@@ -7832,21 +7869,34 @@ Or just send me a message!"""
                 cred_key = state.get("credential_key", "credential.vertex_ai_api_key")
                 from syne.db.models import get_config as _gc2
                 vertex_key = await _gc2(cred_key, None)
+                _proj = state.get("project_id", "")
+                _default_region = "global" if _proj else "us-central1"
+                region = ""
                 if vertex_key:
                     try:
                         from syne.llm.vertex import detect_vertex_region
-                        region = await detect_vertex_region(vertex_key, state["model_id"])
-                        entry["region"] = region
+                        region = await detect_vertex_region(vertex_key, state["model_id"], _proj, fallback="")
+                    except Exception as e:
+                        logger.warning(f"Vertex region detection failed: {e}")
+                    if region:
                         await bot.send_message(
                             chat_id=chat_id,
                             text=f"Auto-detected Vertex AI region: <b>{region}</b>",
                             parse_mode="HTML",
                         )
-                    except Exception as e:
-                        entry["region"] = "us-central1"
-                        logger.warning(f"Vertex region detection failed: {e}, using us-central1")
-                else:
-                    entry["region"] = "us-central1"
+                    else:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=(
+                                f"⚠️ No Vertex endpoint answered for <code>{state['model_id']}</code>. "
+                                f"Using <b>{_default_region}</b> — check the model ID"
+                                f"{', project ID' if _proj else ' (global-only models need a project ID)'} and API key."
+                            ),
+                            parse_mode="HTML",
+                        )
+                entry["region"] = region or _default_region
+                if _proj:
+                    entry["project_id"] = _proj
 
             # Append to provider.models in DB
             models = await get_config("provider.models", [])

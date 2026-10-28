@@ -50,6 +50,7 @@ class ImageGenAbility(Ability):
                 prompt, model=model or "gemini-3.1-flash-image",
                 api_key=api_key, region=config.get("region", ""),
                 project_id=config.get("project_id", ""),
+                prefer_global=not model,
             )
         elif provider == "together":
             api_key = api_key or os.environ.get("TOGETHER_API_KEY", "")
@@ -84,7 +85,7 @@ class ImageGenAbility(Ability):
             "media": filepath,
         }
 
-    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "", project_id: str = "") -> bytes | dict:
+    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "", project_id: str = "", prefer_global: bool = False) -> bytes | dict:
         """Generate image via Vertex AI.
 
         Two different APIs live behind the same provider:
@@ -94,7 +95,7 @@ class ImageGenAbility(Ability):
         """
         if not api_key or not region:
             try:
-                _key, _region, _project = await self._load_vertex_credentials()
+                _key, _region, _project = await self._load_vertex_credentials(model, prefer_global)
                 api_key = api_key or _key
                 if not region:
                     region, project_id = _region, project_id or _project
@@ -274,7 +275,7 @@ class ImageGenAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _load_vertex_credentials(self) -> tuple[str, str, str]:
+    async def _load_vertex_credentials(self, model: str = "", prefer_global: bool = False) -> tuple[str, str, str]:
         """Auto-load Vertex API key, region and project ID from model registry."""
         from ..db.connection import get_connection
         import json as _json
@@ -285,7 +286,11 @@ class ImageGenAbility(Ability):
                 raise ValueError("No model registry found")
 
             models = _json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
-            for m in models:
+            # Exact model match first, then a global entry when the caller is
+            # on the default model, then the first Vertex entry (legacy).
+            from ..llm.vertex import pick_vertex_entry
+            _picked = pick_vertex_entry([e for e in models if e.get("driver") == "vertex"], model, prefer_global)
+            for m in ([_picked] if _picked else []):
                 if m.get("driver") == "vertex":
                     credential_key = m.get("credential_key", "")
                     region = m.get("region", "")

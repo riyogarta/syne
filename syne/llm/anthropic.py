@@ -51,7 +51,9 @@ _ADAPTIVE_MODEL_TAGS = (
 # claude-opus-4-9-20260401, claude-sonnet-5-20260701, etc. Keeps us from
 # needing a release for every new snapshot Anthropic pushes.
 _ADAPTIVE_VERSION_RE = re.compile(
-    r"-(opus|sonnet|haiku|fable)-(\d+)(?:[-\.](\d+))?", re.IGNORECASE
+    # Minor is 1-2 digits only: in claude-sonnet-4-20250514 the trailing
+    # 8 digits are a snapshot date, not a minor version.
+    r"-(opus|sonnet|haiku|fable)-(\d+)(?:[-\.](\d{1,2})(?!\d))?", re.IGNORECASE
 )
 
 

@@ -84,15 +84,24 @@ def _vertex_endpoint(region: str, model: str, project_id: str = "") -> str:
     return f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}"
 
 
-async def detect_vertex_region(api_key: str, model: str = "gemini-3.8-flash") -> str:
+async def detect_vertex_region(
+    api_key: str,
+    model: str = "gemini-3.8-flash",
+    project_id: str = "",
+    fallback: str = "us-central1",
+) -> str:
     """Auto-detect the best Vertex AI region by racing all regions.
 
     Sends a lightweight request to each region concurrently and returns
     the first region that responds with HTTP 200 (actual success).
-    Falls back to us-central1 if none succeed.
+    When project_id is given the global endpoint is raced too — current
+    Gemini models are served there only, and it is addressed by project.
+    Returns `fallback` if nothing succeeds (pass fallback="" to detect it).
     """
+    regions = (["global"] if project_id else []) + _VERTEX_REGIONS
+
     async def _test_region(region: str) -> str:
-        url = f"{_vertex_endpoint(region, model)}:generateContent"
+        url = f"{_vertex_endpoint(region, model, project_id)}:generateContent"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -107,7 +116,7 @@ async def detect_vertex_region(api_key: str, model: str = "gemini-3.8-flash") ->
         return ""
 
     # Race all regions — first 200 wins
-    tasks = {asyncio.create_task(_test_region(r)): r for r in _VERTEX_REGIONS}
+    tasks = {asyncio.create_task(_test_region(r)): r for r in regions}
     try:
         while tasks:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=15)
@@ -126,8 +135,28 @@ async def detect_vertex_region(api_key: str, model: str = "gemini-3.8-flash") ->
     except Exception as e:
         logger.warning(f"Vertex AI region detection error: {e}")
 
-    logger.warning("Vertex AI region auto-detection failed, using us-central1")
-    return "us-central1"
+    logger.warning(f"Vertex AI region auto-detection failed for {model}, using {fallback or '(none)'}")
+    return fallback
+
+
+def pick_vertex_entry(entries: list[dict], model: str = "", prefer_global: bool = False) -> Optional[dict]:
+    """Pick the registry entry that supplies Vertex key/region/project.
+
+    1. the entry serving exactly `model`
+    2. if prefer_global: the first global entry that has a project ID
+    3. the first entry (legacy behaviour)
+    """
+    if not entries:
+        return None
+    if model:
+        for e in entries:
+            if e.get("model_id") == model:
+                return e
+    if prefer_global:
+        for e in entries:
+            if e.get("region") == "global" and e.get("project_id"):
+                return e
+    return entries[0]
 
 
 class VertexProvider(LLMProvider):
