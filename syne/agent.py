@@ -605,7 +605,7 @@ class SyneAgent:
                 "This install is configured for Gemini OAuth, which Google has shut down. "
                 "Run 'syne init' and choose another provider (Gemini is available via API key)."
             )
-        chat_model = await get_config("provider.chat_model", "gemini-2.5-pro")
+        chat_model = await get_config("provider.chat_model", "")
         
         # Try to migrate to new format
         await self._migrate_to_driver_system(provider_name, chat_model)
@@ -632,8 +632,11 @@ class SyneAgent:
         
         # Build model registry based on detected provider
         # (No Gemini OAuth entries — Google has shut that access down.)
+        # Current models only (2026-10): gpt-5.x is deprecated for ChatGPT
+        # sign-in, Claude Sonnet/Opus 4 (2025-05-14) are retired.
         default_models = [
-            {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
+            {"key": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "driver": "codex", "model_id": "gpt-6.1-sol", "auth": "oauth", "context_window": 1050000},
+            {"key": "gpt-6-luna", "label": "GPT-6 Luna", "driver": "codex", "model_id": "gpt-6-luna", "auth": "oauth", "context_window": 1050000},
         ]
 
         # Check if provider.primary has driver info (new init format)
@@ -641,15 +644,10 @@ class SyneAgent:
         if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
             auth = provider_config.get("auth", "oauth")
             default_models.extend([
-                {"key": "claude-sonnet", "label": "Claude Sonnet 4", "driver": "anthropic", "model_id": "claude-sonnet-4-20250514", "auth": auth, "context_window": 200000},
-                {"key": "claude-opus", "label": "Claude Opus 4", "driver": "anthropic", "model_id": "claude-opus-4-20250514", "auth": auth, "context_window": 200000},
+                {"key": "claude-opus", "label": "Claude Opus 5.5", "driver": "anthropic", "model_id": "claude-opus-5-5", "auth": auth, "context_window": 1000000},
+                {"key": "claude-sonnet", "label": "Claude Sonnet 5.5", "driver": "anthropic", "model_id": "claude-sonnet-5-5", "auth": auth, "context_window": 1000000},
             ])
 
-        # Map old provider to new model key
-        model_key_map = {
-            ("codex", "gpt-5.2"): "gpt-5.2",
-            ("codex", "gpt-4.1"): "gpt-5.2",  # Map old models
-        }
 
         # Handle anthropic provider mapping
         if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
@@ -659,7 +657,7 @@ class SyneAgent:
             else:
                 active_key = "claude-sonnet"
         else:
-            active_key = model_key_map.get((provider_name, chat_model), "gpt-5.2")
+            active_key = "gpt-6.1-sol"  # every legacy codex model maps to the current default
         
         # Save new format
         await set_config("provider.models", default_models)

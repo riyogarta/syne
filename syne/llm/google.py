@@ -52,7 +52,7 @@ class GoogleProvider(LLMProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        chat_model: str = "gemini-2.5-pro",
+        chat_model: str = "gemini-3.8-flash",
         embedding_model: str = "text-embedding-004",
         base_url: Optional[str] = None,
     ):

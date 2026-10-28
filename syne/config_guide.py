@@ -348,7 +348,7 @@ Grace period for scheduled tasks that run late (e.g., bot was offline).
 ### Active Models
 | Key | Default | Type |
 |-----|---------|------|
-| `provider.active_model` | `"gemini-pro"` | string |
+| `provider.active_model` | *(set during init)* | string |
 | `provider.active_embedding` | `"together-bge"` | string |
 
 Active chat and embedding models. These reference keys in `provider.models` and
@@ -379,7 +379,7 @@ and reasoning_visible.
 | Key | Default | Type |
 |-----|---------|------|
 | `provider.primary` | *(written by `syne init`)* | JSON object |
-| `provider.chat_model` | `"gemini-2.5-pro"` | string |
+| `provider.chat_model` | *(mirrors the active model_id)* | string |
 | `provider.embedding_model` | `"text-embedding-004"` | string |
 | `provider.embedding_dimensions` | `768` | integer |
 

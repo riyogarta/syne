@@ -84,7 +84,7 @@ def _vertex_endpoint(region: str, model: str, project_id: str = "") -> str:
     return f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}"
 
 
-async def detect_vertex_region(api_key: str, model: str = "gemini-2.5-flash") -> str:
+async def detect_vertex_region(api_key: str, model: str = "gemini-3.8-flash") -> str:
     """Auto-detect the best Vertex AI region by racing all regions.
 
     Sends a lightweight request to each region concurrently and returns
@@ -141,7 +141,7 @@ class VertexProvider(LLMProvider):
         self,
         api_key: str,
         region: str = "us-central1",
-        chat_model: str = "gemini-2.5-pro",
+        chat_model: str = "gemini-3.8-flash",
         embedding_model: str = "text-embedding-004",
         project_id: str = "",
     ):

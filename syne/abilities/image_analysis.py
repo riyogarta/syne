@@ -5,8 +5,8 @@ No hardcoded providers or models. Owner decides everything.
 
 Example configs:
   Ollama:      {"provider": "ollama", "model": "gemma3:4b"}
-  Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen2.5-VL-72B-Instruct"}
-  OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-4o"}
+  Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen3.5-9B"}
+  OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-6-luna"}
 """
 
 import base64
@@ -129,9 +129,10 @@ class ImageAnalysisAbility(Ability):
         if provider == "vertex":
             return await self._call_vertex(
                 image_base64, mime_type, prompt,
-                model=model or "gemini-2.5-flash",
+                model=model or "gemini-3.8-flash",
                 api_key=api_key,
                 region=config.get("region", ""),
+                project_id=config.get("project_id", ""),
             )
 
         if provider == "ollama":
@@ -146,7 +147,7 @@ class ImageAnalysisAbility(Ability):
             return await self._call_openai_compatible(
                 image_base64, mime_type, prompt,
                 api_key=api_key,
-                model=model or "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+                model=model or "Qwen/Qwen3.5-9B",
                 base_url="https://api.together.xyz/v1",
             )
 
@@ -154,7 +155,7 @@ class ImageAnalysisAbility(Ability):
             return await self._call_openai_compatible(
                 image_base64, mime_type, prompt,
                 api_key=api_key,
-                model=model or "gpt-4o",
+                model=model or "gpt-6-luna",
                 base_url="https://api.openai.com/v1",
             )
 
@@ -195,18 +196,20 @@ class ImageAnalysisAbility(Ability):
 
     async def _call_vertex(
         self, b64: str, mime: str, prompt: str,
-        model: str, api_key: str = "", region: str = "",
+        model: str, api_key: str = "", region: str = "", project_id: str = "",
     ) -> dict:
         """Call Vertex AI Gemini vision API.
 
-        Auto-reads API key and region from model registry if not provided.
+        Auto-reads API key, region and project ID from the model registry if
+        not provided (the global endpoint needs the project ID).
         """
         # Auto-load API key + region from existing Vertex model config
         if not api_key or not region:
             try:
-                _key, _region = await self._load_vertex_credentials()
+                _key, _region, _project = await self._load_vertex_credentials()
                 api_key = api_key or _key
-                region = region or _region
+                if not region:
+                    region, project_id = _region, project_id or _project
             except Exception as e:
                 return {"success": False, "error": f"Vertex credentials: {e}"}
 
@@ -215,7 +218,11 @@ class ImageAnalysisAbility(Ability):
         if not region:
             return {"success": False, "error": "No Vertex region. Set in ability config or add a Vertex model in /models."}
 
-        url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+        from ..llm.vertex import _vertex_endpoint
+        try:
+            url = f"{_vertex_endpoint(region, model, project_id)}:generateContent"
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -245,8 +252,8 @@ class ImageAnalysisAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _load_vertex_credentials(self) -> tuple[str, str]:
-        """Auto-load Vertex API key and region from model registry."""
+    async def _load_vertex_credentials(self) -> tuple[str, str, str]:
+        """Auto-load Vertex API key, region and project ID from model registry."""
         from ..db.connection import get_connection
         import json as _json
 
@@ -271,7 +278,7 @@ class ImageAnalysisAbility(Ability):
                             val = key_row["value"]
                             api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
 
-                    return api_key, region
+                    return api_key, region, m.get("project_id", "")
 
         raise ValueError("No Vertex model found in registry")
 

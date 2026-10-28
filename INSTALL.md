@@ -222,7 +222,7 @@ syne/
 │   ├── base.py          # Ability base class
 │   ├── registry.py      # Ability management
 │   ├── loader.py        # Auto-discovery & DB sync
-│   ├── image_gen.py     # Together AI FLUX.1
+│   ├── image_gen.py     # Image generation (Vertex / Together / OpenAI)
 │   ├── image_analysis.py # Gemini vision
 │   └── maps.py          # Google Maps
 └── channels/

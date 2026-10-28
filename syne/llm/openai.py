@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import logging
 import time
 import httpx
@@ -38,6 +39,16 @@ def _merge_consecutive(messages: list[dict]) -> list[dict]:
     return result
 
 
+
+def _gpt_major(model: str) -> int:
+    """Major version of a gpt-N[.M]-... model id (0 if not a GPT id).
+
+    GPT-5 and later are reasoning models: temperature is not accepted,
+    reasoning_effort is.
+    """
+    m = re.search(r"gpt-(\d+)", model or "")
+    return int(m.group(1)) if m else 0
+
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible API provider.
 
@@ -50,7 +61,7 @@ class OpenAIProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        chat_model: str = "gpt-4o",
+        chat_model: str = "gpt-6-luna",
         embedding_model: str = "text-embedding-3-small",
         base_url: str = "https://api.openai.com/v1",
         provider_name: str = "openai",
@@ -73,6 +84,8 @@ class OpenAIProvider(LLMProvider):
     @property
     def context_window(self) -> int:
         m = self.chat_model.lower()
+        if _gpt_major(m) >= 6:
+            return 1_050_000
         if "gpt-5" in m:
             return 400_000
         return 128_000  # GPT-4o default
@@ -80,8 +93,8 @@ class OpenAIProvider(LLMProvider):
     @property
     def reserved_output_tokens(self) -> int:
         m = self.chat_model.lower()
-        if "gpt-5" in m:
-            return 32_000  # GPT-5.x can output up to 128K; reserve conservatively
+        if _gpt_major(m) >= 5:
+            return 32_000  # GPT-5.x/6.x can output up to 128K; reserve conservatively
         return 4096
 
     def _get_headers(self) -> dict:
@@ -213,14 +226,14 @@ class OpenAIProvider(LLMProvider):
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
-        is_reasoning = "gpt-5" in model.lower() or "o3" in model.lower() or "o1" in model.lower()
+        is_reasoning = _gpt_major(model.lower()) >= 5 or "o3" in model.lower() or "o1" in model.lower()
 
         body: dict = {
             "model": model,
             "messages": self._format_messages(hoist_volatile(messages), tools),
         }
 
-        # Reasoning models (GPT-5.x, o3, o1) ignore temperature; use reasoning_effort instead.
+        # Reasoning models (GPT-5.x/6.x, o3, o1) ignore temperature; use reasoning_effort instead.
         # Default to "high" — reduces hallucination significantly vs "none"/"low".
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)

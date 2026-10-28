@@ -1,10 +1,10 @@
 """Image Generation Ability — generate images via multiple providers.
 
 Supported providers:
-  Vertex AI: {"provider": "vertex", "model": "gemini-2.5-flash-image"}
-             (also supports Imagen, e.g. "imagen-3.0-generate-002")
-  Together AI: {"provider": "together", "api_key": "...", "model": "black-forest-labs/FLUX.1-schnell"}
-  OpenAI: {"provider": "openai", "api_key": "...", "model": "dall-e-3"}
+  Vertex AI: {"provider": "vertex", "model": "gemini-3.1-flash-image"}
+             (Imagen models, served via :predict, are also supported)
+  Together AI: {"provider": "together", "api_key": "...", "model": "black-forest-labs/FLUX.2-dev"}
+  OpenAI: {"provider": "openai", "api_key": "...", "model": "gpt-image-2"}
 """
 
 import base64
@@ -47,8 +47,9 @@ class ImageGenAbility(Ability):
 
         if provider == "vertex":
             image_bytes = await self._gen_vertex(
-                prompt, model=model or "gemini-2.5-flash-image",
+                prompt, model=model or "gemini-3.1-flash-image",
                 api_key=api_key, region=config.get("region", ""),
+                project_id=config.get("project_id", ""),
             )
         elif provider == "together":
             api_key = api_key or os.environ.get("TOGETHER_API_KEY", "")
@@ -56,13 +57,13 @@ class ImageGenAbility(Ability):
                 return {"success": False, "error": "Together AI API key not configured"}
             image_bytes = await self._gen_together(
                 prompt, api_key=api_key,
-                model=model or "black-forest-labs/FLUX.1-schnell",
+                model=model or "black-forest-labs/FLUX.2-dev",
             )
         elif provider == "openai":
             if not api_key:
                 return {"success": False, "error": "OpenAI API key not configured"}
             image_bytes = await self._gen_openai(
-                prompt, api_key=api_key, model=model or "dall-e-3",
+                prompt, api_key=api_key, model=model or "gpt-image-2",
             )
         else:
             return {"success": False, "error": f"Unknown provider '{provider}'. Use /imagegen to configure."}
@@ -83,7 +84,7 @@ class ImageGenAbility(Ability):
             "media": filepath,
         }
 
-    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "") -> bytes | dict:
+    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "", project_id: str = "") -> bytes | dict:
         """Generate image via Vertex AI.
 
         Two different APIs live behind the same provider:
@@ -93,19 +94,28 @@ class ImageGenAbility(Ability):
         """
         if not api_key or not region:
             try:
-                _key, _region = await self._load_vertex_credentials()
+                _key, _region, _project = await self._load_vertex_credentials()
                 api_key = api_key or _key
-                region = region or _region
+                if not region:
+                    region, project_id = _region, project_id or _project
             except Exception as e:
                 return {"success": False, "error": f"Vertex credentials: {e}"}
 
         if not api_key:
             return {"success": False, "error": "No Vertex API key. Set via /imagegen or add Vertex model in /models."}
 
-        if model.startswith("gemini-"):
-            return await self._gen_vertex_gemini(prompt, model, api_key, region)
+        # Chat models in the registry may use the global endpoint (needs the
+        # project ID), so build URLs the same way the Vertex driver does.
+        from ..llm.vertex import _vertex_endpoint
+        try:
+            base = _vertex_endpoint(region, model, project_id)
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
 
-        url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:predict"
+        if model.startswith("gemini-"):
+            return await self._gen_vertex_gemini(prompt, base, api_key)
+
+        url = f"{base}:predict"
 
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -138,14 +148,14 @@ class ImageGenAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _gen_vertex_gemini(self, prompt: str, model: str, api_key: str, region: str) -> bytes | dict:
+    async def _gen_vertex_gemini(self, prompt: str, base: str, api_key: str) -> bytes | dict:
         """Generate image via Vertex AI Gemini image models (`:generateContent`).
 
         Response shape:
           candidates[0].content.parts[*].inlineData.data  → base64 image
         Text parts may be interleaved, so scan parts for the first inlineData.
         """
-        url = f"https://{region}-aiplatform.googleapis.com/v1/publishers/google/models/{model}:generateContent"
+        url = f"{base}:generateContent"
 
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -229,7 +239,7 @@ class ImageGenAbility(Ability):
             return {"success": False, "error": str(e)}
 
     async def _gen_openai(self, prompt: str, api_key: str, model: str) -> bytes | dict:
-        """Generate image via OpenAI DALL-E."""
+        """Generate image via the OpenAI Image API (gpt-image models)."""
         try:
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
@@ -243,7 +253,9 @@ class ImageGenAbility(Ability):
                         "prompt": prompt,
                         "n": 1,
                         "size": "1024x1024",
-                        "response_format": "b64_json",
+                        # gpt-image models always return b64_json; only the
+                        # retired DALL-E models took response_format.
+                        **({"response_format": "b64_json"} if model.startswith("dall-e") else {}),
                     },
                 )
 
@@ -262,8 +274,8 @@ class ImageGenAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _load_vertex_credentials(self) -> tuple[str, str]:
-        """Auto-load Vertex API key and region from model registry."""
+    async def _load_vertex_credentials(self) -> tuple[str, str, str]:
+        """Auto-load Vertex API key, region and project ID from model registry."""
         from ..db.connection import get_connection
         import json as _json
 
@@ -285,7 +297,7 @@ class ImageGenAbility(Ability):
                         if key_row:
                             val = key_row["value"]
                             api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
-                    return api_key, region
+                    return api_key, region, m.get("project_id", "")
 
         raise ValueError("No Vertex model found in registry")
 

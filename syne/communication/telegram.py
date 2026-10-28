@@ -2774,9 +2774,9 @@ Or just send me a message!"""
         current_model = config.get("model", "default")
 
         providers = [
-            ("vertex", "Vertex AI (Imagen 3)", "Auto-reads API key from /models"),
-            ("together", "Together AI (FLUX.1)", "Needs API key"),
-            ("openai", "OpenAI (DALL-E 3)", "Needs API key"),
+            ("vertex", "Vertex AI (Gemini 3.1 Flash Image)", "Auto-reads API key from /models"),
+            ("together", "Together AI (FLUX.2)", "Needs API key"),
+            ("openai", "OpenAI (GPT Image 2)", "Needs API key"),
         ]
 
         buttons = []
@@ -2808,7 +2808,7 @@ Or just send me a message!"""
             provider = data.split(":", 2)[2]
 
             defaults = {
-                "vertex": {"provider": "vertex", "model": "imagen-3.0-generate-002"},
+                "vertex": {"provider": "vertex", "model": "gemini-3.1-flash-image"},
                 "openai": {"provider": "openai"},
                 "together": {"provider": "together"},
             }
@@ -2917,7 +2917,7 @@ Or just send me a message!"""
 
             # Default models per provider
             defaults = {
-                "vertex": {"provider": "vertex", "model": "gemini-2.5-flash"},
+                "vertex": {"provider": "vertex", "model": "gemini-3.8-flash"},
                 "ollama": {"provider": "ollama", "model": "gemma3:4b"},
                 "together": {"provider": "together"},
                 "openai": {"provider": "openai"},
@@ -4236,7 +4236,7 @@ Or just send me a message!"""
                 f"🆔 <b>Edit Model ID — {entry.get('label', model_key)}</b>\n\n"
                 f"Current: <code>{current_id}</code>\n"
                 f"Driver: <code>{driver}</code>\n\n"
-                f"Send the new model ID (e.g. <code>claude-opus-4-8</code>).\n"
+                f"Send the new model ID (e.g. <code>claude-opus-5-5</code>).\n"
                 f"Verify the ID in your provider's docs first — invalid IDs return 404 at request time.\n\n"
                 f"Send /cancel to abort.",
                 parse_mode="HTML",
@@ -4426,47 +4426,47 @@ Or just send me a message!"""
                     "label": "Google AI Studio",
                     "driver": "google_cca",
                     "credential_key": "credential.google_cca_api_key",
-                    "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
+                    "examples": "gemini-3.8-flash, gemini-4-argon",
                 },
                 "vertex_ai": {
                     "label": "Google Vertex AI",
                     "driver": "vertex",
                     "credential_key": "credential.vertex_ai_api_key",
-                    "examples": "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash",
+                    "examples": "gemini-3.8-flash, gemini-4-argon",
                 },
                 "openai": {
                     "label": "OpenAI",
                     "driver": "openai_compat",
                     "base_url": "https://api.openai.com/v1",
                     "credential_key": "credential.openai_api_key",
-                    "examples": "gpt-4.1, gpt-4.1-mini, o3, o4-mini",
+                    "examples": "gpt-6-luna, gpt-6.1-terra",
                 },
                 "anthropic": {
                     "label": "Anthropic",
                     "driver": "anthropic",
                     "credential_key": "credential.anthropic_api_key",
-                    "examples": "claude-sonnet-4-20250514, claude-opus-4-0-20250514",
+                    "examples": "claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5",
                 },
                 "groq": {
                     "label": "Groq",
                     "driver": "openai_compat",
                     "base_url": "https://api.groq.com/openai/v1",
                     "credential_key": "credential.groq_api_key",
-                    "examples": "llama-3.3-70b-versatile, qwen/qwen3-32b",
+                    "examples": "llama-3.3-70b-versatile, openai/gpt-oss-120b",
                 },
                 "together": {
                     "label": "Together AI",
                     "driver": "openai_compat",
                     "base_url": "https://api.together.xyz/v1",
                     "credential_key": "credential.together_api_key",
-                    "examples": "meta-llama/Llama-4-Maverick-17B-128E",
+                    "examples": "moonshotai/Kimi-K3, zai-org/GLM-5.3",
                 },
                 "openrouter": {
                     "label": "OpenRouter",
                     "driver": "openai_compat",
                     "base_url": "https://openrouter.ai/api/v1",
                     "credential_key": "credential.openrouter_api_key",
-                    "examples": "google/gemini-2.5-pro, anthropic/claude-sonnet-4",
+                    "examples": "provider/model as listed on openrouter.ai/models",
                 },
             }
             meta = _ak_providers.get(provider_key)
@@ -4617,8 +4617,8 @@ Or just send me a message!"""
                 return
             logger.info(f"Add model (OAuth): driver={driver}, user={user.id}")
             _oauth_meta = {
-                "codex": ("OpenAI (OAuth)", "gpt-5.2, o3-pro"),
-                "anthropic": ("Claude (OAuth)", "claude-opus-4-8, claude-sonnet-4-7, claude-opus-4-6"),
+                "codex": ("OpenAI (OAuth)", "gpt-6.1-sol, gpt-6-astra, gpt-6-luna"),
+                "anthropic": ("Claude (OAuth)", "claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5"),
             }
             driver_label, examples = _oauth_meta.get(driver, (driver, "model-name"))
             self._auth_state[user.id] = {
@@ -7652,9 +7652,9 @@ Or just send me a message!"""
                 try:
                     from syne.llm.vertex import detect_vertex_region
                     models = await get_config("provider.models", [])
-                    vertex_models = [m for m in models if m.get("driver") == "vertex"]
+                    vertex_models = [m for m in models if m.get("driver") == "vertex" and m.get("region") != "global"]
                     if vertex_models:
-                        region = await detect_vertex_region(text, vertex_models[0].get("model_id", "gemini-2.5-flash"))
+                        region = await detect_vertex_region(text, vertex_models[0].get("model_id", "gemini-3.8-flash"))
                         for m in vertex_models:
                             m["region"] = region
                         await set_config("provider.models", models)
@@ -7767,7 +7767,7 @@ Or just send me a message!"""
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"Model ID: <code>{text}</code>\n\n"
-                     f"Now send a <b>display label</b> (e.g. <code>Gemini 2.5 Flash</code>, <code>GPT-5.2</code>).\n"
+                     f"Now send a <b>display label</b> (e.g. <code>Gemini 3.8 Flash</code>, <code>GPT-6.1 Sol</code>).\n"
                      f"Or send <code>.</code> to use model ID as label.",
                 parse_mode="HTML",
             )
@@ -7817,8 +7817,18 @@ Or just send me a message!"""
             if state.get("credential_key"):
                 entry["credential_key"] = state["credential_key"]
 
+            # Vertex: current Gemini models are global-endpoint only, which
+            # needs the project ID — reuse it from an existing global entry.
+            _global_vertex = next(
+                (m for m in (await get_config("provider.models", []) or [])
+                 if m.get("driver") == "vertex" and m.get("region") == "global" and m.get("project_id")),
+                None,
+            ) if driver == "vertex" else None
+            if _global_vertex:
+                entry["region"] = "global"
+                entry["project_id"] = _global_vertex["project_id"]
             # Auto-detect region for Vertex AI
-            if driver == "vertex":
+            elif driver == "vertex":
                 cred_key = state.get("credential_key", "credential.vertex_ai_api_key")
                 from syne.db.models import get_config as _gc2
                 vertex_key = await _gc2(cred_key, None)

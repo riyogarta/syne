@@ -46,7 +46,7 @@ class CodexProvider(LLMProvider):
         self,
         access_token: str,
         refresh_token: Optional[str] = None,
-        chat_model: str = "gpt-5.2",
+        chat_model: str = "gpt-6.1-sol",
         base_url: str = _CODEX_BASE_URL,
     ):
         self.access_token = access_token
@@ -66,7 +66,7 @@ class CodexProvider(LLMProvider):
 
     @property
     def context_window(self) -> int:
-        return 1_000_000  # GPT-5.2 default
+        return 1_050_000  # GPT-6 family (1.05M per OpenAI model docs)
 
     @property
     def supports_vision(self) -> bool:

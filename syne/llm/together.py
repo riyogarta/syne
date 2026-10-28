@@ -11,7 +11,7 @@ class TogetherProvider(LLMProvider):
     def __init__(
         self,
         api_key: str,
-        chat_model: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        chat_model: str = "moonshotai/Kimi-K3",
         embedding_model: str = "BAAI/bge-base-en-v1.5",
     ):
         self.api_key = api_key

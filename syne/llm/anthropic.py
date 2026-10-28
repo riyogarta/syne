@@ -107,7 +107,7 @@ class AnthropicProvider(LLMProvider):
 
     def __init__(
         self,
-        chat_model: str = "claude-sonnet-4-20250514",
+        chat_model: str = "claude-opus-5-5",
         api_key: Optional[str] = None,
     ):
         self.chat_model = chat_model
@@ -137,7 +137,7 @@ class AnthropicProvider(LLMProvider):
 
     @property
     def context_window(self) -> int:
-        return 200_000  # Claude Sonnet 4 default; Opus 4.6 = 1M (set in model registry)
+        return 1_000_000 if _is_adaptive_model(self.chat_model) else 200_000  # 4.6+ / 5.x: 1M
 
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create persistent HTTP client for connection reuse."""

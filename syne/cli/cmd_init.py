@@ -95,7 +95,7 @@ def init():
         codex_creds = asyncio.run(login_codex())
         # Credentials saved to DB after schema init (Step 6)
 
-        provider_config = {"driver": "codex", "model": "gpt-5.2", "auth": "oauth"}
+        provider_config = {"driver": "codex", "model": "gpt-6.1-sol", "auth": "oauth"}
 
     elif choice == 2:
         console.print("\n[bold green]✓ Claude selected (OAuth)[/bold green]")
@@ -116,7 +116,7 @@ def init():
 
         provider_config = {
             "driver": "anthropic",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-opus-5-5",
             "auth": "oauth",
             "_claude_creds": claude_creds.to_dict(),
         }
@@ -125,28 +125,32 @@ def init():
         console.print("\n[bold green]✓ Google Gemini selected (API key)[/bold green]")
         console.print("  [dim]Get your key at aistudio.google.com/apikey.[/dim]")
         api_key = click.prompt("Google AI API key")
-        provider_config = {"driver": "google_cca", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.google_cca_api_key"}
+        provider_config = {"driver": "google_cca", "model": "gemini-3.8-flash", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.google_cca_api_key"}
 
     elif choice == 4:
         console.print("\n[bold green]✓ Google Vertex AI selected (API key)[/bold green]")
         console.print("  [dim]Get your key at console.cloud.google.com (APIs & Services > Credentials).[/dim]")
         api_key = click.prompt("Google Cloud API key")
-        provider_config = {"driver": "vertex", "model": "gemini-2.5-pro", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key"}
+        # Current Gemini models on Vertex are served from the global endpoint
+        # only, which is addressed by project ID.
+        console.print("  [dim]Your project ID is shown in the console's project picker (e.g. my-project-123456).[/dim]")
+        project_id = click.prompt("Google Cloud project ID").strip()
+        provider_config = {"driver": "vertex", "model": "gemini-3.8-flash", "auth": "api_key", "_api_key": api_key, "_credential_key": "credential.vertex_ai_api_key", "_project_id": project_id}
 
     elif choice == 5:
         console.print("\n[bold green]✓ OpenAI selected (API key)[/bold green]")
         api_key = click.prompt("OpenAI API key")
-        provider_config = {"driver": "openai_compat", "model": "gpt-4o", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.openai.com/v1"}
+        provider_config = {"driver": "openai_compat", "model": "gpt-6-luna", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.openai.com/v1"}
 
     elif choice == 6:
         console.print("\n[bold green]✓ Anthropic Claude selected (API key)[/bold green]")
         api_key = click.prompt("Anthropic API key")
-        provider_config = {"driver": "anthropic", "model": "claude-sonnet-4-20250514", "auth": "api_key", "_api_key": api_key}
+        provider_config = {"driver": "anthropic", "model": "claude-opus-5-5", "auth": "api_key", "_api_key": api_key}
 
     elif choice == 7:
         console.print("\n[bold green]✓ Together AI selected (API key)[/bold green]")
         api_key = click.prompt("Together API key")
-        provider_config = {"driver": "openai_compat", "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.together.xyz/v1"}
+        provider_config = {"driver": "openai_compat", "model": "moonshotai/Kimi-K3", "auth": "api_key", "_api_key": api_key, "_base_url": "https://api.together.xyz/v1"}
 
     elif choice == 8:
         console.print("\n[bold green]✓ Groq selected (API key)[/bold green]")
@@ -433,8 +437,8 @@ def init():
     vision_config = None
 
     if vision_provider == "vertex":
-        vision_config = {"provider": "vertex", "model": "gemini-2.5-flash"}
-        console.print("[green]✓ Vision: Vertex AI (gemini-2.5-flash)[/green]")
+        vision_config = {"provider": "vertex", "model": "gemini-3.8-flash"}
+        console.print("[green]✓ Vision: Vertex AI (gemini-3.8-flash)[/green]")
     elif vision_provider == "ollama":
         vision_model = "gemma3:4b"
         console.print(f"[dim]Downloading vision model {vision_model}...[/dim]")
@@ -649,43 +653,46 @@ def init():
             model_id = provider_config["model"]
             models_registry = []
 
+            # Gemini models current as of 2026-10 (Gemini API + Vertex docs):
+            # 4 Argon is the flagship, 3.8 Flash is Google's pick for new
+            # projects. Gemini 2.5 is limited to accounts that used it before.
+            gemini_models = [
+                ("gemini-flash", "Gemini 3.8 Flash", "gemini-3.8-flash"),
+                ("gemini-argon", "Gemini 4 Argon", "gemini-4-argon"),
+            ]
             if driver == "vertex":
                 cred_key = provider_config.get("_credential_key", "credential.vertex_ai_api_key")
-                # Auto-detect region
-                api_key = provider_config.get("_api_key", "")
-                try:
-                    from syne.llm.vertex import detect_vertex_region
-                    region = asyncio.run(detect_vertex_region(api_key))
-                    console.print(f"  [green]Auto-detected region: {region}[/green]")
-                except Exception:
-                    region = "us-central1"
-                    console.print(f"  [yellow]Region detection failed, using {region}[/yellow]")
-                base_entry = {"key": "", "label": "", "driver": "vertex", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576, "region": region}
-                models_registry = [
-                    {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
-                    {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},
-                ]
-                active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
+                # Both models are served from the global endpoint only
+                # (no single-region endpoint), which needs the project ID.
+                base_entry = {"driver": "vertex", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576,
+                              "region": "global", "project_id": provider_config.get("_project_id", "")}
+                models_registry = [{**base_entry, "key": k, "label": label, "model_id": mid} for k, label, mid in gemini_models]
+                active_key = next(k for k, _, mid in gemini_models if mid == model_id)
             elif driver == "google_cca":
                 # API key only — Google has closed all OAuth access for Gemini.
                 cred_key = provider_config.get("_credential_key", "credential.google_cca_api_key")
-                base_entry = {"key": "", "label": "", "driver": "google_cca", "model_id": "", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576}
-                models_registry = [
-                    {**base_entry, "key": "gemini-pro", "label": "Gemini 2.5 Pro", "model_id": "gemini-2.5-pro"},
-                    {**base_entry, "key": "gemini-flash", "label": "Gemini 2.5 Flash", "model_id": "gemini-2.5-flash"},
-                ]
-                active_key = "gemini-pro" if "pro" in model_id else "gemini-flash"
+                base_entry = {"driver": "google_cca", "auth": "api_key", "credential_key": cred_key, "context_window": 1048576}
+                models_registry = [{**base_entry, "key": k, "label": label, "model_id": mid} for k, label, mid in gemini_models]
+                active_key = next(k for k, _, mid in gemini_models if mid == model_id)
             elif driver == "codex":
+                # Models offered for Codex with ChatGPT sign-in (2026-10).
+                # Sol needs a paid plan; Luna also works on Free/Go.
+                base_entry = {"driver": "codex", "auth": "oauth", "context_window": 1050000}
                 models_registry = [
-                    {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
+                    {**base_entry, "key": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "model_id": "gpt-6.1-sol"},
+                    {**base_entry, "key": "gpt-6-astra", "label": "GPT-6 Astra", "model_id": "gpt-6-astra"},
+                    {**base_entry, "key": "gpt-6.1-terra", "label": "GPT-6.1 Terra", "model_id": "gpt-6.1-terra"},
+                    {**base_entry, "key": "gpt-6-luna", "label": "GPT-6 Luna", "model_id": "gpt-6-luna"},
                 ]
-                active_key = "gpt-5.2"
+                active_key = model_id
             elif driver == "anthropic":
+                base_entry = {"driver": "anthropic", "auth": auth, "context_window": 1000000}
                 models_registry = [
-                    {"key": "claude-sonnet", "label": "Claude Sonnet 4.7", "driver": "anthropic", "model_id": "claude-sonnet-4-7", "auth": auth, "context_window": 200000},
-                    {"key": "claude-opus", "label": "Claude Opus 4.8", "driver": "anthropic", "model_id": "claude-opus-4-8", "auth": auth, "context_window": 200000},
+                    {**base_entry, "key": "claude-opus", "label": "Claude Opus 5.5", "model_id": "claude-opus-5-5"},
+                    {**base_entry, "key": "claude-sonnet", "label": "Claude Sonnet 5.5", "model_id": "claude-sonnet-5-5"},
+                    {**base_entry, "key": "claude-haiku", "label": "Claude Haiku 5.5", "model_id": "claude-haiku-5-5"},
                 ]
-                active_key = "claude-sonnet" if "sonnet" in model_id else "claude-opus"
+                active_key = next(m["key"] for m in models_registry if m["model_id"] == model_id)
             elif driver == "openai_compat":
                 active_key = model_id.split("/")[-1].replace(".", "-")
                 base_url = provider_config.get("_base_url", "https://api.openai.com/v1")
@@ -701,6 +708,7 @@ def init():
 
             await set_config("provider.models", models_registry)
             await set_config("provider.active_model", active_key)
+            await set_config("provider.chat_model", model_id)
             console.print("[green]✓ Provider config saved to database[/green]")
         # Save embedding config to DB
         if embedding_config:

@@ -428,7 +428,7 @@ ALTER TABLE scheduled_tasks ADD COLUMN IF NOT EXISTS target_chat_type VARCHAR(20
 
 -- Default config
 INSERT INTO config (key, value, description) VALUES
-    ('provider.chat_model', '"gemini-2.5-pro"', 'Chat model name'),
+    ('provider.chat_model', '""', 'Chat model name (mirror of the active model_id)'),
     ('provider.embedding_model', '"text-embedding-004"', 'Embedding model name'),
     ('provider.embedding_dimensions', '768', 'Embedding vector dimensions'),
     ('memory.auto_capture', 'true', 'Auto-evaluate messages for memory storage (default ON — LLM judges what is worth remembering; explicit stores are permanent, auto-captured ones are non-permanent and subject to decay)'),

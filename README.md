@@ -23,7 +23,7 @@ A Telegram bot you self-host. You chat with it. It remembers what you tell it to
 Beyond the core assistant, Syne ships with optional extensions. They live in `syne/abilities/` and can be enabled/disabled per install:
 
 - **Document I/O** — read & create PDF, Word, Excel, PowerPoint
-- **Image generation & vision OCR** — via Vertex Imagen / Together FLUX / OpenAI DALL-E for generation; Vertex Gemini / Ollama vision for analysis
+- **Image generation & vision OCR** — via Vertex Gemini Image / Together FLUX.2 / OpenAI GPT Image for generation; Vertex Gemini / Ollama vision for analysis
 - **Memory file attachments** — store images, PDFs, voice notes alongside their description; retrieve or re-analyze on demand (up to 50 MB per blob)
 - **Voice in & out** — Groq Whisper STT for inbound voice notes, Edge TTS for outbound voice messages
 - **Remote nodes** — extend Syne across multiple machines via WebSocket gateway
@@ -600,8 +600,8 @@ Since v1.18.18, the LLM sees the **full toolset every turn** (subject to the acc
 
 | Ability | Permission | Description | Requires |
 |---------|-----------|-------------|----------|
-| `image_gen` | 777 | Generate images from text (FLUX.1-schnell via Together AI / Imagen via Vertex / DALL-E via OpenAI) | API key per provider |
-| `image_analysis` | 555 | Analyze and describe images (Gemini 2.5 Flash default; Vertex / Ollama / OpenAI) | Provider-specific (Vertex auto, OpenAI key) |
+| `image_gen` | 777 | Generate images from text (Gemini 3.1 Flash Image via Vertex / FLUX.2 via Together AI / GPT Image 2 via OpenAI) | API key per provider |
+| `image_analysis` | 555 | Analyze and describe images (Gemini 3.8 Flash default; Vertex / Ollama / OpenAI) | Provider-specific (Vertex auto, OpenAI key) |
 | `maps` | 555 | Places, directions, geocoding | Google Maps API key |
 | `pdf` | 770 | **Read** PDFs (text + vision OCR for scanned/CAD pages) and **create** PDFs from text or URL | PyMuPDF, reportlab, beautifulsoup4 (auto-installed) |
 | `office` | 770 | **Create and read** Microsoft Office documents — Word (.docx), Excel (.xlsx), PowerPoint (.pptx) | python-docx, openpyxl, python-pptx (auto-installed) |
@@ -717,7 +717,7 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `provider.active_model` | `"gemini-pro"` | Active chat model key |
+| `provider.active_model` | *(set during init)* | Active chat model key |
 | `provider.active_embedding` | *(set during init)* | Active embedding model key (auto-detected by hardware tier) |
 
 ### Memory Settings
