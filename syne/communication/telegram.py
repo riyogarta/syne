@@ -4114,7 +4114,12 @@ Or just send me a message!"""
             await set_config("provider.active_model", model_key)
             await set_config("provider.chat_model", entry["model_id"])
             if self.agent:
-                await self.agent.reload_provider()
+                try:
+                    await self.agent.reload_provider()
+                except Exception as e:
+                    # reload_provider() already restored the previous model
+                    await query.answer(f"Cannot switch: {str(e)[:150]}", show_alert=True)
+                    return
             await query.answer(f"Default → {entry.get('label', model_key)}")
             await self._models_menu_main(query)
 
@@ -4360,7 +4365,16 @@ Or just send me a message!"""
                 await set_config("provider.active_model", new_default["key"])
                 await set_config("provider.chat_model", new_default["model_id"])
                 if self.agent:
-                    await self.agent.reload_provider()
+                    try:
+                        await self.agent.reload_provider()
+                    except Exception as e:
+                        await query.answer(
+                            f"Model deleted, but {new_default.get('label', new_default['key'])} "
+                            f"could not be loaded: {str(e)[:80]}. Pick another default.",
+                            show_alert=True,
+                        )
+                        await self._models_menu_main(query)
+                        return
             await query.answer("Model deleted")
             await self._models_menu_main(query)
 

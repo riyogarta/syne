@@ -179,7 +179,12 @@ def repair(fix):
 
             await close_db()
         except Exception as e:
+            issues.append(f"Chat provider check failed: {e}")
             console.print(f"   [red]✗ Error checking chat provider: {e}[/red]")
+            try:
+                await close_db()
+            except Exception:
+                pass
 
         # -- 3. Telegram Bot --
         console.print("\n[bold]3. Telegram Bot[/bold]")

@@ -96,7 +96,8 @@ def status():
                 _entry = get_model_from_list(_models, _active_key) if _active_key else None
                 provider_cfg = _entry if _entry else await get_config("provider.primary")
                 if isinstance(provider_cfg, dict):
-                    table.add_row("Provider", f"{provider_cfg.get('driver', '?')} ({provider_cfg.get('auth', '?')})")
+                    _drv = provider_cfg.get('driver') or provider_cfg.get('name', '?')
+                    table.add_row("Provider", f"{_drv} ({provider_cfg.get('auth', '?')})")
                 elif provider_cfg:
                     table.add_row("Provider", str(provider_cfg))
                 else:
@@ -104,7 +105,7 @@ def status():
 
                 # OAuth token status
                 import time as _time
-                driver = provider_cfg.get("driver", "") if isinstance(provider_cfg, dict) else ""
+                driver = (provider_cfg.get("driver") or provider_cfg.get("name", "")) if isinstance(provider_cfg, dict) else ""
                 auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
                 if auth_type == "oauth" and driver in ("google", "google_cca"):
                     table.add_row("OAuth Token", "[red]Gemini OAuth is no longer available — switch model via /models[/red]")

@@ -31,6 +31,11 @@ from .consent import ConsentStore, make_key, content_hash, DEFAULT_TTL_SECONDS, 
 logger = logging.getLogger("syne.agent")
 
 
+def _is_gemini_oauth(entry: dict) -> bool:
+    """Gemini OAuth model entries can no longer work: Google shut that access down."""
+    return entry.get("driver") == "google_cca" and entry.get("auth", "oauth") == "oauth"
+
+
 class SyneAgent:
     """The main Syne agent. Initializes all components and handles messages."""
 
@@ -245,7 +250,21 @@ class SyneAgent:
         Called after /model switch to apply the new provider without restart.
         Updates: self.provider, memory engine, context manager, conversation manager, sub-agents.
         """
-        new_provider = await self._init_provider()
+        previous_key = getattr(self, "_active_model_key", None)
+        try:
+            new_provider = await self._init_provider()
+        except Exception:
+            # The new model can't be built (missing key, dead OAuth, ...).
+            # Keep the running provider and point the config back at it, so
+            # the next restart doesn't crash-loop on the broken choice.
+            if previous_key:
+                models = await get_config("provider.models", []) or []
+                prev_entry = get_model_from_list(models, previous_key)
+                if prev_entry:
+                    await set_config("provider.active_model", previous_key)
+                    await set_config("provider.chat_model", prev_entry.get("model_id", ""))
+                    logger.warning(f"Provider reload failed — active model restored to '{previous_key}'")
+            raise
         self.provider = new_provider
         logger.info(f"Provider reloaded: {new_provider.name}")
 
@@ -516,7 +535,7 @@ class SyneAgent:
         models = await get_config("provider.models", None)
         active_model_key = await get_config("provider.active_model", None)
         
-        if models and active_model_key:
+        if models:
             # Migrate legacy Vertex models (google_cca + aiplatform URL → vertex driver)
             migrated = False
             for m in models:
@@ -535,13 +554,37 @@ class SyneAgent:
                 await set_config("provider.models", models)
 
             # New driver-based system
-            model_entry = get_model_from_list(models, active_model_key)
-            if model_entry:
+            model_entry = get_model_from_list(models, active_model_key) if active_model_key else None
+            if model_entry and not _is_gemini_oauth(model_entry):
                 logger.info(f"Using driver-based model: {model_entry.get('label', active_model_key)}")
-                return await create_hybrid_provider(model_entry)
-            else:
-                logger.warning(f"Model key '{active_model_key}' not found in registry, falling back to default")
-        
+                provider = await create_hybrid_provider(model_entry)
+                self._active_model_key = active_model_key
+                return provider
+
+            # Active model missing or unusable (Gemini OAuth was shut down by
+            # Google): switch to the first usable entry so the service — and
+            # with it Telegram /models — still comes up.
+            fallback = next((m for m in models if not _is_gemini_oauth(m)), None)
+            if fallback:
+                logger.warning(
+                    f"Active model '{active_model_key}' is missing or unusable — "
+                    f"switching to '{fallback.get('key')}'"
+                )
+                provider = await create_hybrid_provider(fallback)
+                await set_config("provider.active_model", fallback["key"])
+                await set_config("provider.chat_model", fallback.get("model_id", ""))
+                self._active_model_key = fallback["key"]
+                return provider
+            raise RuntimeError(
+                "No usable chat model configured (Gemini OAuth was shut down by Google). "
+                "Run 'syne init' to choose a provider."
+            )
+
+        if models is not None:
+            # Registry exists but is empty (fresh DB, or every entry was a
+            # removed Gemini OAuth model) — there is nothing to migrate.
+            raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
+
         # ═══════════════════════════════════════════════════════════════
         # Backward compatibility: old provider.primary system
         # Migrate to new format if possible
@@ -552,7 +595,16 @@ class SyneAgent:
             # finished: there is no legacy config to migrate, and no provider
             # works without credentials chosen in `syne init`.
             raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
-        provider_name = provider_config.get("name", "google") if isinstance(provider_config, dict) else "google"
+        if isinstance(provider_config, dict):
+            provider_name = provider_config.get("name") or provider_config.get("driver") or "google"
+            legacy_auth = provider_config.get("auth", "oauth")
+        else:
+            provider_name, legacy_auth = "google", "oauth"
+        if provider_name in ("google", "google_cca") and legacy_auth == "oauth":
+            raise RuntimeError(
+                "This install is configured for Gemini OAuth, which Google has shut down. "
+                "Run 'syne init' and choose another provider (Gemini is available via API key)."
+            )
         chat_model = await get_config("provider.chat_model", "gemini-2.5-pro")
         
         # Try to migrate to new format
@@ -579,9 +631,8 @@ class SyneAgent:
             return  # Already has model registry
         
         # Build model registry based on detected provider
+        # (No Gemini OAuth entries — Google has shut that access down.)
         default_models = [
-            {"key": "gemini-pro", "label": "Gemini 2.5 Pro", "driver": "google_cca", "model_id": "gemini-2.5-pro", "auth": "oauth", "context_window": 1048576},
-            {"key": "gemini-flash", "label": "Gemini 2.5 Flash", "driver": "google_cca", "model_id": "gemini-2.5-flash", "auth": "oauth", "context_window": 1048576},
             {"key": "gpt-5.2", "label": "GPT-5.2", "driver": "codex", "model_id": "gpt-5.2", "auth": "oauth", "context_window": 1048576},
         ]
 
@@ -596,8 +647,6 @@ class SyneAgent:
 
         # Map old provider to new model key
         model_key_map = {
-            ("google", "gemini-2.5-pro"): "gemini-pro",
-            ("google", "gemini-2.5-flash"): "gemini-flash",
             ("codex", "gpt-5.2"): "gpt-5.2",
             ("codex", "gpt-4.1"): "gpt-5.2",  # Map old models
         }
@@ -610,18 +659,12 @@ class SyneAgent:
             else:
                 active_key = "claude-sonnet"
         else:
-            active_key = model_key_map.get((provider_name, chat_model), "gemini-pro")
+            active_key = model_key_map.get((provider_name, chat_model), "gpt-5.2")
         
         # Save new format
         await set_config("provider.models", default_models)
         await set_config("provider.active_model", active_key)
         logger.info(f"Migrated to driver-based model system: {active_key}")
-        _active = next((m for m in default_models if m["key"] == active_key), None)
-        if _active and _active.get("driver") == "google_cca" and _active.get("auth") == "oauth":
-            logger.warning(
-                "Legacy config migrated to Gemini OAuth, which Google has shut down. "
-                "Switch to a Gemini API key, Vertex AI, or another provider via /models."
-            )
 
     async def _init_provider_legacy(self, provider_name: str, chat_model: str) -> LLMProvider:
         """Legacy provider initialization for backward compatibility."""

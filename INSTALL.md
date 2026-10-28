@@ -69,7 +69,7 @@ syne init  # Choose a provider: ChatGPT / Claude OAuth, or an API key
 
 Google Gemini is available via API key or Vertex AI only — Google has closed all OAuth access paths for Gemini.
 
-Credentials are stored in your local PostgreSQL, in the `config` table (keys prefixed `credential.` — same DB as memory and other config). Encrypt at the disk level (e.g. LUKS) if your threat model requires at-rest encryption; see SECURITY.md. Nothing is written to disk under `~/.syne/`; if a legacy `~/.syne/google_credentials.json` from an older install exists, Syne auto-migrates it into the DB on next start and tells you to delete the file.
+Credentials are stored in your local PostgreSQL, in the `config` table (keys prefixed `credential.` — same DB as memory and other config). Encrypt at the disk level (e.g. LUKS) if your threat model requires at-rest encryption; see SECURITY.md. Nothing is written to disk under `~/.syne/`.
 
 ### 4. Initialize Database Schema
 

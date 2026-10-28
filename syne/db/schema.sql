@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS soul (
 -- ============================================================
 CREATE TABLE IF NOT EXISTS rules (
     id SERIAL PRIMARY KEY,
-    code VARCHAR(20) UNIQUE NOT NULL,      -- 'R001', 'R002', 'SECURITY_001'
+    code VARCHAR(64) UNIQUE NOT NULL,      -- 'R001', 'R002', 'SECURITY_001'
     name VARCHAR(100) NOT NULL,
     description TEXT NOT NULL,
     enforced BOOLEAN DEFAULT true,
@@ -44,6 +44,10 @@ CREATE TABLE IF NOT EXISTS rules (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+-- v1.20.84: code was VARCHAR(20), too short for seeded codes such as
+-- VERIFY_SOURCE_BEFORE_CLAIM (26) — the seed INSERT failed, which aborted
+-- the whole schema on fresh installs. Widen existing tables too.
+ALTER TABLE rules ALTER COLUMN code TYPE VARCHAR(64);
 
 -- ============================================================
 -- USERS: Who interacts with the agent
@@ -721,6 +725,59 @@ BEGIN
         UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
     END IF;
 END $$;
+
+-- v1.20.84: Google closed all OAuth access for Gemini.
+--   google_cca entries saved as auth=oauth but carrying a credential_key were
+--   API-key models mis-tagged by the old Telegram add flow → auth=api_key.
+--   Real Gemini OAuth entries (no credential_key) can never work → removed.
+--   If the active model was removed, the first remaining entry becomes active.
+DO $$
+DECLARE
+    models jsonb;
+    updated jsonb := '[]'::jsonb;
+    model jsonb;
+    changed boolean := false;
+    active text;
+BEGIN
+    SELECT value::jsonb INTO models FROM config WHERE key = 'provider.models';
+    IF models IS NULL OR jsonb_typeof(models) <> 'array' THEN RETURN; END IF;
+
+    FOR model IN SELECT * FROM jsonb_array_elements(models)
+    LOOP
+        IF model->>'driver' = 'google_cca' AND COALESCE(model->>'auth', 'oauth') = 'oauth' THEN
+            changed := true;
+            IF COALESCE(model->>'credential_key', '') <> '' THEN
+                updated := updated || jsonb_build_array(model || '{"auth": "api_key"}'::jsonb);
+            END IF;
+        ELSE
+            updated := updated || jsonb_build_array(model);
+        END IF;
+    END LOOP;
+
+    IF NOT changed THEN RETURN; END IF;
+    UPDATE config SET value = updated, updated_at = NOW() WHERE key = 'provider.models';
+
+    SELECT value #>> '{}' INTO active FROM config WHERE key = 'provider.active_model';
+    IF active IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(updated) e WHERE e->>'key' = active
+    ) THEN
+        IF jsonb_array_length(updated) > 0 THEN
+            UPDATE config SET value = to_jsonb(updated->0->>'key'), updated_at = NOW()
+                WHERE key = 'provider.active_model';
+            UPDATE config SET value = to_jsonb(updated->0->>'model_id'), updated_at = NOW()
+                WHERE key = 'provider.chat_model';
+        ELSE
+            DELETE FROM config WHERE key = 'provider.active_model';
+        END IF;
+    END IF;
+END $$;
+
+-- v1.20.84: Telegram used to store the Google AI Studio key under its own
+-- name; it now shares syne init's key, so carry an existing one over.
+INSERT INTO config (key, value, description)
+SELECT 'credential.google_cca_api_key', value, 'Google AI Studio (Gemini) API key'
+FROM config WHERE key = 'credential.google_ai_api_key'
+ON CONFLICT (key) DO NOTHING;
 
 -- v0.24.2: (removed) — was re-adding embedding/evaluator models on every update,
 -- overriding user deletions. Models can be added via /embedding and /evaluator.
