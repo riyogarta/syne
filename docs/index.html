@@ -363,7 +363,7 @@
       <p style="color:var(--muted-2);font-family:var(--mono);font-size:12.5px;margin-bottom:16px">opt-in · each ability auto-installs its own dependencies</p>
       <div class="abilities">
         <div class="abil"><span class="name">pdf · office</span><p>Read <em>and create</em> PDF, Word, Excel, PowerPoint. Uploads auto-extract to text, no tool call needed.</p></div>
-        <div class="abil"><span class="name">image_gen</span><p>Generate images from text (FLUX.1, Imagen, or DALL-E).</p></div>
+        <div class="abil"><span class="name">image_gen</span><p>Generate images from text (Gemini Image, FLUX.2, or GPT Image).</p></div>
         <div class="abil"><span class="name">image_analysis</span><p>Describe and OCR images, including scanned pages.</p></div>
         <div class="abil"><span class="name">maps</span><p>Places, directions, and geocoding via Google Maps.</p></div>
         <div class="abil"><span class="name">website_screenshot</span><p>Capture a live screenshot of any page.</p></div>
@@ -415,9 +415,9 @@
       <div class="sec-head"><span class="depth">Layer 04 · <b>Models &amp; reach</b></span><h2>Any model. Anywhere. In parallel.</h2></div>
       <div class="split">
         <div>
-          <p style="color:var(--muted);font-size:15.5px;margin-bottom:6px">Seven drivers, switchable mid-conversation with no redeploy. Local Ollama runs free; the chat model uses a paid API key or your existing Claude / ChatGPT subscription via OAuth.</p>
+          <p style="color:var(--muted);font-size:15.5px;margin-bottom:6px">Eight providers, switchable mid-conversation with no redeploy. Local Ollama runs free; the chat model uses a paid API key or your existing Claude / ChatGPT subscription via OAuth.</p>
           <div class="models">
-            <span class="model on">Gemini</span><span class="model">Claude</span><span class="model">ChatGPT</span><span class="model">OpenAI</span><span class="model">Together AI</span><span class="model">Vertex</span><span class="model">Ollama · local</span>
+            <span class="model on">Gemini</span><span class="model">Claude</span><span class="model">ChatGPT</span><span class="model">OpenAI</span><span class="model">Together AI</span><span class="model">Vertex</span><span class="model">Groq</span><span class="model">Ollama · local</span>
           </div>
         </div>
         <div>
@@ -456,7 +456,7 @@
   <!-- L6 install -->
   <section id="install" style="padding-top:36px;padding-bottom:44px">
     <div class="wrap">
-      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>One command. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box, or on Windows through WSL2. The installer pulls its own dependencies: it detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, installs Ollama, wires your Telegram bot, and registers the service.</p></div>
+      <div class="sec-head"><span class="depth">Layer 06 · <b>Install &amp; operate</b></span><h2>One command. Fully guided from there.</h2><p class="sub">Runs on a 2 GB Linux box (Ubuntu 24.04+ or Debian 12+), or on Windows through WSL2. The installer pulls its own dependencies: it detects your CPU and RAM to pick the right local models, sets up PostgreSQL via Docker, installs Ollama, wires your Telegram bot, and registers the service.</p></div>
       <div class="term">
         <div class="term-bar"><i></i><i></i><i></i><span>your-server ~ zsh</span></div>
         <div class="term-body"><span class="c">$ curl -fsSL https://syne.codes/install.sh | bash</span>
@@ -495,7 +495,7 @@
           <div class="cmd"><code>syne updatedev</code><span>force pull + reinstall</span></div>
           <div class="caveat" style="margin-top:22px">
             <div><b>Free floor:</b> Ollama local embedding + evaluator = $0. Chat model uses a paid API key or your existing Claude / ChatGPT subscription via OAuth.</div>
-            <div style="margin-top:10px"><b>Note:</b> switching the embedding model later is supported — <code>syne memory reembed-memory --force</code> re-embeds every row (resumable, HNSW index refreshed). The evaluator can change anytime.</div>
+            <div style="margin-top:10px"><b>Note:</b> switching to an embedding model with the same vector dimension is supported — <code>syne memory reembed-memory --force</code> re-embeds every row (resumable, HNSW index refreshed). A different dimension deletes all memories, so choose with long-term capacity in mind. The evaluator can change anytime.</div>
           </div>
         </div>
       </div>

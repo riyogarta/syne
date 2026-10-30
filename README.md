@@ -16,7 +16,7 @@ A Telegram bot you self-host. You chat with it. It remembers what you tell it to
 - **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
 - **Multi-tier permissions** — owner / family / public with Linux-style 3-digit octal per tool. Public users by default get nothing from memory unless you explicitly open specific categories (Rule 765).
 - **Runtime configuration in PostgreSQL** — no `SOUL.md` or `CONFIG.yaml`. Identity, behavior, rules, and config all live in tables, changeable through conversation.
-- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google / OpenAI / Together / Vertex / Codex — bring a paid API key, or plug in your existing Claude Code / ChatGPT subscription via OAuth.
+- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google Gemini / Vertex AI / OpenAI / Together / Groq / Codex — bring a paid API key, or plug in your existing Claude Code / ChatGPT subscription via OAuth.
 
 ## Advanced capabilities (opt-in)
 
@@ -961,7 +961,7 @@ syne restore                         # Restore from backup
 |-----------|-----------|
 | Language | Python 3.11+ |
 | Database | PostgreSQL 16 + pgvector |
-| Chat LLM | Google Gemini, Claude, ChatGPT, OpenAI, Together AI, Ollama (7 drivers) |
+| Chat LLM | Google Gemini, Vertex AI, Claude, ChatGPT, OpenAI, Together AI, Groq, Ollama |
 | Embedding | Ollama (qwen3-embedding, local) or Together AI / OpenAI (cloud) |
 | Telegram | python-telegram-bot |
 | HTTP | httpx (async) |
