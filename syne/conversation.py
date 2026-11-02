@@ -2614,27 +2614,58 @@ class Conversation:
         set_current_user(None)
         set_current_chat(None, None)
 
-        # If final response is empty (e.g. thinking-only), retry once without thinking
+        # If final response is empty (e.g. thinking-only), retry once with an
+        # explicit text-output nudge.
+        #
+        # NOTE: thinking_budget=0 alone is a NO-OP on adaptive models (Claude
+        # 4.6+ / 5.x). anthropic.py forces thinking={"type": "adaptive"} and
+        # ignores the budget entirely, because that lineage has no "off"
+        # switch; temperature/top_p/top_k are not sent for adaptive either.
+        # So the old retry re-sent a near-identical request and predictably
+        # came back empty again (observed 2026-11-02: stop_reason='refusal'
+        # then 'end_turn', both thinking-only). The retry now changes the
+        # PROMPT as well, which is the only lever that still works there.
         if not (current.content or "").strip():
-            logger.warning(f"Tool loop final response empty after {usage.rounds} rounds — retrying without thinking")
+            logger.warning(f"Tool loop final response empty after {usage.rounds} rounds — retrying with text-output nudge")
             try:
                 _retry_kwargs = self._build_chat_kwargs()
-                _retry_kwargs["thinking_budget"] = 0
+                _retry_kwargs["thinking_budget"] = 0  # effective on non-adaptive models only
                 _retry_kwargs.pop("top_p", None)  # can't send both temperature + top_p
                 _retry_kwargs.pop("top_k", None)
+
+                # Ride the nudge on the last tool result when possible: a system
+                # message would be hoisted into the system prompt and invalidate
+                # every cached history prefix (same reasoning as forced-final
+                # above). Copy the list so history itself stays untouched.
+                _nudge = (
+                    "Your previous reply contained no text for the user. "
+                    "Reply NOW with plain text only: report what you found, or say "
+                    "plainly that you could not complete it. Do not call any tool."
+                )
+                _retry_context = list(context)
+                if _retry_context and _retry_context[-1].role == "tool":
+                    _rl = _retry_context[-1]
+                    _retry_context[-1] = ChatMessage(
+                        role="tool",
+                        content=f"{_rl.content}\n\n{_nudge}" if _rl.content else _nudge,
+                        metadata=_rl.metadata,
+                    )
+                else:
+                    _retry_context.append(ChatMessage(role="system", content=_nudge))
+
                 current = await self.provider.chat(
-                    messages=context,
+                    messages=_retry_context,
                     tools=None,
                     stream_callbacks=self.stream_callbacks,
                     **_retry_kwargs,
                 )
                 usage.add(current)
                 if (current.content or "").strip():
-                    logger.info(f"Retry without thinking succeeded: {len(current.content)} chars")
+                    logger.info(f"Retry with nudge succeeded: {len(current.content)} chars")
                 else:
-                    logger.warning(f"Retry without thinking also empty")
+                    logger.warning("Retry with nudge also empty (thinking-only or stopped early) — using fallback")
             except Exception as e:
-                logger.error(f"Retry without thinking failed: {e}")
+                logger.error(f"Retry with nudge failed: {e}")
 
         # Still empty after retry — use fallback message
         if not (current.content or "").strip():
