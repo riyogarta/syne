@@ -766,12 +766,24 @@ class Conversation:
         elif self.chat_id:
             _hist_chat_id = str(self.chat_id)
 
-        # Private destination: the sender's own words may surface from anywhere
-        # they wrote them, because the audience here is no wider than the
-        # audience there. Public destination: same group only.
-        _hist_private_dest = (not self.is_group) or (
-            _hist_chat_id is not None and _hist_chat_id in _hist_trusted
-        )
+        # Eligibility - family-only recall (Riyo, 4 Nov 2026).
+        # One condition, applied to BOTH ends: the sender must be family, and
+        # every chat involved must be family. Inside that circle recall flows
+        # freely in every direction (DM<->DM, DM<->group, group<->group).
+        # Outside it there is no recall at all.
+        #
+        # "Family group" is a DECLARED list, never a computed one. It cannot be
+        # derived from settings.members: that map is filled by upsert when a
+        # person is first SEEN speaking (models.py:407), so a group would count
+        # as family merely because its outsiders have not spoken yet. Agent.ID
+        # is the live proof - 4 members registered, 3 of them (Wibisono, .a,
+        # Koe) not in the users table at all. A computed test would have
+        # admitted it and leaked DM content into a public group.
+        _hist_family_ok = access_level in ("owner", "family")
+        if self.is_group:
+            _hist_family_ok = _hist_family_ok and (
+                _hist_chat_id is not None and _hist_chat_id in _hist_trusted
+            )
 
         # Sender identity: inbound is the single source of truth. In a group this
         # is the person who actually typed; in a DM it is the chat owner.
@@ -782,7 +794,7 @@ class Conversation:
             _sender_pid = str(self.user.get("platform_id") or "") or None
 
         async def _do_history_recall():
-            if not _hist_enabled or not _sender_pid:
+            if not _hist_enabled or not _sender_pid or not _hist_family_ok:
                 return []
             # Query-side guard. A bare acknowledgement ("Test ya", "Opsi A",
             # "Ok cek") carries no topic, yet embeds close to every OTHER bare
@@ -825,18 +837,24 @@ class Conversation:
                     str(_vec), self.session_id, _sender_pid,
                     _hist_min_sim, _hist_min_chars, _hist_limit,
                 ]
-                if _hist_private_dest:
-                    _scope_sql = ""
-                else:
-                    # Public group. Restrict to rows written in THIS group:
-                    # the sender's own words from another group still cross
-                    # into an audience that was never meant to see them.
-                    # Fail closed if the chat cannot be identified.
-                    if not _hist_chat_id:
-                        return []
-                    _args.append(_hist_chat_id)
+                # Source scope. A row is eligible only if it was written in a
+                # family chat: the sender's own DM (platform_chat_id equals
+                # their platform_id) or a declared family group. Rows from any
+                # other group are never candidates, in either direction.
+                #
+                # With an empty list this reduces to DM-only, which is the
+                # correct fail-closed default for a fresh install: no group
+                # participates until its id is named explicitly.
+                _trusted_list = sorted(_hist_trusted)
+                if _trusted_list:
+                    _args.append(_trusted_list)
                     _scope_sql = (
-                        "\n                          AND s.platform_chat_id = $7"
+                        "\n                          AND (s.platform_chat_id = $3"
+                        " OR s.platform_chat_id = ANY($7::text[]))"
+                    )
+                else:
+                    _scope_sql = (
+                        "\n                          AND s.platform_chat_id = $3"
                     )
                 async with get_connection() as conn:
                     return await conn.fetch(
