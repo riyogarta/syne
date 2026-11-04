@@ -728,10 +728,16 @@ class Conversation:
             _hist_limit = 3
         try:
             _hist_min_sim = float(
-                await _get_recall_config("history.auto_recall_min_similarity", 0.45)
+                await _get_recall_config("history.auto_recall_min_similarity", 0.60)
             )
         except (TypeError, ValueError):
-            _hist_min_sim = 0.45
+            _hist_min_sim = 0.60
+        try:
+            _hist_min_chars = int(
+                await _get_recall_config("history.auto_recall_min_chars", 40)
+            )
+        except (TypeError, ValueError):
+            _hist_min_chars = 40
 
         # Sender identity: inbound is the single source of truth. In a group this
         # is the person who actually typed; in a DM it is the chat owner.
@@ -744,9 +750,15 @@ class Conversation:
         async def _do_history_recall():
             if not _hist_enabled or not _sender_pid:
                 return []
-            # Same guard as memory recall: a 1-word query carries no signal.
+            # Query-side guard. A bare acknowledgement ("Test ya", "Opsi A",
+            # "Ok cek") carries no topic, yet embeds close to every OTHER bare
+            # acknowledgement in the log - which is precisely how "Ok" scored
+            # 65% against "Test ya" on the first live test, and "Opsi A" 70% on
+            # the second. For a query like that the right answer is ZERO rows,
+            # not the three least-bad ones, so this floor is on word count. No
+            # similarity threshold can fix it: the query itself is the problem.
             _hw = [w for w in (recall_query or user_message).strip().split() if len(w) > 1]
-            if len(_hw) < 2:
+            if len(_hw) < 4:
                 return []
             try:
                 _emb = await self.memory.provider.embed(recall_query or user_message)
@@ -765,11 +777,12 @@ class Conversation:
                           AND m.session_id <> $2
                           AND s.platform_chat_id = $3
                           AND 1 - (m.embedding <=> $1::vector) >= $4
+                          AND LENGTH(m.content) >= $5
                         ORDER BY (m.embedding <=> $1::vector) ASC
-                        LIMIT $5
+                        LIMIT $6
                         """,
                         str(_vec), self.session_id, _sender_pid,
-                        _hist_min_sim, _hist_limit,
+                        _hist_min_sim, _hist_min_chars, _hist_limit,
                     )
             except Exception as e:
                 logger.debug(f"History recall skipped: {e}")
