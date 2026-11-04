@@ -785,6 +785,31 @@ class Conversation:
                 _hist_chat_id is not None and _hist_chat_id in _hist_trusted
             )
 
+        # Telegram only (Riyo, 4 Nov 2026).
+        #
+        # Not a policy preference - an identity constraint. Authorship and DM
+        # scope both key on platform_id, and that id is per-platform: the same
+        # human is 3478983 on Telegram and 628111681624 on WhatsApp, with no
+        # mapping between them. Two consequences if platforms were mixed:
+        #
+        #   1. Nothing would match anyway. A WhatsApp DM session carries the
+        #      WhatsApp id as platform_chat_id, which never equals the Telegram
+        #      _sender_pid, so the rows are invisible rather than shared.
+        #   2. The family test would misfire. 628111681624 is registered
+        #      'public' under the name "Pak Riyo", so the owner writing from
+        #      WhatsApp would fail the owner/family check - denied as a
+        #      stranger, while a future id collision across platforms could
+        #      pass as family.
+        #
+        # So the honest fix is to stay on one platform until identities are
+        # unified. The right place for that is the identity mapping, not this
+        # query. trusted_group_ids holds Telegram chat ids, consistent with
+        # this. CLI sessions (platform 'cli') are excluded by the same test.
+        _hist_platform = (
+            str(self.inbound.platform) if self.inbound and self.inbound.platform else None
+        )
+        _hist_family_ok = _hist_family_ok and _hist_platform == "telegram"
+
         # Sender identity: inbound is the single source of truth. In a group this
         # is the person who actually typed; in a DM it is the chat owner.
         _sender_pid = None
@@ -845,16 +870,19 @@ class Conversation:
                 # With an empty list this reduces to DM-only, which is the
                 # correct fail-closed default for a fresh install: no group
                 # participates until its id is named explicitly.
+                # Platform is pinned, not parameterised: it is a constant in
+                # this build, and a literal keeps it out of the arg numbering.
+                _plat_sql = "\n                          AND s.platform = 'telegram'"
                 _trusted_list = sorted(_hist_trusted)
                 if _trusted_list:
                     _args.append(_trusted_list)
                     _scope_sql = (
                         "\n                          AND (s.platform_chat_id = $3"
-                        " OR s.platform_chat_id = ANY($7::text[]))"
+                        " OR s.platform_chat_id = ANY($7::text[]))" + _plat_sql
                     )
                 else:
                     _scope_sql = (
-                        "\n                          AND s.platform_chat_id = $3"
+                        "\n                          AND s.platform_chat_id = $3" + _plat_sql
                     )
                 async with get_connection() as conn:
                     return await conn.fetch(
