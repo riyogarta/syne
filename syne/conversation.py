@@ -739,6 +739,40 @@ class Conversation:
         except (TypeError, ValueError):
             _hist_min_chars = 40
 
+        # Trust tier of the CURRENT chat - option C (Riyo, 4 Nov 2026).
+        # One principle: never move a row into an audience more open than the
+        # one it was written for.
+        #   DM                      -> private, only the sender reads it
+        #   trusted group (family)  -> treated as private, by explicit opt-in
+        #   any other group         -> public, same-group rows only
+        # Trust is NOT hardcoded. It is a config list of platform_chat_ids, so
+        # granting or revoking a group never needs a code change. Default is
+        # empty, i.e. fail closed: until a group is named, it is public.
+        _raw_trusted = await _get_recall_config("history.trusted_group_ids", [])
+        if isinstance(_raw_trusted, str):
+            try:
+                _raw_trusted = json.loads(_raw_trusted)
+            except (ValueError, TypeError):
+                _raw_trusted = [
+                    x for x in _raw_trusted.replace(",", " ").split() if x
+                ]
+        if not isinstance(_raw_trusted, (list, tuple, set)):
+            _raw_trusted = []
+        _hist_trusted = {str(x).strip() for x in _raw_trusted if str(x).strip()}
+
+        _hist_chat_id = None
+        if self.inbound and self.inbound.chat_id:
+            _hist_chat_id = str(self.inbound.chat_id)
+        elif self.chat_id:
+            _hist_chat_id = str(self.chat_id)
+
+        # Private destination: the sender's own words may surface from anywhere
+        # they wrote them, because the audience here is no wider than the
+        # audience there. Public destination: same group only.
+        _hist_private_dest = (not self.is_group) or (
+            _hist_chat_id is not None and _hist_chat_id in _hist_trusted
+        )
+
         # Sender identity: inbound is the single source of truth. In a group this
         # is the person who actually typed; in a DM it is the chat owner.
         _sender_pid = None
@@ -765,9 +799,48 @@ class Conversation:
                 _vec = getattr(_emb, "vector", None)
                 if not _vec:
                     return []
+                # Authorship. A row was written by this sender if it comes
+                # from one of their own DM sessions (platform_chat_id equals
+                # their platform_id) OR if the inbound Sender block embedded in
+                # the message body carries their numeric id.
+                #
+                # The numeric id is the ONLY safe key. conversation_label is a
+                # display name the owner of the account can change at will, and
+                # the log proves it moves: id 41005565 appears as both "ItsAgha"
+                # and "Gamitra". Keying on the name would let anyone in a group
+                # impersonate anyone else simply by renaming themselves.
+                #
+                # metadata->>'sender_id' is checked first so that once rows
+                # carry it natively the regex stops being load-bearing. It is
+                # NULL on every existing row today (verified: 473 YBA user rows,
+                # 0 with metadata), hence the COALESCE fallback, which recovers
+                # authorship for the whole backlog.
+                _sender_re = 'Sender \\(untrusted metadata\\):[^}]*"id": ?"([0-9]+)"'
+                _author_sql = (
+                    "(s.platform_chat_id = $3 OR COALESCE("
+                    "m.metadata->>'sender_id', "
+                    "substring(m.content from '" + _sender_re + "')) = $3)"
+                )
+                _args = [
+                    str(_vec), self.session_id, _sender_pid,
+                    _hist_min_sim, _hist_min_chars, _hist_limit,
+                ]
+                if _hist_private_dest:
+                    _scope_sql = ""
+                else:
+                    # Public group. Restrict to rows written in THIS group:
+                    # the sender's own words from another group still cross
+                    # into an audience that was never meant to see them.
+                    # Fail closed if the chat cannot be identified.
+                    if not _hist_chat_id:
+                        return []
+                    _args.append(_hist_chat_id)
+                    _scope_sql = (
+                        "\n                          AND s.platform_chat_id = $7"
+                    )
                 async with get_connection() as conn:
                     return await conn.fetch(
-                        """
+                        f"""
                         SELECT m.id, m.content, m.created_at,
                                1 - (m.embedding <=> $1::vector) AS similarity
                         FROM messages m
@@ -775,14 +848,13 @@ class Conversation:
                         WHERE m.role = 'user'
                           AND m.embedding IS NOT NULL
                           AND m.session_id <> $2
-                          AND s.platform_chat_id = $3
+                          AND {_author_sql}
                           AND 1 - (m.embedding <=> $1::vector) >= $4
-                          AND LENGTH(m.content) >= $5
+                          AND LENGTH(m.content) >= $5{_scope_sql}
                         ORDER BY (m.embedding <=> $1::vector) ASC
                         LIMIT $6
                         """,
-                        str(_vec), self.session_id, _sender_pid,
-                        _hist_min_sim, _hist_min_chars, _hist_limit,
+                        *_args,
                     )
             except Exception as e:
                 logger.debug(f"History recall skipped: {e}")
