@@ -721,11 +721,27 @@ class TelegramChannel:
             # including a typo or an unparseable one, falls through to
             # approval - an unreadable policy must never be the thing that
             # admits a stranger.
-            if not _existing and db_user.get("access_level") != "owner":
+            # Pending is marked in preferences.pending_approval, NOT by the
+            # absence of the row: _ensure_user above has already created it,
+            # so `not _existing` is only ever true for the FIRST message and
+            # message #2 used to walk straight through as public while the
+            # owner was still deciding. The flag persists, so every message
+            # before approval is held.
+            _prefs = db_user.get("preferences") or {}
+            _pending = (
+                bool(_prefs.get("pending_approval"))
+                and db_user.get("access_level") == "public"
+            )
+            if (not _existing or _pending) and db_user.get("access_level") != "owner":
                 dm_policy = await get_config("telegram.dm_policy", "approval")
                 if str(dm_policy) != "open":
                     await self._handle_pending_user(update, db_user)
                     return
+                # Policy was switched to open while this user sat pending —
+                # clear the flag, otherwise the gate above keeps holding them
+                # forever on a policy that no longer asks for approval.
+                if _pending:
+                    await self._clear_pending_flag(str(user.id), _prefs)
                 logger.info(
                     f"dm_policy=open: admitting new user {user.id} as "
                     f"{db_user.get('access_level')} without owner approval"
@@ -995,6 +1011,24 @@ class TelegramChannel:
             is_dm=is_dm,
         )
 
+    async def _clear_pending_flag(self, platform_id: str, prefs: dict | None = None):
+        """Drop preferences.pending_approval, preserving every other key.
+
+        Merged rather than overwritten: preferences also carries things like
+        the per-user model override, and a blind write would wipe them.
+        """
+        if prefs is None:
+            existing = await get_user("telegram", str(platform_id))
+            prefs = (existing or {}).get("preferences") or {}
+        if not prefs.get("pending_approval"):
+            return
+        new_prefs = dict(prefs)
+        new_prefs.pop("pending_approval", None)
+        try:
+            await update_user("telegram", str(platform_id), preferences=new_prefs)
+        except Exception as e:
+            logger.error(f"Failed to clear pending flag for {platform_id}: {e}")
+
     async def _handle_pending_user(self, update: Update, db_user: dict):
         """Handle messages from pending (unapproved) users.
         
@@ -1005,10 +1039,26 @@ class TelegramChannel:
         chat = update.effective_chat
         user_name = self._get_display_name(user)
         
-        # Reply to user
-        await update.message.reply_text(
-            "⏳ Your access is pending approval from the owner. Please wait."
-        )
+        # Persist the pending marker before anything that can fail. The flag
+        # is what holds message #2, so it must outlive both a failed notify
+        # and a restart. Its absence also means "this is the first held
+        # message", which is what decides whether to acknowledge the user —
+        # no in-memory set needed, and it stays correct across restarts.
+        prefs = dict(db_user.get("preferences") or {})
+        first_hold = not prefs.get("pending_approval")
+        if first_hold:
+            prefs["pending_approval"] = True
+            try:
+                await update_user(
+                    "telegram", str(user.id), preferences=prefs
+                )
+            except Exception as e:
+                logger.error(f"Failed to mark user {user.id} pending: {e}")
+
+            # Said once, not on every held message.
+            await update.message.reply_text(
+                "⏳ Your access is pending approval from the owner. Please wait."
+            )
         
         # Find owner to notify
         from ..db.connection import get_connection
@@ -1032,8 +1082,6 @@ class TelegramChannel:
         if pending_key in self._pending_notified:
             return  # Already notified owner about this user
         
-        self._pending_notified.add(pending_key)
-        
         # Build notification with approve/reject buttons
         username_str = f" (@{user.username})" if user.username else ""
         buttons = [
@@ -1056,11 +1104,22 @@ class TelegramChannel:
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
+                # Marked only on success. Marking before the attempt meant a
+                # transient network failure silently buried the request: the
+                # key was set, and the gate could not re-fire either.
+                self._pending_notified.add(pending_key)
                 break
             except Exception as e:
                 logger.error(f"Failed to notify owner about pending user (attempt {attempt + 1}/3): {e}")
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
+        else:
+            # All three attempts failed. The DB flag keeps the user held and
+            # the dedupe key stays unset, so the next message retries.
+            logger.warning(
+                f"Owner was not notified about pending user {user.id}; "
+                f"will retry on their next message"
+            )
 
     async def _handle_my_chat_member(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle when bot is added to or removed from a group.
@@ -9115,6 +9174,8 @@ Or just send me a message!"""
             
             if action_type == "approve":
                 await update_user("telegram", target_user_id, access_level="public")
+                # Clear the hold, or the gate keeps stopping them at public.
+                await self._clear_pending_flag(target_user_id)
                 await query.edit_message_text(
                     f"✅ **{target_name}** (`{target_user_id}`) approved.\n"
                     f"They can now chat with the bot.",
@@ -9140,6 +9201,9 @@ Or just send me a message!"""
             
             else:  # reject
                 await update_user("telegram", target_user_id, access_level="blocked")
+                # Also cleared: if the owner later lifts the block by hand,
+                # a stale flag would silently re-hold them.
+                await self._clear_pending_flag(target_user_id)
                 await query.edit_message_text(
                     f"🚫 **{target_name}** (`{target_user_id}`) rejected.",
                     parse_mode="Markdown",
