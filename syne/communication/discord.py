@@ -49,9 +49,9 @@ from .outbound import (
 from .formatting import markdown_to_discord
 from .registry import CHANNEL_DISCORD, register_channel, unregister_channel
 from ..db.models import (
+    create_user,
     get_config,
     get_group,
-    get_or_create_user,
     get_user,
 )
 
@@ -275,15 +275,19 @@ class DiscordChannel:
             )
             return False
 
-        await get_or_create_user(
+        # create_user() is used here instead of the get-or-create helper: that
+        # helper persists NOTHING when is_dm is False (models.py:182-194
+        # returns an ephemeral dict), so the admission would not stick and this
+        # person would be re-admitted on every message; and when is_dm is True
+        # it can auto-promote them to OWNER (models.py:167-181). Creating the
+        # row directly as "public" avoids both - the admission sticks, and
+        # ownership stays unobtainable over Discord.
+        await create_user(
             name=message.author.name,
             platform="discord",
             platform_id=str(message.author.id),
             display_name=message.author.display_name,
-            # models.py:126 auto-promotes the first DM sender to OWNER when no
-            # owner row exists. Ownership must only ever be established over
-            # Telegram, so this stays False even though this IS a DM.
-            is_dm=False,
+            access_level="public",
         )
         logger.info(
             "discord.dm_policy=open: admitted new Discord user %s", message.author.id
@@ -393,9 +397,14 @@ class DiscordChannel:
                     message=text,
                     display_name=author.display_name or author.name,
                     message_metadata=metadata,
-                    # agent.py:2907 - group senders must NOT be persisted as
-                    # users, so the real DM-ness has to be forwarded here.
-                    is_dm=is_dm,
+                    # agent.py:2907 forwards this straight into the DB helper,
+                    # whose promote blocks (models.py:126-162, 167-181) raise
+                    # the caller to OWNER when owner_count == 0 - so on a fresh
+                    # install the first Discord DM would become owner. Pinned
+                    # False: ownership is Telegram-only. Correct for both paths
+                    # - DM users are already persisted by _authorize_dm, and
+                    # guild users are meant to be ephemeral (models.py:183-194).
+                    is_dm=False,
                 )
         except Exception as e:
             logger.error(f"Discord dispatch failed: {type(e).__name__}: {e}", exc_info=True)
