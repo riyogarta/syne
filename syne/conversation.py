@@ -992,6 +992,11 @@ class Conversation:
                 "These are real prior statements by the sender. If they refer to "
                 "something discussed in PM, the answer may be right here - do "
                 "NOT claim you have no knowledge of a topic that appears below.",
+                "Only the sender's OWN messages are indexed here - your own past "
+                "replies are NOT. You therefore cannot tell who authored any number, "
+                "link or decision below: a value the sender quotes may have "
+                "originated from you. Never attribute authorship from this block, "
+                "and never guess why something changed.",
                 "In a group, do not expose more of this than the sender has "
                 "already raised in that group themselves.",
                 "",
