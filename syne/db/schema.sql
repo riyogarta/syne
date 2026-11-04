@@ -436,7 +436,6 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '5', 'Max memories to recall per query'),
     ('memory.decay_interval', '50', 'Decay every N conversations'),
-    ('memory.decay_amount', '5', 'How much recall_count decreases per decay'),
     ('memory.initial_recall_count', '1', 'Starting recall_count for new memories (decay v2)'),
     ('memory.promotion_threshold', '1000', 'Promote non-permanent to permanent when recall_count reaches this (decay v2; high = effectively dormant)'),
     ('memory.max_records', '1000', 'Decay v2 cap: max non-permanent memories; LRU/LFU eviction above this (raised to 1000 for evaluation window — no eviction until tuned)'),
@@ -454,7 +453,7 @@ INSERT INTO config (key, value, description) VALUES
     ('history.auto_recall_limit', '3', 'Max past-conversation rows injected per turn.'),
     ('history.auto_recall_min_similarity', '0.60', 'Cosine floor. Below this the matches are bare acknowledgements rather than topics.'),
     ('history.auto_recall_min_chars', '40', 'Rows shorter than this are never candidates. A short Ok embeds close to every other short Ok.'),
-    ('history.trusted_group_ids', '[]', 'JSON array of platform_chat_ids treated as private like a DM for history recall. Empty = fail closed: every group is public, so only rows written in that same group are eligible. Add a family group id to let it see the senders own DM rows.'),
+    ('history.trusted_group_ids', '[]', 'JSON array of Telegram chat ids that count as family for history recall. Recall requires BOTH ends to be family: the sender must be owner or family, and every chat involved must be on this list (a DM always qualifies as its own chat). Inside that circle recall flows in every direction. A group left off this list neither receives recalled rows nor contributes its own. Empty = DM-only, the fail-closed default. Telegram only: platform ids are not unified across channels.'),
     ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
     ('session.history_limit', '50', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
@@ -466,9 +465,6 @@ INSERT INTO config (key, value, description) VALUES
     -- Time & locale (used for injected runtime time context)
     ('time.locale', '"id"', 'Default locale for time/date/day formatting (id/en)'),
     ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template'),
-    ('time.format.date', '"{date}"', 'Default date-only format template'),
-    ('time.format.time', '"{time}"', 'Default time-only format template'),
-    ('time.format.day', '"{day_name}"', 'Default day-only format template'),
     -- session.max_tool_rounds removed in v0.18.5 (no hard limit, loop detection handles runaway)
     -- Telegram channel config
     ('telegram.dm_policy', '"approval"', 'DM policy: approval (owner approves new users) or open (accept all)'),
@@ -524,9 +520,6 @@ END $$;
 -- ============================================================
 -- CONFIG MIGRATIONS: Update defaults for existing installs
 -- ============================================================
--- v0.9.0: decay_amount changed from 2 to 1 (recall +2, decay -1)
-UPDATE config SET value = '1' WHERE key = 'memory.decay_amount' AND value = '2';
-
 -- v0.18.5: max_tool_rounds removed — no hard limit, loop detection is sufficient
 DELETE FROM config WHERE key = 'session.max_tool_rounds';
 
@@ -699,10 +692,7 @@ ON CONFLICT (key) DO NOTHING;
 -- v0.23.10: time formatting defaults
 INSERT INTO config (key, value, description) VALUES
     ('time.locale', '"id"', 'Default locale for time/date/day formatting (id/en)'),
-    ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template'),
-    ('time.format.date', '"{date}"', 'Default date-only format template'),
-    ('time.format.time', '"{time}"', 'Default time-only format template'),
-    ('time.format.day', '"{day_name}"', 'Default day-only format template')
+    ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template')
 ON CONFLICT (key) DO NOTHING;
 
 

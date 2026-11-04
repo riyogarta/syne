@@ -578,10 +578,25 @@ class TelegramChannel:
             if db_user.get("access_level") == "blocked":
                 logger.debug(f"Ignoring message from blocked user {user.id}")
                 return
-            # New user (didn't exist before) and not auto-promoted to owner → pending approval
+            # New user (didn't exist before) and not auto-promoted to owner.
+            # telegram.dm_policy decides what happens next. It is documented
+            # in README and listed in SECURITY.md's hardening checklist, but
+            # until now nothing read it: the gate below was unconditional, so
+            # setting "open" had no effect at all.
+            #
+            # Only the exact string "open" opens the door. Any other value,
+            # including a typo or an unparseable one, falls through to
+            # approval - an unreadable policy must never be the thing that
+            # admits a stranger.
             if not _existing and db_user.get("access_level") != "owner":
-                await self._handle_pending_user(update, db_user)
-                return
+                dm_policy = await get_config("telegram.dm_policy", "approval")
+                if str(dm_policy) != "open":
+                    await self._handle_pending_user(update, db_user)
+                    return
+                logger.info(
+                    f"dm_policy=open: admitting new user {user.id} as "
+                    f"{db_user.get('access_level')} without owner approval"
+                )
             # DM received — send 👀 read receipt
             try:
                 await self.send_reaction(chat.id, update.message.message_id, "👀")

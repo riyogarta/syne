@@ -666,6 +666,54 @@ async def _m24_rule_checker_timeout(conn) -> None:
     """)
 
 
+async def _m25_drop_dead_config(conn) -> None:
+    """Delete config keys that no code path reads (Riyo, 4 Nov 2026).
+
+    Audited by literal match across all 171 repo files, not just .py - config
+    in Syne is also read from inside schema.sql by PL/pgSQL, which an earlier
+    .py-only pass got wrong.
+
+      memory.decay_amount   - decay v2 is cap-based. run_decay() reads
+                              decay_interval, max_records and
+                              promotion_threshold; the per-cycle subtraction
+                              this key configured no longer exists.
+      time.format.date      - conversation.py loads exactly one template,
+      time.format.time        time.format.full (_TIME_CFG_KEYS). The three
+      time.format.day         granular ones were never consulted.
+
+    Unconditional DELETE: no value to converge, nothing to guess wrong about.
+    Fresh installs no longer seed them. Idempotent.
+    """
+    await conn.execute("""
+        DELETE FROM config WHERE key IN (
+            'memory.decay_amount',
+            'time.format.date',
+            'time.format.time',
+            'time.format.day'
+        )
+    """)
+
+
+async def _m26_trusted_group_ids_description(conn) -> None:
+    """Refresh history.trusted_group_ids description (Riyo, 4 Nov 2026).
+
+    Two problems. On this install the description is NULL, so `syne config
+    list` says nothing about the only privacy control the recall feature has.
+    And the text that fresh installs got describes the superseded rule - it
+    speaks of groups "treated as private like a DM" and of rows being limited
+    to "that same group", which was the destination-tier model, not the
+    family-only one that replaced it.
+
+    Description-only: value is never touched, so an owner who already listed
+    their family group keeps it. schema.sql seeds with ON CONFLICT DO NOTHING
+    and therefore cannot refresh prose on an existing row - hence this.
+    """
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'history.trusted_group_ids'",
+        "JSON array of Telegram chat ids that count as family for history recall. Recall requires BOTH ends to be family: the sender must be owner or family, and every chat involved must be on this list (a DM always qualifies as its own chat). Inside that circle recall flows in every direction. A group left off this list neither receives recalled rows nor contributes its own. Empty = DM-only, the fail-closed default. Telegram only: platform ids are not unified across channels.",
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -691,6 +739,8 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (22, _m22_fk_index_and_autovacuum, "transactional"),
     (23, _m23_fetch_url_config, "transactional"),
     (24, _m24_rule_checker_timeout, "transactional"),
+    (25, _m25_drop_dead_config, "transactional"),
+    (26, _m26_trusted_group_ids_description, "transactional"),
 ]
 
 

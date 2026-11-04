@@ -64,21 +64,19 @@ Which model judges whether a message is worth remembering.
 | Key | Default | Type |
 |-----|---------|------|
 | `memory.decay_interval` | `50` | integer |
-| `memory.decay_amount` | `5` | integer |
 | `memory.initial_recall_count` | `5` | integer |
 | `memory.promotion_threshold` | `10` | integer |
 
 Controls how fast non-permanent memories fade and when they get promoted.
 - `decay_interval` — every N conversations, decay triggers. Lower = memories fade faster.
-- `decay_amount` — how much `recall_count` decreases per decay cycle.
 - `initial_recall_count` — starting durability of new memories. Higher = lasts more cycles.
 - `promotion_threshold` — when recall_count exceeds this, memory is promoted to permanent + KG extraction.
 - **Increase interval when**: Memories disappear too fast, bot forgets useful context.
 - **Decrease interval when**: Too many stale memories accumulate, bot recalls irrelevant things.
 - **Increase initial_recall_count when**: Auto-captured memories should last longer by default.
-- **Warning**: With default values (interval=50, amount=1, initial=5), a memory that is never
-  recalled will be deleted after 250 conversations. Frequently recalled memories get +2 boost
-  each time, and memories with recall_count > 10 are promoted to permanent.
+- **Note**: Decay v2 does not delete on `recall_count` reaching zero. Every decay cycle
+  lowers the count of untouched rows, but life or death is decided by `memory.max_records`:
+  when non-permanent rows exceed that cap, the lowest-recall / oldest ones are evicted.
 
 ### Recall & Importance
 | Key | Default | Type |
@@ -166,13 +164,11 @@ takes priority — this only applies when the per-model value is null.
 |-----|---------|------|
 | `time.locale` | `"id"` | string |
 | `time.format.full` | `"{day_name}, {date} {time}"` | string |
-| `time.format.date` | `"{date}"` | string |
-| `time.format.time` | `"{time}"` | string |
-| `time.format.day` | `"{day_name}"` | string |
 
 Controls how the runtime time context is formatted when injected into conversations.
 - `time.locale` affects day/month names (currently `id` and `en`).
-- Formats use Python `str.format` templates with fields: `{day_name}`, `{date}`, `{time}`, `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, `{second}`.
+- `time.format.full` is the one template actually injected. It uses Python `str.format`
+  with fields: `{day_name}`, `{date}`, `{time}`, `{year}`, `{month}`, `{day}`, `{hour}`, `{minute}`, `{second}`.
 - **Warning**: Invalid templates fall back to ISO/full string.
 
 ## System Timezone
