@@ -23,6 +23,7 @@ from telegram.ext import (
 
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
+from .registry import CHANNEL_TELEGRAM, register_channel, unregister_channel
 from .outbound import strip_server_paths, extract_media, extract_all_media, split_message, process_outbound
 from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
 from ..db.models import (
@@ -336,6 +337,11 @@ class TelegramChannel:
             ],
         )
 
+        # Advertise this channel so other channels can reach Telegram —
+        # e.g. Discord delivering an approval prompt to the owner. Registered
+        # only after start_polling, i.e. once it can actually send.
+        register_channel(CHANNEL_TELEGRAM, self)
+
         # Register bot commands menu (the "/" button in Telegram)
         from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
         commands = [
@@ -428,11 +434,138 @@ class TelegramChannel:
 
     async def stop(self):
         """Stop the Telegram bot."""
+        unregister_channel(CHANNEL_TELEGRAM)
         if self.app:
             await self.app.updater.stop()
             await self.app.stop()
             await self.app.shutdown()
             logger.info("Telegram bot stopped.")
+
+    # ── Cross-channel surface ────────────────────────────────
+
+    async def send_inline_prompt(
+        self,
+        chat_id: str | int,
+        text: str,
+        buttons: list[tuple[str, str]],
+    ) -> bool:
+        """Deliver a prompt with inline buttons on behalf of another channel.
+
+        Exists so a channel with no owner-facing UI (Discord) can ask the
+        owner a question here without learning anything about Telegram:
+        `buttons` is a plain list of (label, callback_data) pairs, and
+        InlineKeyboardMarkup never leaves this module.
+
+        Retries like the other owner notifications — an approval request lost
+        to a transient network error leaves a real person waiting forever.
+        """
+        if not self.app or not self.app.bot:
+            logger.warning("send_inline_prompt called before Telegram was ready")
+            return False
+
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=data)
+              for label, data in buttons]]
+        )
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=text,
+                    parse_mode="Markdown",
+                    reply_markup=markup,
+                )
+                return True
+            except Exception as e:
+                logger.error(
+                    f"send_inline_prompt failed (attempt {attempt + 1}/3): {e}"
+                )
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        return False
+
+    async def _handle_discord_user_callback(self, query, data: str) -> None:
+        """Route an approve/reject tap for a pending Discord DM user.
+
+        All policy and every Discord API call stay in the Discord channel;
+        this only routes the tap and reports what came back.
+        """
+        from .registry import CHANNEL_DISCORD, get_channel
+
+        action, _, target = data.partition(":")
+        if not target:
+            await query.edit_message_text("❌ Invalid Discord user ID.")
+            return
+
+        channel = get_channel(CHANNEL_DISCORD)
+        if channel is None:
+            await query.edit_message_text(
+                "⚠️ Discord channel is not running — nothing was changed."
+            )
+            return
+
+        if action == "discord_approve":
+            ok, label = await channel.approve_user(target)
+            if not ok:
+                await query.edit_message_text(
+                    f"⚠️ Could not approve Discord user `{target}` — check logs.",
+                    parse_mode="Markdown",
+                )
+                return
+            await query.edit_message_text(
+                f"✅ Discord user **{label}** (`{target}`) approved.\n"
+                f"They can now chat with Syne.",
+                parse_mode="Markdown",
+            )
+        else:
+            ok, label = await channel.reject_user(target)
+            if not ok:
+                await query.edit_message_text(
+                    f"⚠️ Could not reject Discord user `{target}` — check logs.",
+                    parse_mode="Markdown",
+                )
+                return
+            await query.edit_message_text(
+                f"🚫 Discord user **{label}** (`{target}`) rejected.",
+                parse_mode="Markdown",
+            )
+
+    async def _handle_discord_guild_callback(self, query, data: str) -> None:
+        """Route an approve/reject tap for a pending Discord server."""
+        from .registry import CHANNEL_DISCORD, get_channel
+
+        action, _, target = data.partition(":")
+        if not target:
+            await query.edit_message_text("❌ Invalid Discord server ID.")
+            return
+
+        channel = get_channel(CHANNEL_DISCORD)
+        if channel is None:
+            await query.edit_message_text(
+                "⚠️ Discord channel is not running — nothing was changed."
+            )
+            return
+
+        if action == "discord_guild_approve":
+            ok, label = await channel.approve_guild(target)
+            if not ok:
+                await query.edit_message_text(
+                    f"⚠️ Could not approve Discord server `{target}` — check logs.",
+                    parse_mode="Markdown",
+                )
+                return
+            await query.edit_message_text(
+                f"✅ Discord server **{label}** (`{target}`) approved.\n"
+                f"Syne will respond there when mentioned.",
+                parse_mode="Markdown",
+            )
+        else:
+            left, label = await channel.reject_guild(target)
+            tail = "Syne has left it." if left else "Could not leave it — check logs."
+            await query.edit_message_text(
+                f"🚫 Discord server **{label}** (`{target}`) rejected. {tail}",
+                parse_mode="Markdown",
+            )
 
     async def process_scheduled_message(
         self,
@@ -9028,6 +9161,16 @@ Or just send me a message!"""
                 pending_key = f"pending_notify:{target_user_id}"
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(pending_key)
+
+        elif data.startswith("discord_approve:") or data.startswith("discord_reject:"):
+            # Pending Discord DM user — decided here because the owner lives
+            # on Telegram; the action itself runs in the Discord channel.
+            await self._handle_discord_user_callback(query, data)
+
+        elif (data.startswith("discord_guild_approve:")
+              or data.startswith("discord_guild_reject:")):
+            # Pending Discord server.
+            await self._handle_discord_guild_callback(query, data)
 
         elif data.startswith("nodes:"):
             await self._handle_nodes_callback(query, data)

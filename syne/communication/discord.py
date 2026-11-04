@@ -47,12 +47,19 @@ from .outbound import (
     split_message,
 )
 from .formatting import markdown_to_discord
-from .registry import CHANNEL_DISCORD, register_channel, unregister_channel
+from .registry import (
+    CHANNEL_DISCORD,
+    CHANNEL_TELEGRAM,
+    get_channel,
+    register_channel,
+    unregister_channel,
+)
 from ..db.models import (
     create_user,
     get_config,
     get_group,
     get_user,
+    update_user,
 )
 
 logger = logging.getLogger("syne.discord")
@@ -79,6 +86,12 @@ class DiscordChannel:
         # double-processed message means a double LLM call and a double reply.
         self._seen: set[int] = set()
         self._seen_order: list[int] = []
+        # Approval prompts already delivered to the owner, keyed "dm:<id>" /
+        # "guild:<id>", so a stranger hammering the bot produces exactly one
+        # Telegram notification instead of one per message. In-memory by
+        # design: after a restart the owner gets one fresh prompt on the next
+        # message, which is better than a request silently lost forever.
+        self._pending_notified: set[str] = set()
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -248,16 +261,22 @@ class DiscordChannel:
                 return text[len(token):].strip()
         return text.strip()
 
-    # ── Authorization (fail-closed until the approval gate lands) ──
+    # ── Authorization ────────────────────────────────────────
 
     async def _authorize_dm(self, message: discord.Message) -> bool:
         """Decide whether to serve a DM.
 
         Mirrors the Telegram DM gate: only the exact string "open" admits an
         unknown sender. Any other value — including a typo or an unreadable one
-        — falls through to approval, and until the Telegram-delivered approval
-        UI exists, approval means "ignore and log". An unreadable policy must
-        never be the thing that admits a stranger.
+        — falls through to approval, which asks the owner on Telegram. An
+        unreadable policy must never be the thing that admits a stranger.
+
+        No row is written while a user is pending, deliberately. The Telegram
+        gate persists the user first and then gates on "did this row exist
+        before this message" (telegram.py: _existing), so only the FIRST
+        message is held and a second one slips through while the owner is
+        still deciding. Here the ABSENCE of the row is the pending state, so
+        every message before approval is held.
         """
         existing = await get_user("discord", str(message.author.id))
         if existing:
@@ -268,11 +287,7 @@ class DiscordChannel:
 
         policy = str(await get_config("discord.dm_policy", "approval"))
         if policy != "open":
-            logger.info(
-                "Discord DM from unknown user %s (%s) held: dm_policy=%r. "
-                "Approval UI is not wired yet — ignoring.",
-                message.author, message.author.id, policy,
-            )
+            await self._handle_pending_dm(message, policy)
             return False
 
         # create_user() is used here instead of the get-or-create helper: that
@@ -309,17 +324,272 @@ class DiscordChannel:
 
         policy = str(await get_config("discord.guild_policy", "allowlist"))
         if policy != "open":
-            logger.info(
-                "Discord message from unapproved guild %r (%s) held: "
-                "guild_policy=%r. Approval UI is not wired yet — ignoring.",
-                message.guild.name, message.guild.id, policy,
-            )
+            await self._handle_pending_guild(message, policy)
             return False
         logger.info(
             "discord.guild_policy=open: serving unregistered guild %s",
             message.guild.id,
         )
         return True
+
+    # ── Approval (prompt delivered on Telegram) ──────────────
+
+    async def _owner_telegram_id(self) -> Optional[str]:
+        """Telegram chat id of the owner, or None if there is not one.
+
+        Approval is asked on Telegram because that is where the owner is, and
+        because ownership is deliberately not establishable over Discord.
+        """
+        from ..db.connection import get_connection
+
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT platform_id FROM users "
+                "WHERE platform = 'telegram' AND access_level = 'owner' "
+                "ORDER BY id LIMIT 1"
+            )
+        return str(row["platform_id"]) if row else None
+
+    async def _ask_owner(self, key: str, text: str, buttons: list) -> bool:
+        """Send one approval prompt to the owner over Telegram.
+
+        `key` dedupes: twenty messages from a stranger must not become twenty
+        prompts. The key is marked only once the send actually succeeded, so a
+        transient Telegram failure does not permanently swallow the request.
+        """
+        if key in self._pending_notified:
+            return False
+
+        telegram = get_channel(CHANNEL_TELEGRAM)
+        if telegram is None:
+            logger.warning(
+                "Cannot ask for approval (%s): Telegram channel not registered.", key
+            )
+            return False
+
+        # getattr rather than a direct call: if this is ever run against a
+        # telegram.py without the cross-channel surface, degrade to a log
+        # instead of raising inside a gateway event handler.
+        prompt = getattr(telegram, "send_inline_prompt", None)
+        if prompt is None:
+            logger.warning(
+                "Cannot ask for approval (%s): Telegram channel has no "
+                "send_inline_prompt.", key
+            )
+            return False
+
+        owner_id = await self._owner_telegram_id()
+        if not owner_id:
+            logger.warning("Cannot ask for approval (%s): no owner on Telegram.", key)
+            return False
+
+        ok = await prompt(owner_id, text, buttons)
+        if ok:
+            self._pending_notified.add(key)
+        return ok
+
+    async def _handle_pending_dm(self, message: discord.Message, policy: str) -> None:
+        """Hold a DM from an unknown user and ask the owner about them."""
+        author = message.author
+        logger.info(
+            "Discord DM from unknown user %s (%s) held: dm_policy=%r — asking owner.",
+            author, author.id, policy,
+        )
+        asked = await self._ask_owner(
+            "dm:%s" % author.id,
+            (
+                "🔔 **New Discord user wants access:**\n\n"
+                "• Name: %s\n"
+                "• Handle: %s\n"
+                "• ID: `%s`\n\n"
+                "Approve or reject?"
+            ) % (author.display_name or author.name, author.name, author.id),
+            [
+                ("✅ Approve", "discord_approve:%s" % author.id),
+                ("❌ Reject", "discord_reject:%s" % author.id),
+            ],
+        )
+        # Only acknowledge on the first held message. Saying it every time
+        # would turn a dedupe win into a spam loop in the user's DM.
+        if asked:
+            await self._safe_send(
+                message.channel,
+                "⏳ Your access is pending approval from the owner. Please wait.",
+            )
+
+    async def _handle_pending_guild(self, message: discord.Message, policy: str) -> None:
+        """Hold a guild message and ask the owner about the server.
+
+        Nothing is sent into the server itself: announcing presence in a place
+        the owner has not approved is exactly what allowlist mode prevents.
+        """
+        guild = message.guild
+        logger.info(
+            "Discord message from unapproved guild %r (%s) held: guild_policy=%r "
+            "— asking owner.",
+            guild.name, guild.id, policy,
+        )
+        await self._ask_owner(
+            "guild:%s" % guild.id,
+            (
+                "🔔 **Syne was added to a Discord server:**\n\n"
+                "• Server: %s\n"
+                "• ID: `%s`\n"
+                "• Members: %s\n\n"
+                "Approve or leave?"
+            ) % (guild.name, guild.id, guild.member_count or "?"),
+            [
+                ("✅ Approve", "discord_guild_approve:%s" % guild.id),
+                ("❌ Reject", "discord_guild_reject:%s" % guild.id),
+            ],
+        )
+
+    # ── Approval actions (invoked from the Telegram callback) ─
+
+    async def _resolve_user_names(self, user_id: str) -> tuple[str, str]:
+        """Best-effort (name, display_name) for a Discord user id."""
+        user = self.client.get_user(int(user_id)) if self.client else None
+        if user is None and self.client:
+            try:
+                user = await self.client.fetch_user(int(user_id))
+            except Exception as e:
+                logger.debug("Discord user %s unresolvable: %s", user_id, e)
+        if user is None:
+            return str(user_id), str(user_id)
+        return user.name, user.display_name or user.name
+
+    async def _dm_user(self, user_id: str, text: str) -> None:
+        """Best-effort DM to a Discord user (approval / rejection notice)."""
+        if not self.client:
+            return
+        try:
+            user = self.client.get_user(int(user_id))
+            if user is None:
+                user = await self.client.fetch_user(int(user_id))
+            await user.send(text)
+        except Exception as e:
+            logger.debug("Could not DM Discord user %s: %s", user_id, e)
+
+    async def approve_user(self, user_id: str) -> tuple[bool, str]:
+        """Admit a pending Discord DM user as "public". Returns (ok, label).
+
+        access_level is pinned to "public" and never derived from a count, so
+        this path cannot hand out ownership the way the get-or-create helper
+        can (models.py promote blocks).
+        """
+        try:
+            name, display = await self._resolve_user_names(user_id)
+            existing = await get_user("discord", str(user_id))
+            if existing:
+                await update_user("discord", str(user_id), access_level="public")
+            else:
+                await create_user(
+                    name=name,
+                    platform="discord",
+                    platform_id=str(user_id),
+                    display_name=display,
+                    access_level="public",
+                )
+        except Exception as e:
+            logger.error("Approving Discord user %s failed: %s", user_id, e)
+            return False, str(user_id)
+
+        self._pending_notified.discard("dm:%s" % user_id)
+        await self._dm_user(
+            user_id, "✅ Your access has been approved. You can send messages now."
+        )
+        logger.info("Discord user %s approved by owner", user_id)
+        return True, display
+
+    async def reject_user(self, user_id: str) -> tuple[bool, str]:
+        """Reject a pending Discord DM user. Returns (ok, label).
+
+        The row IS written here, as "blocked": every later message then costs
+        one indexed lookup and dies at the blocked check in _authorize_dm,
+        instead of re-entering the gate and re-asking the owner after a
+        restart has cleared the in-memory dedupe.
+        """
+        try:
+            name, display = await self._resolve_user_names(user_id)
+            existing = await get_user("discord", str(user_id))
+            if existing:
+                await update_user("discord", str(user_id), access_level="blocked")
+            else:
+                await create_user(
+                    name=name,
+                    platform="discord",
+                    platform_id=str(user_id),
+                    display_name=display,
+                    access_level="blocked",
+                )
+        except Exception as e:
+            logger.error("Rejecting Discord user %s failed: %s", user_id, e)
+            return False, str(user_id)
+
+        self._pending_notified.discard("dm:%s" % user_id)
+        await self._dm_user(user_id, "Sorry, your access request was not approved.")
+        logger.info("Discord user %s rejected by owner", user_id)
+        return True, display
+
+    async def approve_guild(self, guild_id: str) -> tuple[bool, str]:
+        """Register a Discord server so the bot may answer in it.
+
+        Upsert rather than insert-if-absent: a server that was approved,
+        rejected and re-added must come back enabled, not collide.
+        """
+        from ..db.connection import get_connection
+
+        guild = self.client.get_guild(int(guild_id)) if self.client else None
+        if guild is None and self.client:
+            try:
+                guild = await self.client.fetch_guild(int(guild_id))
+            except Exception as e:
+                logger.warning("Discord guild %s unreachable: %s", guild_id, e)
+        name = guild.name if guild is not None else "Guild %s" % guild_id
+
+        try:
+            require_mention = bool(await get_config("discord.require_mention", True))
+            async with get_connection() as conn:
+                await conn.execute(
+                    """INSERT INTO groups
+                           (name, platform, platform_group_id, enabled,
+                            require_mention, settings)
+                       VALUES ($1, 'discord', $2, true, $3, '{}')
+                       ON CONFLICT (platform, platform_group_id) DO UPDATE
+                           SET enabled = true, name = EXCLUDED.name""",
+                    name, str(guild_id), require_mention,
+                )
+        except Exception as e:
+            logger.error("Approving Discord guild %s failed: %s", guild_id, e)
+            return False, name
+
+        self._pending_notified.discard("guild:%s" % guild_id)
+        logger.info("Discord guild %r (%s) approved by owner", name, guild_id)
+        return True, name
+
+    async def reject_guild(self, guild_id: str) -> tuple[bool, str]:
+        """Leave a rejected Discord server. Returns (left, label).
+
+        Uses Guild.leave() (verified present on discord.py 2.7.1). If the
+        guild is not in cache there is nothing to leave from - report that
+        rather than claiming success.
+        """
+        guild = self.client.get_guild(int(guild_id)) if self.client else None
+        name = guild.name if guild is not None else "Guild %s" % guild_id
+        left = False
+        if guild is not None:
+            try:
+                await guild.leave()
+                left = True
+            except Exception as e:
+                logger.error("Failed to leave Discord guild %s: %s", guild_id, e)
+        else:
+            logger.warning(
+                "Cannot leave Discord guild %s: not in cache (already removed?)",
+                guild_id,
+            )
+        self._pending_notified.discard("guild:%s" % guild_id)
+        return left, name
 
     # ── Inbound context ──────────────────────────────────────
 
