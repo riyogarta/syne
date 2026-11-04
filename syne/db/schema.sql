@@ -467,7 +467,7 @@ INSERT INTO config (key, value, description) VALUES
     ('time.format.full', '"{day_name}, {date} {time}"', 'Default full datetime format template'),
     -- session.max_tool_rounds removed in v0.18.5 (no hard limit, loop detection handles runaway)
     -- Telegram channel config
-    ('telegram.dm_policy', '"approval"', 'DM policy: approval (owner approves new users) or open (accept all)'),
+    ('telegram.dm_policy', '"approval"', 'DM policy for a Telegram user who has never messaged before. "open" admits them immediately; ANY other value, including a typo or unparseable one, falls through to "approval", where the owner must approve via the inline buttons before the user can chat. Read at the DM gate on every first contact, so a change takes effect without a restart. Default "approval".'),
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
     ('telegram.require_mention', 'true', 'Default require_mention for new groups'),
     ('telegram.bot_trigger_name', 'null', 'Bot trigger name (auto-reads from identity.name if null)'),

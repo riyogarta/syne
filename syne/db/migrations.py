@@ -714,6 +714,28 @@ async def _m26_trusted_group_ids_description(conn) -> None:
     )
 
 
+async def _m27_dm_policy_description(conn) -> None:
+    """Refresh telegram.dm_policy description (Riyo, 4 Nov 2026).
+
+    Live DBs carry prose from an older release: "DM policy: open (accept all)
+    or registered (only known users)". "registered" is not a value any code
+    path recognises, and the text omits "approval" - which is both the
+    default and, since the key was wired up in 1.20.97, the branch every
+    unrecognised value now falls through to. So `syne config list` was
+    offering an option that does not exist while hiding the real one.
+
+    Description-only: the value is never touched, so an owner running "open"
+    on purpose stays open. schema.sql seeds with ON CONFLICT DO NOTHING and
+    cannot refresh prose on a row that already exists - hence this migration.
+    Text is kept byte-identical to the schema.sql seed so fresh and migrated
+    installs read the same.
+    """
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'telegram.dm_policy'",
+        'DM policy for a Telegram user who has never messaged before. "open" admits them immediately; ANY other value, including a typo or unparseable one, falls through to "approval", where the owner must approve via the inline buttons before the user can chat. Read at the DM gate on every first contact, so a change takes effect without a restart. Default "approval".',
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -741,6 +763,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (24, _m24_rule_checker_timeout, "transactional"),
     (25, _m25_drop_dead_config, "transactional"),
     (26, _m26_trusted_group_ids_description, "transactional"),
+    (27, _m27_dm_policy_description, "transactional"),
 ]
 
 
