@@ -286,6 +286,111 @@ def markdown_to_whatsapp(text: str) -> str:
     return '\n'.join(result)
 
 
+def markdown_to_discord(text: str) -> str:
+    """Convert markdown-formatted text to Discord-compatible markdown.
+
+    Discord renders its own subset of markdown, so most LLM output already
+    survives untouched. This function only fixes the places where standard
+    markdown and Discord's flavour genuinely disagree:
+
+      * ``__text__``  Standard markdown reads this as BOLD; Discord renders it
+                      as UNDERLINE. Rewritten to ``**text**`` so the intent
+                      (emphasis) survives instead of silently changing meaning.
+      * ``####+``     Discord supports exactly three heading levels. A level-4+
+                      heading would render as a literal "#### Heading" line, so
+                      it degrades to bold text.
+      * tables        Not rendered at all - pipe syntax comes out as raw text.
+                      Reuses _render_table_plain() to emit an aligned
+                      triple-backtick block, exactly like the WhatsApp path.
+      * ``- [ ]``     Task lists are not supported; the checkbox becomes a
+                      literal. Mapped to the unicode ballot box characters.
+      * ``---``       Horizontal rules are not supported and show as plain
+                      dashes. Replaced with a box-drawing line.
+
+    Left deliberately alone, because Discord handles them natively:
+    ``**bold**``, ``*italic*``, ``~~strike~~``, ``` `code` ```, fenced code
+    blocks, ``> quote``, ``- bullet``, ``1. ordered``, ``||spoiler||``,
+    ``-# subtext`` and masked links ``[label](url)``.
+
+    Returns text, never HTML: Discord has no HTML support.
+    """
+    if not text:
+        return text
+
+    result = []
+    lines = text.split('\n')
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Fenced code block: pass through verbatim, never reformat the inside.
+        if line.strip().startswith('```'):
+            code_lines = [line]
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith('```'):
+                code_lines.append(lines[i])
+                i += 1
+            if i < len(lines):
+                code_lines.append(lines[i])
+                i += 1
+            result.append('\n'.join(code_lines))
+            continue
+
+        # Markdown table -> aligned monospace block (Discord renders no tables).
+        stripped = line.strip()
+        # Discord's spoiler syntax ||text|| also begins with a pipe and holds
+        # two of them, so a naive pipe count reads it as a two-column table and
+        # would render the spoiler away. Count only pipes that are NOT part of
+        # a '||' pair.
+        cell_pipes = stripped.replace('||', '').count('|')
+        is_table_row = cell_pipes >= 2 and not stripped.startswith('```')
+        if is_table_row:
+            table_lines = []
+            while i < len(lines):
+                s = lines[i].strip()
+                if not s or s.replace('||', '').count('|') < 2:
+                    break
+                if re.match(r'^[\s|]*[\-:]+[\s\-:|]*$', s):
+                    i += 1
+                    continue
+                table_lines.append(lines[i])
+                i += 1
+            if table_lines:
+                result.append(_render_table_plain(table_lines))
+            continue
+
+        # Horizontal rule -> box-drawing line ('---' would show literally).
+        if re.match(r'^\s*(?:-{3,}|\*{3,}|_{3,})\s*$', line):
+            result.append('\u2500' * 20)
+            i += 1
+            continue
+
+        # Heading level 4-6 -> bold (Discord only has three levels).
+        deep_header = re.match(r'^#{4,6}\s+(.+)$', line)
+        if deep_header:
+            result.append('**%s**' % deep_header.group(1).strip())
+            i += 1
+            continue
+
+        formatted = line
+
+        # Task list checkboxes -> unicode boxes.
+        formatted = re.sub(r'^(\s*[-*+]\s+)\[[xX]\]\s+',
+                           '\\1' + '\u2611 ', formatted)
+        formatted = re.sub(r'^(\s*[-*+]\s+)\[\s?\]\s+',
+                           '\\1' + '\u2610 ', formatted)
+
+        # __bold__ (standard) -> **bold**, else Discord would underline it.
+        # Done before any other inline pass so the markers are still intact.
+        formatted = re.sub(r'__(?!_)(.+?)__(?!_)', r'**\1**', formatted)
+
+        result.append(formatted)
+        i += 1
+
+    return '\n'.join(result)
+
+
 def _strip_md(text: str) -> str:
     """Strip markdown formatting from text (for monospace display)."""
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)

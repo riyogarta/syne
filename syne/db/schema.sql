@@ -471,6 +471,12 @@ INSERT INTO config (key, value, description) VALUES
     ('telegram.group_policy', '"allowlist"', 'Group policy: allowlist (only registered groups) or open'),
     ('telegram.require_mention', 'true', 'Default require_mention for new groups'),
     ('telegram.bot_trigger_name', 'null', 'Bot trigger name (auto-reads from identity.name if null)'),
+    -- Discord channel config (channel lives in syne/communication/discord.py)
+    ('discord.enabled', 'false', 'Master switch for the Discord channel. false = the channel is never started even if a bot token is stored. Read once at boot, so changing it needs a restart. Default false so adding the dependency alone changes nothing.'),
+    ('discord.dm_policy', '"approval"', 'DM policy for a Discord user who has never messaged before. "open" admits them immediately; ANY other value, including a typo or unparseable one, falls through to "approval", where the owner must approve via the inline buttons on Telegram before the user can chat. Read at the DM gate on every first contact, so a change takes effect without a restart. Default "approval". Note: Discord only delivers a DM to the bot if the sender shares a server with it.'),
+    ('discord.guild_policy', '"allowlist"', 'Guild (server) policy: allowlist = the bot stays silent in a server until the owner approves it, open = any server it is added to is accepted. Approval is per server, not per channel, so a new channel inside an approved server needs no second approval. Default "allowlist".'),
+    ('discord.require_mention', 'true', 'Default require_mention for newly approved Discord servers. Kept true because without the privileged Message Content intent Discord only sends message text when the bot is mentioned, replied to, or DMed — so true also matches what the bot can actually read.'),
+    ('discord.members', '[]', 'JSON array of per-entry Discord settings managed by /discordmember on Telegram. Each entry: {"id", "name", "kind": "dm"|"guild", "model", "blocked"}. model null = use the globally active model. Mirrors the shape whatsapp uses for its own allowlist.'),
     -- Rate limiting config
     ('ratelimit.max_requests', '4', 'Max requests per user per window (default 4)'),
     ('ratelimit.window_seconds', '60', 'Rate limit window in seconds (default 60)'),

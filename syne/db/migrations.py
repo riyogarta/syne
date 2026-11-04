@@ -736,6 +736,47 @@ async def _m27_dm_policy_description(conn) -> None:
     )
 
 
+async def _m28_seed_discord_config(conn) -> None:
+    """Seed discord.* channel config (Riyo, 4 Nov 2026).
+
+    Discord joins Telegram as a core channel, living in
+    syne/communication/discord.py rather than being bolted on as an ability.
+
+    All five keys are NEW, so there is no prior value to converge and no
+    assumed-old-default to guess wrong about - seed-only via ON CONFLICT DO
+    NOTHING, which also makes this idempotent. Fresh installs get identical
+    rows from schema.sql; the prose below is copied from that same seed so a
+    migrated DB and a fresh one read the same text in `syne config list`.
+
+    Defaults are deliberately fail-closed. discord.enabled is false, so
+    applying this migration starts nothing and changes nothing about the
+    Telegram or WhatsApp paths - the owner opts in by storing a bot token and
+    flipping the switch. dm_policy and guild_policy default to approval and
+    allowlist, mirroring the Telegram gates they are modelled on.
+    """
+    rows = [
+        ('discord.enabled', 'false',
+         'Master switch for the Discord channel. false = the channel is never started even if a bot token is stored. Read once at boot, so changing it needs a restart. Default false so adding the dependency alone changes nothing.'),
+        ('discord.dm_policy', '"approval"',
+         'DM policy for a Discord user who has never messaged before. "open" admits them immediately; ANY other value, including a typo or unparseable one, falls through to "approval", where the owner must approve via the inline buttons on Telegram before the user can chat. Read at the DM gate on every first contact, so a change takes effect without a restart. Default "approval". Note: Discord only delivers a DM to the bot if the sender shares a server with it.'),
+        ('discord.guild_policy', '"allowlist"',
+         'Guild (server) policy: allowlist = the bot stays silent in a server until the owner approves it, open = any server it is added to is accepted. Approval is per server, not per channel, so a new channel inside an approved server needs no second approval. Default "allowlist".'),
+        ('discord.require_mention', 'true',
+         'Default require_mention for newly approved Discord servers. Kept true because without the privileged Message Content intent Discord only sends message text when the bot is mentioned, replied to, or DMed — so true also matches what the bot can actually read.'),
+        ('discord.members', '[]',
+         'JSON array of per-entry Discord settings managed by /discordmember on Telegram. Each entry: {"id", "name", "kind": "dm"|"guild", "model", "blocked"}. model null = use the globally active model. Mirrors the shape whatsapp uses for its own allowlist.'),
+    ]
+    for key, value, description in rows:
+        await conn.execute(
+            """
+            INSERT INTO config (key, value, description)
+            VALUES ($1, $2::text::jsonb, $3)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            key, value, description,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -764,6 +805,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (25, _m25_drop_dead_config, "transactional"),
     (26, _m26_trusted_group_ids_description, "transactional"),
     (27, _m27_dm_policy_description, "transactional"),
+    (28, _m28_seed_discord_config, "transactional"),
 ]
 
 

@@ -197,6 +197,59 @@ async def run():
         else:
             logger.debug("WhatsApp ability not registered.")
 
+        # Start Discord if explicitly enabled AND a bot token is stored.
+        #
+        # Opt-in by design: adding the discord.py dependency must not change
+        # the behaviour of an existing install, so discord.enabled defaults to
+        # false (schema.sql / migration 28) and nothing starts until the owner
+        # stores a token and flips it.
+        #
+        # The import is deliberately lazy. communication/discord.py does
+        # `import discord`, so importing DiscordChannel at module scope would
+        # turn a missing dependency into a boot-time ImportError and take
+        # Telegram down with it. Here the worst case is a logged warning.
+        try:
+            from .db.models import get_config as _get_cfg
+
+            _raw_enabled = await _get_cfg("discord.enabled", False)
+            # bool("false") is True, so a string-typed config value would fail
+            # OPEN under a naive bool(). Only a real True or the exact text
+            # "true" counts; a typo or null leaves the channel off.
+            discord_enabled = (
+                _raw_enabled is True
+                or str(_raw_enabled).strip().lower() == "true"
+            )
+
+            if not discord_enabled:
+                logger.debug("Discord channel disabled (discord.enabled is not true).")
+            else:
+                from .db.credentials import get_discord_bot_token
+
+                discord_token = await get_discord_bot_token()
+                if not discord_token:
+                    logger.warning(
+                        "discord.enabled is true but no bot token is stored "
+                        "(credential.discord_bot_token). Discord not started."
+                    )
+                else:
+                    from .communication.discord import DiscordChannel
+
+                    discord_ch = DiscordChannel(agent, discord_token)
+                    await discord_ch.start()
+                    # Appended so the existing `finally` drain calls .stop().
+                    channels.append(discord_ch)
+                    logger.info("Discord channel active.")
+        except ImportError as e:
+            logger.warning(
+                f"Discord is enabled but its dependency is missing: {e}. "
+                "Run `syne update` to install discord.py."
+            )
+        except Exception as e:
+            logger.error(
+                f"Discord channel failed to start: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
+
         # Start Gateway (WebSocket server for remote nodes) — always on
         gateway = None
         try:

@@ -17,6 +17,9 @@ logger = logging.getLogger("syne.db.credentials")
 # Telegram
 CRED_TELEGRAM_BOT_TOKEN = "credential.telegram_bot_token"
 
+# Discord
+CRED_DISCORD_BOT_TOKEN = "credential.discord_bot_token"
+
 # Claude OAuth
 CRED_CLAUDE_ACCESS_TOKEN = "credential.claude_oauth_access_token"
 CRED_CLAUDE_REFRESH_TOKEN = "credential.claude_oauth_refresh_token"
@@ -59,6 +62,31 @@ async def set_telegram_bot_token(token: str) -> None:
         CRED_TELEGRAM_BOT_TOKEN,
         token,
         "Telegram bot token (migrated from .env)"
+    )
+
+
+# ============================================================
+# DISCORD BOT TOKEN
+# ============================================================
+#
+# Discord authenticates automation with a *bot account* token, created in the
+# Discord developer portal — a separate identity from any human account, shown
+# with an APP badge. Automating a normal user account ("self-bot") is forbidden
+# by Discord and can get that account terminated, so a bot token is the only
+# sanctioned path. Storing it here keeps it in the same encrypted config store
+# as the Telegram token rather than in a file.
+
+async def get_discord_bot_token() -> Optional[str]:
+    """Get Discord bot token from DB. None if Discord was never configured."""
+    return await get_credential(CRED_DISCORD_BOT_TOKEN)
+
+
+async def set_discord_bot_token(token: str) -> None:
+    """Store Discord bot token in DB."""
+    await set_credential(
+        CRED_DISCORD_BOT_TOKEN,
+        token,
+        "Discord bot token (from the Discord developer portal, Bot → Token)"
     )
 
 
