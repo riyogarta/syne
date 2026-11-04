@@ -695,6 +695,86 @@ class Conversation:
         # 2b. Run memory recall + graph recall IN PARALLEL (saves ~400ms)
         from .memory.graph import recall_graph as _recall_graph
 
+        # 2c. Cross-session history recall - CODE-ENFORCED, not left to the LLM.
+        #     Rationale (Riyo, 4 Nov 2026): history_search is a tool the model
+        #     has to DECIDE to call, and in practice it kept answering "tidak ada
+        #     di konteksku" about things the owner had discussed in another chat.
+        #     Root cause is a category error no prompt can fix: "context" is this
+        #     session's window, "history" is the messages table across ALL
+        #     sessions. A rule telling the model to search first merely stacks
+        #     another instruction onto the layer that already failed. So hoist it
+        #     into context the way memory is hoisted - no decision, no tool call.
+        #
+        #     PRIVACY - the load-bearing part. sessions.user_id is NOT the sender
+        #     of a message: a group session is owned by whoever created it (YBA
+        #     is owned by user 1), and the messages table has no sender column at
+        #     all (metadata is empty on every user row). So "only this person's
+        #     own words" CANNOT be expressed as sessions.user_id = sender - that
+        #     would surface other members' group turns as if they were the
+        #     owner's. What IS reliable: a DM session's platform_chat_id equals
+        #     that person's own platform_id. Scoping to it admits only the
+        #     sender's own private chats and structurally excludes every group
+        #     and every scheduled:* session. If Yuli triggers recall in YBA,
+        #     Riyo's DM rows are not withheld by policy - they never enter the
+        #     result set at all.
+        _raw_he = await _get_recall_config("history.auto_recall", True)
+        if isinstance(_raw_he, str):
+            _hist_enabled = _raw_he.strip().lower() not in ("false", "0", "no", "off", "")
+        else:
+            _hist_enabled = bool(_raw_he)
+        try:
+            _hist_limit = int(await _get_recall_config("history.auto_recall_limit", 3))
+        except (TypeError, ValueError):
+            _hist_limit = 3
+        try:
+            _hist_min_sim = float(
+                await _get_recall_config("history.auto_recall_min_similarity", 0.45)
+            )
+        except (TypeError, ValueError):
+            _hist_min_sim = 0.45
+
+        # Sender identity: inbound is the single source of truth. In a group this
+        # is the person who actually typed; in a DM it is the chat owner.
+        _sender_pid = None
+        if self.inbound and self.inbound.sender_id:
+            _sender_pid = str(self.inbound.sender_id)
+        elif not self.is_group:
+            _sender_pid = str(self.user.get("platform_id") or "") or None
+
+        async def _do_history_recall():
+            if not _hist_enabled or not _sender_pid:
+                return []
+            # Same guard as memory recall: a 1-word query carries no signal.
+            _hw = [w for w in (recall_query or user_message).strip().split() if len(w) > 1]
+            if len(_hw) < 2:
+                return []
+            try:
+                _emb = await self.memory.provider.embed(recall_query or user_message)
+                _vec = getattr(_emb, "vector", None)
+                if not _vec:
+                    return []
+                async with get_connection() as conn:
+                    return await conn.fetch(
+                        """
+                        SELECT m.id, m.content, m.created_at,
+                               1 - (m.embedding <=> $1::vector) AS similarity
+                        FROM messages m
+                        JOIN sessions s ON s.id = m.session_id
+                        WHERE m.role = 'user'
+                          AND m.embedding IS NOT NULL
+                          AND m.session_id <> $2
+                          AND s.platform_chat_id = $3
+                          AND 1 - (m.embedding <=> $1::vector) >= $4
+                        ORDER BY (m.embedding <=> $1::vector) ASC
+                        LIMIT $5
+                        """,
+                        str(_vec), self.session_id, _sender_pid,
+                        _hist_min_sim, _hist_limit,
+                    )
+            except Exception as e:
+                logger.debug(f"History recall skipped: {e}")
+                return []
+
         async def _do_memory_recall():
             return await self.memory.recall(
                 query=recall_query or user_message,
@@ -712,8 +792,8 @@ class Conversation:
                 logger.debug(f"Graph recall skipped: {e}")
                 return []
 
-        memories, graph_lines = await asyncio.gather(
-            _do_memory_recall(), _do_graph_recall()
+        memories, graph_lines, past_convos = await asyncio.gather(
+            _do_memory_recall(), _do_graph_recall(), _do_history_recall()
         )
 
         # 3. Conversation history
@@ -763,6 +843,41 @@ class Conversation:
         else:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
+
+        # 4c. Cross-session history (fetched in parallel above). Injected as
+        #     context so that "it is not in my context" stops being a true
+        #     sentence whenever the sender's own earlier chat holds the answer.
+        if past_convos:
+            from .memory.engine import format_relative_time as _frt
+            try:
+                _h_locale = (await _load_time_config())['time.locale']
+            except Exception:
+                _h_locale = 'id'
+            hist_lines = [
+                "# Relevant Past Conversations (this sender's other chats)",
+                "Things THIS sender said to you in their OWN private chats, "
+                "outside this session. Scoped by code to their own DM sessions - "
+                "never another person's.",
+                "These are real prior statements by the sender. If they refer to "
+                "something discussed in PM, the answer may be right here - do "
+                "NOT claim you have no knowledge of a topic that appears below.",
+                "In a group, do not expose more of this than the sender has "
+                "already raised in that group themselves.",
+                "",
+            ]
+            for _h in past_convos:
+                _rel = _frt(_h["created_at"], locale=_h_locale)
+                _when = f" [{_rel}]" if _rel else ""
+                _txt = " ".join((_h["content"] or "").split())
+                if len(_txt) > 400:
+                    _txt = _txt[:399] + "\u2026"
+                hist_lines.append(f"- (match: {_h['similarity']:.0%}){_when} {_txt}")
+            messages.append(ChatMessage(role="system", content="\n".join(hist_lines),
+                                        metadata={"volatile": True}))
+            logger.info(
+                f"History recall: {len(past_convos)} rows from other sessions "
+                f"(sender={_sender_pid}, excluded session={self.session_id})"
+            )
 
         # 4b. Knowledge graph context (already fetched in parallel above)
         if graph_lines:
