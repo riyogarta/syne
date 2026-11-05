@@ -84,6 +84,7 @@ from neonize.events import (
     MessageEv,
     PairStatusEv,
 )
+from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 from neonize.utils.jid import build_jid
 
 from ..agent import SyneAgent
@@ -108,6 +109,85 @@ logger = logging.getLogger("syne.whatsapp")
 # readable on a phone. Passed explicitly because split_message's default is a
 # Telegram assumption, not a WhatsApp fact.
 WHATSAPP_MAX_MESSAGE = 4096
+
+
+class _ChatPresenceIndicator:
+    """Keeps WhatsApp's "typing…" indicator alive while the agent thinks.
+
+    The WhatsApp counterpart of telegram.py's _TypingIndicator. neonize
+    exposes send_chat_presence(jid, state, media) (aioze/client.py:2213).
+    WhatsApp expires a COMPOSING state by itself after a few seconds, so it
+    must be refreshed on a loop; on exit PAUSED is sent so the indicator
+    clears at once instead of lingering until that expiry.
+
+    Best-effort by design: every failure is swallowed. A presence update is
+    cosmetic and must never take down message handling.
+
+    No Presence.AVAILABLE is broadcast — that would park the account as
+    permanently "online" and rewrite its last-seen, which is the owner's
+    call, not this channel's. whatsmeow may therefore refuse chat presence
+    outright; if the first send fails the loop exits rather than retrying
+    for the whole max_duration. The 👀 receipt does not depend on it.
+
+    max_duration caps the loop so a hung LLM call cannot leave it running.
+    """
+
+    def __init__(self, channel, chat_jid: str, interval: float = 8.0,
+                 max_duration: float = 300.0):
+        self._channel = channel
+        self._chat_jid = chat_jid
+        self._interval = interval
+        self._max_duration = max_duration
+        self._task: Optional[asyncio.Task] = None
+
+    async def _send(self, state) -> None:
+        client = self._channel.client
+        if not client:
+            return
+        await client.send_chat_presence(
+            self._channel._to_jid(self._chat_jid),
+            state,
+            ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT,
+        )
+
+    async def _loop(self) -> None:
+        start = time.monotonic()
+        try:
+            while True:
+                if time.monotonic() - start > self._max_duration:
+                    logger.warning(
+                        "[whatsapp] typing indicator timeout (%ss) for %s",
+                        self._max_duration, self._chat_jid,
+                    )
+                    return
+                try:
+                    await self._send(ChatPresence.CHAT_PRESENCE_COMPOSING)
+                except Exception as e:
+                    logger.debug("[whatsapp] chat presence unavailable: %s", e)
+                    return
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        task, self._task = self._task, None
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        try:
+            await self._send(ChatPresence.CHAT_PRESENCE_PAUSED)
+        except Exception as e:
+            logger.debug("[whatsapp] chat presence clear failed: %s", e)
 
 # How long a sent message stays "ours" for echo suppression. whatsmeow echoes
 # our own sends back as from_me; in a DM self-chat those are not dropped by the
@@ -859,6 +939,13 @@ class WhatsAppChannel:
         if image_metadata:
             metadata["image"] = image_metadata
 
+        # 👀 receipt + typing indicator. The trigger word is mandatory
+        # everywhere on WhatsApp (DM included), so anything reaching this
+        # line was addressed to us by name — no extra check needed.
+        await self._react(chat_jid, sender_jid, msg_id, "👀")
+        presence = _ChatPresenceIndicator(self, chat_jid)
+        await presence.start()
+
         try:
             response = await self.agent.handle_message(
                 platform="whatsapp",
@@ -886,8 +973,34 @@ class WhatsAppChannel:
             from .errors import classify_error
 
             await self.send_response(chat_jid, classify_error(e))
+        finally:
+            await presence.stop()
 
     # ── Outbound ─────────────────────────────────────────────
+
+    async def _react(self, chat_jid: str, sender_jid: str, msg_id: str,
+                     emoji: str = "👀") -> None:
+        """React to an inbound message — the WhatsApp counterpart of the 👀
+        read receipt Telegram sends (telegram.py:708-710, 759-761).
+
+        neonize has no one-shot send_reaction: build_reaction() returns a
+        Message that still has to be handed to send_message()
+        (aioze/client.py:1025).
+
+        Best-effort: a failed receipt must never block the real reply. Note
+        this is a reaction, NOT mark_read — nothing here marks the chat as
+        read, and Syne never calls neonize's mark_read anywhere.
+        """
+        client = self.client
+        if not client or not msg_id:
+            return
+        try:
+            reaction = await client.build_reaction(
+                self._to_jid(chat_jid), self._to_jid(sender_jid), msg_id, emoji,
+            )
+            await client.send_message(self._to_jid(chat_jid), reaction)
+        except Exception as e:
+            logger.debug("[whatsapp] reaction %r failed: %s", emoji, e)
 
     async def send_response(self, chat_jid: str, text: str) -> None:
         """Send an agent response, applying the shared outbound pipeline."""

@@ -280,6 +280,14 @@ class DiscordChannel:
             guild_name, message.author, message.author.id, text[:100],
         )
 
+        # 👀 read receipt, matching Telegram and WhatsApp. Without the
+        # MESSAGE_CONTENT intent Discord only delivers text when the bot
+        # is addressed, so reaching this line already means it is for us.
+        try:
+            await message.add_reaction("👀")
+        except Exception as e:
+            logger.debug("Discord 👀 receipt failed: %s", e)
+
         await self._dispatch(message, text, is_dm)
 
     def _strip_mention(self, text: str) -> str:
