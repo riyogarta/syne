@@ -7620,6 +7620,7 @@ Or just send me a message!"""
         name = entry.get("name") or "(no name)"
         blocked = bool(entry.get("blocked"))
         mention = bool(entry.get("require_mention", True))
+        access = entry.get("access_level") or "public"
 
         lines = [
             f"{icon} <b>{name}</b>",
@@ -7627,18 +7628,36 @@ Or just send me a message!"""
             f"Type: {'Server' if is_guild else 'DM'}",
             f"ID: <code>{eid}</code>",
             f"Model: {model_label}",
-            f"Status: {('⛔ Disabled' if is_guild else '🚫 Blocked') if blocked else '✅ Active'}",
         ]
+        # Servers have no access level: groups carries enabled/require_mention,
+        # and per-member access lives in groups.settings['members'].
+        if not is_guild:
+            lines.append(f"Access: <b>{access}</b>")
+        lines.append(
+            f"Status: {('⛔ Disabled' if is_guild else '🚫 Blocked') if blocked else '✅ Active'}"
+        )
         if is_guild:
             lines.append(f"Require mention: {'yes' if mention else 'no'}")
         if not entry.get("exists", True):
             lines.append("")
             lines.append("⚠️ No database row — this is a leftover model override.")
 
-        buttons = [
-            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"dc:edit_name:{eid}")],
-            [InlineKeyboardButton("🤖 Set Model", callback_data=f"dc:model_list:{eid}")],
-        ]
+        buttons = []
+        # "blocked" is deliberately absent: it is the same users.access_level
+        # field the Block/Unblock button below already writes, so listing it
+        # here would be a second control for one piece of state. Tapping
+        # "public" on a blocked user unblocks them.
+        if not is_guild:
+            level_row = []
+            for lvl in ("owner", "family", "public"):
+                check = " ✓" if lvl == access else ""
+                level_row.append(InlineKeyboardButton(
+                    f"{lvl}{check}", callback_data=f"dc:setlvl:{eid}:{lvl}"))
+            buttons.append(level_row)
+        buttons.append(
+            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"dc:edit_name:{eid}")])
+        buttons.append(
+            [InlineKeyboardButton("🤖 Set Model", callback_data=f"dc:model_list:{eid}")])
         if is_guild:
             buttons.append([InlineKeyboardButton(
                 "🔕 Turn mention OFF" if mention else "🔔 Turn mention ON",
@@ -7788,6 +7807,38 @@ Or just send me a message!"""
                 name = after.get("name") or eid
                 await query.answer(
                     f"{'Blocked' if want_blocked else 'Unblocked'} {name}")
+            await self._discordmembers_menu_detail(query, eid)
+
+        elif action == "setlvl" and len(parts) >= 4:
+            new_level = parts[3]
+            if new_level not in ("owner", "family", "public"):
+                await query.answer("Unknown level", show_alert=True)
+                return
+            entries = await self._dc_collect()
+            entry = entries.get(eid)
+            if not entry:
+                await query.answer("Entry not found", show_alert=True)
+                return
+            if entry.get("kind") == "guild":
+                await query.answer("Servers have no access level", show_alert=True)
+                return
+            if not entry.get("exists", True):
+                await query.answer("No database row to change", show_alert=True)
+                await self._discordmembers_menu_detail(query, eid)
+                return
+
+            # No first-owner / self-downgrade guard needed here, unlike
+            # /members: get_first_owner is pinned to platform 'telegram', and
+            # the caller is a Telegram user while the target is a Discord row,
+            # so neither can be the same account.
+            await update_user("discord", eid, access_level=new_level)
+
+            # Verify against the table rather than trusting the write.
+            after = (await self._dc_collect()).get(eid) or {}
+            if (after.get("access_level") or "public") != new_level:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Access set to {new_level}")
             await self._discordmembers_menu_detail(query, eid)
 
         elif action == "mention" and eid:
