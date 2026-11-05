@@ -84,7 +84,7 @@ from neonize.events import (
     MessageEv,
     PairStatusEv,
 )
-from neonize.utils.enum import ChatPresence, ChatPresenceMedia, Presence
+from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 from neonize.utils.jid import build_jid
 
 from ..agent import SyneAgent
@@ -123,18 +123,11 @@ class _ChatPresenceIndicator:
     Best-effort by design: every failure is swallowed. A presence update is
     cosmetic and must never take down message handling.
 
-    Requires Presence.AVAILABLE to have been broadcast first — WhatsApp
-    silently drops chat presence from an account that never announced
-    itself, which is exactly what happened when this shipped without it in
-    1.22.7: the 👀 receipt arrived but no "typing…" ever showed. on_connected
-    now sends it once per connect.
-
-    The cost, accepted deliberately by the owner: the account reads as
-    "online" for as long as Syne is connected, and its last-seen moves with
-    it. That is a privacy trade, not a free win.
-
-    If a send still fails the loop exits rather than retrying for the whole
-    max_duration. The 👀 receipt does not depend on presence at all.
+    No Presence.AVAILABLE is broadcast — that would park the account as
+    permanently "online" and rewrite its last-seen, which is the owner's
+    call, not this channel's. whatsmeow may therefore refuse chat presence
+    outright; if the first send fails the loop exits rather than retrying
+    for the whole max_duration. The 👀 receipt does not depend on it.
 
     max_duration caps the loop so a hung LLM call cannot leave it running.
     """
@@ -396,19 +389,6 @@ class WhatsAppChannel:
 
             # Only advertise the channel once it can actually send.
             register_channel(CHANNEL_WHATSAPP, self)
-
-            # Chat presence (the "typing…" indicator) is dropped by
-            # WhatsApp unless the account has announced itself first, so
-            # _ChatPresenceIndicator is dead without this. Owner-approved
-            # trade: the account shows as online while Syne is connected
-            # and its last-seen tracks that.
-            try:
-                await _client.send_presence(Presence.AVAILABLE)
-            except Exception as e:
-                logger.warning(
-                    "[whatsapp] presence broadcast failed, typing indicator "
-                    "will stay silent: %s", e,
-                )
 
             if self.agent and self.agent.conversations:
                 self.agent.conversations.add_delivery_callback(
