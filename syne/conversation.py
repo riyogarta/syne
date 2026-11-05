@@ -951,7 +951,14 @@ class Conversation:
 
         async def _do_graph_recall():
             try:
-                return await _recall_graph(recall_query or user_message)
+                # access_level must be forwarded: graph recall reaches the same
+                # private knowledge as memory recall, so it needs the same
+                # Rule 760/765 gate. Omitting it defaulted every requester to
+                # owner-level visibility.
+                return await _recall_graph(
+                    recall_query or user_message,
+                    requester_access_level=access_level,
+                )
             except Exception as e:
                 logger.debug(f"Graph recall skipped: {e}")
                 return []

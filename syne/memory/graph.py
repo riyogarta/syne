@@ -496,7 +496,11 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
             )
 
 
-async def recall_graph(query: str, limit: int = 10) -> tuple[list[str], bool]:
+async def recall_graph(
+    query: str,
+    limit: int = 10,
+    requester_access_level: str = "owner",
+) -> tuple[list[str], bool]:
     """Query the knowledge graph for relevant entity-relation context.
 
     Two-step approach for performance:
@@ -511,6 +515,26 @@ async def recall_graph(query: str, limit: int = 10) -> tuple[list[str], bool]:
     """
     if not query or not query.strip():
         return []
+
+    # --- Rule 760/765 for the knowledge graph ---
+    # kg_entities carries no category of its own, so the only provenance marker
+    # in the graph is kg_relations.source_memory_id -> memory.category. A
+    # relation is therefore releasable to a non-owner/family requester only
+    # when it can be PROVEN to come from a public category. Relations whose
+    # source memory is absent -- never recorded, or the memory row was deleted
+    # (the FK is ON DELETE SET NULL) -- cannot be proven public and are
+    # withheld. Without this, graph recall bypassed memory privacy entirely:
+    # a keyword could drag a private relation into a public requester's context
+    # through a substring match on an unrelated entity name.
+    public_cats: list[str] | None = None
+    if requester_access_level not in ("owner", "family"):
+        from ..security import _load_public_categories
+        public_cats = await _load_public_categories() or []
+        if not public_cats:
+            logger.debug(
+                "Graph recall: public requester + empty public_categories -> skip"
+            )
+            return []
 
     try:
         async with get_connection() as conn:
@@ -557,14 +581,32 @@ async def recall_graph(query: str, limit: int = 10) -> tuple[list[str], bool]:
 
             # Step 2: fetch relations via UNION (subject + object separately)
             # Each branch uses btree index on subject_id / object_id
+            #
+            # For a non-owner/family requester the category filter is pushed
+            # down into the SQL, before LIMIT -- same reasoning as the Rule 765
+            # filter in memory/engine.py: a Python post-filter would let
+            # withheld rows occupy the limit slots and then discard them, which
+            # can empty a result set that did have permitted rows available.
+            # The INNER JOIN to memory also drops relations with no traceable
+            # source, since those cannot be proven public.
+            _cat_join = ""
+            _cat_cond = ""
+            rel_params: list = [entity_ids, limit]
+            if public_cats is not None:
+                _cat_join = "JOIN memory m ON m.id = r.source_memory_id"
+                _cat_cond = "AND LOWER(TRIM(m.category)) = ANY($3)"
+                rel_params.append(public_cats)
+
             rows = await conn.fetch(
-                """
+                f"""
                 (SELECT s.name AS subject, s.entity_type AS s_type,
                         r.predicate, o.name AS object, o.entity_type AS o_type
                  FROM kg_relations r
                  JOIN kg_entities s ON r.subject_id = s.id
                  JOIN kg_entities o ON r.object_id = o.id
+                 {_cat_join}
                  WHERE r.subject_id = ANY($1)
+                 {_cat_cond}
                  LIMIT $2)
                 UNION
                 (SELECT s.name AS subject, s.entity_type AS s_type,
@@ -572,12 +614,13 @@ async def recall_graph(query: str, limit: int = 10) -> tuple[list[str], bool]:
                  FROM kg_relations r
                  JOIN kg_entities s ON r.subject_id = s.id
                  JOIN kg_entities o ON r.object_id = o.id
+                 {_cat_join}
                  WHERE r.object_id = ANY($1)
+                 {_cat_cond}
                  LIMIT $2)
                 LIMIT $2
                 """,
-                entity_ids,
-                limit,
+                *rel_params,
             )
 
             if not rows:
