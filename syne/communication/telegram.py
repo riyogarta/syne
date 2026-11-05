@@ -7158,6 +7158,30 @@ Or just send me a message!"""
             m = entry.get('model')
             return model_lookup.get(m, m) if m else f"Default ({default_label})"
 
+        # Access level per DM, resolved in ONE query instead of one per member.
+        # The authority is users.access_level for platform 'whatsapp', keyed by
+        # the bare phone number -- that is what whatsapp.py writes on
+        # auto-register. A member with no row reads as "public", the documented
+        # default. Groups are deliberately excluded: they carry enabled /
+        # require_mention, and per-member access lives in
+        # groups.settings['members'], a different field entirely.
+        access_by_pid: dict[str, str] = {}
+        try:
+            from ..db.models import list_users as _lu
+            for _row in await _lu("whatsapp"):
+                _pid = str(_row.get("platform_id") or "")
+                if _pid:
+                    access_by_pid[_pid] = _row.get("access_level") or "public"
+        except Exception as e:
+            logger.warning(f"[wamembers] access lookup failed, assuming public: {e}")
+
+        # Icon goes FIRST in the label: Telegram truncates button text on phone
+        # screens, so access must be readable before the cut.
+        access_icon = {"owner": "\U0001F451", "family": "\U0001F46A", "public": "\U0001F464"}
+
+        def _access_of(jid: str) -> str:
+            return access_by_pid.get(self._wa_platform_id(jid), "public")
+
         buttons = []
 
         # DM section
@@ -7165,8 +7189,9 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton(f"── 👤 DM ({len(dm_entries)}) ──", callback_data="wa:noop")])
             for jid, e in sorted(dm_entries.items(), key=lambda kv: kv[1].get('name') or kv[0]):
                 name = e.get('name') or '(no name)'
+                acc = _access_of(jid)
                 buttons.append([InlineKeyboardButton(
-                    f"{name} — {jid} | {_model_short(e)}",
+                    f"{access_icon.get(acc, '👤')} {name} — {jid} | {acc} | {_model_short(e)}",
                     callback_data=f"wa:view:{jid}",
                 )])
 
