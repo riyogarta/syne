@@ -6339,53 +6339,15 @@ Or just send me a message!"""
         else:
             await query.answer("Unknown action")
 
-    async def _group_menu_main(self, update: Update, query=None):
-        """Show main group menu — list of groups + add button."""
-        from ..db.connection import get_connection
-        from ..db.models import get_config
-        async with get_connection() as conn:
-            rows = await conn.fetch(
-                "SELECT platform_group_id, name, enabled, settings FROM groups WHERE platform = 'telegram' ORDER BY name"
-            )
+    async def _group_menu_main(self, update: Update = None, query=None):
+        """Deprecated root — delegates to the unified /telegrammembers menu.
 
-        # Build model label lookup
-        models = await get_config("provider.models", [])
-        active = await get_config("provider.active_model", "")
-        model_map = {m["key"]: m.get("label", m["key"]) for m in models if "key" in m}
-        default_label = model_map.get(active, active)
-
-        buttons = []
-        for row in rows:
-            gid = row["platform_group_id"]
-            name = row["name"] or gid
-            emoji = "✅" if row["enabled"] else "⛔"
-            raw_settings = row["settings"]
-            if isinstance(raw_settings, dict):
-                settings = raw_settings
-            elif isinstance(raw_settings, str) and raw_settings:
-                try:
-                    settings = json.loads(raw_settings)
-                except (ValueError, TypeError):
-                    settings = {}
-            else:
-                settings = {}
-            mk = settings.get("model")
-            mlabel = model_map.get(mk, mk) if mk else f"Default ({default_label})"
-            buttons.append([InlineKeyboardButton(
-                f"{emoji} {name}  [{mlabel}]", callback_data=f"groups:view:{gid}"
-            )])
-        
-        buttons.append([InlineKeyboardButton("➕ Add Group", callback_data="groups:add_prompt")])
-        
-        text = "📋 <b>Group Management</b>\n\nSelect a group to manage:"
-        if not rows:
-            text = "📋 <b>Group Management</b>\n\nNo groups registered yet."
-        
-        markup = InlineKeyboardMarkup(buttons)
-        if query:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        Kept as a thin delegate so every existing caller and every
+        'groups:main' Back button lands on the single root. /groups
+        still works and now opens the unified menu. The '+ Add Group'
+        action this used to own now lives on that root.
+        """
+        await self._telegrammembers_menu_main(update=update, query=query)
 
     async def _group_menu_view(self, query, group_id: str):
         """Show group detail menu with action buttons."""
@@ -8200,6 +8162,9 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton(
                 f"🚫 Blocked users ({blocked_count})",
                 callback_data="mbr:blocked_list")])
+        # Inherited from the old groups root, which is now a delegate.
+        buttons.append([InlineKeyboardButton(
+            "➕ Add Group", callback_data="groups:add_prompt")])
         buttons.append([InlineKeyboardButton(
             "🔄 Refresh", callback_data="tgm:main")])
 
@@ -8245,49 +8210,14 @@ Or just send me a message!"""
             await query.answer("Unknown action")
 
     async def _members_menu_main(self, update=None, query=None):
-        """Show global members list as interactive menu (blocked users excluded)."""
-        from ..db.models import list_users, get_config as _gc
-        users = await list_users(platform="telegram")
+        """Deprecated root — delegates to the unified /telegrammembers menu.
 
-        active_users = [u for u in users if u.get("access_level") != "blocked"]
-        blocked_count = len(users) - len(active_users)
-
-        level_order = {"owner": 0, "family": 1, "public": 2}
-        active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("display_name") or u.get("name", "")))
-
-        # Resolve model labels for display
-        models = await _gc("provider.models", [])
-        active_key = await _gc("provider.active_model", "gemini-pro")
-        default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
-        model_lookup = {m.get("key"): m.get("label", m.get("key")) for m in models}
-
-        buttons = []
-        for u in active_users:
-            access = u.get("access_level", "public")
-            icon = {"owner": "👑", "family": "👨‍👩‍👦", "public": "👤"}.get(access, "❓")
-            name = u.get("display_name") or u.get("name", "?")
-            pid = u.get("platform_id", "?")
-            # Resolve per-user model or default
-            user_model_key = ((u.get("preferences") or {}).get("model"))
-            if user_model_key:
-                model_short = model_lookup.get(user_model_key, user_model_key)
-            else:
-                model_short = default_label
-            buttons.append([InlineKeyboardButton(
-                f"{icon} {name} — {access} | {model_short}",
-                callback_data=f"mbr:view:{pid}",
-            )])
-
-        if blocked_count > 0:
-            buttons.append([InlineKeyboardButton(f"🚫 Blocked Users ({blocked_count})", callback_data="mbr:blocked_list")])
-
-        text = "👥 <b>Global Members</b>\n\nTap a user to manage:" if active_users else "👥 <b>Global Members</b>\n\nNo active users."
-        markup = InlineKeyboardMarkup(buttons)
-
-        if query:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        Kept as a thin delegate so every existing caller and every
+        'mbr:main' Back button lands on the single root instead of a
+        second, users-only list. /members still works and now opens
+        the unified menu.
+        """
+        await self._telegrammembers_menu_main(update=update, query=query)
 
     async def _members_menu_blocked(self, query):
         """Show blocked users submenu."""
