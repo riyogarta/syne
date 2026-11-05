@@ -437,6 +437,30 @@ no `wacli` any more. Pairing is a one-time QR scan; the QR is written to
   back to us as `from_me`, so an untriggered bot would answer itself.
 - **Warning**: enabling this means the bot reads and replies in those chats.
 
+There is no config key for the session store, by design. whatsmeow keeps the
+device state and the Signal keys in Syne's own PostgreSQL — the DSN is taken
+straight from `SYNE_DATABASE_URL`, so one `pg_dump` captures the WhatsApp
+pairing along with everything else and there is no second credential to keep
+in sync. neonize selects the driver from the string itself (`postgres` prefix
+= Postgres, anything else = a SQLite filename), so no extra flag is involved.
+Its tables are all prefixed `whatsmeow_*`, cannot collide with Syne's schema,
+and are deliberately absent from `schema.sql` and `syne db migrate` because
+whatsmeow owns and migrates them itself.
+- The password is never logged: the DSN is redacted before it reaches the log,
+  and a fixed client id (`uuid="syne"`) is passed so the credential does not
+  end up as the client identifier either.
+- If the DSN cannot be read, the channel falls back to
+  `~/.syne/whatsapp.sqlite3`. It pairs and works identically, it just sits
+  outside the main backup.
+- **A pairing cannot be migrated between stores.** whatsmeow has no such path,
+  so moving from a file to the database (or back) means scanning the QR once
+  more.
+- **Trade-off**: sharing the database makes PostgreSQL a dependency of
+  WhatsApp. With a local file store, a database restart left the WhatsApp
+  connection untouched; now it does not. This buys the single-backup property
+  and is the accepted cost, not an oversight. Performance is not the reason —
+  an in-process SQLite call is cheaper per query than a TCP roundtrip.
+
 ## Impact Summary Table
 
 For quick reference when deciding permission level:

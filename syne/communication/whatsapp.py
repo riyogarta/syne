@@ -123,16 +123,53 @@ _SERVER_GROUP = "g.us"
 _SERVER_LID = "lid"
 
 
+def _is_postgres_store(store: str) -> bool:
+    """True when neonize will treat this string as a Postgres DSN.
+
+    Mirrors goneonize/main.go getDB(), which picks the driver on exactly this
+    prefix test -- `strings.HasPrefix(db, "postgres")` -- and otherwise falls
+    back to sqlite3 with the string used as a filename. Both "postgres://" and
+    "postgresql://" therefore qualify.
+    """
+    return store.strip().lower().startswith("postgres")
+
+
+def _redact_store(store: str) -> str:
+    """Strip the password out of a DSN before it reaches the log."""
+    if not _is_postgres_store(store):
+        return store
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", store)
+
+
+def _default_store(agent: SyneAgent) -> str:
+    """Syne's own PostgreSQL, falling back to a local SQLite file.
+
+    Sharing the main database means one pg_dump captures the WhatsApp pairing
+    along with everything else, which is the whole reason for not keeping a
+    separate file.
+
+    The fallback exists so the channel still starts if settings cannot be read:
+    a file store pairs and works exactly the same, it just sits outside the
+    main backup. Note that whatsmeow cannot migrate a pairing between the two
+    -- switching stores means scanning the QR once more.
+    """
+    dsn = getattr(getattr(agent, "settings", None), "database_url", None)
+    if dsn and _is_postgres_store(str(dsn)):
+        return str(dsn)
+    return os.path.expanduser("~/.syne/whatsapp.sqlite3")
+
+
 class WhatsAppChannel:
     """WhatsApp adapter driving the neonize (whatsmeow) client in-process."""
 
-    def __init__(self, agent: SyneAgent, session_path: Optional[str] = None):
+    def __init__(self, agent: SyneAgent, store: Optional[str] = None):
         self.agent = agent
-        # neonize names both the client and its SQLite session file from this.
-        # Kept under the Syne data dir so a reinstall does not lose the pairing.
-        self.session_path = session_path or os.path.expanduser(
-            "~/.syne/whatsapp.sqlite3"
-        )
+        # Where whatsmeow keeps the device state and the Signal keys. Defaults
+        # to Syne's own database; see _default_store. whatsmeow owns these
+        # tables and prefixes every one of them whatsmeow_*, so they cannot
+        # collide with Syne's schema -- and because they are whatsmeow's, they
+        # are deliberately absent from schema.sql and from `syne db migrate`.
+        self.store = store or _default_store(agent)
         self.client: Optional[NewAClient] = None
         self._connect_task: Optional[asyncio.Task] = None
         self._running = False
@@ -156,13 +193,24 @@ class WhatsAppChannel:
         Does not wait for the connection to come up: a WhatsApp server that is
         slow or an unpaired session must not hold up boot of Telegram.
         """
-        os.makedirs(os.path.dirname(self.session_path), exist_ok=True)
+        # Only a file store needs a directory. Doing this unconditionally would
+        # call dirname() on a DSN and try to mkdir something like
+        # "postgresql://syne:syne@localhost:5433".
+        if not _is_postgres_store(self.store):
+            os.makedirs(os.path.dirname(self.store) or ".", exist_ok=True)
 
-        self.client = NewAClient(name=self.session_path)
+        # uuid is passed explicitly because neonize derives it from the store
+        # string otherwise (client.py: `uuid or name`). With a DSN that would
+        # make the database password both the client identifier and the
+        # ContactStore key; a fixed id keeps the credential out of both.
+        self.client = NewAClient(name=self.store, uuid="syne")
         self._register_handlers()
         self._running = True
 
-        logger.info("Starting WhatsApp (neonize) client: %s", self.session_path)
+        logger.info(
+            "Starting WhatsApp (neonize) client, store: %s",
+            _redact_store(self.store),
+        )
         # connect() itself creates the long-lived task internally and returns
         # it; hold the reference so stop() can cancel deterministically.
         self._connect_task = await self.client.connect()
