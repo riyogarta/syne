@@ -46,7 +46,7 @@ from .outbound import (
     process_outbound,
     split_message,
 )
-from .formatting import markdown_to_discord
+from .formatting import escape_markdown, markdown_to_discord
 from .registry import (
     CHANNEL_DISCORD,
     CHANNEL_TELEGRAM,
@@ -116,7 +116,18 @@ class DiscordChannel:
         so a slow or failing Discord connection cannot hold up boot of the
         other channels.
         """
-        self.client = discord.Client(intents=self._build_intents())
+        # allowed_mentions is NOT a declared Client param; it travels through
+        # **options into ConnectionState (verified: _connection.allowed_mentions
+        # is the exact object passed). Left unset, discord defaults to parsing
+        # every mention in the payload -- so any @everyone or @role echoed from
+        # an LLM reply would really ping a whole server. replied_user stays True
+        # so a direct reply still notifies the person being answered.
+        self.client = discord.Client(
+            intents=self._build_intents(),
+            allowed_mentions=discord.AllowedMentions(
+                everyone=False, roles=False, users=True, replied_user=True
+            ),
+        )
         self._register_handlers()
 
         logger.info("Starting Discord gateway...")
@@ -428,7 +439,11 @@ class DiscordChannel:
                 "• Handle: %s\n"
                 "• ID: `%s`\n\n"
                 "Approve or reject?"
-            ) % (author.display_name or author.name, author.name, author.id),
+            ) % (
+                escape_markdown(author.display_name or author.name),
+                escape_markdown(author.name),
+                author.id,
+            ),
             [
                 ("✅ Approve", "discord_approve:%s" % author.id),
                 ("❌ Reject", "discord_reject:%s" % author.id),
@@ -462,7 +477,11 @@ class DiscordChannel:
                 "• ID: `%s`\n"
                 "• Members: %s\n\n"
                 "Approve or leave?"
-            ) % (guild.name, guild.id, guild.member_count or "?"),
+            ) % (
+                escape_markdown(guild.name),
+                guild.id,
+                guild.member_count or "?",
+            ),
             [
                 ("✅ Approve", "discord_guild_approve:%s" % guild.id),
                 ("❌ Reject", "discord_guild_reject:%s" % guild.id),

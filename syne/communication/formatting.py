@@ -17,6 +17,36 @@ def _escape(text: str) -> str:
     return _html.escape(text, quote=False)
 
 
+# Telegram legacy-Markdown control characters. Verified against
+# python-telegram-bot 22.6 escape_markdown(version=1), which escapes
+# exactly this set and nothing more.
+_MD_V1_SPECIALS = frozenset("_*[" + chr(96))
+
+
+def escape_markdown(text: str) -> str:
+    """Escape Telegram legacy-Markdown controls in untrusted text.
+
+    For interpolating names, handles and group titles into a message sent
+    with parse_mode="Markdown". Telegram rejects the whole send with 400
+    Bad Request when an entity is left unclosed, so one stray '_' in a
+    display name is enough to lose the entire message -- and where the
+    send is an owner-approval prompt guarded by a fail-closed gate, losing
+    it means the request is never seen by anyone.
+
+    Deliberately channel-neutral: Discord composes approval prompts that
+    Telegram delivers, so both channels need this without either one
+    importing the other's SDK.
+    """
+    if not text:
+        return ""
+    out = []
+    for ch in str(text):
+        if ch in _MD_V1_SPECIALS:
+            out.append(chr(92))
+        out.append(ch)
+    return "".join(out)
+
+
 def _html_to_telegram(text: str) -> str:
     """Convert raw HTML from LLM output to Telegram-compatible format.
 

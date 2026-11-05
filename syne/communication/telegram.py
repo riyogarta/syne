@@ -1086,8 +1086,16 @@ class TelegramChannel:
         if pending_key in self._pending_notified:
             return  # Already notified owner about this user
         
-        # Build notification with approve/reject buttons
-        username_str = f" (@{user.username})" if user.username else ""
+        # Build notification with approve/reject buttons.
+        #
+        # Name and handle are escaped, not trusted: an unescaped '_' makes
+        # Telegram reject this send with 400, and because that is
+        # deterministic all three retries below lose to the same error,
+        # leaving _pending_notified unset and the user held with nobody
+        # notified. See escape_markdown in .formatting.
+        from .formatting import escape_markdown as _esc_md
+        _nm = _esc_md(user_name)
+        username_str = f" (@{_esc_md(user.username)})" if user.username else ""
         buttons = [
             [
                 InlineKeyboardButton("✅ Approve", callback_data=f"approve:{user.id}"),
@@ -1101,7 +1109,7 @@ class TelegramChannel:
                     chat_id=owner_chat_id,
                     text=(
                         f"🔔 **New user wants access:**\n\n"
-                        f"• Name: {user_name}{username_str}\n"
+                        f"• Name: {_nm}{username_str}\n"
                         f"• ID: `{user.id}`\n\n"
                         f"Approve or reject?"
                     ),
@@ -1156,8 +1164,17 @@ class TelegramChannel:
             
             # New group — notify owner for approval
             added_by = member_update.from_user
-            added_by_name = self._get_display_name(added_by) if added_by else "Unknown"
-            added_by_username = f" (@{added_by.username})" if added_by and added_by.username else ""
+            # Escaped for the same reason as the pending-user prompt below:
+            # this text is sent as Markdown, and a '_' in a group title or in
+            # the inviter's name would sink the whole notification.
+            from .formatting import escape_markdown as _esc_md
+            added_by_name = _esc_md(
+                self._get_display_name(added_by) if added_by else "Unknown"
+            )
+            added_by_username = (
+                f" (@{_esc_md(added_by.username)})"
+                if added_by and added_by.username else ""
+            )
             
             from ..db.connection import get_connection
             async with get_connection() as conn:
@@ -1184,7 +1201,7 @@ class TelegramChannel:
                         chat_id=owner_chat_id,
                         text=(
                             f"🔔 **Bot added to a new group:**\n\n"
-                            f"• Group: {chat.title}\n"
+                            f"• Group: {_esc_md(chat.title or str(chat.id))}\n"
                             f"• ID: `{chat.id}`\n"
                             f"• Added by: {added_by_name}{added_by_username}\n\n"
                             f"Approve this group?"
