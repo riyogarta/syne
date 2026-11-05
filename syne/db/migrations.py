@@ -764,7 +764,7 @@ async def _m28_seed_discord_config(conn) -> None:
         ('discord.require_mention', 'true',
          'Default require_mention for newly approved Discord servers. Kept true because without the privileged Message Content intent Discord only sends message text when the bot is mentioned, replied to, or DMed — so true also matches what the bot can actually read.'),
         ('discord.members', '[]',
-         'JSON array of per-entry Discord settings managed by /discordmember on Telegram. Each entry: {"id", "name", "kind": "dm"|"guild", "model", "blocked"}. model null = use the globally active model. Mirrors the shape whatsapp uses for its own allowlist.'),
+         'JSON array of per-entry Discord settings managed by /discordmembers on Telegram. Each entry: {"id", "name", "kind": "dm"|"guild", "model", "blocked"}. model null = use the globally active model. Mirrors the shape whatsapp uses for its own allowlist.'),
     ]
     for key, value, description in rows:
         await conn.execute(

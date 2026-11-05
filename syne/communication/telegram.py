@@ -257,7 +257,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
-        self.app.add_handler(CommandHandler("discordmember", self._cmd_discordmember))
+        self.app.add_handler(CommandHandler("discordmembers", self._cmd_discordmembers))
         self.app.add_handler(CommandHandler("createability", self._cmd_createability))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
@@ -356,7 +356,7 @@ class TelegramChannel:
             BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
-            BotCommand("discordmember", "Manage Discord members (owner only)"),
+            BotCommand("discordmembers", "Manage Discord members (owner only)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
@@ -2334,7 +2334,7 @@ class TelegramChannel:
 /groups — Manage groups & members
 /members — Manage global user access
 /wamembers — Manage WhatsApp members
-/discordmember — Manage Discord members
+/discordmembers — Manage Discord members
 /nodes — Manage remote nodes
 
 *System* (owner)
@@ -7467,9 +7467,9 @@ Or just send me a message!"""
         by_id[eid] = cur
         await self._dc_save_overrides(by_id)
 
-    # ─── /discordmember command ──────────────────────────────────────────
+    # ─── /discordmembers command ──────────────────────────────────────────
 
-    async def _cmd_discordmember(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def _cmd_discordmembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manage Discord members via inline keyboard (owner only, DM only)."""
         try:
             user = update.effective_user
@@ -7485,24 +7485,24 @@ Or just send me a message!"""
                 return
 
             if chat.type != "private":
-                await update.message.reply_text("⚠️ Please use /discordmember in DM (private chat) only.")
+                await update.message.reply_text("⚠️ Please use /discordmembers in DM (private chat) only.")
                 return
 
             args = context.args or []
             if args and args[0].lower() not in {"help", "-h", "--help"}:
-                return await self._cmd_discordmember_text(update, context, args)
+                return await self._cmd_discordmembers_text(update, context, args)
 
-            await self._discordmember_menu_main(update=update)
+            await self._discordmembers_menu_main(update=update)
         except Exception as e:
-            logger.error(f"Error in /discordmember: {e}", exc_info=True)
+            logger.error(f"Error in /discordmembers: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
 
-    async def _cmd_discordmember_text(self, update, context, args):
+    async def _cmd_discordmembers_text(self, update, context, args):
         """Text subcommand: list only."""
         action = args[0].lower()
         if action != "list":
             await update.message.reply_text(
-                "❌ Unknown subcommand. Use /discordmember for the interactive menu."
+                "❌ Unknown subcommand. Use /discordmembers for the interactive menu."
             )
             return
 
@@ -7541,7 +7541,7 @@ Or just send me a message!"""
 
     # ─── Discord inline keyboard menus ───────────────────────────────────
 
-    async def _discordmember_menu_main(self, update=None, query=None):
+    async def _discordmembers_menu_main(self, update=None, query=None):
         """Show Discord members split into DM / Servers sections."""
         entries = await self._dc_collect()
         active = {k: v for k, v in entries.items() if not v.get("blocked")}
@@ -7603,7 +7603,7 @@ Or just send me a message!"""
         else:
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
-    async def _discordmember_menu_detail(self, query, eid: str):
+    async def _discordmembers_menu_detail(self, query, eid: str):
         """Show one Discord entry with its actions."""
         entries = await self._dc_collect()
         entry = entries.get(eid)
@@ -7661,7 +7661,7 @@ Or just send me a message!"""
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
-    async def _discordmember_menu_model_list(self, query, eid: str):
+    async def _discordmembers_menu_model_list(self, query, eid: str):
         """Show model selection for one Discord entry."""
         entries = await self._dc_collect()
         entry = entries.get(eid)
@@ -7692,7 +7692,7 @@ Or just send me a message!"""
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
-    async def _discordmember_menu_blocked(self, query):
+    async def _discordmembers_menu_blocked(self, query):
         """Show blocked DM users and disabled servers."""
         entries = await self._dc_collect()
         blocked = {k: v for k, v in entries.items() if v.get("blocked")}
@@ -7715,26 +7715,26 @@ Or just send me a message!"""
 
     # ─── Discord callback handler ────────────────────────────────────────
 
-    async def _handle_discordmember_callback(self, query, data: str):
+    async def _handle_discordmembers_callback(self, query, data: str):
         """Handle dc: prefix callbacks for the Discord members menu."""
         parts = data.split(":")
         action = parts[1] if len(parts) > 1 else ""
         eid = parts[2] if len(parts) > 2 else ""
 
         if action == "main":
-            await self._discordmember_menu_main(query=query)
+            await self._discordmembers_menu_main(query=query)
 
         elif action == "noop":
             await query.answer()
 
         elif action == "blocked":
-            await self._discordmember_menu_blocked(query)
+            await self._discordmembers_menu_blocked(query)
 
         elif action == "view" and eid:
-            await self._discordmember_menu_detail(query, eid)
+            await self._discordmembers_menu_detail(query, eid)
 
         elif action == "model_list" and eid:
-            await self._discordmember_menu_model_list(query, eid)
+            await self._discordmembers_menu_model_list(query, eid)
 
         elif action == "model_set" and len(parts) >= 4:
             model_key = parts[3]
@@ -7756,7 +7756,7 @@ Or just send me a message!"""
                 label = next((m.get("label", model_key) for m in _models
                               if m.get("key") == model_key), model_key)
             await query.answer(f"Model set to {label}")
-            await self._discordmember_menu_detail(query, eid)
+            await self._discordmembers_menu_detail(query, eid)
 
         elif action in ("block", "unblock") and eid:
             entries = await self._dc_collect()
@@ -7766,7 +7766,7 @@ Or just send me a message!"""
                 return
             if not entry.get("exists", True):
                 await query.answer("No database row to change", show_alert=True)
-                await self._discordmember_menu_detail(query, eid)
+                await self._discordmembers_menu_detail(query, eid)
                 return
 
             want_blocked = action == "block"
@@ -7788,7 +7788,7 @@ Or just send me a message!"""
                 name = after.get("name") or eid
                 await query.answer(
                     f"{'Blocked' if want_blocked else 'Unblocked'} {name}")
-            await self._discordmember_menu_detail(query, eid)
+            await self._discordmembers_menu_detail(query, eid)
 
         elif action == "mention" and eid:
             from ..db.models import update_group
@@ -7804,7 +7804,7 @@ Or just send me a message!"""
                 await query.answer("Update did not stick — check logs", show_alert=True)
             else:
                 await query.answer(f"Require mention: {'on' if want else 'off'}")
-            await self._discordmember_menu_detail(query, eid)
+            await self._discordmembers_menu_detail(query, eid)
 
         elif action == "leave_confirm" and eid:
             entries = await self._dc_collect()
@@ -7836,7 +7836,7 @@ Or just send me a message!"""
                     f"Left {label}" if left else f"Disabled {label}, but leaving failed",
                     show_alert=not left,
                 )
-            await self._discordmember_menu_main(query=query)
+            await self._discordmembers_menu_main(query=query)
 
         elif action == "edit_name" and eid:
             user_id = query.from_user.id
@@ -7853,7 +7853,7 @@ Or just send me a message!"""
 
     # ─── Discord state machine input processor ───────────────────────────
 
-    async def _process_discordmember_input(self, user_id, chat_id, text, state, context):
+    async def _process_discordmembers_input(self, user_id, chat_id, text, state, context):
         """Process text input for the dc_edit_name state."""
         bot = context.bot if context else self.app.bot
         if state.get("type") != "dc_edit_name":
@@ -7897,7 +7897,7 @@ Or just send me a message!"""
             'edit_message_text': msg.edit_text,
             'answer': lambda *a, **kw: None,
         })()
-        await self._discordmember_menu_detail(fake_query, eid)
+        await self._discordmembers_menu_detail(fake_query, eid)
         return True
 
     async def _members_menu_main(self, update=None, query=None):
@@ -8313,7 +8313,7 @@ Or just send me a message!"""
         elif auth_type == "wa_edit_name":
             return await self._process_wamembers_input(user_id, chat_id, text, state, context)
         elif auth_type == "dc_edit_name":
-            return await self._process_discordmember_input(user_id, chat_id, text, state, context)
+            return await self._process_discordmembers_input(user_id, chat_id, text, state, context)
         elif auth_type in ("node_token", "node_rename"):
             return await self._process_node_input(user_id, chat_id, text, state, context)
 
@@ -9805,7 +9805,7 @@ Or just send me a message!"""
 
         elif data.startswith("dc:"):
             # Interactive Discord members menu
-            await self._handle_discordmember_callback(query, data)
+            await self._handle_discordmembers_callback(query, data)
 
         elif data.startswith("mbr:"):
             # Interactive global members menu

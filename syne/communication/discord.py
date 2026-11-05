@@ -640,7 +640,7 @@ class DiscordChannel:
         """Per-entry model override from config discord.members.
 
         Keyed on the DM author's user id, or on the guild id for a server —
-        the same keys /discordmember writes and the gates above read. Returns
+        the same keys /discordmembers writes and the gates above read. Returns
         None when there is no entry or no override, which leaves the globally
         active model in place.
         """
@@ -675,7 +675,7 @@ class DiscordChannel:
             text = f"{prefix}\n\n{text}"
 
         author = message.author
-        # Per-entry model override, if /discordmember set one for this
+        # Per-entry model override, if /discordmembers set one for this
         # user or server. Consumed in conversation.py alongside the
         # WhatsApp and remote-node overrides.
         model_override = await self._member_model_override(message, is_dm)
