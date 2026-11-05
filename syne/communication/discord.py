@@ -635,6 +635,33 @@ class DiscordChannel:
         await load_group_settings(ctx)
         return ctx
 
+    async def _member_model_override(self, message: discord.Message,
+                                     is_dm: bool) -> Optional[str]:
+        """Per-entry model override from config discord.members.
+
+        Keyed on the DM author's user id, or on the guild id for a server —
+        the same keys /discordmember writes and the gates above read. Returns
+        None when there is no entry or no override, which leaves the globally
+        active model in place.
+        """
+        key = str(message.author.id) if is_dm else (
+            str(message.guild.id) if message.guild else "")
+        if not key:
+            return None
+        raw = await get_config("discord.members", [])
+        if isinstance(raw, str):
+            import json as _json
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                return None
+        if not isinstance(raw, list):
+            return None
+        for item in raw:
+            if isinstance(item, dict) and str(item.get("id") or "") == key:
+                return item.get("model") or None
+        return None
+
     # ── Dispatch ─────────────────────────────────────────────
 
     async def _dispatch(self, message: discord.Message, text: str, is_dm: bool) -> None:
@@ -648,11 +675,16 @@ class DiscordChannel:
             text = f"{prefix}\n\n{text}"
 
         author = message.author
+        # Per-entry model override, if /discordmember set one for this
+        # user or server. Consumed in conversation.py alongside the
+        # WhatsApp and remote-node overrides.
+        model_override = await self._member_model_override(message, is_dm)
         metadata = {
             "message_id": message.id,
             "chat_id": inbound.chat_id,
             "inbound": inbound,
             "original_text": original_text,
+            **({"model_override": model_override} if model_override else {}),
         }
 
         # typing() is an async context manager on Messageable (verified on

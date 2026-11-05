@@ -257,6 +257,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
+        self.app.add_handler(CommandHandler("discordmember", self._cmd_discordmember))
         self.app.add_handler(CommandHandler("createability", self._cmd_createability))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
@@ -355,6 +356,7 @@ class TelegramChannel:
             BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
+            BotCommand("discordmember", "Manage Discord members (owner only)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
@@ -2332,6 +2334,7 @@ class TelegramChannel:
 /groups — Manage groups & members
 /members — Manage global user access
 /wamembers — Manage WhatsApp members
+/discordmember — Manage Discord members
 /nodes — Manage remote nodes
 
 *System* (owner)
@@ -7342,6 +7345,561 @@ Or just send me a message!"""
             return True
 
         return False
+
+    # ─── Discord member helpers ──────────────────────────────────────────
+
+    async def _dc_load_overrides(self) -> dict:
+        """Load config discord.members into {id: entry}.
+
+        Entry shape mirrors the WhatsApp allowlist:
+        {'id', 'name', 'kind': 'dm'|'guild', 'model', 'blocked'}.
+
+        This config is NOT the authority on access. The Discord gate reads
+        users.access_level for DMs and groups.enabled for servers
+        (discord.py: _authorize_dm / _authorize_guild), so block state is
+        derived from those tables on read and only mirrored here on write.
+        The config carries what the tables cannot: the per-entry model
+        override.
+        """
+        raw = await get_config("discord.members", [])
+        if isinstance(raw, str):
+            import json as _json
+            try:
+                raw = _json.loads(raw)
+            except Exception:
+                raw = []
+        by_id: dict = {}
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                eid = str(item.get("id") or "").strip()
+                if not eid:
+                    continue
+                by_id[eid] = {
+                    "id": eid,
+                    "name": str(item.get("name") or "").strip(),
+                    "kind": "guild" if item.get("kind") == "guild" else "dm",
+                    "model": item.get("model") or None,
+                    "blocked": bool(item.get("blocked", False)),
+                }
+        return by_id
+
+    async def _dc_save_overrides(self, by_id: dict):
+        """Persist the overrides dict back to config."""
+        await set_config("discord.members", list(by_id.values()))
+
+    async def _dc_collect(self) -> dict:
+        """Merge authoritative tables with config overrides -> {id: entry}.
+
+        DMs come from users(platform='discord'), servers from
+        groups(platform='discord'). 'blocked' is always derived from the
+        table so the menu can never disagree with the gate. Entries that
+        exist only in config (row deleted, override left behind) are kept
+        with exists=False rather than hidden.
+        """
+        from ..db.models import list_users, list_groups
+        overrides = await self._dc_load_overrides()
+        merged: dict = {}
+
+        for u in await list_users(platform="discord"):
+            uid = str(u.get("platform_id") or "")
+            if not uid:
+                continue
+            ov = overrides.get(uid, {})
+            merged[uid] = {
+                "id": uid,
+                "kind": "dm",
+                "name": (u.get("display_name") or u.get("name")
+                         or ov.get("name") or ""),
+                "model": ov.get("model"),
+                "blocked": u.get("access_level") == "blocked",
+                "access_level": u.get("access_level") or "public",
+                "exists": True,
+            }
+
+        for g in await list_groups(platform="discord", enabled_only=False):
+            gid = str(g.get("platform_group_id") or "")
+            if not gid:
+                continue
+            ov = overrides.get(gid, {})
+            merged[gid] = {
+                "id": gid,
+                "kind": "guild",
+                "name": g.get("name") or ov.get("name") or "",
+                "model": ov.get("model"),
+                "blocked": not bool(g.get("enabled", True)),
+                "require_mention": bool(g.get("require_mention", True)),
+                "exists": True,
+            }
+
+        for eid, ov in overrides.items():
+            if eid not in merged:
+                merged[eid] = dict(ov, exists=False)
+        return merged
+
+    async def _dc_model_labels(self):
+        """Return (default_label, {key: label}) for model rendering."""
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+        default_label = next(
+            (m.get("label", active_key) for m in models
+             if m.get("key") == active_key),
+            active_key,
+        )
+        lookup = {m.get("key"): m.get("label", m.get("key")) for m in models}
+        return default_label, lookup
+
+    async def _dc_mirror(self, eid: str, **fields):
+        """Write fields into the config entry for eid, creating it if absent."""
+        entries = await self._dc_collect()
+        ent = entries.get(eid) or {}
+        by_id = await self._dc_load_overrides()
+        cur = by_id.get(eid) or {
+            "id": eid,
+            "name": ent.get("name") or "",
+            "kind": ent.get("kind") or "dm",
+            "model": None,
+            "blocked": bool(ent.get("blocked", False)),
+        }
+        cur.update(fields)
+        cur["id"] = eid
+        by_id[eid] = cur
+        await self._dc_save_overrides(by_id)
+
+    # ─── /discordmember command ──────────────────────────────────────────
+
+    async def _cmd_discordmember(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Manage Discord members via inline keyboard (owner only, DM only)."""
+        try:
+            user = update.effective_user
+            chat = update.effective_chat
+            if not user or not chat:
+                return
+
+            from ..db.models import get_user
+            db_user = await get_user("telegram", str(user.id))
+            access_level = db_user.get("access_level", "public") if db_user else "public"
+            if access_level != "owner":
+                await update.message.reply_text("⚠️ Only the owner can manage Discord members.")
+                return
+
+            if chat.type != "private":
+                await update.message.reply_text("⚠️ Please use /discordmember in DM (private chat) only.")
+                return
+
+            args = context.args or []
+            if args and args[0].lower() not in {"help", "-h", "--help"}:
+                return await self._cmd_discordmember_text(update, context, args)
+
+            await self._discordmember_menu_main(update=update)
+        except Exception as e:
+            logger.error(f"Error in /discordmember: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
+
+    async def _cmd_discordmember_text(self, update, context, args):
+        """Text subcommand: list only."""
+        action = args[0].lower()
+        if action != "list":
+            await update.message.reply_text(
+                "❌ Unknown subcommand. Use /discordmember for the interactive menu."
+            )
+            return
+
+        entries = await self._dc_collect()
+        if not entries:
+            await update.message.reply_text(
+                "Discord members: (none)\n\n"
+                "DM users appear after you approve their first message; "
+                "servers after you approve the server."
+            )
+            return
+
+        default_label, lookup = await self._dc_model_labels()
+        dms = {k: v for k, v in entries.items() if v.get("kind") != "guild"}
+        guilds = {k: v for k, v in entries.items() if v.get("kind") == "guild"}
+
+        def _fmt(eid, e):
+            name = e.get("name") or "(no name)"
+            m = e.get("model")
+            model = lookup.get(m, m) if m else f"default ({default_label})"
+            flag = " [blocked]" if e.get("blocked") else ""
+            return f"  {name} — {eid} · {model}{flag}"
+
+        lines = [f"Discord members ({len(dms)} DM, {len(guilds)} servers):"]
+        if dms:
+            lines.append("")
+            lines.append("DM:")
+            lines += [_fmt(k, v) for k, v in sorted(
+                dms.items(), key=lambda kv: (kv[1].get("name") or kv[0]).lower())]
+        if guilds:
+            lines.append("")
+            lines.append("Servers:")
+            lines += [_fmt(k, v) for k, v in sorted(
+                guilds.items(), key=lambda kv: (kv[1].get("name") or kv[0]).lower())]
+        await update.message.reply_text("\n".join(lines))
+
+    # ─── Discord inline keyboard menus ───────────────────────────────────
+
+    async def _discordmember_menu_main(self, update=None, query=None):
+        """Show Discord members split into DM / Servers sections."""
+        entries = await self._dc_collect()
+        active = {k: v for k, v in entries.items() if not v.get("blocked")}
+        blocked_count = sum(1 for v in entries.values() if v.get("blocked"))
+
+        dm_entries = {k: v for k, v in active.items() if v.get("kind") != "guild"}
+        guild_entries = {k: v for k, v in active.items() if v.get("kind") == "guild"}
+
+        default_label, lookup = await self._dc_model_labels()
+
+        def _model_short(entry):
+            m = entry.get("model")
+            return lookup.get(m, m) if m else f"Default ({default_label})"
+
+        def _sorted(d):
+            return sorted(d.items(), key=lambda kv: (kv[1].get("name") or kv[0]).lower())
+
+        buttons = []
+        if dm_entries:
+            buttons.append([InlineKeyboardButton(
+                f"── 👤 DM ({len(dm_entries)}) ──", callback_data="dc:noop")])
+            for eid, e in _sorted(dm_entries):
+                name = e.get("name") or "(no name)"
+                buttons.append([InlineKeyboardButton(
+                    f"👤 {name} · {_model_short(e)}", callback_data=f"dc:view:{eid}")])
+        if guild_entries:
+            buttons.append([InlineKeyboardButton(
+                f"── 👥 Servers ({len(guild_entries)}) ──", callback_data="dc:noop")])
+            for eid, e in _sorted(guild_entries):
+                name = e.get("name") or "(no name)"
+                buttons.append([InlineKeyboardButton(
+                    f"👥 {name} · {_model_short(e)}", callback_data=f"dc:view:{eid}")])
+        if blocked_count:
+            buttons.append([InlineKeyboardButton(
+                f"🚫 Blocked / disabled ({blocked_count})", callback_data="dc:blocked")])
+        buttons.append([InlineKeyboardButton("🔄 Refresh", callback_data="dc:main")])
+
+        enabled = bool(await get_config("discord.enabled", False))
+        dm_policy = str(await get_config("discord.dm_policy", "approval"))
+        guild_policy = str(await get_config("discord.guild_policy", "allowlist"))
+
+        text = (
+            "🎮 <b>Discord Members</b>\n\n"
+            f"Channel: {'✅ enabled' if enabled else '⛔ disabled (discord.enabled=false)'}\n"
+            f"DM policy: <code>{dm_policy}</code> · Server policy: <code>{guild_policy}</code>\n"
+            f"Default model: {default_label}\n\n"
+        )
+        if not (dm_entries or guild_entries or blocked_count):
+            text += (
+                "No members yet. DM users appear here once you approve their "
+                "first message; servers once you approve the server."
+            )
+        else:
+            text += "Tap an entry to manage it."
+
+        markup = InlineKeyboardMarkup(buttons)
+        if query is not None:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _discordmember_menu_detail(self, query, eid: str):
+        """Show one Discord entry with its actions."""
+        entries = await self._dc_collect()
+        entry = entries.get(eid)
+        if not entry:
+            await query.edit_message_text(f"❌ Entry <code>{eid}</code> not found.", parse_mode="HTML")
+            return
+
+        default_label, lookup = await self._dc_model_labels()
+        model = entry.get("model")
+        model_label = lookup.get(model, model) if model else f"Default ({default_label})"
+
+        is_guild = entry.get("kind") == "guild"
+        icon = "👥" if is_guild else "👤"
+        name = entry.get("name") or "(no name)"
+        blocked = bool(entry.get("blocked"))
+        mention = bool(entry.get("require_mention", True))
+
+        lines = [
+            f"{icon} <b>{name}</b>",
+            "",
+            f"Type: {'Server' if is_guild else 'DM'}",
+            f"ID: <code>{eid}</code>",
+            f"Model: {model_label}",
+            f"Status: {('⛔ Disabled' if is_guild else '🚫 Blocked') if blocked else '✅ Active'}",
+        ]
+        if is_guild:
+            lines.append(f"Require mention: {'yes' if mention else 'no'}")
+        if not entry.get("exists", True):
+            lines.append("")
+            lines.append("⚠️ No database row — this is a leftover model override.")
+
+        buttons = [
+            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"dc:edit_name:{eid}")],
+            [InlineKeyboardButton("🤖 Set Model", callback_data=f"dc:model_list:{eid}")],
+        ]
+        if is_guild:
+            buttons.append([InlineKeyboardButton(
+                "🔕 Turn mention OFF" if mention else "🔔 Turn mention ON",
+                callback_data=f"dc:mention:{eid}")])
+        if blocked:
+            buttons.append([InlineKeyboardButton(
+                "✅ Enable" if is_guild else "✅ Unblock",
+                callback_data=f"dc:unblock:{eid}")])
+        else:
+            buttons.append([InlineKeyboardButton(
+                "⛔ Disable" if is_guild else "🚫 Block",
+                callback_data=f"dc:block:{eid}")])
+        if is_guild:
+            buttons.append([InlineKeyboardButton(
+                "🚪 Leave server", callback_data=f"dc:leave_confirm:{eid}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="dc:main")])
+
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _discordmember_menu_model_list(self, query, eid: str):
+        """Show model selection for one Discord entry."""
+        entries = await self._dc_collect()
+        entry = entries.get(eid)
+        if not entry:
+            await query.edit_message_text(f"❌ Entry <code>{eid}</code> not found.", parse_mode="HTML")
+            return
+
+        current_model = entry.get("model")
+        models = await get_config("provider.models", [])
+        default_label, _ = await self._dc_model_labels()
+
+        buttons = [[InlineKeyboardButton(
+            f"🔄 Default ({default_label}){' ✓' if not current_model else ''}",
+            callback_data=f"dc:model_set:{eid}:__default__",
+        )]]
+        for m in models:
+            key = m.get("key", "")
+            label = m.get("label", key)
+            check = " ✓" if key == current_model else ""
+            buttons.append([InlineKeyboardButton(
+                f"{label}{check}", callback_data=f"dc:model_set:{eid}:{key}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"dc:view:{eid}")])
+
+        name = entry.get("name") or eid
+        await query.edit_message_text(
+            f"🤖 <b>Select Model for {name}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _discordmember_menu_blocked(self, query):
+        """Show blocked DM users and disabled servers."""
+        entries = await self._dc_collect()
+        blocked = {k: v for k, v in entries.items() if v.get("blocked")}
+
+        buttons = []
+        for eid, e in sorted(blocked.items(), key=lambda kv: (kv[1].get("name") or kv[0]).lower()):
+            name = e.get("name") or "(no name)"
+            icon = "👥" if e.get("kind") == "guild" else "👤"
+            buttons.append([InlineKeyboardButton(
+                f"🚫 {icon} {name}", callback_data=f"dc:view:{eid}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="dc:main")])
+
+        text = (
+            f"🚫 <b>Blocked / disabled</b> ({len(blocked)})\n\nTap to manage:"
+            if blocked else
+            "🚫 <b>Blocked / disabled</b>\n\nNone."
+        )
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    # ─── Discord callback handler ────────────────────────────────────────
+
+    async def _handle_discordmember_callback(self, query, data: str):
+        """Handle dc: prefix callbacks for the Discord members menu."""
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+        eid = parts[2] if len(parts) > 2 else ""
+
+        if action == "main":
+            await self._discordmember_menu_main(query=query)
+
+        elif action == "noop":
+            await query.answer()
+
+        elif action == "blocked":
+            await self._discordmember_menu_blocked(query)
+
+        elif action == "view" and eid:
+            await self._discordmember_menu_detail(query, eid)
+
+        elif action == "model_list" and eid:
+            await self._discordmember_menu_model_list(query, eid)
+
+        elif action == "model_set" and len(parts) >= 4:
+            model_key = parts[3]
+            entries = await self._dc_collect()
+            if eid not in entries:
+                await query.answer("Entry not found", show_alert=True)
+                return
+            await self._dc_mirror(
+                eid,
+                model=None if model_key == "__default__" else model_key,
+                name=entries[eid].get("name") or "",
+                kind=entries[eid].get("kind") or "dm",
+                blocked=bool(entries[eid].get("blocked")),
+            )
+            if model_key == "__default__":
+                label = "default"
+            else:
+                _models = await get_config("provider.models", [])
+                label = next((m.get("label", model_key) for m in _models
+                              if m.get("key") == model_key), model_key)
+            await query.answer(f"Model set to {label}")
+            await self._discordmember_menu_detail(query, eid)
+
+        elif action in ("block", "unblock") and eid:
+            entries = await self._dc_collect()
+            entry = entries.get(eid)
+            if not entry:
+                await query.answer("Entry not found", show_alert=True)
+                return
+            if not entry.get("exists", True):
+                await query.answer("No database row to change", show_alert=True)
+                await self._discordmember_menu_detail(query, eid)
+                return
+
+            want_blocked = action == "block"
+            if entry.get("kind") == "guild":
+                from ..db.models import update_group
+                await update_group("discord", eid, enabled=not want_blocked)
+            else:
+                await update_user(
+                    "discord", eid,
+                    access_level="blocked" if want_blocked else "public",
+                )
+
+            # Verify against the table rather than trusting the write.
+            after = (await self._dc_collect()).get(eid) or {}
+            if bool(after.get("blocked")) != want_blocked:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await self._dc_mirror(eid, blocked=want_blocked)
+                name = after.get("name") or eid
+                await query.answer(
+                    f"{'Blocked' if want_blocked else 'Unblocked'} {name}")
+            await self._discordmember_menu_detail(query, eid)
+
+        elif action == "mention" and eid:
+            from ..db.models import update_group
+            entries = await self._dc_collect()
+            entry = entries.get(eid)
+            if not entry or entry.get("kind") != "guild":
+                await query.answer("Not a server", show_alert=True)
+                return
+            want = not bool(entry.get("require_mention", True))
+            await update_group("discord", eid, require_mention=want)
+            after = (await self._dc_collect()).get(eid) or {}
+            if bool(after.get("require_mention", True)) != want:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Require mention: {'on' if want else 'off'}")
+            await self._discordmember_menu_detail(query, eid)
+
+        elif action == "leave_confirm" and eid:
+            entries = await self._dc_collect()
+            entry = entries.get(eid) or {}
+            name = entry.get("name") or eid
+            buttons = [[
+                InlineKeyboardButton("✅ Yes, leave", callback_data=f"dc:leave_yes:{eid}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"dc:view:{eid}"),
+            ]]
+            await query.edit_message_text(
+                f"🚪 Leave <b>{name}</b> (<code>{eid}</code>)?\n\n"
+                "The bot leaves the server and the entry is disabled. "
+                "Re-adding it needs a fresh approval.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "leave_yes" and eid:
+            from .registry import CHANNEL_DISCORD, get_channel
+            from ..db.models import update_group
+            await update_group("discord", eid, enabled=False)
+            await self._dc_mirror(eid, blocked=True)
+            channel = get_channel(CHANNEL_DISCORD)
+            if channel is None:
+                await query.answer("Disabled, but channel is offline — not left", show_alert=True)
+            else:
+                left, label = await channel.reject_guild(eid)
+                await query.answer(
+                    f"Left {label}" if left else f"Disabled {label}, but leaving failed",
+                    show_alert=not left,
+                )
+            await self._discordmember_menu_main(query=query)
+
+        elif action == "edit_name" and eid:
+            user_id = query.from_user.id
+            self._auth_state[user_id] = {"type": "dc_edit_name", "id": eid}
+            entries = await self._dc_collect()
+            old_name = (entries.get(eid) or {}).get("name") or "(no name)"
+            await query.edit_message_text(
+                f"✏️ <b>Edit Name</b>\n\nCurrent: {old_name}\n\nSend new name:",
+                parse_mode="HTML",
+            )
+
+        else:
+            await query.answer("Unknown action")
+
+    # ─── Discord state machine input processor ───────────────────────────
+
+    async def _process_discordmember_input(self, user_id, chat_id, text, state, context):
+        """Process text input for the dc_edit_name state."""
+        bot = context.bot if context else self.app.bot
+        if state.get("type") != "dc_edit_name":
+            return False
+
+        new_name = text.strip()
+        if not new_name:
+            await bot.send_message(chat_id=chat_id, text="❌ Name cannot be empty.")
+            return True
+
+        eid = state.get("id", "")
+        entries = await self._dc_collect()
+        entry = entries.get(eid)
+        if not entry:
+            await bot.send_message(chat_id=chat_id, text=f"❌ Entry {eid} no longer exists.")
+            self._auth_state.pop(user_id, None)
+            return True
+
+        if entry.get("exists", True):
+            if entry.get("kind") == "guild":
+                from ..db.models import update_group
+                await update_group("discord", eid, name=new_name)
+            else:
+                await update_user("discord", eid, display_name=new_name)
+        await self._dc_mirror(eid, name=new_name)
+
+        self._auth_state.pop(user_id, None)
+        after = (await self._dc_collect()).get(eid) or {}
+        if (after.get("name") or "") != new_name:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Stored the override, but the row still reads: "
+                     f"{after.get('name') or '(no name)'}",
+            )
+        else:
+            await bot.send_message(chat_id=chat_id, text=f"✅ Name updated to: {new_name}")
+
+        msg = await bot.send_message(chat_id=chat_id, text="Loading...")
+        fake_query = type('Q', (), {
+            'from_user': type('U', (), {'id': user_id})(),
+            'edit_message_text': msg.edit_text,
+            'answer': lambda *a, **kw: None,
+        })()
+        await self._discordmember_menu_detail(fake_query, eid)
+        return True
+
     async def _members_menu_main(self, update=None, query=None):
         """Show global members list as interactive menu (blocked users excluded)."""
         from ..db.models import list_users, get_config as _gc
@@ -7754,6 +8312,8 @@ Or just send me a message!"""
             return await self._process_group_alias_input(user_id, chat_id, text, state, context)
         elif auth_type == "wa_edit_name":
             return await self._process_wamembers_input(user_id, chat_id, text, state, context)
+        elif auth_type == "dc_edit_name":
+            return await self._process_discordmember_input(user_id, chat_id, text, state, context)
         elif auth_type in ("node_token", "node_rename"):
             return await self._process_node_input(user_id, chat_id, text, state, context)
 
@@ -9242,6 +9802,10 @@ Or just send me a message!"""
         elif data.startswith("wa:"):
             # Interactive WA allowlist menu
             await self._handle_wamembers_callback(query, data)
+
+        elif data.startswith("dc:"):
+            # Interactive Discord members menu
+            await self._handle_discordmember_callback(query, data)
 
         elif data.startswith("mbr:"):
             # Interactive global members menu

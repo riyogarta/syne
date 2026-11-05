@@ -3518,8 +3518,11 @@ class ConversationManager:
             inbound=inbound,
         )
 
-        # Per-message WA model override (applies even on cached sessions)
-        wa_override = (message_metadata or {}).get("wa_model_override")
+        # Per-message model override from a channel that keeps per-entry
+        # models: WhatsApp (wa_model_override) and Discord
+        # (model_override). Applies even on cached sessions.
+        wa_override = ((message_metadata or {}).get("wa_model_override")
+                       or (message_metadata or {}).get("model_override"))
         if wa_override and hasattr(self, '_agent') and self._agent:
             override_provider = await self._agent.create_provider_for_model(wa_override)
             if override_provider:
@@ -3535,7 +3538,7 @@ class ConversationManager:
                 _reserved = override_provider.reserved_output_tokens
                 _cpt_wa = float(conv.model_params.get("chars_per_token", 0)) or DEFAULT_CHARS_PER_TOKEN
                 conv.context_mgr = ContextManager(max_context_tokens=_ctx, reserved_output_tokens=_reserved, chars_per_token=_cpt_wa)
-                logger.info(f"WA model override for {chat_id}: {wa_override} (ctx={_ctx}, cpt={_cpt_wa})")
+                logger.info(f"Per-entry model override for {chat_id}: {wa_override} (ctx={_ctx}, cpt={_cpt_wa})")
 
         # Per-node model override (remote node with custom model)
         node_override = (message_metadata or {}).get("node_model_override")
