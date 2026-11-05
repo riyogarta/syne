@@ -184,6 +184,10 @@ class TelegramChannel:
         self._browse_cwd: dict[int, str] = {}
         # Path lookup for browse callbacks (short hash → full path)
         self._browse_paths: dict[str, str] = {}
+        # Short token → WhatsApp group JID, for /wamembers group-member
+        # callbacks. A WA group JID is long enough that embedding it whole
+        # blows Telegram's 64-byte callback_data cap. See _wa_tok.
+        self._wa_group_tokens: dict[str, str] = {}
         # Auth flow state: {telegram_user_id: {"type": "oauth"|"apikey", "provider": str, ...}}
         self._auth_state: dict[int, dict] = {}
         # Remote node mode: {telegram_user_id: node_id} — messages routed to node
@@ -7012,6 +7016,70 @@ Or just send me a message!"""
         from ..db.models import set_config
         await set_config("whatsapp.allowed_chat_jids", list(by_jid.values()))
 
+    @staticmethod
+    def _wa_platform_id(jid: str) -> str:
+        """The users.platform_id a WhatsApp allowlist key maps to.
+
+        whatsapp.py creates the row with platform_id = the bare phone number
+        (create_user(platform_id=sender_pn)), while an allowlist key may be
+        either that bare number or a full user@server JID, so strip the
+        server and any device suffix before touching the users table.
+        """
+        return (jid or "").split("@", 1)[0].split(":", 1)[0]
+
+    def _wa_tok(self, jid: str) -> str:
+        """Short stable token for a group JID, for use in callback_data.
+
+        Telegram caps callback_data at 64 BYTES. A legacy group JID is up to
+        ~31 chars (15-digit creator + '-' + 10-digit timestamp + '@g.us'), so
+        "wa:gmlvl:<jid>:<member>:<level>" can reach 64 and silently break the
+        button. The group-member callbacks therefore carry a 10-char digest
+        instead: "wa:gmlvl:<10>:<18>:<6>" is 46 bytes, with room to spare.
+
+        Mirrors the _browse_paths pattern (hash -> full path) already used for
+        the file browser.
+        """
+        import hashlib
+        tok = hashlib.sha1((jid or "").encode()).hexdigest()[:10]
+        self._wa_group_tokens[tok] = jid
+        return tok
+
+    async def _wa_untok(self, tok: str) -> str:
+        """Resolve a token from _wa_tok back to a group JID, or ''.
+
+        The in-memory map dies with the process, so a button tapped on a menu
+        rendered before a restart would resolve to nothing. Rather than fail,
+        rebuild the mapping from the two places WhatsApp groups are known:
+        the allowlist config and groups(platform='whatsapp').
+        """
+        hit = self._wa_group_tokens.get(tok)
+        if hit:
+            return hit
+
+        import hashlib
+
+        def _digest(j: str) -> str:
+            return hashlib.sha1((j or "").encode()).hexdigest()[:10]
+
+        candidates = [
+            k for k in (await self._wa_load_allowlist()).keys()
+            if k.endswith("@g.us")
+        ]
+        try:
+            from ..db.models import list_groups
+            for g in await list_groups("whatsapp", enabled_only=False):
+                gid = g.get("platform_group_id") or ""
+                if gid and gid not in candidates:
+                    candidates.append(gid)
+        except Exception as e:
+            logger.debug(f"wa token recovery: list_groups failed: {e}")
+
+        for jid in candidates:
+            if _digest(jid) == tok:
+                self._wa_group_tokens[tok] = jid
+                return jid
+        return ""
+
     # ─── /wamembers command ──────────────────────────────────────────────
 
     async def _cmd_wamembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7154,21 +7222,84 @@ Or just send me a message!"""
         is_group = jid.endswith('@g.us')
         icon = "👥" if is_group else "👤"
         type_label = "Group" if is_group else "DM"
-        status_label = "🚫 Blocked" if blocked else "✅ Active"
-        text = f"{icon} <b>{name}</b>\n\nType: {type_label}\nJID: <code>{jid}</code>\nModel: {model_label}\nStatus: {status_label}"
 
-        buttons = [
-            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"wa:edit_name:{jid}")],
-            [InlineKeyboardButton("🤖 Set Model", callback_data=f"wa:model_list:{jid}")],
+        # Access level, DMs only. The authority is users.access_level for
+        # platform 'whatsapp' with platform_id = the phone number, which is
+        # what whatsapp.py writes on auto-register. Existing entries were
+        # never migrated, so a missing row simply reads as "public".
+        access = "public"
+        # Groups carry enabled / require_mention / members instead, in the
+        # groups table. The row only exists once the group has been seen.
+        group_row = None
+        g_members = {}
+        mention = True
+        if is_group:
+            from ..db.models import get_group, get_group_members
+            group_row = await get_group("whatsapp", jid)
+            if group_row:
+                mention = bool(group_row.get("require_mention", True))
+                g_members = await get_group_members("whatsapp", jid)
+        else:
+            from ..db.models import get_user as _gu
+            db_row = await _gu("whatsapp", self._wa_platform_id(jid))
+            if db_row:
+                access = db_row.get("access_level") or "public"
+
+        lines = [
+            f"{icon} <b>{name}</b>",
+            "",
+            f"Type: {type_label}",
+            f"JID: <code>{jid}</code>",
+            f"Model: {model_label}",
         ]
+        if not is_group:
+            lines.append(f"Access: <b>{access}</b>")
+        lines.append(
+            f"Status: {('⛔ Disabled' if is_group else '🚫 Blocked') if blocked else '✅ Active'}"
+        )
+        if is_group:
+            lines.append(f"Require mention: {'yes' if mention else 'no'}")
+            if group_row is None:
+                lines.append("")
+                lines.append(
+                    "⚠️ No database row yet — it is created the first time "
+                    "someone triggers me in this group, and until then there "
+                    "is nothing to toggle or list."
+                )
+        text = "\n".join(lines)
+
+        buttons = []
+        if not is_group:
+            level_row = []
+            for lvl in ("owner", "family", "public"):
+                check = " ✓" if lvl == access else ""
+                level_row.append(InlineKeyboardButton(
+                    f"{lvl}{check}", callback_data=f"wa:setlvl:{jid}:{lvl}"))
+            buttons.append(level_row)
+        buttons.append(
+            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"wa:edit_name:{jid}")])
+        buttons.append(
+            [InlineKeyboardButton("🤖 Set Model", callback_data=f"wa:model_list:{jid}")])
+        if is_group:
+            tok = self._wa_tok(jid)
+            buttons.append([InlineKeyboardButton(
+                f"👥 Members ({len(g_members)})",
+                callback_data=f"wa:gmembers:{tok}")])
+            buttons.append([InlineKeyboardButton(
+                "🔕 Turn mention OFF" if mention else "🔔 Turn mention ON",
+                callback_data=f"wa:mention:{tok}")])
         if blocked:
             buttons.append([
-                InlineKeyboardButton("✅ Unblock", callback_data=f"wa:unblock:{jid}"),
+                InlineKeyboardButton(
+                    "✅ Enable" if is_group else "✅ Unblock",
+                    callback_data=f"wa:unblock:{jid}"),
                 InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
             ])
         else:
             buttons.append([
-                InlineKeyboardButton("🚫 Block", callback_data=f"wa:block:{jid}"),
+                InlineKeyboardButton(
+                    "⛔ Disable" if is_group else "🚫 Block",
+                    callback_data=f"wa:block:{jid}"),
                 InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
             ])
         if is_group:
@@ -7214,6 +7345,102 @@ Or just send me a message!"""
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    async def _wamembers_menu_group_members(self, query, jid: str):
+        """List the members collected inside one WhatsApp group."""
+        from ..db.models import get_group, get_group_members
+        by_jid = await self._wa_load_allowlist()
+        entry = by_jid.get(jid) or {}
+        name = entry.get('name') or jid.split('@')[0]
+
+        group_row = await get_group("whatsapp", jid)
+        members = await get_group_members("whatsapp", jid) if group_row else {}
+
+        buttons = []
+        if not members:
+            text = (
+                f"👥 <b>{name} — Members</b>\n\n"
+                "No members collected yet.\n\n"
+                "<i>A member is recorded the first time they address me by "
+                "the trigger word in this group. WhatsApp requires that "
+                "trigger even in groups, so people who never call me are "
+                "never collected.</i>"
+            )
+        else:
+            text = (f"👥 <b>{name} — Members</b> ({len(members)})"
+                    "\n\nTap a member to set their access:")
+            tok = self._wa_tok(jid)
+            for mid, info in sorted(
+                members.items(),
+                key=lambda kv: (kv[1].get("alias") or kv[1].get("name") or "").lower(),
+            ):
+                m_name = info.get("alias") or info.get("name") or mid
+                m_access = info.get("access", "public")
+                emoji = {"owner": "👑",
+                         "family": "👨‍👩‍👦",
+                         "public": "👤"}.get(m_access, "👤")
+                buttons.append([InlineKeyboardButton(
+                    f"{emoji} {m_name} — {m_access}",
+                    callback_data=f"wa:gmember:{tok}:{mid}")])
+
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"wa:view:{jid}")])
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _wamembers_menu_group_member_detail(self, query, jid: str, mid: str):
+        """Show one WhatsApp group member with an access level row."""
+        from ..db.models import get_group_members
+        by_jid = await self._wa_load_allowlist()
+        g_name = (by_jid.get(jid) or {}).get('name') or jid.split('@')[0]
+        tok = self._wa_tok(jid)
+
+        members = await get_group_members("whatsapp", jid)
+        info = members.get(mid)
+        if info is None:
+            await query.edit_message_text(
+                f"❌ Member <code>{mid}</code> not found in this group.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Back", callback_data=f"wa:gmembers:{tok}")]]),
+            )
+            return
+
+        m_name = info.get("name") or mid
+        alias = info.get("alias") or ""
+        access = info.get("access", "public")
+        seen = info.get("seen") or ""
+
+        lines = [
+            f"👤 <b>{m_name}</b>",
+            "",
+            f"Group: {g_name}",
+            f"ID: <code>{mid}</code>",
+        ]
+        if alias:
+            lines.append(f"Alias: {alias}")
+        lines.append(f"Access: <b>{access}</b>")
+        if seen:
+            lines.append(f"Last seen: {seen[:19].replace('T', ' ')}")
+        lines.append("")
+        lines.append(
+            "<i>This access applies in this group only. It is a separate "
+            "field from the global access level, so it does not carry over "
+            "to a DM or to another platform.</i>"
+        )
+
+        level_row = []
+        for lvl in ("owner", "family", "public"):
+            check = " ✓" if lvl == access else ""
+            level_row.append(InlineKeyboardButton(
+                f"{lvl}{check}", callback_data=f"wa:gmlvl:{tok}:{mid}:{lvl}"))
+
+        buttons = [
+            level_row,
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"wa:gmembers:{tok}")],
+        ]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons))
 
     # ─── WA callback handler ─────────────────────────────────────────────
 
@@ -7281,28 +7508,147 @@ Or just send me a message!"""
             await query.answer(f"Model set to {label}")
             await self._wamembers_menu_detail(query, jid)
 
-        elif action == "block" and len(parts) >= 3:
+        elif action in ("block", "unblock") and len(parts) >= 3:
             jid = ":".join(parts[2:])
+            want_blocked = action == "block"
             by_jid = await self._wa_load_allowlist()
             if jid not in by_jid:
                 await query.answer("Member not found", show_alert=True)
                 return
-            by_jid[jid]['blocked'] = True
+            by_jid[jid]['blocked'] = want_blocked
             await self._wa_save_allowlist(by_jid)
+
+            # For a group the button reads Enable/Disable, and the WhatsApp
+            # channel enforces BOTH gates independently: the allowlist
+            # 'blocked' flag (whatsapp.py, group branch of _handle_message)
+            # and groups.enabled (checked just before the trigger test). They
+            # are written together so the menu can never claim a state only
+            # one of the two gates agrees with.
+            if jid.endswith('@g.us'):
+                from ..db.models import update_group
+                try:
+                    await update_group("whatsapp", jid, enabled=not want_blocked)
+                except Exception as e:
+                    logger.debug(f"wa {action}: update_group failed: {e}")
+
             name = by_jid[jid].get('name') or jid
-            await query.answer(f"Blocked {name}")
+            if jid.endswith('@g.us'):
+                verb = "Disabled" if want_blocked else "Enabled"
+            else:
+                verb = "Blocked" if want_blocked else "Unblocked"
+            await query.answer(f"{verb} {name}")
             await self._wamembers_menu_detail(query, jid)
 
-        elif action == "unblock" and len(parts) >= 3:
-            jid = ":".join(parts[2:])
+        elif action == "setlvl" and len(parts) >= 4:
+            new_level = parts[-1]
+            jid = ":".join(parts[2:-1])
+            if new_level not in ("owner", "family", "public"):
+                await query.answer("Unknown level", show_alert=True)
+                return
+            if jid.endswith('@g.us'):
+                await query.answer("Groups have no access level", show_alert=True)
+                return
             by_jid = await self._wa_load_allowlist()
             if jid not in by_jid:
                 await query.answer("Member not found", show_alert=True)
                 return
-            by_jid[jid]['blocked'] = False
-            await self._wa_save_allowlist(by_jid)
-            name = by_jid[jid].get('name') or jid
-            await query.answer(f"Unblocked {name}")
+
+            # users.access_level for platform 'whatsapp' is the authority the
+            # inbound gate reads. The row is created on auto-register, so an
+            # entry that predates that (or was added by hand) may have none;
+            # create it rather than silently doing nothing.
+            from ..db.models import create_user, get_user as _gu, update_user as _uu
+            pid = self._wa_platform_id(jid)
+            display = by_jid[jid].get('name') or pid
+            if await _gu("whatsapp", pid):
+                await _uu("whatsapp", pid, access_level=new_level)
+            else:
+                try:
+                    await create_user(
+                        name=display, platform="whatsapp", platform_id=pid,
+                        display_name=display, access_level=new_level,
+                    )
+                except Exception as e:
+                    await query.answer(f"Could not create user row: {e}", show_alert=True)
+                    return
+
+            # Verify against the table rather than trusting the write.
+            after = await _gu("whatsapp", pid) or {}
+            if (after.get("access_level") or "public") != new_level:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Access set to {new_level}")
+            await self._wamembers_menu_detail(query, jid)
+
+        elif action == "gmembers" and len(parts) >= 3:
+            jid = await self._wa_untok(parts[2])
+            if not jid:
+                await query.answer("Group no longer known", show_alert=True)
+                return
+            await self._wamembers_menu_group_members(query, jid)
+
+        elif action == "gmember" and len(parts) >= 4:
+            jid = await self._wa_untok(parts[2])
+            if not jid:
+                await query.answer("Group no longer known", show_alert=True)
+                return
+            await self._wamembers_menu_group_member_detail(query, jid, parts[3])
+
+        elif action == "gmlvl" and len(parts) >= 5:
+            jid = await self._wa_untok(parts[2])
+            mid = parts[3]
+            new_level = parts[4]
+            if not jid:
+                await query.answer("Group no longer known", show_alert=True)
+                return
+            if new_level not in ("owner", "family", "public"):
+                await query.answer("Unknown level", show_alert=True)
+                return
+
+            from ..db.models import get_group_members, update_group_member
+            result = await update_group_member(
+                platform="whatsapp",
+                platform_group_id=jid,
+                member_id=mid,
+                access=new_level,
+            )
+            if result is None:
+                await query.answer("Group not found", show_alert=True)
+                return
+
+            # Verify against the table rather than trusting the write.
+            after = (await get_group_members("whatsapp", jid)).get(mid) or {}
+            if after.get("access") != new_level:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Access set to {new_level}")
+            await self._wamembers_menu_group_member_detail(query, jid, mid)
+
+        elif action == "mention" and len(parts) >= 3:
+            jid = await self._wa_untok(parts[2])
+            if not jid:
+                await query.answer("Group no longer known", show_alert=True)
+                return
+
+            # Toggles groups.require_mention ONLY. It deliberately does not
+            # change WhatsApp's trigger-word requirement, which is mandatory
+            # in groups by design (see whatsapp.py, 'THE TRIGGER WORD IS
+            # ABSOLUTE'); this flag exists so the value is settable and
+            # readable like Discord's.
+            from ..db.models import get_group, update_group
+            row = await get_group("whatsapp", jid)
+            if not row:
+                await query.answer(
+                    "No group row yet — it appears after the first triggered "
+                    "message in that group.", show_alert=True)
+                return
+            want = not bool(row.get("require_mention", True))
+            await update_group("whatsapp", jid, require_mention=want)
+            after = await get_group("whatsapp", jid) or {}
+            if bool(after.get("require_mention", True)) != want:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Require mention: {'on' if want else 'off'}")
             await self._wamembers_menu_detail(query, jid)
 
         elif action == "delete_confirm" and len(parts) >= 3:
