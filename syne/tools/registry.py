@@ -212,13 +212,19 @@ class ToolRegistry:
                     sender_user = getattr(conv, "user", None) or {}
                     sender_pid = str(sender_user.get("platform_id", "") or "")
                     dest = str(call_args.get("chat_id", "") or "")
+                    # Compare BARE ids. A WhatsApp JID carries an @server suffix
+                    # that the users row never has, so an unstripped compare
+                    # makes a send to the sender's own WhatsApp look like a
+                    # relay and prepends a bogus "Pesan dari <sender>:".
+                    dest_bare = dest.split("@", 1)[0]
                     # Relay = destination is a real chat, different from sender,
                     # and not a group (group sends are scheduled-only anyway).
                     if (
                         dest
                         and sender_pid
-                        and dest != sender_pid
+                        and dest_bare != sender_pid
                         and not dest.startswith("-")
+                        and not dest.endswith("@g.us")
                         and not str(call_args.get("relay_from", "")).strip()
                     ):
                         sender_name = (
