@@ -232,6 +232,31 @@ class DiscordChannel:
         if not handled:
             return
 
+        # Auto-collect the guild speaker into groups.settings['members'].
+        # That registry is what inbound.py:103-108 resolves ctx.sender_access
+        # from for a guild message, and what the member menus read. Mirrors
+        # telegram.py:962: name/username only, so a manually assigned
+        # access/alias is never clobbered (models.py:409), and a new member
+        # defaults to "public" (models.py:444).
+        #
+        # Placed before the mention strip, matching Telegram, which collects
+        # before its require_mention check -- a member who was authorized is
+        # worth recording even if this particular message yields no prompt.
+        if not is_dm and message.guild:
+            try:
+                from ..db.models import update_group_member
+                await update_group_member(
+                    platform="discord",
+                    platform_group_id=str(message.guild.id),
+                    member_id=str(message.author.id),
+                    name=(message.author.display_name
+                          or message.author.name
+                          or str(message.author.id)),
+                    username=message.author.name,
+                )
+            except Exception as e:
+                logger.debug("Discord auto-collect member failed: %s", e)
+
         # Strip the bot mention so the LLM sees a clean prompt.
         if not is_dm:
             text = self._strip_mention(text)

@@ -7621,6 +7621,13 @@ Or just send me a message!"""
         blocked = bool(entry.get("blocked"))
         mention = bool(entry.get("require_mention", True))
         access = entry.get("access_level") or "public"
+        # Per-group member registry, servers only. This is
+        # groups.settings['members'] -- a DIFFERENT field from
+        # users.access_level above, scoped to this one server.
+        g_members = {}
+        if is_guild:
+            from ..db.models import get_group_members
+            g_members = await get_group_members("discord", eid)
 
         lines = [
             f"{icon} <b>{name}</b>",
@@ -7659,6 +7666,9 @@ Or just send me a message!"""
         buttons.append(
             [InlineKeyboardButton("🤖 Set Model", callback_data=f"dc:model_list:{eid}")])
         if is_guild:
+            buttons.append([InlineKeyboardButton(
+                f"👥 Members ({len(g_members)})",
+                callback_data=f"dc:gmembers:{eid}")])
             buttons.append([InlineKeyboardButton(
                 "🔕 Turn mention OFF" if mention else "🔔 Turn mention ON",
                 callback_data=f"dc:mention:{eid}")])
@@ -7710,6 +7720,110 @@ Or just send me a message!"""
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(buttons),
         )
+
+    async def _discordmembers_menu_group_members(self, query, gid: str):
+        """List members collected inside one Discord server."""
+        from ..db.models import get_group, get_group_members
+        group = await get_group("discord", gid)
+        if not group:
+            await query.edit_message_text(
+                f"❌ Server <code>{gid}</code> not found.", parse_mode="HTML")
+            return
+
+        name = group.get("name") or gid
+        members = await get_group_members("discord", gid)
+
+        if not members:
+            text = (
+                f"👥 <b>{name} — Members</b>\n\n"
+                "No members collected yet.\n\n"
+                "<i>A member is recorded the first time they address the bot "
+                "in this server. Without the Message Content intent Discord "
+                "does not deliver ambient chatter, so lurkers cannot be "
+                "collected.</i>"
+            )
+            buttons = []
+        else:
+            text = (f"👥 <b>{name} — Members</b> ({len(members)})"
+                    "\n\nTap a member to set their access:")
+            buttons = []
+            for mid, info in sorted(
+                members.items(),
+                key=lambda kv: (kv[1].get("alias") or kv[1].get("name") or "").lower(),
+            ):
+                m_name = info.get("alias") or info.get("name") or "Unknown"
+                m_access = info.get("access", "public")
+                emoji = {"owner": "👑",
+                         "family": "👨‍👩‍👦",
+                         "public": "👤"}.get(m_access, "👤")
+                buttons.append([InlineKeyboardButton(
+                    f"{emoji} {m_name} — {m_access}",
+                    callback_data=f"dc:gmember:{gid}:{mid}")])
+
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"dc:view:{gid}")])
+        await query.edit_message_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+
+    async def _discordmembers_menu_group_member_detail(self, query, gid: str, mid: str):
+        """Show one server member with an access level row."""
+        from ..db.models import get_group, get_group_members
+        group = await get_group("discord", gid)
+        if not group:
+            await query.edit_message_text(
+                f"❌ Server <code>{gid}</code> not found.", parse_mode="HTML")
+            return
+
+        members = await get_group_members("discord", gid)
+        info = members.get(mid)
+        if info is None:
+            await query.edit_message_text(
+                f"❌ Member <code>{mid}</code> not found in this server.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                    "⬅️ Back", callback_data=f"dc:gmembers:{gid}")]]),
+            )
+            return
+
+        g_name = group.get("name") or gid
+        m_name = info.get("name") or "Unknown"
+        alias = info.get("alias") or ""
+        username = info.get("username") or ""
+        access = info.get("access", "public")
+        seen = info.get("seen") or ""
+
+        lines = [
+            f"👤 <b>{m_name}</b>",
+            "",
+            f"Server: {g_name}",
+        ]
+        if username:
+            lines.append(f"Username: {username}")
+        lines.append(f"ID: <code>{mid}</code>")
+        if alias:
+            lines.append(f"Alias: {alias}")
+        lines.append(f"Access: <b>{access}</b>")
+        if seen:
+            lines.append(f"Last seen: {seen[:19].replace('T', ' ')}")
+        lines.append("")
+        lines.append(
+            "<i>This access applies in this server only. It is a separate "
+            "field from the global access level, so it does not carry over "
+            "to DMs or to another platform.</i>"
+        )
+
+        level_row = []
+        for lvl in ("owner", "family", "public"):
+            check = " ✓" if lvl == access else ""
+            level_row.append(InlineKeyboardButton(
+                f"{lvl}{check}", callback_data=f"dc:gmlvl:{gid}:{mid}:{lvl}"))
+
+        buttons = [
+            level_row,
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"dc:gmembers:{gid}")],
+        ]
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons))
 
     async def _discordmembers_menu_blocked(self, query):
         """Show blocked DM users and disabled servers."""
@@ -7840,6 +7954,39 @@ Or just send me a message!"""
             else:
                 await query.answer(f"Access set to {new_level}")
             await self._discordmembers_menu_detail(query, eid)
+
+        elif action == "gmembers" and eid:
+            await self._discordmembers_menu_group_members(query, eid)
+
+        elif action == "gmember" and len(parts) >= 4:
+            await self._discordmembers_menu_group_member_detail(
+                query, eid, parts[3])
+
+        elif action == "gmlvl" and len(parts) >= 5:
+            mid = parts[3]
+            new_level = parts[4]
+            if new_level not in ("owner", "family", "public"):
+                await query.answer("Unknown level", show_alert=True)
+                return
+
+            from ..db.models import update_group_member, get_group_members
+            result = await update_group_member(
+                platform="discord",
+                platform_group_id=eid,
+                member_id=mid,
+                access=new_level,
+            )
+            if result is None:
+                await query.answer("Server not found", show_alert=True)
+                return
+
+            # Verify against the table rather than trusting the write.
+            after = (await get_group_members("discord", eid)).get(mid) or {}
+            if after.get("access") != new_level:
+                await query.answer("Update did not stick — check logs", show_alert=True)
+            else:
+                await query.answer(f"Access set to {new_level}")
+            await self._discordmembers_menu_group_member_detail(query, eid, mid)
 
         elif action == "mention" and eid:
             from ..db.models import update_group
