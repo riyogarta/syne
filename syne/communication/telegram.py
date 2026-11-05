@@ -494,6 +494,7 @@ class TelegramChannel:
         All policy and every Discord API call stay in the Discord channel;
         this only routes the tap and reports what came back.
         """
+        from .formatting import escape_markdown as _esc_md
         from .registry import CHANNEL_DISCORD, get_channel
 
         action, _, target = data.partition(":")
@@ -517,7 +518,7 @@ class TelegramChannel:
                 )
                 return
             await query.edit_message_text(
-                f"✅ Discord user **{label}** (`{target}`) approved.\n"
+                f"✅ Discord user **{_esc_md(label)}** (`{target}`) approved.\n"
                 f"They can now chat with Syne.",
                 parse_mode="Markdown",
             )
@@ -530,12 +531,13 @@ class TelegramChannel:
                 )
                 return
             await query.edit_message_text(
-                f"🚫 Discord user **{label}** (`{target}`) rejected.",
+                f"🚫 Discord user **{_esc_md(label)}** (`{target}`) rejected.",
                 parse_mode="Markdown",
             )
 
     async def _handle_discord_guild_callback(self, query, data: str) -> None:
         """Route an approve/reject tap for a pending Discord server."""
+        from .formatting import escape_markdown as _esc_md
         from .registry import CHANNEL_DISCORD, get_channel
 
         action, _, target = data.partition(":")
@@ -559,7 +561,7 @@ class TelegramChannel:
                 )
                 return
             await query.edit_message_text(
-                f"✅ Discord server **{label}** (`{target}`) approved.\n"
+                f"✅ Discord server **{_esc_md(label)}** (`{target}`) approved.\n"
                 f"Syne will respond there when mentioned.",
                 parse_mode="Markdown",
             )
@@ -567,7 +569,7 @@ class TelegramChannel:
             left, label = await channel.reject_guild(target)
             tail = "Syne has left it." if left else "Could not leave it — check logs."
             await query.edit_message_text(
-                f"🚫 Discord server **{label}** (`{target}`) rejected. {tail}",
+                f"🚫 Discord server **{_esc_md(label)}** (`{target}`) rejected. {tail}",
                 parse_mode="Markdown",
             )
 
@@ -10022,13 +10024,15 @@ Or just send me a message!"""
                 return
             
             target_name = target_user.get("display_name") or target_user.get("name", "Unknown")
+            # Escaped for the confirmation edits below (sent as Markdown).
+            from .formatting import escape_markdown as _esc_md
             
             if action_type == "approve":
                 await update_user("telegram", target_user_id, access_level="public")
                 # Clear the hold, or the gate keeps stopping them at public.
                 await self._clear_pending_flag(target_user_id)
                 await query.edit_message_text(
-                    f"✅ **{target_name}** (`{target_user_id}`) approved.\n"
+                    f"✅ **{_esc_md(target_name)}** (`{target_user_id}`) approved.\n"
                     f"They can now chat with the bot.",
                     parse_mode="Markdown",
                 )
@@ -10056,7 +10060,7 @@ Or just send me a message!"""
                 # a stale flag would silently re-hold them.
                 await self._clear_pending_flag(target_user_id)
                 await query.edit_message_text(
-                    f"🚫 **{target_name}** (`{target_user_id}`) rejected.",
+                    f"🚫 **{_esc_md(target_name)}** (`{target_user_id}`) rejected.",
                     parse_mode="Markdown",
                 )
                 # Notify the user
