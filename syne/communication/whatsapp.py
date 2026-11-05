@@ -117,6 +117,10 @@ _ECHO_TTL = 60.0
 # Bounded dedup memory for inbound message ids.
 _SEEN_MAX = 500
 
+# Bounded cache for @lid -> phone number lookups. One entry per contact that
+# ever messages us, so a couple of thousand is already generous.
+_LID_CACHE_MAX = 2000
+
 # Server parts of a WhatsApp JID.
 _SERVER_DM = "s.whatsapp.net"
 _SERVER_GROUP = "g.us"
@@ -214,6 +218,11 @@ class WhatsAppChannel:
 
         # chat+content hash -> time we sent it, for echo suppression.
         self._echo: dict[str, float] = {}
+
+        # lid local-part -> phone number, filled from whatsmeow_lid_map on
+        # first miss. Only HITS are cached: a miss can become a hit later once
+        # whatsmeow syncs the contact, and caching "" would hide that forever.
+        self._lid_pn: dict[str, str] = {}
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -396,6 +405,46 @@ class WhatsAppChannel:
         user = user.split(":", 1)[0]
         return build_jid(user, server or _SERVER_DM)
 
+    async def _resolve_lid_pn(self, jid_like: Any) -> str:
+        """Phone number behind an @lid JID, or '' when unknown.
+
+        whatsmeow keeps its own lid->pn mapping in the table
+        whatsmeow_lid_map of Syne's database (the store is Postgres, see
+        _default_store). That table belongs to whatsmeow and is NOT part of
+        schema.sql, so it is simply absent on an install that has never
+        paired — every failure here is therefore swallowed and reported as
+        "unknown", never raised.
+
+        Needed because MessageSource.SenderAlt is not always populated: a
+        self-chat message was observed in production arriving as
+        176295656874158@lid with no SenderAlt at all, which registered the
+        owner under their lid instead of their phone number.
+        """
+        raw = jid_like if isinstance(jid_like, str) else self._jid_str(jid_like)
+        if not raw or not raw.endswith(f"@{_SERVER_LID}"):
+            return ""
+        lid = self._local(raw)
+        if not lid:
+            return ""
+        cached = self._lid_pn.get(lid)
+        if cached:
+            return cached
+
+        try:
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT pn FROM whatsmeow_lid_map WHERE lid = $1", lid
+                )
+        except Exception as e:
+            logger.debug("[whatsapp] lid map unavailable for %s: %s", lid, e)
+            return ""
+
+        pn = self._local(str(row["pn"] or "")) if row else ""
+        if pn and len(self._lid_pn) < _LID_CACHE_MAX:
+            self._lid_pn[lid] = pn
+        return pn
+
     # ── Trigger word (ported verbatim from the wacli bridge) ──
 
     def _has_trigger_word(self, text: str, trigger: str) -> bool:
@@ -484,9 +533,13 @@ class WhatsAppChannel:
         """Find a member entry for this chat. Returns (key, entry) or (None, None).
 
         Tries the full JID, the bare local part, and — for an @lid chat — the
-        phone number whatsmeow supplied alongside it. The wacli bridge had to
-        query its SQLite lid map for that last one; neonize hands us SenderAlt
-        directly, so no database lookup is needed.
+        phone number resolved for it, which the caller passes as alt_pn:
+        MessageSource.SenderAlt when whatsmeow fills it in, otherwise the
+        whatsmeow_lid_map lookup done by _resolve_lid_pn. SenderAlt alone is
+        NOT enough — it was seen empty on a self-chat @lid message — and this
+        last candidate is what makes a member already on the allowlist under
+        their phone number match an @lid chat instead of being registered a
+        second time under the lid.
         """
         local = self._local(chat_jid)
         candidates = [chat_jid, local]
@@ -562,10 +615,17 @@ class WhatsAppChannel:
         src = ev.Info.MessageSource
         chat_jid = self._jid_str(src.Chat)
         sender_jid = self._jid_str(src.Sender)
-        # whatsmeow fills SenderAlt with the real phone number when Sender is a
-        # privacy-preserving @lid. That is what makes the old SQLite lid lookup
-        # unnecessary.
+        # whatsmeow USUALLY fills SenderAlt with the real phone number when
+        # Sender is a privacy-preserving @lid — but not always: a self-chat
+        # message arrived in production as 176295656874158@lid with SenderAlt
+        # empty, and the lid then became the member key. The phone number is
+        # the canonical identity, so fall back to whatsmeow's own lid map.
+        # Both calls no-op on a non-lid JID, so an ordinary DM or group
+        # message costs nothing.
         alt_pn = self._local(src.SenderAlt) if src.HasField("SenderAlt") else ""
+        if not alt_pn:
+            alt_pn = (await self._resolve_lid_pn(sender_jid)
+                      or await self._resolve_lid_pn(chat_jid))
         from_me = bool(src.IsFromMe)
         is_group = bool(src.IsGroup)
         msg_id = ev.Info.ID
