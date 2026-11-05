@@ -257,8 +257,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("groups", self._cmd_groups))
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
-        self.app.add_handler(CommandHandler("discordmembers", self._cmd_discordmembers))
-        self.app.add_handler(CommandHandler("telegrammembers", self._cmd_telegrammembers))
+        self.app.add_handler(CommandHandler("dcmembers", self._cmd_discordmembers))
+        self.app.add_handler(CommandHandler("telemembers", self._cmd_telegrammembers))
         self.app.add_handler(CommandHandler("createability", self._cmd_createability))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
@@ -357,7 +357,7 @@ class TelegramChannel:
             BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
-            BotCommand("discordmembers", "Manage Discord members (owner only)"),
+            BotCommand("dcmembers", "Manage Discord members (owner only)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
@@ -376,7 +376,7 @@ class TelegramChannel:
             BotCommand("reset", "Clear consent grants (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
-            BotCommand("telegrammembers", "Manage Telegram users & groups (owner only)"),
+            BotCommand("telemembers", "Manage Telegram users & groups (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("version", "Version info"),
             BotCommand("vision", "Switch image analysis provider (owner only)"),
@@ -2353,7 +2353,7 @@ class TelegramChannel:
 /groups — Manage groups & members
 /members — Manage global user access
 /wamembers — Manage WhatsApp members
-/discordmembers — Manage Discord members
+/dcmembers — Manage Discord members
 /nodes — Manage remote nodes
 
 *System* (owner)
@@ -6357,7 +6357,7 @@ Or just send me a message!"""
             await query.answer("Unknown action")
 
     async def _group_menu_main(self, update: Update = None, query=None):
-        """Deprecated root — delegates to the unified /telegrammembers menu.
+        """Deprecated root — delegates to the unified /telemembers menu.
 
         Kept as a thin delegate so every existing caller and every
         'groups:main' Back button lands on the single root. /groups
@@ -7448,7 +7448,7 @@ Or just send me a message!"""
         by_id[eid] = cur
         await self._dc_save_overrides(by_id)
 
-    # ─── /discordmembers command ──────────────────────────────────────────
+    # ─── /dcmembers command ──────────────────────────────────────────
 
     async def _cmd_discordmembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manage Discord members via inline keyboard (owner only, DM only)."""
@@ -7466,7 +7466,7 @@ Or just send me a message!"""
                 return
 
             if chat.type != "private":
-                await update.message.reply_text("⚠️ Please use /discordmembers in DM (private chat) only.")
+                await update.message.reply_text("⚠️ Please use /dcmembers in DM (private chat) only.")
                 return
 
             args = context.args or []
@@ -7475,7 +7475,7 @@ Or just send me a message!"""
 
             await self._discordmembers_menu_main(update=update)
         except Exception as e:
-            logger.error(f"Error in /discordmembers: {e}", exc_info=True)
+            logger.error(f"Error in /dcmembers: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
 
     async def _cmd_discordmembers_text(self, update, context, args):
@@ -7483,7 +7483,7 @@ Or just send me a message!"""
         action = args[0].lower()
         if action != "list":
             await update.message.reply_text(
-                "❌ Unknown subcommand. Use /discordmembers for the interactive menu."
+                "❌ Unknown subcommand. Use /dcmembers for the interactive menu."
             )
             return
 
@@ -8080,7 +8080,7 @@ Or just send me a message!"""
         return True
 
     async def _cmd_telegrammembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /telegrammembers -- one root over Telegram users AND groups.
+        """Handle /telemembers -- one root over Telegram users AND groups.
 
         Owner + DM only, matching /members and /groups. Takes no
         subcommands: the text subcommands still live on /members and
@@ -8100,12 +8100,12 @@ Or just send me a message!"""
                 return
             if chat.type != "private":
                 await update.message.reply_text(
-                    "⚠️ Use /telegrammembers in DM only.")
+                    "⚠️ Use /telemembers in DM only.")
                 return
 
             await self._telegrammembers_menu_main(update=update)
         except Exception as e:
-            logger.error(f"Error in /telegrammembers: {e}", exc_info=True)
+            logger.error(f"Error in /telemembers: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
 
     async def _telegrammembers_menu_main(self, update=None, query=None):
@@ -8227,7 +8227,7 @@ Or just send me a message!"""
             await query.answer("Unknown action")
 
     async def _members_menu_main(self, update=None, query=None):
-        """Deprecated root — delegates to the unified /telegrammembers menu.
+        """Deprecated root — delegates to the unified /telemembers menu.
 
         Kept as a thin delegate so every existing caller and every
         'mbr:main' Back button lands on the single root instead of a
