@@ -258,6 +258,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("discordmembers", self._cmd_discordmembers))
+        self.app.add_handler(CommandHandler("telegrammembers", self._cmd_telegrammembers))
         self.app.add_handler(CommandHandler("createability", self._cmd_createability))
         self.app.add_handler(CommandHandler("allowlist", self._cmd_allowlist))
         self.app.add_handler(CommandHandler("denylist", self._cmd_denylist))
@@ -375,6 +376,7 @@ class TelegramChannel:
             BotCommand("reset", "Clear consent grants (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
+            BotCommand("telegrammembers", "Manage Telegram users & groups (owner only)"),
             BotCommand("update", "Update Syne to latest version (owner only)"),
             BotCommand("version", "Version info"),
             BotCommand("vision", "Switch image analysis provider (owner only)"),
@@ -8098,6 +8100,150 @@ Or just send me a message!"""
         await self._discordmembers_menu_detail(fake_query, eid)
         return True
 
+    async def _cmd_telegrammembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /telegrammembers -- one root over Telegram users AND groups.
+
+        Owner + DM only, matching /members and /groups. Takes no
+        subcommands: the text subcommands still live on /members and
+        /groups, which remain valid entry points.
+        """
+        try:
+            user = update.effective_user
+            chat = update.effective_chat
+            if not user or not chat:
+                return
+
+            from ..db.models import get_user
+            db_user = await get_user("telegram", str(user.id))
+            if not db_user or db_user.get("access_level") != "owner":
+                await update.message.reply_text(
+                    "⚠️ Only the owner can manage Telegram members.")
+                return
+            if chat.type != "private":
+                await update.message.reply_text(
+                    "⚠️ Use /telegrammembers in DM only.")
+                return
+
+            await self._telegrammembers_menu_main(update=update)
+        except Exception as e:
+            logger.error(f"Error in /telegrammembers: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error: {type(e).__name__}: {e}")
+
+    async def _telegrammembers_menu_main(self, update=None, query=None):
+        """Root menu: DM users section + groups section.
+
+        Reads the same two sources the split commands read -- users for the
+        global level, groups (+ settings['members']) for the per-group one --
+        so nothing here can drift from what /members and /groups show.
+        """
+        from ..db.models import list_users, list_groups, get_config as _gc
+
+        users = await list_users(platform="telegram")
+        active = [u for u in users if u.get("access_level") != "blocked"]
+        blocked_count = len(users) - len(active)
+
+        level_order = {"owner": 0, "family": 1, "public": 2}
+        active.sort(key=lambda u: (
+            level_order.get(u.get("access_level", "public"), 9),
+            (u.get("display_name") or u.get("name") or "").lower(),
+        ))
+
+        models = await _gc("provider.models", [])
+        active_key = await _gc("provider.active_model", "gemini-pro")
+        default_label = next(
+            (m.get("label", active_key) for m in models if m.get("key") == active_key),
+            active_key)
+        lookup = {m.get("key"): m.get("label", m.get("key")) for m in models}
+
+        buttons = []
+
+        # ── Users ──
+        if active:
+            buttons.append([InlineKeyboardButton(
+                f"── 👤 Users ({len(active)}) ──",
+                callback_data="tgm:noop")])
+            for u in active:
+                acc = u.get("access_level", "public")
+                icon = {"owner": "👑",
+                        "family": "👨‍👩‍👦",
+                        "public": "👤"}.get(acc, "❓")
+                nm = u.get("display_name") or u.get("name") or "?"
+                pid = u.get("platform_id", "?")
+                mk = (u.get("preferences") or {}).get("model")
+                mlabel = lookup.get(mk, mk) if mk else default_label
+                buttons.append([InlineKeyboardButton(
+                    f"{icon} {nm} — {acc} | {mlabel}",
+                    callback_data=f"mbr:view:{pid}")])
+
+        # ── Groups ──
+        groups = await list_groups(platform="telegram", enabled_only=False)
+        if groups:
+            buttons.append([InlineKeyboardButton(
+                f"── 👥 Groups ({len(groups)}) ──",
+                callback_data="tgm:noop")])
+            for g in sorted(groups, key=lambda x: (x.get("name") or "").lower()):
+                gid = str(g.get("platform_group_id") or "")
+                nm = g.get("name") or gid
+                emoji = "✅" if g.get("enabled", True) else "⛔"
+                settings = g.get("settings") or {}
+                if isinstance(settings, str):
+                    try:
+                        settings = json.loads(settings) if settings else {}
+                    except (ValueError, TypeError):
+                        settings = {}
+                n_members = len(settings.get("members") or {})
+                buttons.append([InlineKeyboardButton(
+                    f"{emoji} {nm} — {n_members} members",
+                    callback_data=f"groups:view:{gid}")])
+
+        if blocked_count:
+            buttons.append([InlineKeyboardButton(
+                f"🚫 Blocked users ({blocked_count})",
+                callback_data="mbr:blocked_list")])
+        buttons.append([InlineKeyboardButton(
+            "🔄 Refresh", callback_data="tgm:main")])
+
+        text = (
+            "📒 <b>Telegram Members</b>\n\n"
+            f"Default model: {default_label}\n\n"
+        )
+        if not (active or groups or blocked_count):
+            text += "Nothing registered yet."
+        else:
+            text += (
+                "Tap a user to set their global access, or a group to manage "
+                "it and the access of people inside it."
+            )
+
+        markup = InlineKeyboardMarkup(buttons)
+        if query is not None:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_telegrammembers_callback(self, query, data: str):
+        """Callbacks for the unified root.
+
+        Only the root itself lives here. Everything else is delegated by
+        emitting mbr:/groups: callback data directly on the buttons above,
+        so the existing handlers stay the single implementation.
+        """
+        parts = data.split(":")
+        action = parts[1] if len(parts) > 1 else ""
+
+        from ..db.models import get_user
+        db_user = await get_user("telegram", str(query.from_user.id))
+        if not db_user or db_user.get("access_level") != "owner":
+            await query.answer("⚠️ Owner only", show_alert=True)
+            return
+
+        if action == "main":
+            await self._telegrammembers_menu_main(query=query)
+        elif action == "noop":
+            await query.answer()
+        else:
+            await query.answer("Unknown action")
+
     async def _members_menu_main(self, update=None, query=None):
         """Show global members list as interactive menu (blocked users excluded)."""
         from ..db.models import list_users, get_config as _gc
@@ -10004,6 +10150,10 @@ Or just send me a message!"""
         elif data.startswith("dc:"):
             # Interactive Discord members menu
             await self._handle_discordmembers_callback(query, data)
+
+        elif data.startswith("tgm:"):
+            # Unified Telegram users + groups menu
+            await self._handle_telegrammembers_callback(query, data)
 
         elif data.startswith("mbr:"):
             # Interactive global members menu
