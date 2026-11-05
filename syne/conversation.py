@@ -818,6 +818,30 @@ class Conversation:
         elif not self.is_group:
             _sender_pid = str(self.user.get("platform_id") or "") or None
 
+        # One vector per turn, shared by both recall paths below. They run
+        # concurrently on the SAME query string and each used to embed it
+        # separately, so every turn paid for two identical vectors.
+        #
+        # Lazy, and each caller checks its own word-count floor BEFORE
+        # asking: a bare acknowledgement embeds nothing today and must
+        # keep embedding nothing. The lock makes the second caller wait
+        # for the first result instead of starting a duplicate request.
+        _qvec: dict = {}
+        _qvec_lock = asyncio.Lock()
+
+        async def _shared_query_vector():
+            async with _qvec_lock:
+                if "v" not in _qvec:
+                    try:
+                        _r = await self.memory.provider.embed(
+                            recall_query or user_message
+                        )
+                        _qvec["v"] = getattr(_r, "vector", None)
+                    except Exception as e:
+                        logger.debug(f"Query embed failed: {e}")
+                        _qvec["v"] = None
+            return _qvec["v"]
+
         async def _do_history_recall():
             if not _hist_enabled or not _sender_pid or not _hist_family_ok:
                 return []
@@ -832,8 +856,7 @@ class Conversation:
             if len(_hw) < 4:
                 return []
             try:
-                _emb = await self.memory.provider.embed(recall_query or user_message)
-                _vec = getattr(_emb, "vector", None)
+                _vec = await _shared_query_vector()
                 if not _vec:
                     return []
                 # Authorship. A row was written by this sender if it comes
@@ -907,8 +930,18 @@ class Conversation:
                 return []
 
         async def _do_memory_recall():
+            # Mirror recall()'s own 2-word floor before touching the
+            # shared vector. recall() discards a 1-word query anyway, so
+            # embedding first would turn today's free turn into a paid
+            # one. None here simply leaves recall to its old behaviour.
+            _mw = [
+                w for w in (recall_query or user_message).strip().split()
+                if len(w) > 1
+            ]
+            _mv = await _shared_query_vector() if len(_mw) >= 2 else None
             return await self.memory.recall(
                 query=recall_query or user_message,
+                query_vector=_mv,
                 limit=recall_limit,
                 categories=_route_include,
                 exclude_categories=_route_exclude,
@@ -986,9 +1019,10 @@ class Conversation:
                 _h_locale = 'id'
             hist_lines = [
                 "# Relevant Past Conversations (this sender's other chats)",
-                "Things THIS sender said to you in their OWN private chats, "
-                "outside this session. Scoped by code to their own DM sessions - "
-                "never another person's.",
+                "Things THIS sender said to you in their other chats, "
+                "outside this session. Scoped by code to chats the sender "
+                "took part in - their own DM, plus any group declared "
+                "trusted in config - never another person's private chat.",
                 "These are real prior statements by the sender. If they refer to "
                 "something discussed in PM, the answer may be right here - do "
                 "NOT claim you have no knowledge of a topic that appears below.",

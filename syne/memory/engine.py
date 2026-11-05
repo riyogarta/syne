@@ -125,6 +125,7 @@ class MemoryEngine:
         exclude_categories: Optional[list[str]] = None,
         user_id: Optional[int] = None,
         requester_access_level: str = "public",
+        query_vector: Optional[list] = None,
     ) -> list[dict]:
         """Recall memories by semantic similarity.
 
@@ -140,6 +141,9 @@ class MemoryEngine:
                 categories are searched instead.
             user_id: Filter by user
             requester_access_level: Access level of the requester (for Rule 760 filtering)
+            query_vector: Embedding of the same query, already computed by
+                the caller. Supplied to avoid embedding one string twice
+                in a turn; when omitted recall embeds it itself as before.
 
         Returns:
             List of matching memories (filtered by Rule 760 for privacy)
@@ -172,9 +176,17 @@ class MemoryEngine:
             logger.debug(f"Recall skipped: query too short ({query!r})")
             return []
 
-        # Generate query embedding
-        embedding_resp = await self.provider.embed(query)
-        vector = embedding_resp.vector
+        # Generate query embedding, unless the caller already did.
+        # conversation.py embeds this exact string for its own past-chat
+        # lookup and hands the vector over, so one turn buys one vector
+        # instead of two. Deliberately AFTER the access and word-count
+        # checks above: a requester who can reach nothing, or a query too
+        # short to mean anything, must still not cost an embed.
+        if query_vector:
+            vector = query_vector
+        else:
+            embedding_resp = await self.provider.embed(query)
+            vector = embedding_resp.vector
 
         async with get_connection() as conn:
             # Build query with optional filters. All columns prefixed with m. so
