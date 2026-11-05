@@ -141,6 +141,33 @@ def _redact_store(store: str) -> str:
     return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", store)
 
 
+def _with_sslmode(store: str) -> str:
+    """Pin sslmode on a Postgres DSN that does not already carry one.
+
+    whatsmeow opens the store through github.com/lib/pq, whose default is
+    sslmode=require. The Syne Postgres normally runs on localhost, or over a
+    docker-compose network, with ssl off -- so the very DSN asyncpg accepts
+    makes the Go side fail with:
+        pq: SSL is not enabled on the server
+
+    The silence is the expensive part. That error is raised inside the task
+    connect() spawns, and nothing awaits that task, so the channel logs
+    'Starting WhatsApp (neonize) client' and then stops dead: no error, no QR
+    callback, no whatsmeow_* tables. It reads like a slow connect rather than
+    a failed one.
+
+    'prefer' rather than 'disable': it still negotiates TLS when the server
+    offers it and falls back to plaintext when it does not, so this stays
+    correct on an install whose Postgres does have SSL. Verified against
+    neonize 0.10.0 -- the bare DSN raises, while prefer and disable both
+    reach the QR callback.
+    """
+    if not _is_postgres_store(store) or "sslmode=" in store.lower():
+        return store
+    sep = "&" if "?" in store else "?"
+    return store + sep + "sslmode=prefer"
+
+
 def _default_store(agent: SyneAgent) -> str:
     """Syne's own PostgreSQL, falling back to a local SQLite file.
 
@@ -169,7 +196,10 @@ class WhatsAppChannel:
         # tables and prefixes every one of them whatsmeow_*, so they cannot
         # collide with Syne's schema -- and because they are whatsmeow's, they
         # are deliberately absent from schema.sql and from `syne db migrate`.
-        self.store = store or _default_store(agent)
+        # Wrapped in _with_sslmode because lib/pq defaults to sslmode=require
+        # and the local Postgres refuses it; without this the store never
+        # opens and the QR never arrives. See the helper for the full story.
+        self.store = _with_sslmode(store or _default_store(agent))
         self.client: Optional[NewAClient] = None
         self._connect_task: Optional[asyncio.Task] = None
         self._running = False

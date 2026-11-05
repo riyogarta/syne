@@ -812,15 +812,16 @@ async def _m29_whatsapp_channel_config(conn) -> None:
                                    untriggered bot would answer itself), so a
                                    switch to disable it must not even exist.
 
-    3. DELETE the stale `abilities` row. The loader imports bundled abilities
-       from a hardcoded list (loader.py get_bundled_ability_classes) and its
-       dynamic pass only reads `WHERE source != 'bundled'`, while
-       sync_abilities_to_db only touches abilities present in the registry.
-       With the file deleted, a leftover source='bundled' row named 'whatsapp'
-       is therefore never loaded, never updated and never cleaned by any code
-       path — it would sit in the table forever and show up in `syne abilities`
-       as an ability that cannot exist. Removing the row is the only way it
-       goes away.
+    3. DELETE the stale `abilities` row. On this install that row was
+       source=self_created, NOT bundled -- and the loader's dynamic pass
+       selects exactly that set (WHERE source != 'bundled'), so with the file
+       deleted the loader would try to import syne.abilities.whatsapp on every
+       boot. It fails soft rather than fatally: _resolve_module_to_filepath
+       returns None for a missing file, validation is skipped, and the ability
+       is passed over with a WARNING. The leftover row therefore costs a log
+       warning per boot plus a phantom entry in `syne abilities` -- not a
+       crash. The DELETE matches on name, so it clears the row whatever its
+       source column happens to say.
 
     Idempotent: seeds skip on conflict, deletes are unconditional.
     """
