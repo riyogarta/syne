@@ -410,18 +410,32 @@ Controls OAuth token refresh timing.
 - **Warning**: Setting buffer too low risks token expiry mid-conversation.
   Setting interval too high may miss refresh windows.
 
-## WhatsApp Bridge
+## WhatsApp Channel
 
 | Key | Default | Type |
 |-----|---------|------|
-| `whatsapp.wacli_path` | `"wacli"` | string |
+| `whatsapp.enabled` | `false` | boolean |
+| `whatsapp.trigger_name` | `null` | string or null |
 | `whatsapp.allowed_chat_jids` | `[]` | JSON array |
 
-WhatsApp integration settings.
-- `wacli_path` — path to the wacli binary. Only change if installed in non-standard location.
-- `allowed_chat_jids` — whitelist of WhatsApp chat JIDs the bot monitors.
-  Empty = no WhatsApp monitoring.
-- **Warning**: Adding JIDs to the allowlist means the bot will read and respond to those chats.
+WhatsApp is a core channel (`syne/communication/whatsapp.py`), not an ability.
+It embeds whatsmeow via neonize in-process — there is no external binary and
+no `wacli` any more. Pairing is a one-time QR scan; the QR is written to
+`~/.syne/whatsapp_qr.png` and its path logged at WARNING.
+- `enabled` — master switch. false = never started, even if a session is
+  already paired. Read once at boot, so a change needs a restart.
+- `trigger_name` — the name the bot answers to. null falls back to
+  `telegram.bot_trigger_name`, then `identity.name`.
+- `allowed_chat_jids` — per-entry settings managed by `/wamembers` on
+  Telegram: `{"jid", "name", "model", "blocked"}`. `model` null = use the
+  globally active model. Unknown senders auto-register here on their first
+  triggered message; access level is NOT stored here (a DM takes it from
+  `users.access_level`, a group member from `groups.settings['members']`,
+  absent meaning "public").
+- **The trigger word is mandatory**, in groups AND DMs, including from the
+  owner. There is deliberately no switch to disable it: a WhatsApp reply comes
+  back to us as `from_me`, so an untriggered bot would answer itself.
+- **Warning**: enabling this means the bot reads and replies in those chats.
 
 ## Impact Summary Table
 

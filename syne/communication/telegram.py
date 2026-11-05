@@ -6259,6 +6259,52 @@ Or just send me a message!"""
             self._clear_group_conversation(group_id)
             await query.answer("Group deleted")
             await self._group_menu_main(None, query=query)
+
+        elif action == "leave_confirm" and len(parts) >= 3:
+            group_id = parts[2]
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            name = (group or {}).get("name", group_id)
+
+            buttons = [
+                [
+                    InlineKeyboardButton("🚪 Yes, leave", callback_data=f"groups:leave:{group_id}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"groups:view:{group_id}"),
+                ]
+            ]
+            await query.edit_message_text(
+                f"🚪 Leave group <b>{name}</b>?\n\nI leave the chat and drop its "
+                "config and member data. Someone has to add me back to undo this.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "leave" and len(parts) >= 3:
+            group_id = parts[2]
+            # Leave first, purge second: if leaving fails we still want the
+            # owner to see why, and a stale row is easier to fix than a bot
+            # silently sitting in a group it was told to leave.
+            left, err = False, ""
+            try:
+                await self.app.bot.leave_chat(int(group_id))
+                left = True
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                logger.warning(f"Failed to leave group {group_id}: {err}")
+
+            from ..db.connection import get_connection
+            async with get_connection() as conn:
+                await conn.execute(
+                    "DELETE FROM groups WHERE platform = 'telegram' AND platform_group_id = $1",
+                    group_id,
+                )
+            self._clear_group_conversation(group_id)
+
+            if left:
+                await query.answer("Left the group")
+            else:
+                await query.answer(f"Config removed, but leaving failed: {err}", show_alert=True)
+            await self._group_menu_main(None, query=query)
         
         elif action == "member" and len(parts) >= 4:
             group_id = parts[2]
@@ -6416,6 +6462,7 @@ Or just send me a message!"""
                 ),
                 InlineKeyboardButton("🗑 Delete", callback_data=f"groups:delete_confirm:{group_id}"),
             ],
+            [InlineKeyboardButton("🚪 Leave Group", callback_data=f"groups:leave_confirm:{group_id}")],
             [InlineKeyboardButton("⬅️ Back", callback_data="groups:main")],
         ]
         
@@ -7124,6 +7171,9 @@ Or just send me a message!"""
                 InlineKeyboardButton("🚫 Block", callback_data=f"wa:block:{jid}"),
                 InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
             ])
+        if is_group:
+            buttons.append([InlineKeyboardButton(
+                "🚪 Leave Group", callback_data=f"wa:leave_confirm:{jid}")])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="wa:main")])
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -7280,6 +7330,41 @@ Or just send me a message!"""
             name = (removed.get('name') if removed else jid) or jid
             await query.answer(f"Deleted {name}")
             await self._wamembers_menu_main(query=query)
+
+        elif action == "leave_confirm" and len(parts) >= 3:
+            jid = ":".join(parts[2:])
+            if not jid.endswith("@g.us"):
+                await query.answer("Not a group", show_alert=True)
+                return
+            by_jid = await self._wa_load_allowlist()
+            entry = by_jid.get(jid)
+            name = (entry.get('name') if entry else jid) or jid
+            buttons = [
+                [
+                    InlineKeyboardButton("🚪 Yes, leave", callback_data=f"wa:leave_yes:{jid}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"wa:view:{jid}"),
+                ],
+            ]
+            await query.edit_message_text(
+                f"🚪 Leave WhatsApp group <b>{name}</b>?\n\nI only leave the chat — "
+                "the allowlist entry stays. Delete it separately to forget the group.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "leave_yes" and len(parts) >= 3:
+            jid = ":".join(parts[2:])
+            # Cross-channel: the prompt lives on Telegram, the action belongs
+            # to the WhatsApp channel. The registry is the only way across.
+            from .registry import CHANNEL_WHATSAPP, get_channel
+            channel = get_channel(CHANNEL_WHATSAPP)
+            if not channel:
+                await query.answer("WhatsApp channel is not running", show_alert=True)
+                await self._wamembers_menu_detail(query, jid)
+                return
+            ok, msg = await channel.leave_group(jid)
+            await query.answer(msg if ok else f"Failed: {msg}", show_alert=not ok)
+            await self._wamembers_menu_detail(query, jid)
 
         elif action == "edit_name" and len(parts) >= 3:
             jid = ":".join(parts[2:])

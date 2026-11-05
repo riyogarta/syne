@@ -176,26 +176,57 @@ async def run():
                 "Set via DB (credential.telegram_bot_token) or .env (SYNE_TELEGRAM_BOT_TOKEN)."
             )
 
-        # Start WhatsApp bridge if the ability is enabled in DB
-        # NOTE: We use abilities.enabled as the source of truth (not config.whatsapp.enabled)
-        wa_reg = agent.abilities.get("whatsapp")
-        if wa_reg and wa_reg.enabled:
-            from .db.models import get_config
-            # Ensure wacli is installed before starting bridge
-            dep_ok, dep_msg = await wa_reg.instance.ensure_dependencies()
-            if not dep_ok:
-                logger.warning(f"WhatsApp ability enabled but dependency check failed: {dep_msg}")
+        # Start WhatsApp if explicitly enabled.
+        #
+        # This replaces the old wacli-subprocess bridge (abilities/whatsapp.py).
+        # That bridge had to stop its own listener around every single send,
+        # because `wacli sync --follow` holds an EXCLUSIVE lock on the WhatsApp
+        # store; communication/whatsapp.py keeps ONE neonize connection that
+        # carries both directions, so sending no longer blinds receiving.
+        #
+        # Opt-in by design, exactly like Discord below: whatsapp.enabled has no
+        # default row, so bool-of-missing is False and nothing starts until the
+        # owner flips it. An install that upgrades into this code therefore gets
+        # no WhatsApp until it is asked for.
+        #
+        # The import is deliberately lazy. communication/whatsapp.py imports
+        # neonize at module scope, so importing WhatsAppChannel at the top of
+        # this file would turn a missing wheel into a boot-time ImportError and
+        # take Telegram down with it. Here the worst case is a logged warning.
+        try:
+            from .db.models import get_config as _get_wa_cfg
+
+            _raw_wa_enabled = await _get_wa_cfg("whatsapp.enabled", False)
+            # bool("false") is True, so a string-typed config value would fail
+            # OPEN under a naive bool(). Only a real True or the exact text
+            # "true" counts; a typo or null leaves the channel off.
+            whatsapp_enabled = (
+                _raw_wa_enabled is True
+                or str(_raw_wa_enabled).strip().lower() == "true"
+            )
+
+            if not whatsapp_enabled:
+                logger.debug(
+                    "WhatsApp channel disabled (whatsapp.enabled is not true)."
+                )
             else:
-                wa_path = await get_config("whatsapp.wacli_path", "wacli")
-                if await wa_reg.instance.start_bridge(agent, wacli_path=wa_path):
-                    channels.append(wa_reg.instance)
-                    logger.info("WhatsApp bridge active.")
-                else:
-                    logger.warning("WhatsApp ability enabled but failed to start.")
-        elif wa_reg and not wa_reg.enabled:
-            logger.info("WhatsApp ability registered but disabled.")
-        else:
-            logger.debug("WhatsApp ability not registered.")
+                from .communication.whatsapp import WhatsAppChannel
+
+                whatsapp_ch = WhatsAppChannel(agent)
+                await whatsapp_ch.start()
+                # Appended so the existing `finally` drain calls .stop().
+                channels.append(whatsapp_ch)
+                logger.info("WhatsApp channel active.")
+        except ImportError as e:
+            logger.warning(
+                f"WhatsApp is enabled but its dependency is missing: {e}. "
+                "Run `syne update` to install neonize."
+            )
+        except Exception as e:
+            logger.error(
+                f"WhatsApp channel failed to start: {type(e).__name__}: {e}",
+                exc_info=True,
+            )
 
         # Start Discord if explicitly enabled AND a bot token is stored.
         #

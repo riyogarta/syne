@@ -29,7 +29,6 @@ def get_bundled_ability_classes() -> list[Type[Ability]]:
         ("syne.abilities.image_gen", "ImageGenAbility"),
         ("syne.abilities.image_analysis", "ImageAnalysisAbility"),
         ("syne.abilities.maps", "MapsAbility"),
-        ("syne.abilities.whatsapp", "WhatsAppAbility"),
         ("syne.abilities.pdf", "PdfAbility"),
         ("syne.abilities.office", "OfficeAbility"),
         ("syne.abilities.website_screenshot", "WebsiteScreenshotAbility"),

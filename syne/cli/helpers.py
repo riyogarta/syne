@@ -374,8 +374,10 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
 
 # Single source of truth for pip deps of bundled abilities.
 # Maps import name → pip package name.
-# Browser-based (playwright) and external binaries (wacli) are NOT here —
-# those still install lazily on first ability enable.
+# Browser-based deps (playwright) are NOT here — those still install lazily
+# on first ability enable. Channel deps (neonize for WhatsApp, discord.py)
+# are not here either: they are declared in pyproject.toml, because a channel
+# is core and must be installable before any ability is touched.
 _ABILITY_PIP_DEPS = {
     # pdf ability
     "fitz": "PyMuPDF",

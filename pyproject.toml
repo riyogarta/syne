@@ -30,6 +30,7 @@ dependencies = [
     "pydantic-settings>=2.0",
     "python-telegram-bot>=21.0",
     "discord.py>=2.4.0",
+    "neonize>=0.10.0",
     "click>=8.0",
     "rich>=13.0",
     "pyyaml>=6.0",

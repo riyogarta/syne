@@ -29,14 +29,20 @@ syne/
 ├── config_guide.py      — Config reference (injected into this prompt)
 ├── update_checker.py    — Checks GitHub for new versions
 │
-├── communication/       — Channel-agnostic message processing
+├── communication/       — Channels + channel-agnostic message processing
+│   ├── telegram.py      — Telegram bot (commands, groups, photos, voice, docs)
+│   ├── discord.py       — Discord bot (DM + guild, approval-gated)
+│   ├── whatsapp.py      — WhatsApp channel (neonize/whatsmeow, in-process)
+│   ├── registry.py      — Live channel registry (cross-channel send)
 │   ├── inbound.py       — InboundContext dataclass (THE source of truth per message)
+│   ├── outbound.py      — Path/narration stripping, MEDIA:, message splitting
 │   ├── formatting.py    — Output formatting, tag stripping, platform adaptation
+│   ├── tags.py          — Parses [[reply_to:...]] / [[react:...]] directives
 │   └── errors.py        — Error classification and user-friendly messages
 │
-├── channels/            — Platform bridges
-│   ├── telegram.py      — Telegram bot (commands, groups, photos, voice, docs)
-│   └── cli_channel.py   — CLI interface for local testing
+├── channels/            — Legacy shims only
+│   ├── telegram.py      — DEPRECATED re-export of communication.telegram
+│   └── cli_channel.py   — CLI interface for local testing (still used)
 │
 ├── llm/                 — LLM provider drivers
 │   ├── provider.py      — Abstract LLMProvider interface
@@ -74,7 +80,6 @@ syne/
 │   ├── maps.py          — Google Maps static maps
 │   ├── pdf.py           — PDF generation (HTML→PDF via wkhtmltopdf)
 │   ├── website_screenshot.py — Web screenshots (Playwright)
-│   ├── whatsapp.py      — WhatsApp bridge (via wacli)
 │   └── custom/          — User-created abilities (ONLY writable directory)
 │
 ├── memory/              — Semantic memory engine

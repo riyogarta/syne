@@ -29,7 +29,7 @@ Beyond the core assistant, Syne ships with optional extensions. They live in `sy
 - **Remote nodes** — extend Syne across multiple machines via WebSocket gateway
 - **Sub-agents** — spawn background workers for parallel tasks
 - **Self-modification** — the LLM can write new abilities (off by default, see [SECURITY.md](SECURITY.md))
-- **Maps, screenshots, WhatsApp bridge, and more**
+- **Maps, screenshots, documents, and more**
 
 These are deliberately separate from the core. The headline use case is chat + memory; everything else is plumbing you can ignore until you need it.
 
@@ -606,7 +606,6 @@ Since v1.18.18, the LLM sees the **full toolset every turn** (subject to the acc
 | `pdf` | 770 | **Read** PDFs (text + vision OCR for scanned/CAD pages) and **create** PDFs from text or URL | PyMuPDF, reportlab, beautifulsoup4 (auto-installed) |
 | `office` | 770 | **Create and read** Microsoft Office documents — Word (.docx), Excel (.xlsx), PowerPoint (.pptx) | python-docx, openpyxl, python-pptx (auto-installed) |
 | `website_screenshot` | 550 | Capture website screenshots | Playwright + Chromium (auto-installed) |
-| `whatsapp` | 700 | WhatsApp bridge (send/receive via wacli) | wacli binary |
 
 Each ability manages its own dependencies via `ensure_dependencies()` — external binaries and packages are auto-installed when you enable the ability.
 
@@ -675,7 +674,7 @@ class Ability:
 
 ### Shell Security
 
-The `shell` tool (formerly `exec`) gives Syne shell access on the host system. Every command — from the LLM, from a sub-agent, or from an ability shell-out (LibreOffice conversion, WhatsApp bridge, etc.) — routes through a single chokepoint `run_shell()` that calls **shell_guard** for a verdict (see [Consent Gate & Shell Guard](#consent-gate--shell-guard)).
+The `shell` tool (formerly `exec`) gives Syne shell access on the host system. Every command — from the LLM, from a sub-agent, or from an ability shell-out (LibreOffice conversion, etc.) — routes through a single chokepoint `run_shell()` that calls **shell_guard** for a verdict (see [Consent Gate & Shell Guard](#consent-gate--shell-guard)).
 
 - **Owner-only** (permission 700) — only the owner can trigger the LLM to call `shell`
 - **Configurable timeout** — `exec.timeout_max` (default: 300 seconds)
@@ -897,7 +896,7 @@ syne restore                         # Restore from backup
 |  |              ABILITIES (Pluggable)                   |  |
 |  |                                                      |  |
 |  |  [image_gen]  [image_analysis]  [maps]  [pdf]        |  |
-|  |  [office]  [website_screenshot]  [whatsapp]          |  |
+|  |  [office]  [website_screenshot]                      |  |
 |  |  [custom...]                                         |  |
 |  |                                                      |  |
 |  |  Self-Created: Syne adds new abilities at runtime    |  |
@@ -1019,7 +1018,7 @@ syne/
 │   ├── tools/               # 28 core tools
 │   ├── abilities/           # Bundled + self-created abilities
 │   │   ├── custom/          # User-created abilities (only writable dir)
-│   │   └── ...              # 7 bundled abilities (image_gen, image_analysis, maps, pdf, office, website_screenshot, whatsapp)
+│   │   └── ...              # 6 bundled abilities (image_gen, image_analysis, maps, pdf, office, website_screenshot)
 │   ├── db/
 │   │   ├── schema.sql       # Database schema (18 tables)
 │   │   ├── migrations.py    # Versioned schema migrations

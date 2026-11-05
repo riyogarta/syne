@@ -777,6 +777,83 @@ async def _m28_seed_discord_config(conn) -> None:
         )
 
 
+async def _m29_whatsapp_channel_config(conn) -> None:
+    """Move WhatsApp from ability to core channel (Riyo, 5 Nov 2026).
+
+    WhatsApp now lives in syne/communication/whatsapp.py next to Telegram and
+    Discord, driving neonize (embedded whatsmeow) in-process. The old
+    syne/abilities/whatsapp.py drove the `wacli` binary as a subprocess and is
+    deleted in the same change, so every wacli-era leftover goes with it.
+
+    Four groups, in order:
+
+    1. SEED the three keys the new channel actually reads. Seed-only via
+       ON CONFLICT DO NOTHING, so an existing whatsapp.allowed_chat_jids with
+       real members and an existing whatsapp.trigger_name keep their values —
+       there is nothing to converge and nothing to guess wrong about. Prose is
+       copied verbatim from schema.sql so a migrated DB and a fresh one read
+       the same text in `syne config list`.
+
+       whatsapp.enabled is NEW and seeds to false, mirroring discord.enabled
+       (migration 28). That is deliberate: applying this migration must not
+       silently start a channel. The owner opts in by flipping the switch,
+       which also means WhatsApp stays down across the deploy until they do.
+
+    2. DROP keys no code path reads any more, audited by literal grep across
+       the repo before writing this:
+         whatsapp.wacli_path     - the wacli binary is gone; neonize needs no
+                                   external executable.
+         whatsapp.owner_only     - zero readers even BEFORE this change. The
+                                   old bridge gated on allowed_chat_jids and
+                                   the trigger word, never on this key.
+         whatsapp.require_trigger - same: zero readers. On the new channel the
+                                   trigger is unconditional in groups AND DMs
+                                   (a reply returns as from_me, so an
+                                   untriggered bot would answer itself), so a
+                                   switch to disable it must not even exist.
+
+    3. DELETE the stale `abilities` row. The loader imports bundled abilities
+       from a hardcoded list (loader.py get_bundled_ability_classes) and its
+       dynamic pass only reads `WHERE source != 'bundled'`, while
+       sync_abilities_to_db only touches abilities present in the registry.
+       With the file deleted, a leftover source='bundled' row named 'whatsapp'
+       is therefore never loaded, never updated and never cleaned by any code
+       path — it would sit in the table forever and show up in `syne abilities`
+       as an ability that cannot exist. Removing the row is the only way it
+       goes away.
+
+    Idempotent: seeds skip on conflict, deletes are unconditional.
+    """
+    rows = [
+        ('whatsapp.enabled', 'false',
+         'Master switch for the WhatsApp channel. false = the channel is never started even if a session is already paired. Read once at boot, so changing it needs a restart. Default false so adding the dependency alone changes nothing.'),
+        ('whatsapp.trigger_name', 'null',
+         'Trigger name the bot answers to on WhatsApp. null = fall back to telegram.bot_trigger_name, then identity.name. The trigger is MANDATORY on WhatsApp in BOTH groups and DMs, including from the owner - there is no require_mention escape hatch, because a WhatsApp reply arrives back as from_me and an untriggered bot would answer itself.'),
+        ('whatsapp.allowed_chat_jids', '[]',
+         'JSON array of per-entry WhatsApp settings managed by /wamembers on Telegram. Each entry: {"jid", "name", "model", "blocked"}. model null = use the globally active model. Access level is NOT stored here: a DM takes it from users.access_level and a group member from groups.settings[\'members\'], absent meaning "public". Mirrors the shape discord.members uses.'),
+    ]
+    for key, value, description in rows:
+        await conn.execute(
+            """
+            INSERT INTO config (key, value, description)
+            VALUES ($1, $2::text::jsonb, $3)
+            ON CONFLICT (key) DO NOTHING
+            """,
+            key, value, description,
+        )
+
+    await conn.execute("""
+        DELETE FROM config WHERE key IN (
+            'whatsapp.wacli_path',
+            'whatsapp.owner_only',
+            'whatsapp.require_trigger'
+        )
+    """)
+
+    await conn.execute("DELETE FROM abilities WHERE name = 'whatsapp'")
+
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -806,6 +883,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (26, _m26_trusted_group_ids_description, "transactional"),
     (27, _m27_dm_policy_description, "transactional"),
     (28, _m28_seed_discord_config, "transactional"),
+    (29, _m29_whatsapp_channel_config, "transactional"),
 ]
 
 
