@@ -4166,20 +4166,17 @@ Or just send me a message!"""
     def _sort_models_for_display(models, active_key):
         """Display order for every model list/picker (stored order untouched).
 
-        Default first, then grouped by driver, OAuth before API key, then
-        label in natural order (so "G 4" sorts before "G 10").
+        Purely by label, A-Z, natural number order (so "G 4" sorts before
+        "G 10"). The default is NOT pinned to the top: /models marks it with
+        a star and pickers already have their own "Default (...)" button.
+        active_key is kept for call-site compatibility.
         """
         import re as _re
 
         def _sort_key(m):
             label = (m.get("label") or m.get("key") or "").lower()
-            natural = [int(t) if t.isdigit() else t for t in _re.split(r"(\d+)", label)]
-            return (
-                m.get("key") != active_key,
-                (m.get("driver") or "").lower(),
-                m.get("auth") != "oauth",
-                natural,
-            )
+            return [(0, int(t)) if t.isdigit() else (1, t)
+                    for t in _re.split(r"(\d+)", label) if t]
 
         return sorted(models, key=_sort_key)
 
