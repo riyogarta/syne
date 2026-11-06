@@ -4657,11 +4657,12 @@ Or just send me a message!"""
                 [InlineKeyboardButton("OpenAI (OAuth)", callback_data="models:add:codex")],
                 [InlineKeyboardButton("Claude (OAuth)", callback_data="models:add:anthropic")],
                 [InlineKeyboardButton("🔑 AI API Key", callback_data="models:add_apikey")],
+                [InlineKeyboardButton("🦙 Ollama (local)", callback_data="models:add_ak:ollama")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="models:main")],
             ]
             await query.edit_message_text(
                 "🤖 <b>Add Model</b>\n\n"
-                "Choose authentication method:",
+                "Choose how to connect:",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -4676,7 +4677,6 @@ Or just send me a message!"""
                 ("groq", "Groq"),
                 ("together", "Together AI"),
                 ("openrouter", "OpenRouter"),
-                ("ollama", "Ollama (local)"),
                 ("custom", "Custom (enter URL)"),
             ]
             buttons = [
