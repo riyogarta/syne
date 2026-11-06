@@ -8861,8 +8861,10 @@ Or just send me a message!"""
                     except (ValueError, TypeError):
                         settings = {}
                 n_members = len(settings.get("members") or {})
+                gmk = settings.get("model")
+                glabel = lookup.get(gmk, gmk) if gmk else default_label
                 buttons.append([InlineKeyboardButton(
-                    f"{emoji} {nm} — {n_members} members",
+                    f"{emoji} {nm} — {n_members} members | {glabel}",
                     callback_data=f"groups:view:{gid}")])
 
         if blocked_count:
