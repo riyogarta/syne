@@ -3116,7 +3116,7 @@ Or just send me a message!"""
         for m in self._sort_models_for_display(usable, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
-            prefix = ">> " if key == current_key else ""
+            prefix = "✅ " if key == current_key else ""
             buttons.append([InlineKeyboardButton(
                 f"{prefix}{label}", callback_data=f"{purpose}:set:{key}"
             )])
