@@ -3066,19 +3066,6 @@ Or just send me a message!"""
 
     # ── Image Generation / Vision: model picked from the /models registry ──
 
-    @staticmethod
-    def _media_model_usable(m: dict, purpose: str) -> bool:
-        """Can this /models entry serve image gen ("imggen") or vision ("vision")?"""
-        driver = m.get("driver", "")
-        if driver == "vertex":
-            return True
-        if driver == "openai_compat":
-            base_url = (m.get("base_url") or "").lower()
-            return "api.openai.com" in base_url or "together" in base_url
-        if driver == "ollama":
-            return purpose == "vision"
-        return False
-
     async def _media_ability_config(self, ability: str) -> dict:
         """Read an ability's config from the abilities table."""
         from ..db.connection import get_connection
@@ -3101,7 +3088,6 @@ Or just send me a message!"""
         current_key = config.get("model_key", "")
         models = await get_config("provider.models", []) or []
         active_key = await get_config("provider.active_model", "")
-        usable = [m for m in models if self._media_model_usable(m, purpose)]
 
         current = next((m for m in models if m.get("key") == current_key), None) if current_key else None
         if current:
@@ -3113,7 +3099,7 @@ Or just send me a message!"""
             current_text = "<b>not set</b>"
 
         buttons = []
-        for m in self._sort_models_for_display(usable, active_key):
+        for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
             prefix = "✅ " if key == current_key else ""
@@ -3122,8 +3108,8 @@ Or just send me a message!"""
             )])
 
         text = f"<b>{title}</b>\n\nModel: {current_text}"
-        if not usable:
-            text += "\n\nNo usable models in /models."
+        if not models:
+            text += "\n\nNo models in /models."
         markup = InlineKeyboardMarkup(buttons)
 
         if hasattr(update_or_query, 'message') and update_or_query.message:
