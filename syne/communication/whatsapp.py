@@ -218,6 +218,9 @@ _FROM_ME_WINDOW = 60.0
 # ever messages us, so a couple of thousand is already generous.
 _LID_CACHE_MAX = 2000
 
+# Default marker for outgoing messages; see _reply_prefix.
+_DEFAULT_REPLY_PREFIX = "\U0001F40D"  # 🐍
+
 # [[react:<emoji>]] tag, same pattern as tags.parse_react_tags.
 _REACT_TAG = re.compile(r"\[\[\s*react:\s*(.+?)\s*\]\]")
 
@@ -1311,6 +1314,16 @@ class WhatsAppChannel:
             return
         text = markdown_to_whatsapp(text)
 
+        # Every message Syne sends starts with a marker on its own line, so
+        # its replies are told apart from the owner typing on the same
+        # number. Added after formatting so markdown conversion never touches
+        # it, and before splitting so only the first chunk (or the caption of
+        # the first file) carries it. The echo hash is recorded on the final
+        # text, marker included, which is exactly what comes back.
+        prefix = await self._reply_prefix()
+        if prefix:
+            text = f"{prefix}\n\n{text}" if text else prefix
+
         target = self._to_jid(chat_jid)
         caption_used = False
 
@@ -1335,6 +1348,19 @@ class WhatsAppChannel:
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error("WhatsApp send failed: %s: %s", type(e).__name__, e)
+
+    async def _reply_prefix(self) -> str:
+        """Marker for outgoing messages (config whatsapp.reply_prefix).
+
+        Missing key = the default 🐍; an explicit empty string turns it off.
+        """
+        try:
+            raw = await get_config("whatsapp.reply_prefix", None)
+        except Exception:
+            raw = None
+        if raw is None:
+            return _DEFAULT_REPLY_PREFIX
+        return str(raw).strip()
 
     async def _send_file(self, target: Any, path: str, caption: Optional[str]) -> None:
         """Send one attachment, routed by extension."""

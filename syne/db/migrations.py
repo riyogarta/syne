@@ -855,6 +855,26 @@ async def _m29_whatsapp_channel_config(conn) -> None:
 
 
 
+async def _m30_whatsapp_reply_prefix(conn) -> None:
+    """Seed whatsapp.reply_prefix (Riyo, 6 Nov 2026).
+
+    Syne runs on the owner's own WhatsApp number, so its replies and the
+    owner's own messages come from the same account. The prefix marks every
+    message Syne sends. Seed-only (ON CONFLICT DO NOTHING) so a value the
+    owner already set is kept; description copied verbatim from schema.sql.
+    """
+    await conn.execute(
+        """
+        INSERT INTO config (key, value, description)
+        VALUES ($1, $2::text::jsonb, $3)
+        ON CONFLICT (key) DO NOTHING
+        """,
+        "whatsapp.reply_prefix",
+        '"\U0001F40D"',
+        'Marker put on its own line, followed by a blank line, at the top of every WhatsApp message Syne sends, so a reply from the bot is told apart from the owner typing on the same number. Default "🐍". Empty string = no marker. Read on every send, so a change takes effect without a restart.',
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -885,6 +905,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (27, _m27_dm_policy_description, "transactional"),
     (28, _m28_seed_discord_config, "transactional"),
     (29, _m29_whatsapp_channel_config, "transactional"),
+    (30, _m30_whatsapp_reply_prefix, "transactional"),
 ]
 
 

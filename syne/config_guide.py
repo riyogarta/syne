@@ -417,6 +417,7 @@ Controls OAuth token refresh timing.
 | `whatsapp.enabled` | `false` | boolean |
 | `whatsapp.trigger_name` | `null` | string or null |
 | `whatsapp.allowed_chat_jids` | `[]` | JSON array |
+| `whatsapp.reply_prefix` | `"🐍"` | string |
 
 WhatsApp is a core channel (`syne/communication/whatsapp.py`), not an ability.
 It embeds whatsmeow via neonize in-process — there is no external binary and
@@ -432,6 +433,10 @@ no `wacli` any more. Pairing is a one-time QR scan; the QR is written to
   triggered message; access level is NOT stored here (a DM takes it from
   `users.access_level`, a group member from `groups.settings['members']`,
   absent meaning "public").
+- `reply_prefix` — marker on its own line, then a blank line, at the top of
+  every WhatsApp message Syne sends (replies, errors, sub-agent results,
+  send_message), because Syne runs on the owner's own number and its replies
+  would otherwise look like the owner typing. Empty string = off.
 - **The trigger word is mandatory**, in groups AND DMs, including from the
   owner. There is deliberately no switch to disable it: a WhatsApp reply comes
   back to us as `from_me`, so an untriggered bot would answer itself.

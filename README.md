@@ -427,6 +427,7 @@ syne restart
 
 - **Session storage** — whatsmeow keeps its device state in Syne's own PostgreSQL (`whatsmeow_*` tables), so `syne backup` covers the pairing too.
 - **Trigger word is mandatory** — in groups *and* DMs, including from the owner. Set it with `whatsapp.trigger_name` (falls back to `telegram.bot_trigger_name`, then the identity name).
+- **Reply marker** — every message Syne sends on WhatsApp starts with 🐍 on its own line, so its replies are told apart from your own messages. Change or disable it with `syne config set whatsapp.reply_prefix ""`.
 - **Running on your own number** — your own messages can call the bot too, in groups and in private chats with other people (trigger anywhere in the text). In a private chat the conversation stays the other person's, but your message is attributed to you, with your own access level. Syne recognises its own replies by message id and content, and a brake ignores more than 3 of your triggers per chat per minute.
 - **Members** — anyone who addresses the bot by name is registered as `public` on first contact. Manage them with `/wamembers` on Telegram: block, per-entry model override, per-member access level in groups, leave a group.
 - **Re-pairing** — WhatsApp logs linked devices out if the primary phone is unused for about 14 days, or when the device is removed from *Linked devices*. Syne tells the owner on Telegram when that happens; send `/restart` and scan the new QR it sends.
