@@ -3064,10 +3064,113 @@ Or just send me a message!"""
 
         return False
 
-    # ── Image Generation provider ──
+    # ── Image Generation / Vision: model picked from the /models registry ──
+
+    @staticmethod
+    def _media_model_usable(m: dict, purpose: str) -> bool:
+        """Can this /models entry serve image gen ("imggen") or vision ("vision")?"""
+        driver = m.get("driver", "")
+        if driver == "vertex":
+            return True
+        if driver == "openai_compat":
+            base_url = (m.get("base_url") or "").lower()
+            return "api.openai.com" in base_url or "together" in base_url
+        if driver == "ollama":
+            return purpose == "vision"
+        return False
+
+    async def _media_ability_config(self, ability: str) -> dict:
+        """Read an ability's config from the abilities table."""
+        from ..db.connection import get_connection
+        import json as _json
+        try:
+            async with get_connection() as conn:
+                row = await conn.fetchrow(
+                    "SELECT config FROM abilities WHERE name = $1", ability
+                )
+                if row and row["config"]:
+                    cfg = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
+                    return cfg if isinstance(cfg, dict) else {}
+        except Exception:
+            pass
+        return {}
+
+    async def _media_model_menu(self, update_or_query, ability: str, purpose: str, title: str):
+        """Render a model picker (from /models) for image gen or vision."""
+        config = await self._media_ability_config(ability)
+        current_key = config.get("model_key", "")
+        models = await get_config("provider.models", []) or []
+        active_key = await get_config("provider.active_model", "")
+        usable = [m for m in models if self._media_model_usable(m, purpose)]
+
+        current = next((m for m in models if m.get("key") == current_key), None) if current_key else None
+        if current:
+            current_text = (
+                f"<b>{current.get('label', current_key)}</b>\n"
+                f"Model ID: <code>{current.get('model_id', '')}</code>"
+            )
+        else:
+            current_text = "<b>not set</b>"
+
+        buttons = []
+        for m in self._sort_models_for_display(usable, active_key):
+            key = m.get("key", "")
+            label = m.get("label", key)
+            prefix = ">> " if key == current_key else ""
+            buttons.append([InlineKeyboardButton(
+                f"{prefix}{label}", callback_data=f"{purpose}:set:{key}"
+            )])
+
+        text = f"<b>{title}</b>\n\nModel: {current_text}"
+        if not usable:
+            text += "\n\nNo usable models in /models."
+        markup = InlineKeyboardMarkup(buttons)
+
+        if hasattr(update_or_query, 'message') and update_or_query.message:
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _media_model_set(self, query, model_key: str, ability: str, title: str, enable: bool):
+        """Save {"model_key": key} to an ability config (DB + in-memory)."""
+        from ..db.connection import get_connection
+        import json as _json
+
+        models = await get_config("provider.models", []) or []
+        entry = next((m for m in models if m.get("key") == model_key), None)
+        if not entry:
+            await query.edit_message_text("Model not found in /models.")
+            return
+
+        new_config = {"model_key": model_key}
+        sql = (
+            "UPDATE abilities SET config = $1, enabled = true WHERE name = $2"
+            if enable else
+            "UPDATE abilities SET config = $1 WHERE name = $2"
+        )
+        try:
+            async with get_connection() as conn:
+                await conn.execute(sql, _json.dumps(new_config), ability)
+        except Exception as e:
+            await query.edit_message_text(f"Error: {e}")
+            return
+
+        # Update in-memory ability config so it takes effect immediately
+        if self.agent.abilities:
+            reg = self.agent.abilities.get(ability)
+            if reg:
+                reg.config = new_config
+                if enable:
+                    reg.enabled = True
+
+        await query.edit_message_text(
+            f"{title} model set to <b>{entry.get('label', model_key)}</b>\n"
+            f"Model ID: <code>{entry.get('model_id', '')}</code>",
+            parse_mode="HTML",
+        )
 
     async def _cmd_imagegen(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /imagegen command — switch image generation provider."""
+        """Handle /imagegen command — pick the image generation model."""
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
@@ -3077,47 +3180,8 @@ Or just send me a message!"""
         await self._imggen_menu_main(update)
 
     async def _imggen_menu_main(self, update_or_query):
-        """Render image generation provider selection menu."""
-        from ..db.connection import get_connection
-        import json as _json
-        config = {}
-        try:
-            async with get_connection() as conn:
-                row = await conn.fetchrow(
-                    "SELECT config FROM abilities WHERE name = 'image_gen'"
-                )
-                if row and row["config"]:
-                    config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-        except Exception:
-            pass
-
-        current = config.get("provider", "not set")
-        current_model = config.get("model", "default")
-
-        providers = [
-            ("vertex", "Vertex AI (Gemini 3.1 Flash Image)", "Auto-reads API key from /models"),
-            ("together", "Together AI (FLUX.2)", "Needs API key"),
-            ("openai", "OpenAI (GPT Image 2)", "Needs API key"),
-        ]
-
-        buttons = []
-        for key, label, desc in providers:
-            prefix = ">> " if key == current else ""
-            buttons.append([InlineKeyboardButton(
-                f"{prefix}{label}", callback_data=f"imggen:set:{key}"
-            )])
-
-        text = (
-            f"<b>Image Generation</b>\n\n"
-            f"Provider: <b>{current}</b>\n"
-            f"Model: <code>{current_model}</code>"
-        )
-        markup = InlineKeyboardMarkup(buttons)
-
-        if hasattr(update_or_query, 'message') and update_or_query.message:
-            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        """Render image generation model selection menu (from /models)."""
+        await self._media_model_menu(update_or_query, "image_gen", "imggen", "Image Generation")
 
     async def _handle_imggen_callback(self, query, data: str):
         """Handle imggen:* callback routing."""
@@ -3126,55 +3190,13 @@ Or just send me a message!"""
             return
 
         if data.startswith("imggen:set:"):
-            provider = data.split(":", 2)[2]
+            model_key = data.split(":", 2)[2]
+            await self._media_model_set(query, model_key, "image_gen", "Image generation", enable=True)
 
-            defaults = {
-                "vertex": {"provider": "vertex", "model": "gemini-3.1-flash-image"},
-                "openai": {"provider": "openai"},
-                "together": {"provider": "together"},
-            }
-            new_config = defaults.get(provider, {"provider": provider})
-
-            # Preserve existing api_key
-            from ..db.connection import get_connection
-            import json as _json
-            try:
-                async with get_connection() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT config FROM abilities WHERE name = 'image_gen'"
-                    )
-                    if row and row["config"]:
-                        old_config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-                        old_key = old_config.get("api_key", "")
-                        if old_key and provider in ("together", "openai"):
-                            new_config["api_key"] = old_key
-
-                    # Update config
-                    await conn.execute(
-                        "UPDATE abilities SET config = $1, enabled = true WHERE name = 'image_gen'",
-                        _json.dumps(new_config),
-                    )
-            except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
-                return
-
-            # Update in-memory ability config
-            if self.agent.abilities:
-                reg = self.agent.abilities.get("image_gen")
-                if reg:
-                    reg.config = new_config
-                    reg.enabled = True
-
-            await query.edit_message_text(
-                f"Image generation provider switched to <b>{provider}</b>.\n"
-                f"Config: <code>{_json.dumps(new_config)}</code>",
-                parse_mode="HTML",
-            )
-
-    # ── Vision / Image Analysis provider ──
+    # ── Vision / Image Analysis model ──
 
     async def _cmd_vision(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /vision command — switch image analysis provider."""
+        """Handle /vision command — pick the image analysis model."""
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
@@ -3184,48 +3206,8 @@ Or just send me a message!"""
         await self._vision_menu_main(update)
 
     async def _vision_menu_main(self, update_or_query):
-        """Render vision provider selection menu."""
-        # Load current config
-        from ..db.connection import get_connection
-        import json as _json
-        config = {}
-        try:
-            async with get_connection() as conn:
-                row = await conn.fetchrow(
-                    "SELECT config FROM abilities WHERE name = 'image_analysis'"
-                )
-                if row and row["config"]:
-                    config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-        except Exception:
-            pass
-
-        current = config.get("provider", "not set")
-        current_model = config.get("model", "default")
-
-        providers = [
-            ("vertex", "Vertex AI", "Auto-reads API key from /models"),
-            ("ollama", "Ollama (local)", "gemma3:4b — free, no API key"),
-            ("openai", "OpenAI", "Needs API key"),
-        ]
-
-        buttons = []
-        for key, label, desc in providers:
-            prefix = ">> " if key == current else ""
-            buttons.append([InlineKeyboardButton(
-                f"{prefix}{label}", callback_data=f"vision:set:{key}"
-            )])
-
-        text = (
-            f"<b>Vision / Image Analysis</b>\n\n"
-            f"Provider: <b>{current}</b>\n"
-            f"Model: <code>{current_model}</code>"
-        )
-        markup = InlineKeyboardMarkup(buttons)
-
-        if hasattr(update_or_query, 'message') and update_or_query.message:
-            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        """Render vision model selection menu (from /models)."""
+        await self._media_model_menu(update_or_query, "image_analysis", "vision", "Vision / Image Analysis")
 
     async def _handle_vision_callback(self, query, data: str):
         """Handle vision:* callback routing."""
@@ -3234,90 +3216,8 @@ Or just send me a message!"""
             return
 
         if data.startswith("vision:set:"):
-            provider = data.split(":", 2)[2]
-
-            # Default models per provider
-            defaults = {
-                "vertex": {"provider": "vertex", "model": "gemini-3.8-flash"},
-                "ollama": {"provider": "ollama", "model": "gemma3:4b"},
-                "together": {"provider": "together"},
-                "openai": {"provider": "openai"},
-            }
-            new_config = defaults.get(provider, {"provider": provider})
-
-            # Ollama: auto-pull model if not available
-            if provider == "ollama":
-                model = new_config.get("model", "gemma3:4b")
-                await query.edit_message_text(f"Checking Ollama model <code>{model}</code>...", parse_mode="HTML")
-                import subprocess, shutil
-                if not shutil.which("ollama"):
-                    await query.edit_message_text("Ollama is not installed on this server.")
-                    return
-                # Check if model exists
-                try:
-                    result = subprocess.run(
-                        ["ollama", "list"], capture_output=True, text=True, timeout=10,
-                    )
-                    model_exists = any(model in line for line in result.stdout.splitlines())
-                except Exception:
-                    model_exists = False
-
-                if not model_exists:
-                    await query.edit_message_text(
-                        f"Downloading <code>{model}</code>... This may take a few minutes.",
-                        parse_mode="HTML",
-                    )
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "ollama", "pull", model,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
-                        if proc.returncode != 0:
-                            await query.edit_message_text(
-                                f"Failed to pull <code>{model}</code>:\n<code>{stderr.decode()[:300]}</code>",
-                                parse_mode="HTML",
-                            )
-                            return
-                    except asyncio.TimeoutError:
-                        await query.edit_message_text(f"Download timed out (10min). Try manually: <code>ollama pull {model}</code>", parse_mode="HTML")
-                        return
-
-            # Preserve existing api_key if switching between providers that need it
-            from ..db.connection import get_connection
-            import json as _json
-            try:
-                async with get_connection() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT config FROM abilities WHERE name = 'image_analysis'"
-                    )
-                    if row and row["config"]:
-                        old_config = _json.loads(row["config"]) if isinstance(row["config"], str) else row["config"]
-                        old_key = old_config.get("api_key", "")
-                        if old_key and provider in ("together", "openai"):
-                            new_config["api_key"] = old_key
-
-                    # Update config
-                    await conn.execute(
-                        "UPDATE abilities SET config = $1 WHERE name = 'image_analysis'",
-                        _json.dumps(new_config),
-                    )
-            except Exception as e:
-                await query.edit_message_text(f"Error: {e}")
-                return
-
-            # Update in-memory ability config so it takes effect immediately
-            if self.agent.abilities:
-                reg = self.agent.abilities.get("image_analysis")
-                if reg:
-                    reg.config = new_config
-
-            await query.edit_message_text(
-                f"Vision provider switched to <b>{provider}</b>.\n"
-                f"Config: <code>{_json.dumps(new_config)}</code>",
-                parse_mode="HTML",
-            )
+            model_key = data.split(":", 2)[2]
+            await self._media_model_set(query, model_key, "image_analysis", "Vision", enable=False)
 
     # ── Knowledge Graph extractor management ──
 
@@ -4162,6 +4062,53 @@ Or just send me a message!"""
             return
         await self._models_menu_main(update)
 
+    async def _ollama_ensure_model(self, bot, chat_id, base_url: str, model_id: str) -> tuple[bool, str]:
+        """Check Ollama for model_id via HTTP API; pull it if missing.
+
+        Returns (ok, error_message).
+        """
+        base = base_url.rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{base}/api/tags")
+            if resp.status_code != 200:
+                return False, f"GET {base}/api/tags returned HTTP {resp.status_code}"
+            names = set()
+            for m in resp.json().get("models", []) or []:
+                names.add(m.get("name", ""))
+                names.add(m.get("model", ""))
+        except Exception as e:
+            return False, f"cannot reach Ollama at {base}: {e}"
+
+        wanted = model_id if ":" in model_id else f"{model_id}:latest"
+        if model_id in names or wanted in names:
+            return True, ""
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"Downloading <code>{model_id}</code>…",
+            parse_mode="HTML",
+        )
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:
+                resp = await client.post(
+                    f"{base}/api/pull",
+                    json={"model": model_id, "stream": False},
+                )
+            if resp.status_code != 200:
+                return False, f"pull failed (HTTP {resp.status_code}): {resp.text[:300]}"
+            try:
+                err = (resp.json() or {}).get("error")
+            except Exception:
+                err = None
+            if err:
+                return False, f"pull failed: {err}"
+        except httpx.TimeoutException:
+            return False, "download timed out (10 min)"
+        except Exception as e:
+            return False, f"pull failed: {e}"
+        return True, ""
+
     @staticmethod
     def _sort_models_for_display(models, active_key):
         """Display order for every model list/picker (stored order untouched).
@@ -4743,6 +4690,7 @@ Or just send me a message!"""
                 ("groq", "Groq"),
                 ("together", "Together AI"),
                 ("openrouter", "OpenRouter"),
+                ("ollama", "Ollama (local)"),
                 ("custom", "Custom (enter URL)"),
             ]
             buttons = [
@@ -4827,6 +4775,28 @@ Or just send me a message!"""
                         "🔑 <b>Add Model — Custom API</b>\n\n"
                         "Send the base URL (OpenAI-compatible endpoint).\n"
                         "Example: <code>https://api.example.com/v1</code>\n\n"
+                        "Send /cancel to abort."
+                    ),
+                    parse_mode="HTML",
+                )
+            elif provider_key == "ollama":
+                # Local Ollama — no API key; ask for base URL, then model ID
+                self._auth_state[user.id] = {
+                    "type": "models_add",
+                    "driver": "ollama",
+                    "auth_override": "none",
+                    "step": "ollama_base_url",
+                }
+                try:
+                    await query.answer()
+                except Exception:
+                    pass
+                await (query._bot or self.app.bot).send_message(
+                    chat_id=query.message.chat_id,
+                    text=(
+                        "🦙 <b>Add Model — Ollama (local)</b>\n\n"
+                        "Send the Ollama base URL, or <code>default</code> for "
+                        "<code>http://localhost:11434</code>.\n\n"
                         "Send /cancel to abort."
                     ),
                     parse_mode="HTML",
@@ -9471,7 +9441,34 @@ Or just send me a message!"""
         step = state.get("step", "")
         text = text.strip()
 
-        if step == "base_url":
+        if step == "ollama_base_url":
+            # Ollama — user enters base URL (or "default")
+            if text.lower() in ("default", "."):
+                base_url = "http://localhost:11434"
+            elif text.startswith("http"):
+                base_url = text.rstrip("/")
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ URL must start with http:// or https:// (or send <code>default</code>).",
+                    parse_mode="HTML",
+                )
+                return True
+            state["base_url"] = base_url
+            state["step"] = "model_id"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"Base URL: <code>{base_url}</code>\n\n"
+                    f"Now send the <b>model ID</b> (as named in Ollama).\n"
+                    f"It will be downloaded if not present.\n\n"
+                    f"Send /cancel to abort."
+                ),
+                parse_mode="HTML",
+            )
+            return True
+
+        elif step == "base_url":
             # Custom API key provider — user enters base URL
             if not text.startswith("http"):
                 await bot.send_message(chat_id=chat_id, text="⚠️ URL must start with http:// or https://", parse_mode="HTML")
@@ -9650,6 +9647,19 @@ Or just send me a message!"""
                 entry["region"] = region or _default_region
                 if _proj:
                     entry["project_id"] = _proj
+
+            # Ollama: make sure the model exists locally (pull if missing)
+            if driver == "ollama":
+                _ok, _err = await self._ollama_ensure_model(
+                    bot, chat_id, entry.get("base_url") or "http://localhost:11434", entry["model_id"],
+                )
+                if not _ok:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=f"❌ Ollama: {_err}\nModel not saved.",
+                    )
+                    self._auth_state.pop(user_id, None)
+                    return True
 
             # Append to provider.models in DB
             models = await get_config("provider.models", [])

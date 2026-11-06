@@ -1,10 +1,11 @@
-"""Image Generation Ability — generate images via multiple providers.
+"""Image Generation Ability — generate images with a model from /models.
 
-Supported providers:
-  Vertex AI: {"provider": "vertex", "model": "gemini-3.1-flash-image"}
-             (Imagen models, served via :predict, are also supported)
-  Together AI: {"provider": "together", "api_key": "...", "model": "black-forest-labs/FLUX.2-dev"}
-  OpenAI: {"provider": "openai", "api_key": "...", "model": "gpt-image-2"}
+Config: {"model_key": "<key of a /models entry>"}  (set via /imagegen)
+The entry decides the provider:
+  driver vertex                         → Vertex AI (Gemini image / Imagen)
+  driver openai_compat, api.openai.com  → OpenAI Image API
+  driver openai_compat, together        → Together AI images
+API key comes from the entry's credential_key.
 """
 
 import base64
@@ -41,33 +42,37 @@ class ImageGenAbility(Ability):
         if not config:
             config = await self._load_config_from_db()
 
-        provider = config.get("provider", "").lower()
-        api_key = config.get("api_key", "")
-        model = config.get("model", "")
+        model_key = config.get("model_key", "")
+        if not model_key:
+            return {"success": False, "error": "Image generation model not set. Choose one in /imagegen."}
 
-        if provider == "vertex":
+        try:
+            entry, api_key = await self._resolve_model_entry(model_key)
+        except Exception as e:
+            return {"success": False, "error": f"Could not read /models registry: {e}"}
+        if not entry:
+            return {"success": False, "error": f"Image generation model '{model_key}' not found in /models. Choose one in /imagegen."}
+
+        driver = entry.get("driver", "")
+        model = entry.get("model_id", "")
+        base_url = (entry.get("base_url") or "").lower()
+
+        if driver == "vertex":
             image_bytes = await self._gen_vertex(
-                prompt, model=model or "gemini-3.1-flash-image",
-                api_key=api_key, region=config.get("region", ""),
-                project_id=config.get("project_id", ""),
-                prefer_global=not model,
+                prompt, model=model, api_key=api_key,
+                region=entry.get("region", ""),
+                project_id=entry.get("project_id", ""),
             )
-        elif provider == "together":
-            api_key = api_key or os.environ.get("TOGETHER_API_KEY", "")
+        elif driver == "openai_compat" and "api.openai.com" in base_url:
             if not api_key:
-                return {"success": False, "error": "Together AI API key not configured"}
-            image_bytes = await self._gen_together(
-                prompt, api_key=api_key,
-                model=model or "black-forest-labs/FLUX.2-dev",
-            )
-        elif provider == "openai":
+                return {"success": False, "error": "OpenAI API key not configured for this model in /models"}
+            image_bytes = await self._gen_openai(prompt, api_key=api_key, model=model)
+        elif driver == "openai_compat" and "together" in base_url:
             if not api_key:
-                return {"success": False, "error": "OpenAI API key not configured"}
-            image_bytes = await self._gen_openai(
-                prompt, api_key=api_key, model=model or "gpt-image-2",
-            )
+                return {"success": False, "error": "Together AI API key not configured for this model in /models"}
+            image_bytes = await self._gen_together(prompt, api_key=api_key, model=model)
         else:
-            return {"success": False, "error": f"Unknown provider '{provider}'. Use /imagegen to configure."}
+            return {"success": False, "error": f"Model '{entry.get('label', model_key)}' (driver {driver}) cannot generate images. Choose another in /imagegen."}
 
         if isinstance(image_bytes, dict):
             return image_bytes  # error dict
@@ -85,7 +90,7 @@ class ImageGenAbility(Ability):
             "media": filepath,
         }
 
-    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "", project_id: str = "", prefer_global: bool = False) -> bytes | dict:
+    async def _gen_vertex(self, prompt: str, model: str, api_key: str = "", region: str = "", project_id: str = "") -> bytes | dict:
         """Generate image via Vertex AI.
 
         Two different APIs live behind the same provider:
@@ -93,17 +98,10 @@ class ImageGenAbility(Ability):
           - Gemini models  → `:generateContent` (contents / inlineData)
         They are not interchangeable, so dispatch on the model family.
         """
-        if not api_key or not region:
-            try:
-                _key, _region, _project = await self._load_vertex_credentials(model, prefer_global)
-                api_key = api_key or _key
-                if not region:
-                    region, project_id = _region, project_id or _project
-            except Exception as e:
-                return {"success": False, "error": f"Vertex credentials: {e}"}
-
         if not api_key:
-            return {"success": False, "error": "No Vertex API key. Set via /imagegen or add Vertex model in /models."}
+            return {"success": False, "error": "No Vertex API key for this model. Check its credential in /models."}
+        if not region:
+            return {"success": False, "error": "No Vertex region for this model in /models."}
 
         # Chat models in the registry may use the global endpoint (needs the
         # project ID), so build URLs the same way the Vertex driver does.
@@ -275,36 +273,30 @@ class ImageGenAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _load_vertex_credentials(self, model: str = "", prefer_global: bool = False) -> tuple[str, str, str]:
-        """Auto-load Vertex API key, region and project ID from model registry."""
+    async def _resolve_model_entry(self, model_key: str) -> tuple[dict | None, str]:
+        """Look up model_key in the /models registry → (entry, api_key)."""
         from ..db.connection import get_connection
         import json as _json
 
         async with get_connection() as conn:
             row = await conn.fetchrow("SELECT value FROM config WHERE key = 'provider.models'")
             if not row:
-                raise ValueError("No model registry found")
-
+                return None, ""
             models = _json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
-            # Exact model match first, then a global entry when the caller is
-            # on the default model, then the first Vertex entry (legacy).
-            from ..llm.vertex import pick_vertex_entry
-            _picked = pick_vertex_entry([e for e in models if e.get("driver") == "vertex"], model, prefer_global)
-            for m in ([_picked] if _picked else []):
-                if m.get("driver") == "vertex":
-                    credential_key = m.get("credential_key", "")
-                    region = m.get("region", "")
-                    api_key = ""
-                    if credential_key:
-                        key_row = await conn.fetchrow(
-                            "SELECT value FROM config WHERE key = $1", credential_key
-                        )
-                        if key_row:
-                            val = key_row["value"]
-                            api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
-                    return api_key, region, m.get("project_id", "")
+            entry = next((m for m in (models or []) if m.get("key") == model_key), None)
+            if not entry:
+                return None, ""
 
-        raise ValueError("No Vertex model found in registry")
+            api_key = ""
+            credential_key = entry.get("credential_key", "")
+            if credential_key:
+                key_row = await conn.fetchrow(
+                    "SELECT value FROM config WHERE key = $1", credential_key
+                )
+                if key_row:
+                    val = key_row["value"]
+                    api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
+            return entry, api_key or ""
 
     async def _load_config_from_db(self) -> dict:
         try:
@@ -345,19 +337,15 @@ class ImageGenAbility(Ability):
         }
 
     def get_guide(self, enabled: bool, config: dict) -> str:
-        provider = config.get("provider", "")
-        has_key = bool(config.get("api_key"))
-        ready = enabled and (provider == "vertex" or has_key)
-        if ready:
+        model_key = config.get("model_key", "")
+        if enabled and model_key:
             return (
-                f"- Status: **ready** (provider: {provider})\n"
+                f"- Status: **ready** (model: {model_key})\n"
                 "- Use: `image_gen(prompt='...')` to generate images"
             )
         return (
             "- Status: **not ready**\n"
-            "- Providers: vertex (auto-reads key from /models), together, openai (need api_key)\n"
-            "- Setup via /imagegen command or: `update_ability(action='config', name='image_gen', "
-            "config='{\"provider\": \"vertex\"}')`"
+            "- Setup: owner picks an image model (from /models) via /imagegen"
         )
 
     def get_required_config(self) -> list[str]:

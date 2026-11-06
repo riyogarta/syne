@@ -1,12 +1,11 @@
-"""Image Analysis Ability — analyze images using configured vision provider.
+"""Image Analysis Ability — analyze images with a model from /models.
 
-All configuration comes from the ability's config in DB.
-No hardcoded providers or models. Owner decides everything.
-
-Example configs:
-  Ollama:      {"provider": "ollama", "model": "gemma3:4b"}
-  Together AI: {"provider": "together", "api_key": "...", "model": "Qwen/Qwen3.5-9B"}
-  OpenAI:      {"provider": "openai", "api_key": "...", "model": "gpt-6-luna"}
+Config: {"model_key": "<key of a /models entry>"}  (set via /vision)
+The entry decides the provider:
+  driver vertex         → Vertex AI generateContent
+  driver openai_compat  → OpenAI-compatible chat/completions (OpenAI, Together, ...)
+  driver ollama         → Ollama /api/chat at the entry's base_url
+API key comes from the entry's credential_key.
 """
 
 import base64
@@ -121,53 +120,47 @@ class ImageAnalysisAbility(Ability):
         if not config:
             config = await self._load_config_from_db()
 
-        provider = config.get("provider", "").lower()
-        api_key = config.get("api_key", "")
-        model = config.get("model", "")
+        model_key = config.get("model_key", "")
+        if not model_key:
+            return {"success": False, "error": "Vision model not set. Choose one in /vision."}
 
-        # Dispatch to provider
-        if provider == "vertex":
+        try:
+            entry, api_key = await self._resolve_model_entry(model_key)
+        except Exception as e:
+            return {"success": False, "error": f"Could not read /models registry: {e}"}
+        if not entry:
+            return {"success": False, "error": f"Vision model '{model_key}' not found in /models. Choose one in /vision."}
+
+        driver = entry.get("driver", "")
+        model = entry.get("model_id", "")
+
+        if driver == "vertex":
             return await self._call_vertex(
                 image_base64, mime_type, prompt,
-                model=model or "gemini-3.8-flash",
-                api_key=api_key,
-                region=config.get("region", ""),
-                project_id=config.get("project_id", ""),
-                prefer_global=not model,
+                model=model, api_key=api_key,
+                region=entry.get("region", ""),
+                project_id=entry.get("project_id", ""),
             )
 
-        if provider == "ollama":
-            base_url = config.get("base_url", "http://localhost:11434")
+        if driver == "ollama":
             return await self._call_ollama(
                 image_base64, mime_type, prompt,
-                model=model or "gemma3:4b",
-                base_url=base_url,
+                model=model,
+                base_url=entry.get("base_url") or "http://localhost:11434",
             )
 
-        if provider == "together" and api_key:
+        if driver == "openai_compat":
+            if not api_key:
+                return {"success": False, "error": "API key not configured for this model in /models"}
+            base_url = (entry.get("base_url") or "").rstrip("/")
+            if not base_url:
+                return {"success": False, "error": "No base_url for this model in /models"}
             return await self._call_openai_compatible(
                 image_base64, mime_type, prompt,
-                api_key=api_key,
-                model=model or "Qwen/Qwen3.5-9B",
-                base_url="https://api.together.xyz/v1",
+                api_key=api_key, model=model, base_url=base_url,
             )
 
-        if provider == "openai" and api_key:
-            return await self._call_openai_compatible(
-                image_base64, mime_type, prompt,
-                api_key=api_key,
-                model=model or "gpt-6-luna",
-                base_url="https://api.openai.com/v1",
-            )
-
-        if provider == "google":
-            # Google has closed all OAuth access paths for Gemini.
-            return {"success": False, "error": "Gemini OAuth is no longer available from Google. Choose another vision provider via /vision."}
-
-        if not provider:
-            return {"success": False, "error": "No vision provider configured. Choose one via /vision."}
-
-        return {"success": False, "error": f"Unknown provider '{provider}' or missing api_key"}
+        return {"success": False, "error": f"Model '{entry.get('label', model_key)}' (driver {driver}) is not supported for vision. Choose another in /vision."}
 
     async def _resolve_image(self, url: str, b64: str, default_mime: str) -> tuple[str, str]:
         if not url:
@@ -198,27 +191,12 @@ class ImageAnalysisAbility(Ability):
     async def _call_vertex(
         self, b64: str, mime: str, prompt: str,
         model: str, api_key: str = "", region: str = "", project_id: str = "",
-        prefer_global: bool = False,
     ) -> dict:
-        """Call Vertex AI Gemini vision API.
-
-        Auto-reads API key, region and project ID from the model registry if
-        not provided (the global endpoint needs the project ID).
-        """
-        # Auto-load API key + region from existing Vertex model config
-        if not api_key or not region:
-            try:
-                _key, _region, _project = await self._load_vertex_credentials(model, prefer_global)
-                api_key = api_key or _key
-                if not region:
-                    region, project_id = _region, project_id or _project
-            except Exception as e:
-                return {"success": False, "error": f"Vertex credentials: {e}"}
-
+        """Call Vertex AI Gemini vision API with the /models entry's settings."""
         if not api_key:
-            return {"success": False, "error": "No Vertex API key. Set in ability config or add a Vertex model in /models."}
+            return {"success": False, "error": "No Vertex API key for this model. Check its credential in /models."}
         if not region:
-            return {"success": False, "error": "No Vertex region. Set in ability config or add a Vertex model in /models."}
+            return {"success": False, "error": "No Vertex region for this model in /models."}
 
         from ..llm.vertex import _vertex_endpoint
         try:
@@ -254,39 +232,30 @@ class ImageAnalysisAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _load_vertex_credentials(self, model: str = "", prefer_global: bool = False) -> tuple[str, str, str]:
-        """Auto-load Vertex API key, region and project ID from model registry."""
+    async def _resolve_model_entry(self, model_key: str) -> tuple[dict | None, str]:
+        """Look up model_key in the /models registry → (entry, api_key)."""
         from ..db.connection import get_connection
         import json as _json
 
         async with get_connection() as conn:
             row = await conn.fetchrow("SELECT value FROM config WHERE key = 'provider.models'")
             if not row:
-                raise ValueError("No model registry found")
-
+                return None, ""
             models = _json.loads(row["value"]) if isinstance(row["value"], str) else row["value"]
-            # Exact model match first, then a global entry when the caller is
-            # on the default model, then the first Vertex entry (legacy).
-            from ..llm.vertex import pick_vertex_entry
-            _picked = pick_vertex_entry([e for e in models if e.get("driver") == "vertex"], model, prefer_global)
-            for m in ([_picked] if _picked else []):
-                if m.get("driver") == "vertex":
-                    credential_key = m.get("credential_key", "")
-                    region = m.get("region", "")
+            entry = next((m for m in (models or []) if m.get("key") == model_key), None)
+            if not entry:
+                return None, ""
 
-                    # Load API key
-                    api_key = ""
-                    if credential_key:
-                        key_row = await conn.fetchrow(
-                            "SELECT value FROM config WHERE key = $1", credential_key
-                        )
-                        if key_row:
-                            val = key_row["value"]
-                            api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
-
-                    return api_key, region, m.get("project_id", "")
-
-        raise ValueError("No Vertex model found in registry")
+            api_key = ""
+            credential_key = entry.get("credential_key", "")
+            if credential_key:
+                key_row = await conn.fetchrow(
+                    "SELECT value FROM config WHERE key = $1", credential_key
+                )
+                if key_row:
+                    val = key_row["value"]
+                    api_key = _json.loads(val) if isinstance(val, str) and val.startswith('"') else val
+            return entry, api_key or ""
 
     async def _call_ollama(
         self, b64: str, mime: str, prompt: str,
@@ -409,25 +378,16 @@ class ImageAnalysisAbility(Ability):
         }
 
     def get_guide(self, enabled: bool, config: dict) -> str:
-        provider = config.get("provider", "")
-        has_key = bool(config.get("api_key"))
-        # vertex reads its key from /models, ollama needs none; the others
-        # need an api_key in the ability config.
-        ready = enabled and (
-            provider in ("vertex", "ollama")
-            or (provider in ("together", "openai") and has_key)
-        )
-        if ready:
+        model_key = config.get("model_key", "")
+        if enabled and model_key:
             return (
-                f"- Status: **ready** (provider: {provider})\n"
+                f"- Status: **ready** (model: {model_key})\n"
                 "- Automatically analyzes images sent by users (ability-first)\n"
                 "- Also callable: `image_analysis(image_url='...', prompt='...')`"
             )
         return (
             "- Status: **not ready**\n"
-            "- Providers: vertex (auto-reads key from /models), ollama (local), together, openai\n"
-            "- Setup: `update_ability(action='config', name='image_analysis', "
-            "config='{\"provider\": \"vertex\"}')`"
+            "- Setup: owner picks a vision model (from /models) via /vision"
         )
 
     def get_required_config(self) -> list[str]:

@@ -437,7 +437,9 @@ def init():
     vision_config = None
 
     if vision_provider == "vertex":
-        vision_config = {"provider": "vertex", "model": "gemini-3.8-flash"}
+        # Vision picks a /models entry; "gemini-flash" is the registry key
+        # created below for the Vertex provider (gemini-3.8-flash).
+        vision_config = {"model_key": "gemini-flash"}
         console.print("[green]✓ Vision: Vertex AI (gemini-3.8-flash)[/green]")
     elif vision_provider == "ollama":
         vision_model = "gemma3:4b"
@@ -448,10 +450,21 @@ def init():
             if ret == 0:
                 console.print(f"[green]✓ Vision model {vision_model} ready[/green]")
             else:
-                console.print(f"[yellow]⚠️ Failed to pull {vision_model} — can download later via /vision[/yellow]")
+                console.print(f"[yellow]⚠️ Failed to pull {vision_model} — can download later via /models[/yellow]")
         else:
             console.print("[yellow]⚠️ Ollama not available yet — model will be pulled on first update[/yellow]")
-        vision_config = {"provider": "ollama", "model": vision_model}
+        # Vision picks a /models entry, so register the Ollama model there.
+        vision_config = {
+            "model_key": "ollama-vision",
+            "_ollama_entry": {
+                "key": "ollama-vision",
+                "label": f"Ollama {vision_model}",
+                "driver": "ollama",
+                "model_id": vision_model,
+                "auth": "none",
+                "base_url": "http://localhost:11434",
+            },
+        }
     else:
         console.print("[dim]  Vision: native LLM (no separate ability configured)[/dim]")
 
@@ -783,6 +796,12 @@ def init():
         # Save vision/image_analysis config
         if vision_config:
             import json as _json
+            _ollama_entry = vision_config.pop("_ollama_entry", None)
+            if _ollama_entry:
+                _models = await get_config("provider.models", []) or []
+                if not any(m.get("key") == _ollama_entry["key"] for m in _models):
+                    _models.append(_ollama_entry)
+                    await set_config("provider.models", _models)
             async with pool.acquire() as conn:
                 await conn.execute(
                     "UPDATE abilities SET config = $1, enabled = true WHERE name = 'image_analysis'",
