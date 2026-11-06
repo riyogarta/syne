@@ -797,7 +797,12 @@ class DiscordChannel:
         reply_to: Optional[discord.Message] = None,
     ) -> None:
         """Send an agent response, applying the shared outbound pipeline."""
-        text = process_outbound(text or "")
+        # _dispatch already acted on these tags; sub-agent results and
+        # send_message arrive here without a triggering message, so strip
+        # any leftover tag instead of showing it.
+        text, _ = parse_reply_tag(text or "")
+        text, _ = parse_react_tags(text)
+        text = process_outbound(text)
         text, media = extract_all_media(text)
         text = markdown_to_discord(text)
 

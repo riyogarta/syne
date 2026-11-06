@@ -103,6 +103,7 @@ from ..db.models import (
 from .formatting import markdown_to_whatsapp
 from .inbound import InboundContext, build_user_context_prefix, load_group_settings
 from .outbound import extract_all_media, process_outbound, split_message
+from .tags import parse_reply_tag
 from .registry import (
     CHANNEL_TELEGRAM,
     CHANNEL_WHATSAPP,
@@ -216,6 +217,9 @@ _FROM_ME_WINDOW = 60.0
 # Bounded cache for @lid -> phone number lookups. One entry per contact that
 # ever messages us, so a couple of thousand is already generous.
 _LID_CACHE_MAX = 2000
+
+# [[react:<emoji>]] tag, same pattern as tags.parse_react_tags.
+_REACT_TAG = re.compile(r"\[\[\s*react:\s*(.+?)\s*\]\]")
 
 # Server parts of a WhatsApp JID.
 _SERVER_DM = "s.whatsapp.net"
@@ -1293,9 +1297,15 @@ class WhatsAppChannel:
             logger.warning("send_response called while WhatsApp is not connected")
             return
 
+        # Channel tags the model emits. On WhatsApp [[react:👍]] is sent as the
+        # emoji itself in the reply text -- the 👀 reaction on the incoming
+        # message stays as the receipt -- and [[reply_to_…]] is dropped, since
+        # quote-replies are not implemented here.
+        text, _ = parse_reply_tag(text or "")
+        text = _REACT_TAG.sub(lambda m: m.group(1).strip(), text).strip()
         # MEDIA: paths must be pulled BEFORE process_outbound strips server
         # paths. The first file takes the caption; the rest follow bare.
-        text, media = extract_all_media(text or "")
+        text, media = extract_all_media(text)
         text = process_outbound(text)
         if not text and not media:
             return
