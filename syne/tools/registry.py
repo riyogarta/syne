@@ -202,6 +202,10 @@ class ToolRegistry:
             call_args = {**arguments}
             if scheduled and name in ("send_message",):
                 call_args["_scheduled"] = True
+            if name == "send_message":
+                # Cross-channel limits depend on who is asking (owner vs
+                # family), which the handler cannot see on its own.
+                call_args["_access_level"] = access_level
             # Deterministic relay attribution: for a non-scheduled send_message
             # whose destination is a DIFFERENT chat than the current user (a
             # relay to someone else), auto-fill relay_from with the sender's

@@ -101,7 +101,13 @@ from ..db.models import (
 from .formatting import markdown_to_whatsapp
 from .inbound import InboundContext, build_user_context_prefix, load_group_settings
 from .outbound import extract_all_media, process_outbound, split_message
-from .registry import CHANNEL_WHATSAPP, register_channel, unregister_channel
+from .registry import (
+    CHANNEL_TELEGRAM,
+    CHANNEL_WHATSAPP,
+    get_channel,
+    register_channel,
+    unregister_channel,
+)
 
 logger = logging.getLogger("syne.whatsapp")
 
@@ -311,6 +317,11 @@ class WhatsAppChannel:
         # whatsmeow syncs the contact, and caching "" would hide that forever.
         self._lid_pn: dict[str, str] = {}
 
+        # Telegram message id of the pairing QR sent to the owner. whatsmeow
+        # rotates the code several times; each new one replaces the image in
+        # this message rather than stacking up expired QRs.
+        self._qr_msg_id: Optional[int] = None
+
     # ── Lifecycle ────────────────────────────────────────────
 
     async def start(self) -> None:
@@ -394,6 +405,14 @@ class WhatsAppChannel:
             self._own_pn = self._own_number(me)
             logger.info("WhatsApp connected (own number: %s)", self._own_pn or "?")
 
+            # A QR was out, so this connect is the end of a pairing.
+            if self._qr_msg_id is not None:
+                self._qr_msg_id = None
+                await self._notify_owner(
+                    "✅ WhatsApp paired (%s). The channel is live."
+                    % (self._own_pn or "number unknown")
+                )
+
             # Only advertise the channel once it can actually send.
             register_channel(CHANNEL_WHATSAPP, self)
 
@@ -418,6 +437,14 @@ class WhatsAppChannel:
                 "scanning the QR again."
             )
             unregister_channel(CHANNEL_WHATSAPP)
+            # whatsmeow does not reconnect a logged-out device, so nothing
+            # happens until a restart produces a fresh QR. Without this the
+            # only trace is a log line on a server the owner rarely reads.
+            await self._notify_owner(
+                "⚠️ WhatsApp session logged out — the linked device was removed "
+                "or expired (the phone was unused for ~14 days). WhatsApp is "
+                "offline. Send /restart to get a new pairing QR here."
+            )
 
         @client.event(PairStatusEv)
         async def on_pair_status(_client: NewAClient, ev: PairStatusEv):
@@ -458,6 +485,39 @@ class WhatsAppChannel:
             )
         except Exception as e:
             logger.error("Failed to render WhatsApp QR: %s: %s", type(e).__name__, e)
+            return
+
+        # Also hand it to the owner on Telegram, so pairing a remote server
+        # does not mean fetching a file over SSH. Best-effort: the file and
+        # the log line above stay the fallback.
+        telegram = get_channel(CHANNEL_TELEGRAM)
+        send_photo = getattr(telegram, "send_owner_photo", None)
+        if send_photo is None:
+            return
+        try:
+            msg_id = await send_photo(
+                png_path,
+                "📱 WhatsApp pairing — scan in WhatsApp › Linked devices › "
+                "Link a device. The code refreshes itself a few times; if it "
+                "stops refreshing before you scan, send /restart.",
+                self._qr_msg_id,
+            )
+            if msg_id is not None:
+                self._qr_msg_id = msg_id
+        except Exception as e:
+            logger.debug("[whatsapp] QR delivery to Telegram failed: %s", e)
+
+    async def _notify_owner(self, text: str) -> None:
+        """Best-effort plain-text notice to the owner over Telegram."""
+        telegram = get_channel(CHANNEL_TELEGRAM)
+        notify = getattr(telegram, "notify_owner", None)
+        if notify is None:
+            logger.warning("[whatsapp] cannot notify owner: Telegram not available")
+            return
+        try:
+            await notify(text)
+        except Exception as e:
+            logger.debug("[whatsapp] owner notice failed: %s", e)
 
     # ── JID helpers ──────────────────────────────────────────
 
@@ -1197,6 +1257,18 @@ class WhatsAppChannel:
         except Exception as e:
             logger.error("WhatsApp send_to_chat failed: %s: %s", type(e).__name__, e)
             return False
+
+    async def is_known_chat(self, chat_id: str) -> bool:
+        """True if chat_id is a non-blocked entry in the member list.
+
+        The member list holds exactly the chats that have addressed Syne (plus
+        what the owner added in /wamembers). send_message limits non-owners to
+        these, so the account cannot be pointed at arbitrary numbers -- cold
+        messages to strangers are the fastest way to get a number banned.
+        """
+        by_jid = await self._load_members()
+        _, member = self._match_member(by_jid, str(chat_id or "").strip())
+        return bool(member) and not member.get("blocked")
 
     async def leave_group(self, group_jid: str) -> tuple[bool, str]:
         """Leave a WhatsApp group. Returns (ok, message).

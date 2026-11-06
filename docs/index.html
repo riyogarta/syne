@@ -90,7 +90,7 @@
   .sec-head h2{font-family:var(--serif);font-weight:500;font-size:clamp(28px,3.6vw,40px);letter-spacing:-.015em;line-height:1.08;margin:14px 0 0}
   .sec-head p.sub{color:var(--muted);margin-top:14px;font-size:16.5px;max-width:56ch}
 
-  .proofs{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+  .proofs{display:grid;grid-template-columns:repeat(2,1fr);gap:22px}
   .proof{background:var(--ink-2);border:1px solid var(--line);border-radius:16px;padding:26px 24px 28px;transition:border-color .2s,transform .2s}
   .proof:hover{border-color:var(--gold-line);transform:translateY(-3px)}
   .proof .n{font-family:var(--mono);font-size:12px;color:var(--gold);letter-spacing:.1em}
@@ -229,7 +229,7 @@
   <div class="wrap">
     <h1 class="tagline"><span class="q">“</span>I remember,<br>therefore I am.<span class="q">”</span></h1>
     <p class="subline">The assistant that <b>remembers what matters,</b> and never <b>leaves your server.</b></p>
-    <div class="hero-meta">Self-hosted · on Telegram · near-zero cost · Apache 2.0</div>
+    <div class="hero-meta">Self-hosted · on Telegram · Apache 2.0</div>
     <div class="hero-cta">
       <div class="install">
         <span class="prompt">$</span>
@@ -267,7 +267,6 @@
     <div class="proofs">
       <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Anything you explicitly ask it to remember is kept forever. Stop repeating yourself to your tools.</p><div class="detail">explicit facts never fade · casual mentions decay if unused</div></div>
       <div class="proof"><div class="n">02</div><h3>It's yours.</h3><p>Runs entirely on your own server, stored in your own PostgreSQL. Your memories never touch a third party unless you choose them to.</p><div class="detail">Telegram · WhatsApp · Discord · terminal · same agent, same memory</div></div>
-      <div class="proof"><div class="n">03</div><h3>It's near-zero cost.</h3><p>Memory and evaluation run locally on Ollama for free. Chat runs on a paid API key, or your existing Claude / ChatGPT subscription via OAuth.</p><div class="detail">free memory floor · your call on the chat model</div></div>
     </div>
   </div>
 </section>
@@ -414,7 +413,7 @@
       <div class="sec-head"><span class="depth">Layer 04 · <b>Models &amp; reach</b></span><h2>Any model. Anywhere. In parallel.</h2></div>
       <div class="split">
         <div>
-          <p style="color:var(--muted);font-size:15.5px;margin-bottom:6px">Eight providers, switchable mid-conversation with no redeploy. Local Ollama runs free; the chat model uses a paid API key or your existing Claude / ChatGPT subscription via OAuth.</p>
+          <p style="color:var(--muted);font-size:15.5px;margin-bottom:6px">Eight providers, switchable mid-conversation with no redeploy. Memory embedding and evaluation run locally on Ollama; the chat model uses your own API key or a ChatGPT sign-in.</p>
           <div class="models">
             <span class="model on">Gemini</span><span class="model">Claude</span><span class="model">ChatGPT</span><span class="model">OpenAI</span><span class="model">Together AI</span><span class="model">Vertex</span><span class="model">Groq</span><span class="model">Ollama · local</span>
           </div>
@@ -461,7 +460,7 @@
       <div class="term">
         <div class="term-bar"><i></i><i></i><i></i><span>your-server ~ zsh</span></div>
         <div class="term-body"><span class="c">$ curl -fsSL https://syne.codes/install.sh | bash</span>
-<span class="o">→ choose provider (API key or subscription OAuth)</span>
+<span class="o">→ choose chat provider</span>
 <span class="o">→ auto-detect hardware, recommend models</span>
 <span class="o">→ git + Python 3.11+ + Docker + PostgreSQL + pgvector</span>
 <span class="o">→ Ollama + embedding + evaluator · Telegram bot · systemd</span>
@@ -495,7 +494,7 @@
           <div class="cmd"><code>syne update</code><span>latest release</span></div>
           <div class="cmd"><code>syne updatedev</code><span>force pull + reinstall</span></div>
           <div class="caveat" style="margin-top:22px">
-            <div><b>Free floor:</b> Ollama local embedding + evaluator = $0. Chat model uses a paid API key or your existing Claude / ChatGPT subscription via OAuth.</div>
+            <div><b>Runs local where it can:</b> embedding and the memory evaluator run on Ollama on your own server. The chat model uses your own API key or a ChatGPT sign-in.</div>
             <div style="margin-top:10px"><b>Note:</b> switching to an embedding model with the same vector dimension is supported — <code>syne memory reembed-memory --force</code> re-embeds every row (resumable, HNSW index refreshed). A different dimension deletes all memories, so choose with long-term capacity in mind. The evaluator can change anytime.</div>
           </div>
         </div>

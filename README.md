@@ -2,7 +2,7 @@
 
 **The assistant that remembers what matters, and never leaves your server.**
 
-Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Zero-cost floor with local Ollama for memory + evaluation; bring a paid API key or use your existing Claude / ChatGPT subscription via OAuth for the chat model.
+Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Memory embedding and evaluation run locally on Ollama; the chat model uses your own API key or a ChatGPT sign-in.
 
 *"I remember, therefore I am"* — named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), Greek goddess of memory.
 
@@ -16,7 +16,7 @@ A Telegram bot you self-host — also reachable on WhatsApp and Discord, sharing
 - **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
 - **Multi-tier permissions** — owner / family / public with Linux-style 3-digit octal per tool. Public users by default get nothing from memory unless you explicitly open specific categories (Rule 765).
 - **Runtime configuration in PostgreSQL** — no `SOUL.md` or `CONFIG.yaml`. Identity, behavior, rules, and config all live in tables, changeable through conversation.
-- **Cost floor: Ollama local + optional paid API** — Ollama embeddings + small local evaluator are free and self-contained. Chat goes through Anthropic / Google Gemini / Vertex AI / OpenAI / Together / Groq / Codex — bring a paid API key, or plug in your existing Claude Code / ChatGPT subscription via OAuth.
+- **Runs local where it can** — Ollama embeddings + a small local evaluator run on your own server. Chat goes through Anthropic / Google Gemini / Vertex AI / OpenAI / Together / Groq / Codex — with your own API key, or a ChatGPT sign-in.
 
 ## Advanced capabilities (opt-in)
 
@@ -68,7 +68,7 @@ bash install.sh
 
 | Step | What happens |
 |------|---|
-| ① | Choose AI provider (API key or subscription OAuth) |
+| ① | Choose chat provider |
 | ② | Auto-detect hardware → recommend models |
 | ③ | Enter Telegram bot token |
 | ④ | Docker + PostgreSQL + pgvector |
@@ -421,14 +421,15 @@ Runs in-process through [neonize](https://github.com/krypton-byte/neonize) (the 
 ```bash
 syne config set whatsapp.enabled true
 syne restart
-# First start: the pairing QR is written to ~/.syne/whatsapp_qr.png (path logged at WARNING).
+# First start: the pairing QR is sent to the owner on Telegram (and saved to ~/.syne/whatsapp_qr.png).
 # Scan it from WhatsApp → Linked devices → Link a device.
 ```
 
 - **Session storage** — whatsmeow keeps its device state in Syne's own PostgreSQL (`whatsmeow_*` tables), so `syne backup` covers the pairing too.
 - **Trigger word is mandatory** — in groups *and* DMs, including from the owner. Set it with `whatsapp.trigger_name` (falls back to `telegram.bot_trigger_name`, then the identity name).
 - **Members** — anyone who addresses the bot by name is registered as `public` on first contact. Manage them with `/wamembers` on Telegram: block, per-entry model override, per-member access level in groups, leave a group.
-- **Re-pairing** — WhatsApp logs linked devices out if the primary phone is unused for about 14 days, or when the device is removed from *Linked devices*. Restart Syne and scan the new QR.
+- **Re-pairing** — WhatsApp logs linked devices out if the primary phone is unused for about 14 days, or when the device is removed from *Linked devices*. Syne tells the owner on Telegram when that happens; send `/restart` and scan the new QR it sends.
+- **Outbound limits** — through `send_message`, family members can only reach WhatsApp chats that have already talked to Syne; only the owner can message a new number. Group sends (WhatsApp groups, Discord server channels) are allowed only from scheduled tasks.
 
 ### Discord
 

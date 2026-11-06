@@ -35,6 +35,7 @@ async def send_message_handler(
     relay_from: str = "",
     platform: str = "telegram",
     _scheduled: bool = False,
+    _access_level: str = "public",
 ) -> str:
     """Send a message to a chat on any connected channel.
 
@@ -48,6 +49,7 @@ async def send_message_handler(
             equivalent.
         platform: "telegram" (default), "whatsapp", or "discord".
         _scheduled: Injected by tool registry when called from scheduled context.
+        _access_level: Injected by tool registry -- the caller's access level.
 
     Returns:
         Success or error message.
@@ -95,6 +97,28 @@ async def send_message_handler(
         send_to_chat = getattr(channel, "send_to_chat", None)
         if send_to_chat is None:
             return f"Error: {plat} channel does not support sending."
+
+        # Discord channel ids carry no group marker, so ask the channel.
+        # Same rule as above: a server channel only from a scheduled task.
+        if plat == "discord" and not _scheduled:
+            is_group = getattr(channel, "is_group_target", None)
+            if is_group is None or await is_group(dest):
+                return (
+                    "Error: Cannot send to a Discord server channel from a "
+                    "regular conversation. Use manage_schedule to create a "
+                    "scheduled task instead."
+                )
+
+        # Non-owners may only reach WhatsApp chats that already talk to Syne.
+        # Messaging arbitrary numbers from the bot's account is how WhatsApp
+        # numbers get banned; the owner keeps that call for themselves.
+        if plat == "whatsapp" and _access_level != "owner":
+            is_known = getattr(channel, "is_known_chat", None)
+            if is_known is None or not await is_known(dest):
+                return (
+                    "Error: This WhatsApp number or group has not chatted with "
+                    "Syne yet. Only the owner can message new WhatsApp contacts."
+                )
         try:
             ok = await send_to_chat(dest, message)
         except Exception as e:

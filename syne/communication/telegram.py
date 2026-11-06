@@ -492,6 +492,86 @@ class TelegramChannel:
                     await asyncio.sleep(2 ** attempt)
         return False
 
+    async def _owner_chat_id(self) -> Optional[int]:
+        """Telegram chat id of the owner, or None if there is no owner yet."""
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT platform_id FROM users "
+                "WHERE platform = 'telegram' AND access_level = 'owner' "
+                "ORDER BY id LIMIT 1"
+            )
+        return int(row["platform_id"]) if row else None
+
+    async def notify_owner(self, text: str) -> bool:
+        """Send a plain-text notice to the owner on behalf of another channel.
+
+        Plain text on purpose: callers pass device names and error strings,
+        and no parse_mode means nothing in them can break the send.
+        """
+        if not self.app or not self.app.bot:
+            logger.warning("notify_owner called before Telegram was ready")
+            return False
+        owner_id = await self._owner_chat_id()
+        if owner_id is None:
+            logger.warning("notify_owner: no owner on Telegram")
+            return False
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(chat_id=owner_id, text=text)
+                return True
+            except Exception as e:
+                logger.error(f"notify_owner failed (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        return False
+
+    async def send_owner_photo(
+        self,
+        path: str,
+        caption: str,
+        replace_message_id: Optional[int] = None,
+    ) -> Optional[int]:
+        """Send a photo to the owner, or swap the image of an earlier one.
+
+        Returns the message id to pass back as replace_message_id next time,
+        or None on failure. Used for the WhatsApp pairing QR, which whatsmeow
+        rotates several times: editing one message in place keeps the chat
+        to a single, always-current QR instead of a stack of expired ones.
+        If the edit fails (message deleted, too old) a fresh photo is sent.
+        """
+        if not self.app or not self.app.bot:
+            logger.warning("send_owner_photo called before Telegram was ready")
+            return None
+        owner_id = await self._owner_chat_id()
+        if owner_id is None:
+            logger.warning("send_owner_photo: no owner on Telegram")
+            return None
+
+        from telegram import InputMediaPhoto
+
+        if replace_message_id:
+            try:
+                with open(path, "rb") as f:
+                    await self.app.bot.edit_message_media(
+                        chat_id=owner_id,
+                        message_id=replace_message_id,
+                        media=InputMediaPhoto(f, caption=caption),
+                    )
+                return replace_message_id
+            except Exception as e:
+                logger.debug(f"send_owner_photo: edit failed, sending new: {e}")
+
+        try:
+            with open(path, "rb") as f:
+                msg = await self.app.bot.send_photo(
+                    chat_id=owner_id, photo=f, caption=caption,
+                )
+            return msg.message_id
+        except Exception as e:
+            logger.error(f"send_owner_photo failed: {e}")
+            return None
+
     async def _handle_discord_user_callback(self, query, data: str) -> None:
         """Route an approve/reject tap for a pending Discord DM user.
 

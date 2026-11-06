@@ -847,6 +847,24 @@ class DiscordChannel:
 
     # ── Used by the registry / cross-channel callers ─────────
 
+    async def is_group_target(self, chat_id: str) -> bool:
+        """True unless chat_id resolves to a DM channel.
+
+        send_message uses this to apply the "groups only from a scheduled
+        task" rule to Discord, whose channel ids (unlike Telegram's '-' or
+        WhatsApp's '@g.us') carry no hint of what they are. Anything that
+        cannot be resolved counts as a group: fail closed.
+        """
+        if not self.client or self.client.is_closed():
+            return True
+        try:
+            target = self.client.get_channel(int(chat_id))
+            if target is None:
+                target = await self.client.fetch_channel(int(chat_id))
+        except Exception:
+            return True
+        return not isinstance(target, discord.DMChannel)
+
     async def send_to_chat(self, chat_id: str, text: str) -> bool:
         """Send a message to a Discord channel id. Returns success.
 
