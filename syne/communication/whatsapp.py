@@ -710,12 +710,19 @@ class WhatsAppChannel:
         is_group = bool(src.IsGroup)
         msg_id = ev.Info.ID
 
-        if self._is_duplicate(msg_id):
-            logger.debug("Dropping duplicate WhatsApp message %s", msg_id)
-            return
-
         text, caption, media_kind = self._extract_content(ev)
         if not text and not caption and not media_kind:
+            # Protocol-only payload — e.g. the sender-key distribution that
+            # rides along with the FIRST message in a new group. whatsmeow
+            # dispatches one event per <enc> child, so that first message
+            # arrives twice with the SAME id: once as this empty carrier,
+            # once as the real text. Returning BEFORE _is_duplicate is
+            # deliberate: marking the id as seen here would make the real
+            # text look like a duplicate and silently drop it.
+            return
+
+        if self._is_duplicate(msg_id):
+            logger.debug("Dropping duplicate WhatsApp message %s", msg_id)
             return
 
         logger.info(
