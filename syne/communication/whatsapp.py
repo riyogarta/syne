@@ -300,6 +300,12 @@ class WhatsAppChannel:
         # chat+content hash -> time we sent it, for echo suppression.
         self._echo: dict[str, float] = {}
 
+        # Serialises read-modify-write of whatsapp.allowed_chat_jids. Two first
+        # messages from different new contacts arriving together would each
+        # load the list, add themselves, and save -- the second save erasing
+        # the first registration.
+        self._members_lock = asyncio.Lock()
+
         # lid local-part -> phone number, filled from whatsmeow_lid_map on
         # first miss. Only HITS are cached: a miss can become a hit later once
         # whatsmeow syncs the contact, and caching "" would hide that forever.
@@ -633,6 +639,29 @@ class WhatsAppChannel:
     async def _save_members(self, by_jid: dict) -> None:
         await set_config("whatsapp.allowed_chat_jids", list(by_jid.values()))
 
+    async def _upsert_member(self, key: str, entry: dict,
+                             fields: Optional[tuple] = None) -> None:
+        """Write one member entry without clobbering concurrent changes.
+
+        Re-reads the list under _members_lock instead of saving the snapshot
+        the caller loaded earlier in the turn, so a registration by another
+        in-flight message -- or a block / model change made in /wamembers
+        meanwhile -- is not overwritten. A new key is inserted whole; for an
+        existing key only `fields` are copied over, and nothing at all when
+        `fields` is None (someone else registered it first).
+        """
+        async with self._members_lock:
+            fresh = await self._load_members()
+            current = fresh.get(key)
+            if current is None:
+                fresh[key] = entry
+            elif fields:
+                for f in fields:
+                    current[f] = entry.get(f)
+            else:
+                return
+            await self._save_members(fresh)
+
     def _match_member(self, by_jid: dict, chat_jid: str, alt_pn: str = "") -> tuple:
         """Find a member entry for this chat. Returns (key, entry) or (None, None).
 
@@ -662,11 +691,43 @@ class WhatsAppChannel:
             return False
         if msg_id in self._seen:
             return True
+        self._remember_id(msg_id)
+        return False
+
+    def _remember_id(self, msg_id: str) -> None:
+        """Add a message id to the bounded dedup set."""
+        if not msg_id or msg_id in self._seen:
+            return
         self._seen.add(msg_id)
         self._seen_order.append(msg_id)
         if len(self._seen_order) > _SEEN_MAX:
             self._seen.discard(self._seen_order.pop(0))
-        return False
+
+    def _mark_sent(self, resp: Any) -> None:
+        """Remember the id of a message we sent, so its echo is dropped.
+
+        whatsmeow can hand our own sends back as from_me, and in the self-chat
+        the from_me rules let them through. The content hash only covers
+        plain text; an image or document -- with or without a caption --
+        would come back as self-chat media, which needs no trigger, and Syne
+        would answer its own attachment. The message id is the same on the
+        echo, so recording it here makes _is_duplicate catch every kind.
+        """
+        msg_id = str(getattr(resp, "ID", "") or "")
+        if msg_id:
+            self._remember_id(msg_id)
+
+    def _record_echo(self, chat_jid: str, text: str) -> None:
+        """Record a sent text for echo suppression, pruning expired entries.
+
+        Entries are only consumed when an echo arrives, which never happens in
+        a group (from_me in a group is dropped first), so without pruning the
+        dict would grow with every message sent.
+        """
+        now = time.time()
+        for k in [k for k, t in self._echo.items() if now - t >= _ECHO_TTL]:
+            del self._echo[k]
+        self._echo[self._content_hash(chat_jid, text)] = now
 
     def _content_hash(self, chat_jid: str, text: str) -> str:
         return f"{chat_jid}:{hashlib.md5((text or '').encode()).hexdigest()[:12]}"
@@ -850,8 +911,7 @@ class WhatsAppChannel:
                     "jid": chat_jid, "name": group_name,
                     "model": None, "blocked": False,
                 }
-                by_jid[chat_jid] = member
-                await self._save_members(by_jid)
+                await self._upsert_member(chat_jid, member)
                 logger.info(
                     "[whatsapp] auto-registered group: %s (%s)", group_name, chat_jid
                 )
@@ -860,8 +920,9 @@ class WhatsAppChannel:
                 # Entry registered before the subject was resolvable — /wamembers
                 # reads this field, so repair it in place.
                 member["name"] = group_name
-                by_jid[member_key or chat_jid] = member
-                await self._save_members(by_jid)
+                await self._upsert_member(
+                    member_key or chat_jid, member, fields=("name",)
+                )
                 logger.info(
                     "[whatsapp] group name healed in allowlist: %s (%s)",
                     group_name, chat_jid,
@@ -914,8 +975,7 @@ class WhatsAppChannel:
                     "jid": reg_key, "name": display,
                     "model": None, "blocked": False,
                 }
-                by_jid[reg_key] = member
-                await self._save_members(by_jid)
+                await self._upsert_member(reg_key, member)
                 logger.info(
                     "[whatsapp] auto-registered new member: %s (%s)", display, reg_key
                 )
@@ -1060,7 +1120,9 @@ class WhatsAppChannel:
             reaction = await client.build_reaction(
                 self._to_jid(chat_jid), self._to_jid(sender_jid), msg_id, emoji,
             )
-            await client.send_message(self._to_jid(chat_jid), reaction)
+            self._mark_sent(
+                await client.send_message(self._to_jid(chat_jid), reaction)
+            )
         except Exception as e:
             logger.debug("[whatsapp] reaction %r failed: %s", emoji, e)
 
@@ -1087,6 +1149,7 @@ class WhatsAppChannel:
                 await self._send_file(target, path, cap)
                 if cap:
                     caption_used = True
+                    self._record_echo(chat_jid, cap)
                 await asyncio.sleep(0.3)
             except Exception as e:
                 logger.error("WhatsApp file send failed for %s: %s", path, e)
@@ -1096,8 +1159,8 @@ class WhatsAppChannel:
                 if not chunk.strip():
                     continue
                 try:
-                    await self.client.send_message(target, chunk)
-                    self._echo[self._content_hash(chat_jid, chunk)] = time.time()
+                    self._mark_sent(await self.client.send_message(target, chunk))
+                    self._record_echo(chat_jid, chunk)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error("WhatsApp send failed: %s: %s", type(e).__name__, e)
@@ -1106,14 +1169,15 @@ class WhatsAppChannel:
         """Send one attachment, routed by extension."""
         ext = os.path.splitext(path)[1].lower()
         if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
-            await self.client.send_image(to=target, file=path, caption=caption)
+            resp = await self.client.send_image(to=target, file=path, caption=caption)
         else:
-            await self.client.send_document(
+            resp = await self.client.send_document(
                 to=target,
                 file=path,
                 caption=caption,
                 filename=os.path.basename(path),
             )
+        self._mark_sent(resp)
         logger.info("[whatsapp] sent file: %s", path)
 
     # ── Used by the registry / cross-channel callers ─────────

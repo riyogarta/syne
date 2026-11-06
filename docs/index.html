@@ -266,7 +266,7 @@
     <div class="sec-head"><span class="eyebrow">Why people keep it running</span><h2>Three reasons, not twenty features.</h2></div>
     <div class="proofs">
       <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Anything you explicitly ask it to remember is kept forever. Stop repeating yourself to your tools.</p><div class="detail">explicit facts never fade · casual mentions decay if unused</div></div>
-      <div class="proof"><div class="n">02</div><h3>It's yours.</h3><p>Runs entirely on your own server, stored in your own PostgreSQL. Your memories never touch a third party unless you choose them to.</p><div class="detail">Telegram + terminal · same agent, same memory</div></div>
+      <div class="proof"><div class="n">02</div><h3>It's yours.</h3><p>Runs entirely on your own server, stored in your own PostgreSQL. Your memories never touch a third party unless you choose them to.</p><div class="detail">Telegram · WhatsApp · Discord · terminal · same agent, same memory</div></div>
       <div class="proof"><div class="n">03</div><h3>It's near-zero cost.</h3><p>Memory and evaluation run locally on Ollama for free. Chat runs on a paid API key, or your existing Claude / ChatGPT subscription via OAuth.</p><div class="detail">free memory floor · your call on the chat model</div></div>
     </div>
   </div>
@@ -343,7 +343,7 @@
   <!-- L2 capabilities -->
   <section id="capabilities" style="padding-top:36px">
     <div class="wrap">
-      <div class="sec-head"><span class="depth">Layer 02 · <b>What it can do</b></span><h2>28 core tools. 7 bundled abilities.</h2><p class="sub">A working assistant out of the box, plus optional extensions you enable only when you need them.</p></div>
+      <div class="sec-head"><span class="depth">Layer 02 · <b>What it can do</b></span><h2>28 core tools. 6 bundled abilities.</h2><p class="sub">A working assistant out of the box, plus optional extensions you enable only when you need them.</p></div>
       <div class="caps">
         <span class="cap"><b>memory</b> — store · update · recall · graph · files</span>
         <span class="cap"><b>history</b> — semantic search across your chat log</span>
@@ -367,7 +367,6 @@
         <div class="abil"><span class="name">image_analysis</span><p>Describe and OCR images, including scanned pages.</p></div>
         <div class="abil"><span class="name">maps</span><p>Places, directions, and geocoding via Google Maps.</p></div>
         <div class="abil"><span class="name">website_screenshot</span><p>Capture a live screenshot of any page.</p></div>
-        <div class="abil"><span class="name">whatsapp</span><p>Bridge messages to and from WhatsApp.</p></div>
       </div>
 
       <h3 style="font-family:var(--serif);font-weight:500;font-size:22px;margin:40px 0 8px">It can write its own abilities</h3>
@@ -423,7 +422,9 @@
         <div>
           <p style="color:var(--muted);font-size:15.5px">Reach it however you like, all sharing one memory:</p>
           <div class="caps" style="flex-direction:column;align-items:stretch;margin-top:12px">
-            <span class="cap"><b>Telegram</b> — chat from anywhere</span>
+            <span class="cap"><b>Telegram</b> — chat from anywhere, and the control panel</span>
+            <span class="cap"><b>WhatsApp</b> — answers when called by name · opt-in</span>
+            <span class="cap"><b>Discord</b> — DMs and mentions, owner-approved · opt-in</span>
             <span class="cap"><b>CLI</b> — terminal chat, resumes per-directory</span>
             <span class="cap"><b>Nodes</b> — pair a laptop over WebSocket, one shared mind</span>
             <span class="cap"><b>Sub-agents</b> — spawn background workers for parallel tasks</span>

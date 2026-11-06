@@ -10,7 +10,7 @@ Self-hosted personal AI on Telegram. Runs on your own server, stores everything 
 
 ## What Syne actually is
 
-A Telegram bot you self-host. You chat with it. It remembers what you tell it to remember, across days, weeks, restarts. Built around:
+A Telegram bot you self-host — also reachable on WhatsApp and Discord, sharing the same memory. You chat with it. It remembers what you tell it to remember, across days, weeks, restarts. Built around:
 
 - **Persistent long-term memory** — semantic search via pgvector + a small knowledge graph for entity-relation queries. Subject to decay (non-permanent memories fade with disuse) and conflict resolution (newer, higher-source-priority entries win).
 - **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
@@ -26,6 +26,7 @@ Beyond the core assistant, Syne ships with optional extensions. They live in `sy
 - **Image generation & vision OCR** — via Vertex Gemini Image / Together FLUX.2 / OpenAI GPT Image for generation; Vertex Gemini / Ollama vision for analysis
 - **Memory file attachments** — store images, PDFs, voice notes alongside their description; retrieve or re-analyze on demand (up to 50 MB per blob)
 - **Voice in & out** — Groq Whisper STT for inbound voice notes, Edge TTS for outbound voice messages
+- **WhatsApp & Discord channels** — off by default; the same agent and memory, with Telegram as the control panel (see [Channels](#channels--telegram-whatsapp-discord))
 - **Remote nodes** — extend Syne across multiple machines via WebSocket gateway
 - **Sub-agents** — spawn background workers for parallel tasks
 - **Self-modification** — the LLM can write new abilities (off by default, see [SECURITY.md](SECURITY.md))
@@ -45,7 +46,7 @@ These are deliberately separate from the core. The headline use case is chat + m
 | **RAM** | 2 GB minimum (Ollama loads one model at a time, ~1.3 GB per model). 4 GB recommended for smooth operation |
 | **Storage** | 1 GB base + ~1 GB for Ollama models (embedding + evaluator). ~2.5 GB total recommended |
 | **Docker** | Required — PostgreSQL 16 + pgvector runs in Docker |
-| **Network** | Outbound HTTPS to: LLM provider (Google/OpenAI/Anthropic), Telegram API, Brave Search (optional). Ollama runs locally — no network needed for embedding and memory evaluation |
+| **Network** | Outbound HTTPS to: LLM provider (Google/OpenAI/Anthropic), Telegram API, WhatsApp / Discord (only if enabled), Brave Search (optional). Ollama runs locally — no network needed for embedding and memory evaluation |
 
 ---
 
@@ -406,6 +407,44 @@ Syne:     I can't share that. That's private information.
 ```
 
 Via CLI: `syne memory stats`, `syne memory search "query"`, `syne memory add "info"`
+
+---
+
+## Channels — Telegram, WhatsApp, Discord
+
+Telegram is the primary channel and the control panel: every owner command, approval prompt and menu lives there. WhatsApp and Discord are additional chat surfaces on the **same agent and the same memory**. Both are core channels in `syne/communication/`, both are **off by default**, and neither can grant owner status — ownership is established on Telegram only.
+
+### WhatsApp
+
+Runs in-process through [neonize](https://github.com/krypton-byte/neonize) (the whatsmeow engine, shipped as a prebuilt wheel — no Go toolchain, no external binary). One connection carries both directions and reconnects on its own.
+
+```bash
+syne config set whatsapp.enabled true
+syne restart
+# First start: the pairing QR is written to ~/.syne/whatsapp_qr.png (path logged at WARNING).
+# Scan it from WhatsApp → Linked devices → Link a device.
+```
+
+- **Session storage** — whatsmeow keeps its device state in Syne's own PostgreSQL (`whatsmeow_*` tables), so `syne backup` covers the pairing too.
+- **Trigger word is mandatory** — in groups *and* DMs, including from the owner. Set it with `whatsapp.trigger_name` (falls back to `telegram.bot_trigger_name`, then the identity name).
+- **Members** — anyone who addresses the bot by name is registered as `public` on first contact. Manage them with `/wamembers` on Telegram: block, per-entry model override, per-member access level in groups, leave a group.
+- **Re-pairing** — WhatsApp logs linked devices out if the primary phone is unused for about 14 days, or when the device is removed from *Linked devices*. Restart Syne and scan the new QR.
+
+### Discord
+
+Runs through [discord.py](https://github.com/Rapptz/discord.py) with a bot account. It requests **no privileged intents**, so Discord only delivers message text when the bot is **mentioned, replied to, or DMed** — Syne structurally cannot read server chatter it was not addressed in, and no Discord app review is needed.
+
+```bash
+# 1. Create a bot in the Discord developer portal (Bot → Token) and invite it to your server.
+syne config set credential.discord_bot_token <token>
+syne config set discord.enabled true
+syne restart
+```
+
+- **DM approval** — `discord.dm_policy` (default `approval`): the first DM from an unknown user is held and the owner gets **Approve / Reject** buttons on Telegram. Rejected users are stored as blocked.
+- **Server approval** — `discord.guild_policy` (default `allowlist`): Syne stays silent in a new server until the owner approves it on Telegram; rejecting makes the bot leave.
+- **Members** — `/dcmembers` on Telegram: per-DM and per-server model override, block, and per-member access level inside a server.
+- **Mentions are pinned** — replies can never ping `@everyone` or a role.
 
 ---
 
@@ -860,7 +899,9 @@ syne restore                         # Restore from backup
 | `/browse` | Browse directories (share session with CLI) | Owner |
 | `/groups` | Manage groups & members | Owner |
 | `/members` | Manage global user access levels | Owner |
-| `/wamembers` | Manage WhatsApp allowlist | Owner |
+| `/telemembers` | Manage Telegram users & groups | Owner |
+| `/wamembers` | Manage WhatsApp members, groups & model overrides | Owner |
+| `/dcmembers` | Manage Discord users, servers & model overrides | Owner |
 | `/backup` | Backup database | Owner |
 | `/restore` | Restore database from backup | Owner |
 | `/graph` | Manage knowledge graph extractors | Owner |
@@ -963,6 +1004,8 @@ syne restore                         # Restore from backup
 | Chat LLM | Google Gemini, Vertex AI, Claude, ChatGPT, OpenAI, Together AI, Groq, Ollama |
 | Embedding | Ollama (qwen3-embedding, local) or Together AI / OpenAI (cloud) |
 | Telegram | python-telegram-bot |
+| WhatsApp | neonize (whatsmeow, in-process) |
+| Discord | discord.py |
 | HTTP | httpx (async) |
 | CLI | Click + Rich |
 
@@ -990,6 +1033,9 @@ syne/
 │   ├── system_guide.py      # Architecture guide (injected into system prompt)
 │   ├── communication/
 │   │   ├── telegram.py      # Telegram bot (commands, groups, photos, voice, docs)
+│   │   ├── whatsapp.py      # WhatsApp channel (neonize / whatsmeow)
+│   │   ├── discord.py       # Discord channel (discord.py, no privileged intents)
+│   │   ├── registry.py      # Live channel lookup for cross-channel actions
 │   │   ├── inbound.py       # InboundContext (source of truth per message)
 │   │   ├── outbound.py      # Outbound post-processing (path strip, narration strip, MEDIA extract)
 │   │   ├── formatting.py    # Output formatting, markdown → Telegram HTML
