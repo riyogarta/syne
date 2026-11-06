@@ -4162,14 +4162,13 @@ Or just send me a message!"""
             return
         await self._models_menu_main(update)
 
-    async def _models_menu_main(self, update_or_query):
-        """Render CRUD model list — reusable for command + back button."""
-        models = await get_config("provider.models", [])
-        active_key = await get_config("provider.active_model", "gemini-pro")
+    @staticmethod
+    def _sort_models_for_display(models, active_key):
+        """Display order for every model list/picker (stored order untouched).
 
-        # Display order only (stored order is untouched): default first,
-        # then grouped by driver, OAuth before API key, then label in
-        # natural order (so "G 4" sorts before "G 10").
+        Default first, then grouped by driver, OAuth before API key, then
+        label in natural order (so "G 4" sorts before "G 10").
+        """
         import re as _re
 
         def _sort_key(m):
@@ -4182,8 +4181,15 @@ Or just send me a message!"""
                 natural,
             )
 
+        return sorted(models, key=_sort_key)
+
+    async def _models_menu_main(self, update_or_query):
+        """Render CRUD model list — reusable for command + back button."""
+        models = await get_config("provider.models", [])
+        active_key = await get_config("provider.active_model", "gemini-pro")
+
         buttons = []
-        for m in sorted(models, key=_sort_key):
+        for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
             prefix = "⭐ " if key == active_key else ""
@@ -6100,7 +6106,7 @@ Or just send me a message!"""
                 default_btn,
                 callback_data=f"nodes:model_set:{node_id}:",
             )])
-            for m in models:
+            for m in self._sort_models_for_display(models, active_key):
                 key = m.get("key", "")
                 label = m.get("label", key)
                 check = " ✓" if key == current_model else ""
@@ -6716,7 +6722,7 @@ Or just send me a message!"""
         default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
 
         buttons = []
-        for m in models:
+        for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
             check = " ✓" if key == current_model else ""
@@ -7586,7 +7592,7 @@ Or just send me a message!"""
             f"🔄 Default ({default_label}){check}",
             callback_data=f"wa:model_set:{jid}:__default__",
         )])
-        for m in models:
+        for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
             check = " ✓" if key == current_model else ""
@@ -8377,7 +8383,7 @@ Or just send me a message!"""
             f"🔄 Default ({default_label}){' ✓' if not current_model else ''}",
             callback_data=f"dc:model_set:{eid}:__default__",
         )]]
-        for m in models:
+        for m in self._sort_models_for_display(models, await get_config("provider.active_model", "gemini-pro")):
             key = m.get("key", "")
             label = m.get("label", key)
             check = " ✓" if key == current_model else ""
@@ -9009,7 +9015,7 @@ Or just send me a message!"""
         default_label = next((m.get("label", active_key) for m in models if m.get("key") == active_key), active_key)
 
         buttons = []
-        for m in models:
+        for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
             check = " ✓" if key == current_model else ""
