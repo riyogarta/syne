@@ -309,6 +309,12 @@ class SyneAgent:
 
         # Update conversation manager's provider + memory + context_mgr
         if self.conversations:
+            # Remember the outgoing default BEFORE replacing it. Conversations
+            # that follow the default share this exact object (conversation.py
+            # assigns conv_provider = self.provider); per-user / group / WA /
+            # Discord / node overrides get their own instance from
+            # create_provider_for_model(), so an identity check tells them apart.
+            old_default = self.conversations.provider
             self.conversations.provider = new_provider
             self.conversations.memory = self.memory
             self.conversations.context_mgr = self.context_mgr
@@ -317,8 +323,12 @@ class SyneAgent:
             if models and active_key:
                 _active_model_entry = get_model_from_list(models, active_key)
             for conv in self.conversations._active.values():
-                conv.provider = new_provider
                 conv.memory = self.memory
+                # Only conversations on the default follow the new default.
+                # Conversations with their own model keep it untouched.
+                if conv.provider is not old_default:
+                    continue
+                conv.provider = new_provider
                 conv.context_mgr = self.context_mgr
                 if _active_model_entry:
                     conv.model_params = _active_model_entry.get("params") or conv.model_params
