@@ -6067,8 +6067,8 @@ Or just send me a message!"""
             active_key = await get_config("provider.active_model", "")
             default_entry = next((m for m in models if m.get("key") == active_key), None)
             default_name = default_entry.get("label", active_key) if default_entry else active_key
-            check = " ✓" if not current_model else ""
-            default_btn = f"{default_name} (default){check}" if default_name else f"default{check}"
+            check = "✅ " if not current_model else "🔄 "
+            default_btn = f"{check}{default_name} (default)" if default_name else f"{check}default"
             buttons.append([InlineKeyboardButton(
                 default_btn,
                 callback_data=f"nodes:model_set:{node_id}:",
@@ -6076,9 +6076,9 @@ Or just send me a message!"""
             for m in self._sort_models_for_display(models, active_key):
                 key = m.get("key", "")
                 label = m.get("label", key)
-                check = " ✓" if key == current_model else ""
+                check = "✅ " if key == current_model else ""
                 buttons.append([InlineKeyboardButton(
-                    f"{label}{check}",
+                    f"{check}{label}",
                     callback_data=f"nodes:model_set:{node_id}:{key}",
                 )])
             buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"nodes:detail:{node_id}")])
@@ -6692,15 +6692,15 @@ Or just send me a message!"""
         for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
-            check = " ✓" if key == current_model else ""
+            check = "✅ " if key == current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"{label}{check}", callback_data=f"groups:model_set:{group_id}:{key}"
+                f"{check}{label}", callback_data=f"groups:model_set:{group_id}:{key}"
             )])
 
         # Add "default" option with resolved label
-        check = " ✓" if not current_model else ""
+        check = "✅ " if not current_model else "🔄 "
         buttons.append([InlineKeyboardButton(
-            f"🔄 Default ({default_label}){check}", callback_data=f"groups:model_set:{group_id}:__default__"
+            f"{check}Default ({default_label})", callback_data=f"groups:model_set:{group_id}:__default__"
         )])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")])
         
@@ -7554,17 +7554,17 @@ Or just send me a message!"""
 
         buttons = []
         # Default option first
-        check = " ✓" if not current_model else ""
+        check = "✅ " if not current_model else "🔄 "
         buttons.append([InlineKeyboardButton(
-            f"🔄 Default ({default_label}){check}",
+            f"{check}Default ({default_label})",
             callback_data=f"wa:model_set:{jid}:__default__",
         )])
         for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
-            check = " ✓" if key == current_model else ""
+            check = "✅ " if key == current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"{label}{check}",
+                f"{check}{label}",
                 callback_data=f"wa:model_set:{jid}:{key}",
             )])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"wa:view:{jid}")])
@@ -8347,15 +8347,15 @@ Or just send me a message!"""
         default_label, _ = await self._dc_model_labels()
 
         buttons = [[InlineKeyboardButton(
-            f"🔄 Default ({default_label}){' ✓' if not current_model else ''}",
+            f"{'✅ ' if not current_model else '🔄 '}Default ({default_label})",
             callback_data=f"dc:model_set:{eid}:__default__",
         )]]
         for m in self._sort_models_for_display(models, await get_config("provider.active_model", "gemini-pro")):
             key = m.get("key", "")
             label = m.get("label", key)
-            check = " ✓" if key == current_model else ""
+            check = "✅ " if key == current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"{label}{check}", callback_data=f"dc:model_set:{eid}:{key}")])
+                f"{check}{label}", callback_data=f"dc:model_set:{eid}:{key}")])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"dc:view:{eid}")])
 
         name = entry.get("name") or eid
@@ -8985,15 +8985,15 @@ Or just send me a message!"""
         for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
             label = m.get("label", key)
-            check = " ✓" if key == current_model else ""
+            check = "✅ " if key == current_model else ""
             buttons.append([InlineKeyboardButton(
-                f"{label}{check}", callback_data=f"mbr:model_set:{platform_id}:{key}"
+                f"{check}{label}", callback_data=f"mbr:model_set:{platform_id}:{key}"
             )])
 
         # Add "default" option with resolved label
-        check = " ✓" if not current_model else ""
+        check = "✅ " if not current_model else "🔄 "
         buttons.append([InlineKeyboardButton(
-            f"🔄 Default ({default_label}){check}", callback_data=f"mbr:model_set:{platform_id}:__default__"
+            f"{check}Default ({default_label})", callback_data=f"mbr:model_set:{platform_id}:__default__"
         )])
         buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mbr:view:{platform_id}")])
 
