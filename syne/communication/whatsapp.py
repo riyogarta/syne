@@ -95,6 +95,7 @@ from ..db.models import (
     get_group,
     get_user,
     set_config,
+    update_group,
     update_group_member,
 )
 from .formatting import markdown_to_whatsapp
@@ -485,6 +486,29 @@ class WhatsAppChannel:
         user = user.split(":", 1)[0]
         return build_jid(user, server or _SERVER_DM)
 
+    async def _fetch_group_subject(self, chat_jid: str) -> str:
+        """The real group subject from WhatsApp, or '' when unavailable.
+
+        The `groups` row does not exist yet the first time a new group is
+        seen, so deriving the name from the JID alone labels the group with
+        its raw digits ("120363433706421292"). whatsmeow knows the actual
+        subject, so ask it. Best-effort by design: a failure here must never
+        block an inbound message, hence the broad except and the '' return
+        that lets the caller fall back.
+        """
+        client = getattr(self, "client", None)
+        if client is None:
+            return ""
+        try:
+            info = await client.get_group_info(self._to_jid(chat_jid))
+            return (info.GroupName.Name or "").strip()
+        except Exception as e:
+            logger.debug(
+                "[whatsapp] get_group_info failed for %s: %s: %s",
+                chat_jid, type(e).__name__, e,
+            )
+            return ""
+
     async def _resolve_lid_pn(self, jid_like: Any) -> str:
         """Phone number behind an @lid JID, or '' when unknown.
 
@@ -796,7 +820,27 @@ class WhatsAppChannel:
 
         if is_group:
             member_key, member = self._match_member(by_jid, chat_jid)
-            group_name = (group_row or {}).get("name") or chat_jid.split("@")[0]
+            chat_local = chat_jid.split("@")[0]
+            group_name = ((group_row or {}).get("name") or "").strip()
+            # A stored name equal to the JID digits is the old fallback, not a
+            # real subject, so treat it as missing and heal it.
+            if not group_name or group_name == chat_local:
+                group_name = await self._fetch_group_subject(chat_jid) or chat_local
+                if (group_row is not None
+                        and group_name != (group_row.get("name") or "")):
+                    try:
+                        await update_group(
+                            "whatsapp", chat_jid, name=group_name
+                        )
+                        logger.info(
+                            "[whatsapp] group name resolved: %s (%s)",
+                            group_name, chat_jid,
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            "[whatsapp] update_group name failed for %s: %s",
+                            chat_jid, e,
+                        )
 
             if member and member.get("blocked"):
                 logger.info("[whatsapp] blocked group, dropping: %s", chat_jid)
@@ -810,6 +854,17 @@ class WhatsAppChannel:
                 await self._save_members(by_jid)
                 logger.info(
                     "[whatsapp] auto-registered group: %s (%s)", group_name, chat_jid
+                )
+            elif ((member.get("name") or "").strip() in ("", chat_local)
+                    and group_name != chat_local):
+                # Entry registered before the subject was resolvable — /wamembers
+                # reads this field, so repair it in place.
+                member["name"] = group_name
+                by_jid[member_key or chat_jid] = member
+                await self._save_members(by_jid)
+                logger.info(
+                    "[whatsapp] group name healed in allowlist: %s (%s)",
+                    group_name, chat_jid,
                 )
 
             # A groups row is what carries enabled / require_mention / members,
