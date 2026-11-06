@@ -30,6 +30,9 @@ from .consent import ConsentStore, make_key, content_hash, DEFAULT_TTL_SECONDS, 
 
 logger = logging.getLogger("syne.agent")
 
+# Config keys the update_config tool may read but never write.
+_TOOL_PROTECTED_CONFIG_PREFIXES = ("provider.", "credential.")
+
 
 def _is_gemini_oauth(entry: dict) -> bool:
     """Gemini OAuth model entries can no longer work: Google shut that access down."""
@@ -83,6 +86,11 @@ class SyneAgent:
 
         # 1.5. Migrate old access levels (admin→owner, friend/pending→public)
         await migrate_access_levels()
+
+        # 1.6. Config snapshot — taken before provider init, which may rewrite
+        # provider.active_model when the configured model is unusable.
+        from .db.config_snapshot import auto_snapshot
+        await auto_snapshot("startup")
 
         # 2. LLM Provider
         self.provider = await self._init_provider()
@@ -1291,7 +1299,7 @@ class SyneAgent:
                     },
                     "key": {
                         "type": "string",
-                        "description": "Config key (e.g. 'memory.auto_capture', 'provider.chat_model')",
+                        "description": "Config key (e.g. 'memory.auto_capture'). provider.* and credential.* are read-only here.",
                     },
                     "value": {
                         "type": "string",
@@ -1982,11 +1990,22 @@ class SyneAgent:
         if action == "set":
             if not key or not value:
                 return "Error: key and value are required for set action."
+            # Model registry, active model and credentials are owner-only
+            # territory: a model once rewrote provider.models through this
+            # tool and broke every chat. Changes go through /models or
+            # `syne config` instead.
+            if key.startswith(_TOOL_PROTECTED_CONFIG_PREFIXES):
+                return (
+                    f"❌ `{key}` cannot be changed by tool. "
+                    "Ask the owner to use /models (Telegram) or `syne config set` on the server."
+                )
             import json
             try:
                 parsed = json.loads(value)
             except json.JSONDecodeError:
                 parsed = value  # Store as string
+            from .db.config_snapshot import auto_snapshot
+            await auto_snapshot(f"before-{key}")
             await set_config(key, parsed)
 
             # Guard: check evaluator model availability when enabling auto_capture
@@ -2003,15 +2022,6 @@ class SyneAgent:
                             f"Run `ollama pull {eval_model}` first, or set `memory.evaluator_driver` to `\"provider\"`."
                         )
 
-            # Auto-sync: if chat_model changes, find matching model in registry
-            # and update active_model to keep them in sync
-            if key == "provider.chat_model":
-                models = await get_config("provider.models", [])
-                for m in models:
-                    if m.get("model_id") == parsed or m.get("key") == parsed:
-                        await set_config("provider.active_model", m["key"])
-                        break
-            
             return f"Config updated: `{key}` = {self._mask_sensitive_value(key, parsed)}"
 
         return f"Unknown action: {action}"

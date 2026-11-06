@@ -274,6 +274,8 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("backup", self._cmd_backup))
         self.app.add_handler(CommandHandler("reset", self._cmd_reset))
         self.app.add_handler(CommandHandler("restore", self._cmd_restore))
+        self.app.add_handler(CommandHandler("backupconf", self._cmd_backupconf))
+        self.app.add_handler(CommandHandler("restoreconf", self._cmd_restoreconf))
         self.app.add_handler(CommandHandler("vision", self._cmd_vision))
         self.app.add_handler(CommandHandler("imagegen", self._cmd_imagegen))
         # Message handlers
@@ -353,6 +355,7 @@ class TelegramChannel:
         commands = [
             BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("backup", "Backup database (owner only)"),
+            BotCommand("backupconf", "Backup config only (owner only)"),
             BotCommand("allowlist", "Manage shell command allowlist (owner only)"),
             BotCommand("denylist", "Manage shell command denylist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
@@ -377,6 +380,7 @@ class TelegramChannel:
             BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("restore", "Restore database from backup (owner only)"),
+            BotCommand("restoreconf", "Restore config from a config backup (owner only)"),
             BotCommand("reset", "Clear consent grants (owner only)"),
             BotCommand("start", "Welcome message"),
             BotCommand("status", "Agent status"),
@@ -2448,6 +2452,8 @@ class TelegramChannel:
 /restart — Restart the Syne process
 /backup — Back up the database
 /restore — List & restore a backup
+/backupconf — Back up config only (models, credentials)
+/restoreconf — List & restore a config backup
 /browse — Browse directories (share session with CLI)
 /quit — Exit remote-node mode
 /cancel — Cancel active auth flow
@@ -5428,6 +5434,137 @@ Or just send me a message!"""
             import os, threading; threading.Timer(1, os._exit, args=[1]).start()
         else:
             await query.edit_message_text(f"Restore failed: {message}")
+
+    async def _cmd_backupconf(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /backupconf — owner only, snapshot config (not the whole DB)."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can run backups.")
+            return
+
+        import os
+        from ..db.config_snapshot import create_snapshot
+
+        try:
+            path = await create_snapshot("manual")
+        except Exception as e:
+            await update.message.reply_text(f"Config backup failed: {e}")
+            return
+        await update.message.reply_text(
+            f"Config backup saved: {os.path.basename(path)}\n"
+            "Contains credentials — keep it private. Restore with /restoreconf"
+        )
+
+    @staticmethod
+    def _conf_snapshot_id(path: str) -> str:
+        """Short stable id for a snapshot file (callback_data is capped at 64 bytes)."""
+        import hashlib
+        import os
+        return hashlib.sha1(os.path.basename(path).encode()).hexdigest()[:12]
+
+    def _find_conf_snapshot(self, snap_id: str):
+        from ..db.config_snapshot import list_snapshots
+        for path, _ in list_snapshots():
+            if self._conf_snapshot_id(path) == snap_id:
+                return path
+        return None
+
+    async def _cmd_restoreconf(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /restoreconf — owner only, list config snapshots and restore via inline buttons."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can restore backups.")
+            return
+
+        import os
+        from datetime import datetime
+        from ..db.config_snapshot import list_snapshots
+
+        snaps = list_snapshots()
+        if not snaps:
+            await update.message.reply_text("No config backups found. Create one with /backupconf")
+            return
+
+        buttons = []
+        for path, mtime in snaps[:10]:
+            ts = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            name = os.path.basename(path)
+            is_auto = name.startswith("auto-")
+            reason = name.rsplit(".", 1)[0].split("-", 6 if is_auto else 5)[-1]
+            buttons.append([InlineKeyboardButton(
+                f"{ts}  {'auto: ' if is_auto else ''}{reason}"[:60],
+                callback_data=f"rconf:{self._conf_snapshot_id(path)}",
+            )])
+        buttons.append([InlineKeyboardButton("Cancel", callback_data="rconf:cancel")])
+
+        await update.message.reply_text(
+            f"Select config backup to restore ({len(snaps)} available, newest first):",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    async def _handle_restoreconf_callback(self, query, arg: str):
+        """Confirm (with a diff) and apply a config snapshot."""
+        import os
+        from ..db.config_snapshot import create_snapshot, diff_snapshot, load_snapshot, restore_snapshot
+
+        if arg == "cancel":
+            await query.edit_message_text("Restore cancelled.")
+            return
+
+        confirmed = arg.startswith("ok:")
+        snap_id = arg[3:] if confirmed else arg
+        path = self._find_conf_snapshot(snap_id)
+        if not path:
+            await query.edit_message_text("Config backup not found (it may have been pruned). Run /restoreconf again.")
+            return
+        name = os.path.basename(path)
+
+        try:
+            data = load_snapshot(path)
+        except Exception as e:
+            await query.edit_message_text(f"Cannot read {name}: {e}")
+            return
+
+        if not confirmed:
+            diff = await diff_snapshot(data)
+            if not (diff["changed"] or diff["added"] or diff["users"]):
+                await query.edit_message_text(f"Config already matches {name}. Nothing to do.")
+                return
+            lines = [f"Restore config from:\n{name}\n"]
+            lines += [f"~ {k}" for k in diff["changed"]]
+            lines += [f"+ {k}" for k in diff["added"]]
+            lines += [f"user {p}:{pid}  model {now or '-'} → {then or '-'}" for p, pid, now, then in diff["users"]]
+            if len(lines) > 40:
+                lines = lines[:40] + [f"... and {len(lines) - 40} more"]
+            if diff["extra"]:
+                lines.append(f"\n{len(diff['extra'])} key(s) not in the backup stay as they are.")
+            lines.append("\nMemories and chat history are not touched. Syne restarts afterwards.")
+            buttons = [
+                [InlineKeyboardButton("Yes, restore", callback_data=f"rconf:ok:{snap_id}")],
+                [InlineKeyboardButton("Cancel", callback_data="rconf:cancel")],
+            ]
+            await query.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(buttons))
+            return
+
+        await query.edit_message_text(f"Restoring config from {name}...")
+        try:
+            safety = await create_snapshot("pre-restore")
+            result = await restore_snapshot(data)
+        except Exception as e:
+            logger.error(f"Config restore failed: {e}", exc_info=True)
+            await query.edit_message_text(f"Config restore failed: {e}")
+            return
+
+        await query.edit_message_text(
+            f"Restored {result['keys']} key(s) and {result['users']} user model override(s) from {name}.\n"
+            f"Previous config saved as {os.path.basename(safety)}.\nRestarting..."
+        )
+        import threading
+        threading.Timer(1, os._exit, args=[1]).start()
 
     async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /restart command — owner only, restarts the Syne process."""
@@ -10542,6 +10679,9 @@ Or just send me a message!"""
         elif data.startswith("restore:"):
             filename = data.split(":", 1)[1]
             await self._handle_restore_callback(query, filename)
+
+        elif data.startswith("rconf:"):
+            await self._handle_restoreconf_callback(query, data.split(":", 1)[1])
 
         elif data.startswith("approve:") or data.startswith("reject:"):
             # User approval/rejection

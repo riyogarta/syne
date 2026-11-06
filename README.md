@@ -426,7 +426,7 @@ syne restart
 ```
 
 - **Session storage** — whatsmeow keeps its device state in Syne's own PostgreSQL (`whatsmeow_*` tables), so `syne backup` covers the pairing too.
-- **Trigger word is mandatory** — in groups *and* DMs, including from the owner. Set it with `whatsapp.trigger_name` (falls back to `telegram.bot_trigger_name`, then the identity name).
+- **Trigger word is mandatory** — in groups *and* DMs, including from the owner. Set it with `whatsapp.trigger_name` (falls back to `telegram.bot_trigger_name`, then the identity name). The one exception: **replying to one of Syne's messages** needs no trigger — the reply itself addresses the bot, and the quoted message is passed along as context. Syne's messages are recognised by id, and after a restart by the reply marker.
 - **Reply marker** — every message Syne sends on WhatsApp starts with 🐍 on its own line, so its replies are told apart from your own messages. Change or disable it with `syne config set whatsapp.reply_prefix ""`.
 - **Running on your own number** — your own messages can call the bot too, in groups and in private chats with other people (trigger anywhere in the text). In a private chat the conversation stays the other person's, but your message is attributed to you, with your own access level. Syne recognises its own replies by message id and content, and a brake ignores more than 3 of your triggers per chat per minute.
 - **Members** — anyone who addresses the bot by name is registered as `public` on first contact. Manage them with `/wamembers` on Telegram: block, per-entry model override, per-member access level in groups, leave a group.
@@ -873,7 +873,11 @@ syne config delete <key>             # Remove a key
 # Backup & Restore
 syne backup                          # Backup database
 syne restore                         # Restore from backup
+syne config backup                   # Snapshot config only (models, credentials, per-user model overrides)
+syne config restore [file]           # Restore a config snapshot — memories and chat history untouched (no file → list)
 ```
+
+Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/syne/backup/config/` (mode 0600 — they hold credentials). Besides manual ones, Syne takes one automatically at every start and before any tool-driven config change, skipping it when nothing changed. Like `syne backup`, only the newest 10 are kept — counted separately for manual and automatic snapshots, so automatic ones never push out a manual backup. `syne config restore` (or `/restoreconf` on Telegram) shows what will change, saves the current config first, then writes the snapshot back; run `syne restart` afterwards. The `update_config` tool cannot write `provider.*` or `credential.*` — model and credential changes go through `/models` or `syne config set`.
 
 ---
 
@@ -907,6 +911,8 @@ syne restore                         # Restore from backup
 | `/dcmembers` | Manage Discord users, servers & model overrides | Owner |
 | `/backup` | Backup database | Owner |
 | `/restore` | Restore database from backup | Owner |
+| `/backupconf` | Back up config only (models, credentials, per-user model overrides) | Owner |
+| `/restoreconf` | Restore a config backup — shows the changes first, memories untouched | Owner |
 | `/graph` | Manage knowledge graph extractors | Owner |
 | `/nodes` | Manage remote nodes | Owner |
 | `/update` | Update Syne to latest version | Owner |
@@ -1072,6 +1078,7 @@ syne/
 │   │   ├── schema.sql       # Database schema (18 tables)
 │   │   ├── migrations.py    # Versioned schema migrations
 │   │   ├── connection.py    # Async connection pool (asyncpg)
+│   │   ├── config_snapshot.py # Config-only snapshots (syne config backup/restore)
 │   │   ├── models.py        # Data access layer
 │   │   └── credentials.py   # Encrypted credential storage
 │   ├── gateway/             # Remote node support
@@ -1083,7 +1090,7 @@ syne/
 │       ├── cmd_repair.py    # syne repair
 │       ├── cmd_update.py    # syne update
 │       ├── cmd_db.py        # syne db
-│       ├── cmd_config.py    # syne config (list/get/set/delete)
+│       ├── cmd_config.py    # syne config (list/get/set/delete/backup/restore)
 │       ├── cmd_memory.py    # syne memory (stats/search/add/delete/prune)
 │       ├── cmd_node.py      # syne node (init/start/stop/restart/status)
 │       ├── cmd_backup.py    # syne backup/restore

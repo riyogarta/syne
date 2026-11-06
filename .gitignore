@@ -49,3 +49,6 @@ data/output/
 workspace/
 .syne_uploads/
 .syne_outputs/
+
+# Local backups (full DB dumps and config snapshots contain credentials)
+backup/

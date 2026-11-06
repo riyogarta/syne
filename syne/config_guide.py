@@ -341,6 +341,10 @@ Grace period for scheduled tasks that run late (e.g., bot was offline).
 
 ## Provider & Model
 
+**All `provider.*` keys (and `credential.*`) are read-only for `update_config`** — a `set`
+is rejected. Model switching and registry edits are done by the owner via `/models`
+(Telegram) or `syne config set` on the server. Explain the change; don't attempt it.
+
 ### Active Models
 | Key | Default | Type |
 |-----|---------|------|

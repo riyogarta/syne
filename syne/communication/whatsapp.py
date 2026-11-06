@@ -65,6 +65,10 @@ behaviour does not change under users:
     InboundContext.sender_access carries the owner's access, not the
     friend's. Same echo guards and rate brake as in a group
   * media in the self-chat needs no trigger (there is no one else to address)
+  * a reply (quote) to one of Syne's own messages needs no trigger: replying
+    to the bot is addressing it. Syne's messages are recognised by the ids
+    recorded on send and, after a restart, by the reply marker they start
+    with (see _is_reply_to_bot). The quoted text is passed on as reply context
 """
 
 from __future__ import annotations
@@ -207,6 +211,15 @@ _ECHO_TTL = 60.0
 # Bounded dedup memory for inbound message ids.
 _SEEN_MAX = 500
 
+# Bounded memory of ids Syne sent, so a reply quoting one needs no trigger.
+_SENT_MAX = 500
+
+# Message fields that can carry a ContextInfo (the quote of a reply).
+_QUOTE_CARRIERS = (
+    "extendedTextMessage", "imageMessage", "videoMessage",
+    "documentMessage", "audioMessage", "stickerMessage",
+)
+
 # Rate brake for from_me triggers in groups: at most this many per chat per
 # window. The id dedup and echo hash should already stop Syne answering its
 # own replies; this is the backstop that turns any miss into a few extra
@@ -318,6 +331,9 @@ class WhatsAppChannel:
         # double-processed message is a double LLM call and a double reply.
         self._seen: set[str] = set()
         self._seen_order: list[str] = []
+        # Ids of messages Syne sent (bounded), for reply-without-trigger.
+        self._sent_ids: set[str] = set()
+        self._sent_order: list[str] = []
 
         # chat+content hash -> time we sent it, for echo suppression.
         self._echo: dict[str, float] = {}
@@ -795,6 +811,11 @@ class WhatsAppChannel:
         msg_id = str(getattr(resp, "ID", "") or "")
         if msg_id:
             self._remember_id(msg_id)
+            if msg_id not in self._sent_ids:
+                self._sent_ids.add(msg_id)
+                self._sent_order.append(msg_id)
+                if len(self._sent_order) > _SENT_MAX:
+                    self._sent_ids.discard(self._sent_order.pop(0))
 
     def _record_echo(self, chat_jid: str, text: str) -> None:
         """Record a sent text for echo suppression, pruning expired entries.
@@ -870,6 +891,50 @@ class WhatsAppChannel:
             pass
 
         return (text or "").strip(), (caption or "").strip(), kind
+
+    @staticmethod
+    def _extract_quote(ev: MessageEv) -> tuple[str, str]:
+        """(quoted message id, quoted text) if this message is a reply, else ("", "")."""
+        msg = ev.Message
+        for field in _QUOTE_CARRIERS:
+            try:
+                if not msg.HasField(field):
+                    continue
+                inner = getattr(msg, field)
+                if not inner.HasField("contextInfo"):
+                    continue
+                ctx = inner.contextInfo
+            except (ValueError, AttributeError):
+                continue
+            stanza_id = ctx.stanzaID or ""
+            if not stanza_id:
+                continue
+            quoted = ""
+            if ctx.HasField("quotedMessage"):
+                q = ctx.quotedMessage
+                quoted = (
+                    q.conversation
+                    or q.extendedTextMessage.text
+                    or q.imageMessage.caption
+                    or q.videoMessage.caption
+                    or q.documentMessage.caption
+                    or ""
+                )
+            return stanza_id, quoted.strip()
+        return "", ""
+
+    async def _is_reply_to_bot(self, quoted_id: str, quoted_text: str) -> bool:
+        """True if the quoted message is one Syne sent.
+
+        The sent-id set is in memory, so it is empty after a restart; the
+        reply marker every Syne message starts with covers that case.
+        """
+        if not quoted_id:
+            return False
+        if quoted_id in self._sent_ids:
+            return True
+        prefix = await self._reply_prefix()
+        return bool(prefix) and quoted_text.startswith(prefix)
 
     async def _handle_message(self, ev: MessageEv) -> None:
         """Process one inbound WhatsApp message."""
@@ -954,6 +1019,8 @@ class WhatsAppChannel:
         # groups row is read ONLY to honour `enabled`; require_mention
         # deliberately does NOT relax the trigger requirement.
         trigger = await self._get_trigger_name()
+        quoted_id, quoted_text = self._extract_quote(ev)
+        reply_to_bot = await self._is_reply_to_bot(quoted_id, quoted_text)
         group_row = None
         if is_group:
             group_row = await get_group("whatsapp", chat_jid)
@@ -966,7 +1033,7 @@ class WhatsAppChannel:
                 # Self-chat media needs no trigger — there is no one else being
                 # addressed in a chat with yourself.
                 text = caption or ""
-            elif self._has_trigger_word(caption, trigger):
+            elif reply_to_bot or self._has_trigger_word(caption, trigger):
                 text = self._strip_trigger_word(caption, trigger)
             else:
                 logger.info(
@@ -975,7 +1042,7 @@ class WhatsAppChannel:
                 )
                 return
         else:
-            if not self._has_trigger_word(text, trigger):
+            if not reply_to_bot and not self._has_trigger_word(text, trigger):
                 logger.info('[whatsapp] no trigger "%s" in: %s', trigger, text[:80])
                 return
             text = self._strip_trigger_word(text, trigger)
@@ -1186,6 +1253,15 @@ class WhatsAppChannel:
             sender_id=sender_pn if is_group else None,
             was_mentioned=True,
         )
+        if quoted_text:
+            body = quoted_text
+            if reply_to_bot:
+                prefix = await self._reply_prefix()
+                if prefix and body.startswith(prefix):
+                    body = body[len(prefix):].lstrip()
+            inbound.has_reply_context = True
+            inbound.reply_to_body = body[:2000]
+            inbound.reply_to_sender = "you (your own earlier message)" if reply_to_bot else None
         await load_group_settings(inbound)
 
         # In a DM the access level is set per message from the actual speaker.
