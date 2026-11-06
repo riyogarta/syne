@@ -610,10 +610,10 @@ class Conversation:
         """
         messages = []
         access_level = self.user.get("access_level", "public")
-        # In group chats, the effective access level for memory is the SENDER (who asked),
-        # resolved from the group member registry in InboundContext.sender_access.
-        # If not available, fall back to the user record.
-        if self.is_group and self.inbound and self.inbound.sender_access:
+        # The effective access level for memory is the SENDER (who asked) when
+        # the channel resolved one in InboundContext.sender_access -- the group
+        # member registry, or the WhatsApp DM sender. Otherwise the user record.
+        if self.inbound and self.inbound.sender_access:
             access_level = self.inbound.sender_access
 
         # 1. System prompt (decorated). Snapshot the epoch it was built from
@@ -1674,9 +1674,10 @@ class Conversation:
         # Get available tools + abilities
         access_level = self.user.get("access_level", "public")
         
-        # In group chats, tool access is based on the SENDER (member registry),
-        # not the cached session user.
-        if self.is_group and self.inbound and self.inbound.sender_access:
+        # Tool access is based on the SENDER when the channel resolved one
+        # (group member registry, WhatsApp DM sender), not the cached session
+        # user -- a session can carry messages from more than one person.
+        if self.inbound and self.inbound.sender_access:
             access_level = self.inbound.sender_access
 
         # SECURITY (Groups): tools are sender-based, but owner-only tools stay DM-only.

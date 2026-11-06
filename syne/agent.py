@@ -2275,7 +2275,7 @@ class SyneAgent:
         # Pass requester access level for Rule 760 filtering
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
             access = conv.inbound.sender_access
         results = await self.memory.recall(query, limit=limit, categories=categories or None, requester_access_level=access)
         if not results:
@@ -2534,7 +2534,7 @@ class SyneAgent:
 
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
             access = conv.inbound.sender_access
         allowed, reason = check_rule_760(row["category"] or "", access)
         if not allowed:
@@ -2594,7 +2594,7 @@ class SyneAgent:
 
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.is_group and conv.inbound.sender_access:
+        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
             access = conv.inbound.sender_access
         allowed, reason = check_rule_760(row["category"] or "", access)
         if not allowed:

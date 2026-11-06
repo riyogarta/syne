@@ -54,15 +54,17 @@ behaviour does not change under users:
   * text ALWAYS requires the trigger word — in groups AND in DMs, from
     strangers AND from the owner. A group's require_mention flag is read only
     to decide `enabled`; it deliberately does NOT relax the trigger.
-  * from_me in a group is always dropped — Syne's own replies come back as
-    from_me and would otherwise feed themselves forever
-  * from_me in a DM is dropped unless it is the self-chat
+  * from_me in a group is processed like anyone else's message (trigger
+    word anywhere in the text). Syne runs on the owner's own number, so the
+    owner typing in a group arrives as from_me too; Syne's own replies are
+    told apart by the message-id dedup and the echo hash, and a per-chat
+    rate brake caps the damage if both ever miss (see _from_me_braked)
+  * from_me in a DM with someone else is processed too (the owner calling
+    the bot in a chat with a friend). The session stays the friend's, but
+    the message is attributed to the owner: a Sender block names them and
+    InboundContext.sender_access carries the owner's access, not the
+    friend's. Same echo guards and rate brake as in a group
   * media in the self-chat needs no trigger (there is no one else to address)
-
-The owner can therefore use the trigger anywhere, self-chat included. The only
-self-feeding risk left is the self-chat, where a reply of ours arrives as
-from_me in the same chat; two guards cover it without ever restricting the
-owner — the echo hash below and the message-id dedup.
 """
 
 from __future__ import annotations
@@ -204,6 +206,13 @@ _ECHO_TTL = 60.0
 # Bounded dedup memory for inbound message ids.
 _SEEN_MAX = 500
 
+# Rate brake for from_me triggers in groups: at most this many per chat per
+# window. The id dedup and echo hash should already stop Syne answering its
+# own replies; this is the backstop that turns any miss into a few extra
+# replies instead of a loop.
+_FROM_ME_MAX = 3
+_FROM_ME_WINDOW = 60.0
+
 # Bounded cache for @lid -> phone number lookups. One entry per contact that
 # ever messages us, so a couple of thousand is already generous.
 _LID_CACHE_MAX = 2000
@@ -321,6 +330,9 @@ class WhatsAppChannel:
         # rotates the code several times; each new one replaces the image in
         # this message rather than stacking up expired QRs.
         self._qr_msg_id: Optional[int] = None
+
+        # chat_jid -> recent from_me trigger times, for _from_me_braked.
+        self._from_me_hits: dict[str, list[float]] = {}
 
     # ── Lifecycle ────────────────────────────────────────────
 
@@ -789,6 +801,23 @@ class WhatsAppChannel:
             del self._echo[k]
         self._echo[self._content_hash(chat_jid, text)] = now
 
+    def _from_me_braked(self, chat_jid: str) -> bool:
+        """True if this group already had _FROM_ME_MAX from_me triggers in the
+        last _FROM_ME_WINDOW seconds. Records the hit when not braked."""
+        now = time.time()
+        hits = [t for t in self._from_me_hits.get(chat_jid, [])
+                if now - t < _FROM_ME_WINDOW]
+        if len(hits) >= _FROM_ME_MAX:
+            self._from_me_hits[chat_jid] = hits
+            logger.warning(
+                "[whatsapp] from_me brake: %d triggers in %ss in %s, ignoring",
+                len(hits), int(_FROM_ME_WINDOW), chat_jid,
+            )
+            return True
+        hits.append(now)
+        self._from_me_hits[chat_jid] = hits
+        return False
+
     def _content_hash(self, chat_jid: str, text: str) -> str:
         return f"{chat_jid}:{hashlib.md5((text or '').encode()).hexdigest()[:12]}"
 
@@ -875,20 +904,31 @@ class WhatsAppChannel:
             from_me, is_group, chat_jid, media_kind or "-", (text or caption)[:60],
         )
 
-        # from_me rules — ported verbatim (abilities/whatsapp.py:753-771).
+        # from_me rules. Syne runs on the owner's own number, so from_me is
+        # either the owner typing or one of Syne's own replies.
+        #
+        # owner_in_dm: the owner typing "Molt ..." in a DM with someone else.
+        # The chat is that person's, the speaker is the owner.
+        owner_in_dm = False
         if from_me:
             if is_group:
-                logger.info("[whatsapp] drop: from_me in group (%s)", chat_jid)
-                return
-            if not sender_jid:
+                # The owner typing in a group from their own phone. Allowed
+                # through to the trigger check below; Syne's own replies were
+                # already caught by _is_duplicate (their ids are recorded on
+                # send) and are caught again by the echo hash.
+                pass
+            elif not sender_jid:
                 logger.info("[whatsapp] drop: from_me with no sender")
                 return
-            if self._local(sender_jid) != self._local(chat_jid):
-                logger.info(
-                    "[whatsapp] drop: from_me to other contact (%s != %s)",
-                    self._local(sender_jid), self._local(chat_jid),
+            else:
+                # Self-chat: same local part, or the chat resolves to our own
+                # number (sender may be our @lid while the chat is our pn).
+                chat_pn = await self._resolve_lid_pn(chat_jid) or self._local(chat_jid)
+                is_self_chat = (
+                    self._local(sender_jid) == self._local(chat_jid)
+                    or (bool(self._own_pn) and chat_pn == self._own_pn)
                 )
-                return
+                owner_in_dm = not is_self_chat
 
         # Echo suppression: our own replies come back as from_me, and in a
         # self-chat the rules above let them through, so match on content. This
@@ -915,7 +955,7 @@ class WhatsAppChannel:
                 return
 
         if media_kind:
-            if not is_group and from_me:
+            if from_me and not is_group and not owner_in_dm:
                 # Self-chat media needs no trigger — there is no one else being
                 # addressed in a chat with yourself.
                 text = caption or ""
@@ -934,6 +974,9 @@ class WhatsAppChannel:
             text = self._strip_trigger_word(text, trigger)
             if not text:
                 return
+
+        if from_me and (is_group or owner_in_dm) and self._from_me_braked(chat_jid):
+            return
 
         # Members: blocked check + auto-register.
         by_jid = await self._load_members()
@@ -1021,6 +1064,47 @@ class WhatsAppChannel:
                 )
             except Exception as e:
                 logger.debug("[whatsapp] auto-collect member failed: %s", e)
+        elif owner_in_dm:
+            # The owner calling the bot in a DM with someone else. The session
+            # and the member entry (block, model override) are the OTHER
+            # person's; the speaker is the owner. alt_pn is the owner here
+            # (it was resolved from the sender), so the chat side is resolved
+            # separately. Nothing is auto-registered: the owner's message must
+            # not enrol the friend under the owner's push name.
+            friend_pn = await self._resolve_lid_pn(chat_jid) or self._local(chat_jid)
+            member_key, member = self._match_member(by_jid, chat_jid, friend_pn)
+            if member and member.get("blocked"):
+                logger.info("[whatsapp] blocked member, dropping: %s", chat_jid)
+                return
+            friend_user = await get_user("whatsapp", friend_pn)
+            friend_name = (
+                (member or {}).get("name")
+                or (friend_user or {}).get("display_name")
+                or friend_pn
+            )
+            if member is None:
+                member = {"jid": friend_pn, "name": friend_name,
+                          "model": None, "blocked": False}
+
+            own_pn = self._own_pn or alt_pn or self._local(sender_jid)
+            owner_name = push_name or own_pn
+            try:
+                owner_user = await get_user("whatsapp", own_pn)
+                if not owner_user:
+                    await create_user(
+                        name=owner_name, platform="whatsapp", platform_id=own_pn,
+                        display_name=owner_name, access_level="public",
+                    )
+            except Exception as e:
+                owner_user = None
+                logger.debug("[whatsapp] owner user lookup failed: %s", e)
+
+            # Session identity = the friend; speaker = the owner.
+            sender_pn = friend_pn
+            sender_name = friend_name
+            conversation_label = friend_name
+            dm_speaker = (own_pn, owner_name,
+                          (owner_user or {}).get("access_level", "public"))
         else:
             member_key, member = self._match_member(by_jid, chat_jid, alt_pn)
             chat_local = alt_pn or self._local(chat_jid)
@@ -1096,6 +1180,23 @@ class WhatsAppChannel:
             was_mentioned=True,
         )
         await load_group_settings(inbound)
+
+        # In a DM the access level is set per message from the actual speaker.
+        # The cached session's user is whoever opened it after the last
+        # restart -- the friend, or the owner if they spoke first -- so it
+        # cannot be trusted to describe this message's sender.
+        if not is_group:
+            if owner_in_dm:
+                own_pn, owner_name, owner_access = dm_speaker
+                inbound.sender_id = own_pn
+                inbound.sender_name = owner_name
+                inbound.sender_access = owner_access
+            else:
+                try:
+                    _u = await get_user("whatsapp", sender_pn)
+                except Exception:
+                    _u = None
+                inbound.sender_access = (_u or {}).get("access_level", "public")
 
         original_text = text
         prefix = build_user_context_prefix(inbound)

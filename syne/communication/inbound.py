@@ -53,7 +53,7 @@ class InboundContext:
 
     # ── Sender (resolved from group member registry) ────────
     sender_alias: Optional[str] = None       # per-group alias (e.g. "Pak Riyo")
-    sender_access: Optional[str] = None      # per-group access (owner/family/public)
+    sender_access: Optional[str] = None      # access of THIS message's sender (owner/family/public); overrides the session user when set
 
     # ── Flags ─────────────────────────────────────────────────
     was_mentioned: bool = False
@@ -179,8 +179,10 @@ def build_user_context_prefix(ctx: InboundContext) -> str:
     if conv_info:
         blocks.append(_json_block("Conversation info (untrusted metadata):", conv_info))
 
-    # 2. Sender info (groups only — in DM the sender is obvious)
-    if ctx.is_group and ctx.sender_name:
+    # 2. Sender info. Channels set sender_name only when the chat does not
+    # already imply the speaker: groups, and the owner writing from their own
+    # number in someone else's WhatsApp DM.
+    if ctx.sender_name:
         sender_info = _clean_dict({
             "name": ctx.sender_name,
             "id": ctx.sender_id,
