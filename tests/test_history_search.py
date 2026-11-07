@@ -217,13 +217,13 @@ class TestHistoryExpandValidation:
 
 
 # ---------------------------------------------------------------------------
-# history_expand: window shaping (count conversation only, truncate tools)
+# history_expand: window shaping (conversation only, no tool results)
 # ---------------------------------------------------------------------------
 
 
 class TestHistoryExpandWindow:
 
-    async def test_counts_conversation_and_truncates_tool_results(self):
+    async def test_returns_conversation_only(self):
         from datetime import datetime, timedelta, timezone
         base = datetime(2026, 11, 7, 5, 0, tzinfo=timezone.utc)
 
@@ -245,7 +245,6 @@ class TestHistoryExpandWindow:
                 calls["window"] = (sql, params)
                 return [
                     {"id": 97, "role": "user", "content": "q1", "created_at": t(97)},
-                    {"id": 98, "role": "tool", "content": "x" * 2000, "created_at": t(98)},
                     {"id": 99, "role": "assistant", "content": "a1", "created_at": t(99)},
                     {"id": 100, "role": "user", "content": "anchor", "created_at": t(100)},
                     {"id": 101, "role": "assistant", "content": "a2", "created_at": t(101)},
@@ -270,17 +269,14 @@ class TestHistoryExpandWindow:
         sql, params = calls["window"]
         assert params == (51, t(97), 97)
         assert "<=" not in sql
-        # Never numbers the whole session again
+        # Never numbers the whole session again; tool rows filtered in SQL
         assert "ROW_NUMBER" not in sql
+        assert H._CONVO_FILTER in sql
 
         turns = json.loads(result)["blocks"][0]["turns"]
-        assert [x["id"] for x in turns] == [97, 98, 99, 100, 101]
+        assert [x["id"] for x in turns] == [97, 99, 100, 101]
         assert [x["id"] for x in turns if x["is_anchor"]] == [100]
-        tool = turns[1]
-        assert tool["truncated"] is True
-        assert tool["content"].startswith("x" * 500)
-        assert "1500 more chars" in tool["content"]
-        assert turns[0]["content"] == "q1" and "truncated" not in turns[0]
+        assert all(x["role"] in ("user", "assistant") for x in turns)
 
     async def test_zero_context_bounds_on_anchor(self):
         from datetime import datetime, timezone

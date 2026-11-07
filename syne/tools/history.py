@@ -39,9 +39,10 @@ logger = logging.getLogger("syne.tools.history")
 # surfaces as an explicit error instead of a silent multi-minute hang.
 _STEP_TIMEOUT = 60
 
-# Rows that count toward context_before / context_after: what was actually
-# said. Tool results and empty assistant tool-call shells sit in between
-# and are shown, but do not use up the count.
+# Rows history_expand returns: only what was actually said between the
+# owner and the assistant. Tool results and empty assistant tool-call
+# shells are left out entirely (Riyo, 7 Nov 2026): the owner never saw
+# them, and a cut-off tool result invites wrong conclusions.
 _CONVO_FILTER = "role IN ('user', 'assistant') AND btrim(coalesce(content, '')) <> ''"
 
 
@@ -326,9 +327,8 @@ async def history_expand_handler(
     try:
         default_before = int(await get_config("history_search.context_before", 10))
         default_after = int(await get_config("history_search.context_after", 10))
-        tool_chars = int(await get_config("history_search.tool_result_chars", 500))
     except Exception:
-        default_before, default_after, tool_chars = 10, 10, 500
+        default_before, default_after = 10, 10
 
     before = max(0, int(context_before) if context_before is not None else default_before)
     after = max(0, int(context_after) if context_after is not None else default_after)
@@ -336,7 +336,6 @@ async def history_expand_handler(
     # Cap so a rogue call can't dump gigabytes.
     before = min(before, 20)
     after = min(after, 40)
-    tool_chars = max(0, tool_chars)
 
     blocks = []
     missing = []
@@ -419,8 +418,8 @@ async def history_expand_handler(
                 else:
                     hi = a  # after == 0
 
-                # Step 2 — everything between the edges, ALL roles, in order.
-                conds = ["session_id = $1"]
+                # Step 2 — the conversation between the edges, in order.
+                conds = ["session_id = $1", _CONVO_FILTER]
                 params = [sid]
                 if lo is not None:
                     params += [lo["created_at"], lo["id"]]
@@ -447,24 +446,13 @@ async def history_expand_handler(
 
                 turns = []
                 for r in window_rows:
-                    content = r["content"] or ""
-                    turn = {
+                    turns.append({
                         "id": r["id"],
                         "role": r["role"],
-                        "content": content,
+                        "content": r["content"] or "",
                         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                         "is_anchor": r["id"] == aid,
-                    }
-                    # Tool/system results stay visible (which tool ran, roughly
-                    # what it returned) but are cut short to keep a wide
-                    # window inside the context budget.
-                    if r["role"] not in ("user", "assistant") and len(content) > tool_chars:
-                        turn["content"] = (
-                            content[:tool_chars]
-                            + f"… [truncated: {len(content) - tool_chars} more chars]"
-                        )
-                        turn["truncated"] = True
-                    turns.append(turn)
+                    })
                 blocks.append({
                     "anchor_id": aid,
                     "session_id": sid,
@@ -499,9 +487,8 @@ HISTORY_EXPAND_TOOL = {
         "REQUIRED before concluding from any relevant anchor: never answer from "
         "the search preview alone; expand to read what was actually said around "
         "it. Call SELECTIVELY — only expand previews that look promising, not the "
-        "whole top-N. context_before / context_after count conversation "
-        "messages only (user + assistant text); tool results in between are "
-        "included but truncated. Owner-only."
+        "whole top-N. Returns the conversation only (user + assistant text); "
+        "tool results are not included. Owner-only."
     ),
     "parameters": {
         "type": "object",
