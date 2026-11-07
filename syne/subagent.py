@@ -45,6 +45,39 @@ class SubAgentIncomplete(Exception):
         super().__init__(f"Sub-agent stopped before completing the task: {reason}")
 
 
+def format_subagent_notice(status: str, reason: str = "") -> str:
+    """Short user-facing notice for a finished sub-agent.
+
+    The owner already knows the task (the main agent explained it before
+    spawning), so the notice carries no run id and no result body — only
+    the outcome, plus the reason when the run did not finish. The full
+    result is kept in conversation history for the main agent.
+    """
+    reason = (reason or "").strip()
+    if len(reason) > 300:
+        reason = reason[:297] + "..."
+    if status == "completed":
+        return "✅ Sub-agent selesai."
+    if status == "cancelled":
+        return "⚠️ Sub-agent dibatalkan."
+    if status == "incomplete":
+        return f"⚠️ Sub-agent berhenti: {reason}" if reason else "⚠️ Sub-agent berhenti sebelum selesai."
+    return f"❌ Sub-agent gagal: {reason}" if reason else "❌ Sub-agent gagal."
+
+
+def _normalize_planned(commands) -> list[str]:
+    """Accept a list or a JSON/newline string of planned shell commands."""
+    if not commands:
+        return []
+    if isinstance(commands, str):
+        try:
+            parsed = json.loads(commands)
+        except Exception:
+            parsed = commands.splitlines()
+        commands = parsed if isinstance(parsed, list) else [str(parsed)]
+    return [str(c).strip() for c in commands if str(c).strip()]
+
+
 class SubAgentManager:
     """Manages sub-agent lifecycle: spawn, monitor, deliver results."""
 
@@ -54,13 +87,14 @@ class SubAgentManager:
         self.tools = None          # ToolRegistry — set by agent after init
         self.abilities = None      # AbilityRegistry — set by agent after init
         self._active_runs: dict[str, asyncio.Task] = {}
-        self._on_complete: Optional[Callable[[str, str, str, int], Awaitable[None]]] = None
+        self._on_complete: Optional[Callable[..., Awaitable[None]]] = None
         self._on_start: Optional[Callable[[str, str, int], Awaitable[None]]] = None
 
     def set_completion_callback(self, callback: Callable[[str, str, str, int], Awaitable[None]]):
         """Set callback for when sub-agent completes.
 
-        callback(run_id: str, status: str, result_or_error: str, parent_session_id: int)
+        callback(run_id: str, status: str, result_or_error: str,
+                 parent_session_id: int, reason: str)
         """
         self._on_complete = callback
 
@@ -100,6 +134,7 @@ class SubAgentManager:
         model: Optional[str] = None,
         provider: Optional[LLMProvider] = None,
         resume_from: Optional[str] = None,
+        planned_commands=None,
     ) -> dict:
         """Spawn a new sub-agent.
         
@@ -125,6 +160,24 @@ class SubAgentManager:
             return {
                 "success": False,
                 "error": f"Max concurrent sub-agents reached ({max_conc}). Wait for one to complete.",
+            }
+
+        # ── Feasibility pre-check ──
+        # Sub-agents run headless: a shell command needing owner consent can
+        # never be approved there and would stop the run mid-flight. Check the
+        # planned commands with the same guard BEFORE starting, so a task that
+        # cannot finish is refused up front instead of failing halfway.
+        blocked = await self.precheck_commands(planned_commands)
+        if blocked:
+            lines = "\n".join(f"- `{c}` → {why}" for c, why in blocked)
+            return {
+                "success": False,
+                "error": (
+                    "Pre-check failed — sub-agent NOT started. These planned shell "
+                    "commands cannot run headless in a sub-agent:\n" + lines + "\n"
+                    "Do this work in the main chat instead (where the owner can "
+                    "approve), or change the plan."
+                ),
             }
 
         # Resume handling: continue an incomplete/failed run from its partial result
@@ -202,6 +255,35 @@ class SubAgentManager:
             "message": f"Sub-agent spawned. I'll notify you when it completes.",
         }
 
+    async def precheck_commands(self, commands) -> list[tuple[str, str]]:
+        """Return [(command, why)] for planned commands a sub-agent cannot run.
+
+        Uses run_shell(check_only=True) with the sub-agent's exact settings
+        (source="subagent", consent forced on, not approved), so the verdict
+        matches what would happen at run time, including the DB allow/deny
+        lists. Nothing is executed.
+        """
+        cmds = _normalize_planned(commands)
+        if not cmds:
+            return []
+        from .shell_exec import run_shell, Outcome
+        from .db.connection import get_pool
+        try:
+            pool = get_pool()
+        except Exception:
+            pool = None
+        blocked: list[tuple[str, str]] = []
+        for c in cmds:
+            res = await run_shell(
+                c, source="subagent", db_pool=pool,
+                consent_enabled=True, approved=False, check_only=True,
+            )
+            if res.outcome == Outcome.NEEDS_CONSENT:
+                blocked.append((c, f"needs owner consent ({res.reason})"))
+            elif res.outcome == Outcome.DENIED:
+                blocked.append((c, f"hard-denied by shell guard ({res.reason})"))
+        return blocked
+
     async def _run_subagent(
         self,
         run_id: str,
@@ -221,7 +303,7 @@ class SubAgentManager:
 
         except SubAgentIncomplete as e:
             logger.warning(f"Sub-agent {run_id}: incomplete ({e.reason})")
-            await self._complete_run(run_id, "incomplete", result=e.partial_result)
+            await self._complete_run(run_id, "incomplete", result=e.partial_result, error=e.reason)
 
         except asyncio.TimeoutError:
             error_msg = f"Sub-agent timed out after {timeout}s"
@@ -295,6 +377,9 @@ class SubAgentManager:
             "- For long tasks: launch as background script (nohup) then STOP. "
             "Do NOT poll/monitor progress — the user can check manually.\n"
             "- Prefer doing the actual work directly over writing scripts to do it later.\n"
+            "- Shell commands that need owner consent are BLOCKED here (nobody can approve\n"
+            "  them) and stop the task immediately. Use only allowed commands; never try\n"
+            "  to work around a block.\n"
             f"\n## ROUND BUDGET: You have {max_rounds} tool call round(s) total.\n"
             "- If the task genuinely needs MORE rounds than your budget and you cannot\n"
             "  finish, do NOT pretend it is done. Report the partial progress and end your\n"
@@ -339,6 +424,7 @@ class SubAgentManager:
         round_delay = await get_config("subagents.round_delay", 2.0)  # seconds between rounds
         round_num = 0
         forced_stop = False
+        stop_reason: Optional[str] = None
         while response.tool_calls:
             # Hard round limit — force stop to prevent runaway sub-agents
             if round_num >= max_rounds:
@@ -352,6 +438,7 @@ class SubAgentManager:
                     ),
                 ))
                 forced_stop = True
+                stop_reason = f"batas {max_rounds} langkah habis"
                 break
 
             # Warn at 80% of limit
@@ -398,10 +485,18 @@ class SubAgentManager:
             tasks = [self._execute_tool(n, a, access_level) for n, a, _ in parsed]
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
+            blocked = None
             for i, raw in enumerate(raw_results):
                 name, args, tool_call_id = parsed[i]
-                is_error = isinstance(raw, Exception) or (isinstance(raw, str) and raw.startswith("Error:"))
-                result = str(raw) if not isinstance(raw, Exception) else f"Error: {raw}"
+                if isinstance(raw, SubAgentIncomplete):
+                    # Consent-blocked shell command. gather(return_exceptions=True)
+                    # swallowed the exception, so surface it here and stop below.
+                    blocked = blocked or raw
+                    is_error = True
+                    result = f"Error: {raw.partial_result}"
+                else:
+                    is_error = isinstance(raw, Exception) or (isinstance(raw, str) and raw.startswith("Error:"))
+                    result = str(raw) if not isinstance(raw, Exception) else f"Error: {raw}"
 
                 # Track this call
                 success = not is_error
@@ -415,6 +510,24 @@ class SubAgentManager:
                 if tool_call_id:
                     tool_meta["tool_call_id"] = tool_call_id
                 messages.append(ChatMessage(role="tool", content=result, metadata=tool_meta))
+
+            # Hard stop on a consent-blocked command — do not let the
+            # sub-agent burn rounds trying workarounds.
+            if blocked is not None:
+                logger.warning(f"Sub-agent {run_id[:8]}: stopping — {blocked.reason}")
+                messages.append(ChatMessage(
+                    role="system",
+                    content=(
+                        "STOP. A shell command was blocked: it needs owner consent, which "
+                        "is impossible in a sub-agent. Do NOT try alternatives. Summarize "
+                        "what you accomplished and what remains so the owner can finish "
+                        "it in the main chat."
+                    ),
+                ))
+                forced_stop = True
+                stop_reason = blocked.reason
+                round_num += 1
+                break
 
             # Get next response — may contain more tool calls
             response = await llm.chat(
@@ -474,7 +587,9 @@ class SubAgentManager:
         # INCOMPLETE if the engine forced a stop OR the sub-agent itself signalled
         # it ran out of budget with work remaining. Either way it's resumable.
         if is_incomplete:
-            raise SubAgentIncomplete(result)
+            raise SubAgentIncomplete(
+                result, reason=stop_reason or "sub-agent melaporkan pekerjaan belum selesai"
+            )
         return result
 
     def _get_tool_schemas(self, access_level: str) -> list[dict]:
@@ -538,7 +653,11 @@ class SubAgentManager:
                 f"possible in a sub-agent): `{_cmd}`. Reason: {_res.reason}. "
                 "Task stopped — owner must run this manually or pre-approve."
             )
-            raise SubAgentIncomplete(_msg, reason=_msg)
+            _short = _cmd if len(_cmd) <= 120 else _cmd[:117] + "..."
+            raise SubAgentIncomplete(
+                _msg,
+                reason=f"perintah `{_short}` butuh izin owner (sub-agent tidak bisa meminta izin)",
+            )
 
         # Try core tools first
         if self.tools and self.tools.get(name):
@@ -590,7 +709,7 @@ class SubAgentManager:
         if self._on_complete:
             output = result if status in ("completed", "incomplete") else f"Error: {error}"
             try:
-                await self._on_complete(run_id, status, output, parent_session_id)
+                await self._on_complete(run_id, status, output, parent_session_id, error or "")
             except Exception as e:
                 logger.error(f"Completion callback failed for {run_id}: {e}")
 

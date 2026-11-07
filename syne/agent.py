@@ -1174,7 +1174,13 @@ class SyneAgent:
         # Sub-agent spawn tool
         self.tools.register(
             name="spawn_subagent",
-            description="Spawn a background sub-agent for heavy/parallel tasks.",
+            description=(
+                "Spawn a background sub-agent for heavy/parallel tasks. Sub-agents run "
+                "headless: shell commands that need owner consent are blocked and stop "
+                "the task. List every shell command you plan for the sub-agent in "
+                "planned_commands — they are pre-checked and the spawn is refused if any "
+                "would be blocked (do that work in the main chat instead)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -1190,8 +1196,13 @@ class SyneAgent:
                         "type": "string",
                         "description": "Optional run_id of a previous incomplete/failed sub-agent to continue. The prior partial result is injected as context so the new sub-agent picks up where it left off instead of restarting.",
                     },
+                    "planned_commands": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Every shell command the sub-agent is expected to run (empty list if none). Pre-checked against the shell guard before spawning; the spawn is refused if any needs owner consent or is denied.",
+                    },
                 },
-                "required": ["task"],
+                "required": ["task", "planned_commands"],
             },
             handler=self._tool_spawn_subagent,
             permission=0o750,
@@ -1502,7 +1513,8 @@ class SyneAgent:
         
         return "\n".join(lines)
 
-    async def _tool_spawn_subagent(self, task: str, context: str = "", resume_from: str = "", _provider=None) -> str:
+    async def _tool_spawn_subagent(self, task: str, context: str = "", resume_from: str = "",
+                                   planned_commands=None, _provider=None) -> str:
         """Tool handler: spawn a sub-agent."""
         if not self.subagents:
             return "Sub-agent system not initialized."
@@ -1522,6 +1534,7 @@ class SyneAgent:
             context=context or None,
             provider=_provider,
             resume_from=resume_from or None,
+            planned_commands=planned_commands,
         )
         
         if result["success"]:

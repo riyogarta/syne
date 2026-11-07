@@ -3252,18 +3252,27 @@ class ConversationManager:
         else:
             logger.info(f"Sub-agent started (no delivery callback): {msg[:200]}")
 
-    async def _on_subagent_complete(self, run_id: str, status: str, result: str, parent_session_id: int):
-        """Called when a sub-agent finishes. Delivers result to the parent session."""
+    async def _on_subagent_complete(self, run_id: str, status: str, result: str,
+                                    parent_session_id: int, reason: str = ""):
+        """Called when a sub-agent finishes.
+
+        The user gets a short notice only (outcome + reason if it stopped);
+        the full result goes into conversation history so the main agent can
+        still report on it when asked.
+        """
+        from .subagent import format_subagent_notice
+        msg = format_subagent_notice(status, reason)
+
         if status == "completed":
-            msg = f"✅ Sub-agent completed (run: {run_id[:8]})\n\n{result}"
+            full = f"✅ Sub-agent completed (run: {run_id[:8]})\n\n{result}"
         elif status == "incomplete":
-            msg = (
-                f"⚠️ Sub-agent incomplete (run: {run_id[:8]}) — hit max rounds "
-                f"before finishing. Partial result below; continue manually or "
-                f"spawn another sub-agent.\n\n{result}"
+            full = (
+                f"⚠️ Sub-agent incomplete (run: {run_id[:8]}) — {reason or 'stopped early'}. "
+                f"Partial result below; continue manually or spawn another "
+                f"sub-agent with resume_from.\n\n{result}"
             )
         else:
-            msg = f"❌ Sub-agent failed (run: {run_id[:8]})\n\n{result}"
+            full = f"❌ Sub-agent {status} (run: {run_id[:8]})\n\n{result}"
 
         # Save to conversation history so the LLM knows the sub-agent finished.
         # Without this, the bot has no memory of sub-agent results and can't
@@ -3271,7 +3280,7 @@ class ConversationManager:
         conv = self._find_conversation_by_session(parent_session_id)
         if conv:
             # Truncate for history — execution reports can be long
-            history_msg = msg[:2000] if len(msg) > 2000 else msg
+            history_msg = full[:2000] if len(full) > 2000 else full
             try:
                 await conv.save_message("system", history_msg, metadata={
                     "type": "subagent_result",
