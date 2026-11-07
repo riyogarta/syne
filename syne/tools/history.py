@@ -39,6 +39,11 @@ logger = logging.getLogger("syne.tools.history")
 # surfaces as an explicit error instead of a silent multi-minute hang.
 _STEP_TIMEOUT = 60
 
+# Rows that count toward context_before / context_after: what was actually
+# said. Tool results and empty assistant tool-call shells sit in between
+# and are shown, but do not use up the count.
+_CONVO_FILTER = "role IN ('user', 'assistant') AND btrim(coalesce(content, '')) <> ''"
+
 
 # ---------------------------------------------------------------------------
 # Provider hook — set by agent.py at boot so the tools can embed queries
@@ -319,10 +324,11 @@ async def history_expand_handler(
         return "Error: expand at most 20 anchors at once (be selective — expand only promising previews)."
 
     try:
-        default_before = int(await get_config("history_search.context_before", 2))
-        default_after = int(await get_config("history_search.context_after", 5))
+        default_before = int(await get_config("history_search.context_before", 10))
+        default_after = int(await get_config("history_search.context_after", 10))
+        tool_chars = int(await get_config("history_search.tool_result_chars", 500))
     except Exception:
-        default_before, default_after = 2, 5
+        default_before, default_after, tool_chars = 10, 10, 500
 
     before = max(0, int(context_before) if context_before is not None else default_before)
     after = max(0, int(context_after) if context_after is not None else default_after)
@@ -330,6 +336,7 @@ async def history_expand_handler(
     # Cap so a rogue call can't dump gigabytes.
     before = min(before, 20)
     after = min(after, 40)
+    tool_chars = max(0, tool_chars)
 
     blocks = []
     missing = []
@@ -340,9 +347,6 @@ async def history_expand_handler(
         async with get_connection(timeout=_STEP_TIMEOUT) as conn:
             logger.info(f"history_expand: connection acquired in {time.monotonic() - _t0:.2f}s")
             _stage = "fetch anchors"
-            # Fetch anchor metadata first so we know each anchor's session +
-            # created_at. We then do a per-anchor window fetch — this is
-            # simpler than a lateral join and each window is small.
             anchors = await conn.fetch(
                 "SELECT id, session_id, created_at FROM messages "
                 "WHERE id = ANY($1::int[])",
@@ -357,44 +361,110 @@ async def history_expand_handler(
                     continue
                 a = anchor_map[aid]
                 sid = a["session_id"]
-
-                # ROW_NUMBER by (session, created_at, id) so we can slice
-                # the neighbourhood deterministically.
-                _stage = f"fetch window for anchor {aid}"
+                a_at = a["created_at"]
                 _tw = time.monotonic()
-                window_rows = await conn.fetch(
-                    """
-                    WITH ordered AS (
-                        SELECT id, role, content, metadata, created_at,
-                               ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC) AS rn
-                        FROM messages
-                        WHERE session_id = $1
-                    ),
-                    anchor AS (
-                        SELECT rn FROM ordered WHERE id = $2
-                    )
-                    SELECT o.id, o.role, o.content, o.metadata, o.created_at,
-                           (o.id = $2) AS is_anchor
-                    FROM ordered o, anchor a
-                    WHERE o.rn BETWEEN a.rn - $3 AND a.rn + $4
-                    ORDER BY o.rn ASC
+
+                # Step 1 — find the window edges. Take the `before`
+                # conversation messages right before the anchor and the
+                # `after` ones right after it. Each is a short range scan on
+                # idx_messages_session (session_id, created_at), so the cost
+                # does not grow with the size of the session. (The old query
+                # numbered EVERY row of the session with ROW_NUMBER() and the
+                # planner could turn that into a ~N^2 nested loop: 7 Nov 2026,
+                # a 34k-row session took >10 minutes.)
+                _stage = f"fetch rows before anchor {aid}"
+                before_rows = await conn.fetch(
+                    f"""
+                    /* history_expand:before */
+                    SELECT id, created_at FROM messages
+                    WHERE session_id = $1
+                      AND created_at <= $2
+                      AND (created_at < $2 OR id < $3)
+                      AND {_CONVO_FILTER}
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT $4
                     """,
-                    sid, aid, before, after,
+                    sid, a_at, aid, before,
+                    timeout=_STEP_TIMEOUT,
+                )
+                _stage = f"fetch rows after anchor {aid}"
+                after_rows = await conn.fetch(
+                    f"""
+                    /* history_expand:after */
+                    SELECT id, created_at FROM messages
+                    WHERE session_id = $1
+                      AND created_at >= $2
+                      AND (created_at > $2 OR id > $3)
+                      AND {_CONVO_FILTER}
+                    ORDER BY created_at ASC, id ASC
+                    LIMIT $4
+                    """,
+                    sid, a_at, aid, after,
+                    timeout=_STEP_TIMEOUT,
+                )
+
+                # Fewer rows than asked = reached the start/end of the
+                # session, so leave that side open (also picks up trailing
+                # tool rows of a turn still in progress).
+                if len(before_rows) < before:
+                    lo = None
+                elif before_rows:
+                    lo = before_rows[-1]
+                else:
+                    lo = a  # before == 0
+                if len(after_rows) < after:
+                    hi = None
+                elif after_rows:
+                    hi = after_rows[-1]
+                else:
+                    hi = a  # after == 0
+
+                # Step 2 — everything between the edges, ALL roles, in order.
+                conds = ["session_id = $1"]
+                params = [sid]
+                if lo is not None:
+                    params += [lo["created_at"], lo["id"]]
+                    n = len(params)
+                    conds.append(f"created_at >= ${n - 1} AND (created_at > ${n - 1} OR id >= ${n})")
+                if hi is not None:
+                    params += [hi["created_at"], hi["id"]]
+                    n = len(params)
+                    conds.append(f"created_at <= ${n - 1} AND (created_at < ${n - 1} OR id <= ${n})")
+                _stage = f"fetch window for anchor {aid}"
+                window_rows = await conn.fetch(
+                    "/* history_expand:window */ "
+                    "SELECT id, role, content, created_at FROM messages WHERE "
+                    + " AND ".join(conds)
+                    + " ORDER BY created_at ASC, id ASC",
+                    *params,
                     timeout=_STEP_TIMEOUT,
                 )
                 logger.info(
                     f"history_expand: anchor {aid} window {len(window_rows)} rows "
+                    f"({len(before_rows)} before / {len(after_rows)} after) "
                     f"in {time.monotonic() - _tw:.2f}s"
                 )
+
                 turns = []
                 for r in window_rows:
-                    turns.append({
+                    content = r["content"] or ""
+                    turn = {
                         "id": r["id"],
                         "role": r["role"],
-                        "content": r["content"],
+                        "content": content,
                         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-                        "is_anchor": bool(r["is_anchor"]),
-                    })
+                        "is_anchor": r["id"] == aid,
+                    }
+                    # Tool/system results stay visible (which tool ran, roughly
+                    # what it returned) but are cut short to keep a wide
+                    # window inside the context budget.
+                    if r["role"] not in ("user", "assistant") and len(content) > tool_chars:
+                        turn["content"] = (
+                            content[:tool_chars]
+                            + f"… [truncated: {len(content) - tool_chars} more chars]"
+                        )
+                        turn["truncated"] = True
+                    turns.append(turn)
                 blocks.append({
                     "anchor_id": aid,
                     "session_id": sid,
@@ -429,9 +499,9 @@ HISTORY_EXPAND_TOOL = {
         "REQUIRED before concluding from any relevant anchor: never answer from "
         "the search preview alone; expand to read what was actually said around "
         "it. Call SELECTIVELY — only expand previews that look promising, not the "
-        "whole top-N. context_after can/should be larger than context_before "
-        "because you want to see the assistant response + follow-up around each "
-        "anchor. Owner-only."
+        "whole top-N. context_before / context_after count conversation "
+        "messages only (user + assistant text); tool results in between are "
+        "included but truncated. Owner-only."
     ),
     "parameters": {
         "type": "object",
@@ -443,11 +513,11 @@ HISTORY_EXPAND_TOOL = {
             },
             "context_before": {
                 "type": "integer",
-                "description": "Turns BEFORE the anchor to include (default 2, cap 20).",
+                "description": "Conversation messages (user + assistant text) BEFORE the anchor (default 10, cap 20).",
             },
             "context_after": {
                 "type": "integer",
-                "description": "Turns AFTER the anchor to include (default 5, cap 40).",
+                "description": "Conversation messages (user + assistant text) AFTER the anchor (default 10, cap 40).",
             },
         },
         "required": ["anchor_ids"],

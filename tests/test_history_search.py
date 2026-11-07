@@ -217,6 +217,99 @@ class TestHistoryExpandValidation:
 
 
 # ---------------------------------------------------------------------------
+# history_expand: window shaping (count conversation only, truncate tools)
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryExpandWindow:
+
+    async def test_counts_conversation_and_truncates_tool_results(self):
+        from datetime import datetime, timedelta, timezone
+        base = datetime(2026, 11, 7, 5, 0, tzinfo=timezone.utc)
+
+        def t(i):
+            return base + timedelta(seconds=i)
+
+        calls = {}
+
+        async def fake_fetch(sql, *params, timeout=None):
+            if "id = ANY" in sql:
+                return [{"id": 100, "session_id": 51, "created_at": t(100)}]
+            if "history_expand:before" in sql:
+                calls["before"] = params
+                return [{"id": 99, "created_at": t(99)}, {"id": 97, "created_at": t(97)}]
+            if "history_expand:after" in sql:
+                calls["after"] = params
+                return [{"id": 101, "created_at": t(101)}]  # fewer than asked
+            if "history_expand:window" in sql:
+                calls["window"] = (sql, params)
+                return [
+                    {"id": 97, "role": "user", "content": "q1", "created_at": t(97)},
+                    {"id": 98, "role": "tool", "content": "x" * 2000, "created_at": t(98)},
+                    {"id": 99, "role": "assistant", "content": "a1", "created_at": t(99)},
+                    {"id": 100, "role": "user", "content": "anchor", "created_at": t(100)},
+                    {"id": 101, "role": "assistant", "content": "a2", "created_at": t(101)},
+                ]
+            raise AssertionError(f"unexpected SQL: {sql}")
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=fake_fetch)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            result = await H.history_expand_handler(
+                anchor_ids=[100], context_before=2, context_after=3
+            )
+
+        # LIMITs passed are the requested counts
+        assert calls["before"][-1] == 2
+        assert calls["after"][-1] == 3
+        # Lower edge = 2nd row before; upper side open (only 1 of 3 found)
+        sql, params = calls["window"]
+        assert params == (51, t(97), 97)
+        assert "<=" not in sql
+        # Never numbers the whole session again
+        assert "ROW_NUMBER" not in sql
+
+        turns = json.loads(result)["blocks"][0]["turns"]
+        assert [x["id"] for x in turns] == [97, 98, 99, 100, 101]
+        assert [x["id"] for x in turns if x["is_anchor"]] == [100]
+        tool = turns[1]
+        assert tool["truncated"] is True
+        assert tool["content"].startswith("x" * 500)
+        assert "1500 more chars" in tool["content"]
+        assert turns[0]["content"] == "q1" and "truncated" not in turns[0]
+
+    async def test_zero_context_bounds_on_anchor(self):
+        from datetime import datetime, timezone
+        at = datetime(2026, 11, 7, 5, 0, tzinfo=timezone.utc)
+        seen = {}
+
+        async def fake_fetch(sql, *params, timeout=None):
+            if "id = ANY" in sql:
+                return [{"id": 7, "session_id": 3, "created_at": at}]
+            if "history_expand:before" in sql or "history_expand:after" in sql:
+                return []
+            seen["params"] = params
+            return [{"id": 7, "role": "user", "content": "only", "created_at": at}]
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=fake_fetch)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            result = await H.history_expand_handler(
+                anchor_ids=[7], context_before=0, context_after=0
+            )
+        assert seen["params"] == (3, at, 7, at, 7)
+        assert [x["id"] for x in json.loads(result)["blocks"][0]["turns"]] == [7]
+
+
+# ---------------------------------------------------------------------------
 # Tool schemas — the shape the LLM registration relies on
 # ---------------------------------------------------------------------------
 

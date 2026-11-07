@@ -875,6 +875,41 @@ async def _m30_whatsapp_reply_prefix(conn) -> None:
     )
 
 
+async def _m31_history_expand_window(conn) -> None:
+    """history_expand window defaults (Riyo, 7 Nov 2026).
+
+    context_before / context_after now count conversation messages only and
+    default to 10 / 10 (was 2 / 5 counting every row incl. tool results).
+    Value is only moved when it is still the old default, so an operator who
+    tuned it is kept. Descriptions are refreshed to match schema.sql, and
+    history_search.tool_result_chars is seeded.
+    """
+    await conn.execute(
+        "UPDATE config SET value = '10'::jsonb "
+        "WHERE key = 'history_search.context_before' AND value = '2'::jsonb"
+    )
+    await conn.execute(
+        "UPDATE config SET value = '10'::jsonb "
+        "WHERE key = 'history_search.context_after' AND value = '5'::jsonb"
+    )
+    for key, desc in (
+        ("history_search.context_before", 'Default number of conversation messages (user + assistant text) to include BEFORE each anchor in history_expand. Tool results in between are included but do not count. Re-evaluate against real use (Riyo, 7 Nov 2026).'),
+        ("history_search.context_after", 'Default number of conversation messages (user + assistant text) to include AFTER each anchor in history_expand. Tool results in between are included but do not count.'),
+    ):
+        await conn.execute(
+            "UPDATE config SET description = $2 WHERE key = $1", key, desc
+        )
+    await conn.execute(
+        """
+        INSERT INTO config (key, value, description)
+        VALUES ($1, '500'::jsonb, $2)
+        ON CONFLICT (key) DO NOTHING
+        """,
+        "history_search.tool_result_chars",
+        'Max characters kept per tool/system result inside a history_expand window. Longer results are truncated so a wide window stays within the context budget.',
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -906,6 +941,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (28, _m28_seed_discord_config, "transactional"),
     (29, _m29_whatsapp_channel_config, "transactional"),
     (30, _m30_whatsapp_reply_prefix, "transactional"),
+    (31, _m31_history_expand_window, "transactional"),
 ]
 
 
