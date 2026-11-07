@@ -186,7 +186,7 @@ class VertexProvider(LLMProvider):
 
     @property
     def supports_vision(self) -> bool:
-        return True
+        return bool(self.cap("vision", True))
 
     @property
     def context_window(self) -> int:
@@ -228,7 +228,7 @@ class VertexProvider(LLMProvider):
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         """Chat via Vertex AI streaming endpoint with Gemini CLI-style retry."""
-        system_text, contents = format_messages_for_gemini(messages, model)
+        system_text, contents = format_messages_for_gemini(messages, model, self.cap_for(model, "thinking_mode"))
 
         body: dict = {"contents": contents}
 
@@ -245,7 +245,9 @@ class VertexProvider(LLMProvider):
         if top_k is not None:
             gen_config["topK"] = top_k
 
-        gen_config["thinkingConfig"] = _build_thinking_config(model, thinking_budget)
+        _thinking_cfg = _build_thinking_config(model, thinking_budget, self.cap_for(model, "thinking_mode"))
+        if _thinking_cfg:
+            gen_config["thinkingConfig"] = _thinking_cfg
 
         if gen_config:
             body["generationConfig"] = gen_config

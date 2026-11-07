@@ -4214,6 +4214,8 @@ Or just send me a message!"""
         elif auth_type == "api_key":
             buttons.append([InlineKeyboardButton("🔐 Update API Key", callback_data=f"models:apikey:{model_key}")])
         buttons.append([InlineKeyboardButton("⚙️ Parameters", callback_data=f"models:params:{model_key}")])
+        _caps_mark = " ✓" if entry.get("capabilities") else ""
+        buttons.append([InlineKeyboardButton(f"🧩 Capabilities{_caps_mark}", callback_data=f"models:caps:{model_key}")])
         buttons.append([InlineKeyboardButton("✏️ Edit Label", callback_data=f"models:edit_label:{model_key}")])
         buttons.append([InlineKeyboardButton("🆔 Edit Model ID", callback_data=f"models:edit_model_id:{model_key}")])
         buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"models:delete_confirm:{model_key}")])
@@ -4501,6 +4503,31 @@ Or just send me a message!"""
                 f"<pre>{params_json}</pre>\n\n"
                 f"Be careful, changing parameters can make the AI model work unstable.\n\n"
                 f"Send new JSON to update, or /cancel to abort.",
+                parse_mode="HTML",
+            )
+
+        elif data.startswith("models:caps:"):
+            model_key = data.split(":", 2)[2]
+            models = await get_config("provider.models", [])
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.answer("Model not found", show_alert=True)
+                return
+            caps_json = json.dumps(entry.get("capabilities") or {}, indent=2)
+            self._auth_state[user.id] = {
+                "type": "models_caps",
+                "model_key": model_key,
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                f"🧩 <b>Capabilities — {entry.get('label', model_key)}</b>\n\n"
+                f"<pre>{caps_json}</pre>\n\n"
+                "Optional overrides. Missing or null = auto-detect from the model name.\n"
+                "• <code>thinking_mode</code>: adaptive | budget | level | effort | none\n"
+                "• <code>api_mode</code>: responses | chat (OpenAI only)\n"
+                "• <code>reserved_output_tokens</code>: positive integer\n"
+                "• <code>vision</code>: true | false\n\n"
+                "Send new JSON to update (<code>{}</code> clears all), or /cancel to abort.",
                 parse_mode="HTML",
             )
 
@@ -9275,6 +9302,8 @@ Or just send me a message!"""
             return await self._process_ctx_window_input(user_id, chat_id, text, state, context)
         elif auth_type == "models_params":
             return await self._process_models_params(user_id, chat_id, text, state, context)
+        elif auth_type == "models_caps":
+            return await self._process_models_caps(user_id, chat_id, text, state, context)
         elif auth_type == "models_edit_label":
             return await self._process_models_edit_label(user_id, chat_id, text, state, context)
         elif auth_type == "models_edit_model_id":
@@ -9785,6 +9814,57 @@ Or just send me a message!"""
             )
         else:
             await bot.send_message(chat_id=chat_id, text="Model not found in registry.")
+
+        self._auth_state.pop(user_id, None)
+        return True
+
+    async def _process_models_caps(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle JSON input for per-model capability overrides."""
+        from ..llm.provider import validate_capabilities
+        bot = context.bot if context else self.app.bot
+        model_key = state.get("model_key", "")
+
+        try:
+            caps = json.loads(text.strip())
+        except json.JSONDecodeError as e:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Invalid JSON: {e}\n\nSend valid JSON or /cancel to abort.",
+            )
+            return True
+
+        errors = validate_capabilities(caps)
+        if errors:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="❌ Validation errors:\n• " + "\n• ".join(errors) + "\n\nFix and resend, or /cancel to abort.",
+            )
+            return True
+
+        caps = {k: v for k, v in caps.items() if v is not None}
+        models = await get_config("provider.models", [])
+        label = None
+        for m in models:
+            if m.get("key") == model_key:
+                if caps:
+                    m["capabilities"] = caps
+                else:
+                    m.pop("capabilities", None)
+                label = m.get("label", model_key)
+                break
+
+        if label is None:
+            await bot.send_message(chat_id=chat_id, text="Model not found in registry.")
+        else:
+            await set_config("provider.models", models)
+            if self.agent:
+                await self.agent.reload_provider()
+            shown = json.dumps(caps, indent=2) if caps else "{}  (auto-detect)"
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ Capabilities updated for <b>{label}</b>:\n<pre>{shown}</pre>",
+                parse_mode="HTML",
+            )
 
         self._auth_state.pop(user_id, None)
         return True

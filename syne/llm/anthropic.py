@@ -69,9 +69,14 @@ def _is_adaptive_model(model_id: str) -> bool:
     return major >= 5 or (major == 4 and minor >= 6)
 
 
-def _build_beta_header(is_oauth: bool, model_id: str) -> str:
-    """Build beta header exactly like Pi — conditional on model."""
-    adaptive = _is_adaptive_model(model_id)
+def _build_beta_header(is_oauth: bool, model_id: str, adaptive: Optional[bool] = None) -> str:
+    """Build beta header exactly like Pi — conditional on model.
+
+    ``adaptive`` comes from the provider (capabilities override); None means
+    detect from the model name.
+    """
+    if adaptive is None:
+        adaptive = _is_adaptive_model(model_id)
     betas = [_BETA_TOOL_STREAMING]
     if not adaptive:
         betas.append(_BETA_INTERLEAVED)
@@ -135,11 +140,21 @@ class AnthropicProvider(LLMProvider):
 
     @property
     def supports_vision(self) -> bool:
-        return True
+        return bool(self.cap("vision", True))
+
+    def _adaptive_for(self, model_id: str) -> bool:
+        """Adaptive thinking? capabilities.thinking_mode wins over the name:
+        "adaptive" = yes, "budget"/"none" = no, else detect from model id."""
+        mode = self.cap_for(model_id, "thinking_mode")
+        if mode == "adaptive":
+            return True
+        if mode in ("budget", "none"):
+            return False
+        return _is_adaptive_model(model_id or "")
 
     @property
     def context_window(self) -> int:
-        return 1_000_000 if _is_adaptive_model(self.chat_model) else 200_000  # 4.6+ / 5.x: 1M
+        return 1_000_000 if self._adaptive_for(self.chat_model) else 200_000  # 4.6+ / 5.x: 1M
 
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create persistent HTTP client for connection reuse."""
@@ -152,6 +167,9 @@ class AnthropicProvider(LLMProvider):
 
     @property
     def reserved_output_tokens(self) -> int:
+        _override = self.cap("reserved_output_tokens")
+        if _override:
+            return int(_override)
         return self.DEFAULT_MAX_TOKENS + self.DEFAULT_THINKING_BUDGET  # 26624
 
     async def _load_token(self) -> str:
@@ -248,7 +266,7 @@ class AnthropicProvider(LLMProvider):
             "anthropic-version": ANTHROPIC_API_VERSION,
             "content-type": "application/json",
             "accept": "application/json",
-            "anthropic-beta": _build_beta_header(is_oauth, model_id),
+            "anthropic-beta": _build_beta_header(is_oauth, model_id, self._adaptive_for(model_id)),
         }
         if is_oauth:
             headers["Authorization"] = f"Bearer {token}"
@@ -604,7 +622,10 @@ class AnthropicProvider(LLMProvider):
 
         # Thinking: None=default ON, 0=explicitly OFF, >0=use that value.
         effective_budget = thinking_budget if thinking_budget is not None else self.DEFAULT_THINKING_BUDGET
-        _adaptive = _is_adaptive_model(model)
+        _adaptive = self._adaptive_for(model)
+        # capabilities.thinking_mode == "none": thinking off, sampling params on.
+        if self.cap_for(model, "thinking_mode") == "none":
+            effective_budget = 0
 
         # Three distinct model classes, each with its own compatible knob set:
         #

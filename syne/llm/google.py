@@ -70,7 +70,7 @@ class GoogleProvider(LLMProvider):
 
     @property
     def supports_vision(self) -> bool:
-        return True
+        return bool(self.cap("vision", True))
 
     @property
     def context_window(self) -> int:
@@ -78,7 +78,7 @@ class GoogleProvider(LLMProvider):
 
     def _format_messages(self, messages: list[ChatMessage], model: str = "") -> tuple[Optional[str], list[dict]]:
         """Convert ChatMessages to Gemini format. Delegates to gemini_common."""
-        return format_messages_for_gemini(messages, model)
+        return format_messages_for_gemini(messages, model, self.cap_for(model, "thinking_mode"))
 
     async def chat(
         self,
@@ -130,7 +130,9 @@ class GoogleProvider(LLMProvider):
         if top_k is not None:
             gen_config["topK"] = top_k
         # #8: Thinking config — always on, model-appropriate defaults
-        gen_config["thinkingConfig"] = _build_thinking_config(model, thinking_budget)
+        _thinking_cfg = _build_thinking_config(model, thinking_budget, self.cap_for(model, "thinking_mode"))
+        if _thinking_cfg:
+            gen_config["thinkingConfig"] = _thinking_cfg
 
         # #13: Only set if non-empty
         if gen_config:

@@ -618,14 +618,23 @@ def _sanitize_turn_ordering(contents: list[dict]) -> list[dict]:
 # Build thinking config
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _uses_thinking_level(model: str) -> bool:
+def _uses_thinking_level(model: str, mode: Optional[str] = None) -> bool:
     """Gemini 3+ uses thinkingLevel. Sending thinkingBudget returns HTTP 400
-    (verified 2026-10-18 on gemini-4-argon)."""
-    m = (model or "").lower()
-    return "gemini-3" in m or "gemini-4" in m
+    (verified 2026-10-18 on gemini-4-argon).
+
+    ``mode`` is the per-model ``capabilities.thinking_mode`` override:
+    "level" forces thinkingLevel, "budget"/"none" force the legacy path.
+    Otherwise detect from the name: gemini-N with N >= 3.
+    """
+    if mode == "level":
+        return True
+    if mode in ("budget", "none"):
+        return False
+    m = re.search(r"gemini-(\d+)", (model or "").lower())
+    return bool(m) and int(m.group(1)) >= 3
 
 
-def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Optional[dict]:
+def _build_thinking_config(model: str, thinking_budget: Optional[int], mode: Optional[str] = None) -> Optional[dict]:
     """Build thinkingConfig for Gemini models.
 
     Defaults (when thinking_budget is None):
@@ -634,7 +643,9 @@ def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Option
 
     Explicit thinking_budget=0 → minimal thinking (LOW / budget 128).
     """
-    if _uses_thinking_level(model):
+    if mode == "none":
+        return None  # capabilities.thinking_mode "none": send no thinkingConfig
+    if _uses_thinking_level(model, mode):
         if thinking_budget is None or thinking_budget < 0:
             level = "HIGH"
         elif thinking_budget == 0:
@@ -664,6 +675,7 @@ def _build_thinking_config(model: str, thinking_budget: Optional[int]) -> Option
 def format_messages_for_gemini(
     messages: list[ChatMessage],
     model: str = "",
+    thinking_mode: Optional[str] = None,
 ) -> tuple[Optional[str], list[dict]]:
     """Convert ChatMessages to Gemini format. Returns (system_text, contents).
 
@@ -679,7 +691,7 @@ def format_messages_for_gemini(
     system_text = None
     contents = []
 
-    is_gemini_3 = _uses_thinking_level(model)
+    is_gemini_3 = _uses_thinking_level(model, thinking_mode if thinking_mode != "none" else None)
 
     for msg in messages:
         if msg.role == "system":

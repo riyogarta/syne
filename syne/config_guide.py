@@ -370,7 +370,8 @@ Active chat and embedding models. These reference keys in `provider.models` and
 
 Full model registries. Each entry contains: key, label, driver, model_id, auth, context_window,
 params (temperature, max_tokens, thinking_budget, top_p, top_k, frequency_penalty, presence_penalty),
-and reasoning_visible.
+and reasoning_visible, plus an optional `capabilities` object.
+- `capabilities` overrides what the driver would otherwise guess from the model name: `thinking_mode` (adaptive | budget | level | effort | none), `api_mode` (responses | chat, OpenAI only), `reserved_output_tokens` (positive int), `vision` (bool). Missing/null = auto-detect. Edit via /models → model → 🧩 Capabilities. Lets a new model (GPT-7, Claude 6, Gemini 5, ...) work without a code change when name detection guesses wrong.
 - Managed via `/model` and `/embedding` commands — avoid editing raw JSON directly.
 - Each model has its own `thinking_budget` and `reasoning_visible` per-model settings.
 - **Warning**: Invalid JSON in these registries will break model selection.

@@ -70,7 +70,7 @@ class CodexProvider(LLMProvider):
 
     @property
     def supports_vision(self) -> bool:
-        return True
+        return bool(self.cap("vision", True))
 
     def _refresh_token_sync(self) -> bool:
         """Refresh Codex OAuth token if expired or about to expire.
@@ -286,7 +286,12 @@ class CodexProvider(LLMProvider):
             "store": False,
         }
 
-        is_reasoning = thinking_budget is not None and thinking_budget > 0
+        # capabilities.thinking_mode == "none" turns reasoning off for this
+        # entry even when a thinking budget is configured.
+        is_reasoning = (
+            self.cap_for(model, "thinking_mode") != "none"
+            and thinking_budget is not None and thinking_budget > 0
+        )
         if is_reasoning:
             effort = "high" if thinking_budget >= 8192 else "medium" if thinking_budget >= 2048 else "low"
             body["reasoning"] = {"effort": effort}

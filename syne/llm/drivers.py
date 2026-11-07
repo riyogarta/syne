@@ -11,7 +11,7 @@ import os
 import time
 from typing import Optional, Type
 
-from .provider import LLMProvider, ChatMessage, ChatResponse
+from .provider import LLMProvider, ChatMessage, ChatResponse, clean_capabilities
 from .google import GoogleProvider
 from .vertex import VertexProvider, detect_vertex_region
 from .codex import CodexProvider
@@ -55,6 +55,25 @@ def list_drivers() -> list[str]:
 
 
 async def create_provider(model_entry: dict) -> LLMProvider:
+    """Instantiate a provider from a model registry entry and apply the
+    entry's optional ``capabilities`` overrides (see provider.CAPABILITY_SCHEMA).
+
+    Invalid capability keys/values are dropped with a warning so a typo in the
+    registry never takes the model down; anything not overridden keeps the
+    driver's auto-detection from the model name.
+    """
+    provider = await _create_provider_raw(model_entry)
+    caps, errors = clean_capabilities(model_entry.get("capabilities"))
+    for err in errors:
+        logger.warning(
+            f"Ignoring capability for {model_entry.get('key', model_entry.get('model_id'))}: {err}"
+        )
+    if caps:
+        provider.capabilities = caps
+    return provider
+
+
+async def _create_provider_raw(model_entry: dict) -> LLMProvider:
     """Instantiate a provider from a model registry entry.
     
     Args:

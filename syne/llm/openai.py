@@ -289,7 +289,7 @@ class OpenAIProvider(LLMProvider):
     @property
     def supports_vision(self) -> bool:
         # Groq Llama models don't support vision well
-        return self._provider_name == "openai"
+        return bool(self.cap("vision", self._provider_name == "openai"))
 
     @property
     def context_window(self) -> int:
@@ -302,6 +302,9 @@ class OpenAIProvider(LLMProvider):
 
     @property
     def reserved_output_tokens(self) -> int:
+        _override = self.cap("reserved_output_tokens")
+        if _override:
+            return int(_override)
         m = self.chat_model.lower()
         if _gpt_major(m) >= 5:
             return 32_000  # GPT-5.x/6.x can output up to 128K; reserve conservatively
@@ -436,7 +439,7 @@ class OpenAIProvider(LLMProvider):
         stream_callbacks: Optional[StreamCallbacks] = None,
     ) -> ChatResponse:
         model = model or self.chat_model
-        is_reasoning = _gpt_major(model.lower()) >= 5 or "o3" in model.lower() or "o1" in model.lower()
+        is_reasoning = self._is_reasoning(model)
 
         # Reasoning models on the official endpoint go through /v1/responses,
         # where reasoning_effort and function tools can be combined.
@@ -655,6 +658,15 @@ class OpenAIProvider(LLMProvider):
             thinking=thinking_text,
         )
 
+    def _is_reasoning(self, model: str) -> bool:
+        """Reasoning model? capabilities.thinking_mode wins over the name:
+        "none" = plain model (temperature), any other value = reasoning."""
+        mode = self.cap_for(model, "thinking_mode")
+        if mode is not None:
+            return mode != "none"
+        m = (model or "").lower()
+        return _gpt_major(m) >= 5 or "o3" in m or "o1" in m
+
     def _model_key(self, model: str) -> str:
         return f"{self.base_url}|{model}"
 
@@ -662,8 +674,14 @@ class OpenAIProvider(LLMProvider):
         """Use /v1/responses only on the official endpoint (OpenAI-compatible
         hosts such as Groq/Together may not implement it), unless it already
         proved unavailable for this model."""
-        return ("api.openai.com" in self.base_url
-                and self._model_key(model) not in _RESPONSES_UNSUPPORTED)
+        if self._model_key(model) in _RESPONSES_UNSUPPORTED:
+            return False
+        mode = self.cap_for(model, "api_mode")
+        if mode == "chat":
+            return False
+        if mode == "responses":
+            return True
+        return "api.openai.com" in self.base_url
 
     def _build_responses_body(
         self,

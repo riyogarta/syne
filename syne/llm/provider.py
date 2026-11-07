@@ -164,8 +164,32 @@ class LLMProvider(ABC):
 
         ContextManager uses this to limit how much input context to keep.
         Override in providers that need more room (e.g. extended thinking).
+        A positive ``capabilities.reserved_output_tokens`` wins.
         """
-        return 4096
+        return int(self.cap("reserved_output_tokens") or 4096)
+
+    # ── Per-model capability overrides ──────────────────────────────
+    # Set by drivers.create_provider() from provider.models[].capabilities.
+    # Missing/None keys mean "auto-detect from the model name" (the
+    # provider's built-in guess). Never mutated in place: drivers assign a
+    # fresh dict per instance, so this class-level default stays empty.
+    capabilities: dict = {}
+
+    def cap(self, key: str, default=None):
+        """Return a capability override, or ``default`` when not set."""
+        val = (getattr(self, "capabilities", None) or {}).get(key)
+        return default if val is None else val
+
+    def cap_for(self, model: Optional[str], key: str, default=None):
+        """Like cap(), but only for this entry's own model.
+
+        A provider instance can be asked to run a model id other than the one
+        its registry entry describes; overrides must not leak to that model.
+        """
+        own = getattr(self, "chat_model", None)
+        if model and own and model != own:
+            return default
+        return self.cap(key, default)
 
 
 def hoist_volatile(messages: list[ChatMessage]) -> list[ChatMessage]:
@@ -210,3 +234,55 @@ def hoist_volatile(messages: list[ChatMessage]) -> list[ChatMessage]:
             )
         out.append(m)
     return out
+
+
+# ════════════════════════════════════════════════════════
+# Capability overrides — schema shared by drivers and /models
+# ════════════════════════════════════════════════════════
+
+CAPABILITY_SCHEMA: dict = {
+    "thinking_mode": ("adaptive", "budget", "level", "effort", "none"),
+    "api_mode": ("responses", "chat"),
+    "reserved_output_tokens": int,
+    "vision": bool,
+}
+
+
+def _capability_error(key, value) -> Optional[str]:
+    spec = CAPABILITY_SCHEMA.get(key)
+    if spec is None:
+        return f"{key}: unknown key (allowed: {', '.join(CAPABILITY_SCHEMA)})"
+    if value is None:
+        return None
+    if isinstance(spec, tuple):
+        if value not in spec:
+            return f"{key}: must be one of {' | '.join(spec)}, or null"
+    elif spec is int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            return f"{key}: must be a positive integer, or null"
+    elif spec is bool:
+        if not isinstance(value, bool):
+            return f"{key}: must be true or false, or null"
+    return None
+
+
+def validate_capabilities(caps) -> list[str]:
+    """Return human-readable errors for a capabilities object (empty = valid)."""
+    if not isinstance(caps, dict):
+        return ["capabilities must be a JSON object"]
+    return [e for e in (_capability_error(k, v) for k, v in caps.items()) if e]
+
+
+def clean_capabilities(caps) -> tuple[dict, list[str]]:
+    """Split a raw capabilities object into (valid non-null entries, errors)."""
+    if not isinstance(caps, dict):
+        return {}, ([] if caps is None else ["capabilities must be a JSON object"])
+    clean: dict = {}
+    errors: list[str] = []
+    for k, v in caps.items():
+        err = _capability_error(k, v)
+        if err:
+            errors.append(err)
+        elif v is not None:
+            clean[k] = v
+    return clean, errors
