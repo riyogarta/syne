@@ -65,6 +65,12 @@ def format_subagent_notice(status: str, reason: str = "") -> str:
     return f"❌ Sub-agent gagal: {reason}" if reason else "❌ Sub-agent gagal."
 
 
+def format_subagent_start_notice(resumed: bool = False) -> str:
+    """Short user-facing notice when a sub-agent starts (no run id, no task —
+    the main agent already explained the task to the owner)."""
+    return "🔄 Sub-agent dilanjutkan." if resumed else "🚀 Sub-agent mulai."
+
+
 def _normalize_planned(commands) -> list[str]:
     """Accept a list or a JSON/newline string of planned shell commands."""
     if not commands:

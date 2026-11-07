@@ -3232,15 +3232,9 @@ class ConversationManager:
         return any(conv._processing for conv in self._active.values())
 
     async def _on_subagent_start(self, run_id: str, task: str, parent_session_id: int, resumed_from: str = None):
-        """Called when a sub-agent starts. Notifies the parent session."""
-        task_preview = task[:200] + ("…" if len(task) > 200 else "")
-        if resumed_from:
-            msg = (
-                f"🔄 Sub-agent resumed (run: {run_id[:8]}, from: {str(resumed_from)[:8]})\n\n"
-                f"Continuing: {task_preview}"
-            )
-        else:
-            msg = f"🚀 Sub-agent started (run: {run_id[:8]})\n\nTask: {task_preview}"
+        """Called when a sub-agent starts. Sends a short notice to the parent session."""
+        from .subagent import format_subagent_start_notice
+        msg = format_subagent_start_notice(resumed=bool(resumed_from))
 
         # Deliver via callbacks (e.g., Telegram, WhatsApp)
         if self._delivery_callbacks:

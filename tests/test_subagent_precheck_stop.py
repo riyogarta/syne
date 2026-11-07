@@ -14,6 +14,7 @@ from syne.subagent import (
     SubAgentManager,
     _normalize_planned,
     format_subagent_notice,
+    format_subagent_start_notice,
 )
 
 
@@ -32,6 +33,11 @@ def test_notice_failed_and_long_reason_truncated():
     msg = format_subagent_notice("failed", "x" * 1000)
     assert msg.startswith("❌ Sub-agent gagal: ")
     assert len(msg) < 400
+
+
+def test_start_notice_is_short():
+    assert format_subagent_start_notice() == "🚀 Sub-agent mulai."
+    assert format_subagent_start_notice(resumed=True) == "🔄 Sub-agent dilanjutkan."
 
 
 def test_notice_cancelled():
