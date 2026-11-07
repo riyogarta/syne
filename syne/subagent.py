@@ -25,6 +25,13 @@ from .db.models import get_config
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse
 from .security import get_subagent_access_level, filter_tools_for_subagent
 
+import contextvars as _contextvars
+
+# history_search / history_expand scope inherited from the chat that spawned
+# this sub-agent (Riyo, 7 Nov 2026). Set once per run inside its own task, so
+# parallel runs never see each other's scope. None = deny.
+_HISTORY_SCOPE = _contextvars.ContextVar("subagent_history_scope", default=None)
+
 logger = logging.getLogger("syne.subagent")
 
 
@@ -141,6 +148,7 @@ class SubAgentManager:
         provider: Optional[LLMProvider] = None,
         resume_from: Optional[str] = None,
         planned_commands=None,
+        history_scope: Optional[dict] = None,
     ) -> dict:
         """Spawn a new sub-agent.
         
@@ -242,7 +250,8 @@ class SubAgentManager:
         effective_provider = provider or self.provider
         timeout = await self.timeout_seconds()
         async_task = asyncio.create_task(
-            self._run_subagent(run_id, task, context, model, timeout, effective_provider)
+            self._run_subagent(run_id, task, context, model, timeout, effective_provider,
+                               history_scope)
         )
         self._active_runs[run_id] = async_task
 
@@ -298,8 +307,10 @@ class SubAgentManager:
         model: Optional[str],
         timeout: int,
         provider: Optional[LLMProvider] = None,
+        history_scope: Optional[dict] = None,
     ):
         """Execute a sub-agent task in the background."""
+        _HISTORY_SCOPE.set(history_scope)
         try:
             result = await asyncio.wait_for(
                 self._execute_task(run_id, task, context, model, provider),
@@ -667,7 +678,9 @@ class SubAgentManager:
 
         # Try core tools first
         if self.tools and self.tools.get(name):
-            return await self.tools.execute(name, args, access_level)
+            return await self.tools.execute(
+                name, args, access_level, history_scope=_HISTORY_SCOPE.get(),
+            )
 
         # Try abilities
         if self.abilities and self.abilities.get(name):

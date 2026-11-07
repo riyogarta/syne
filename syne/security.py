@@ -42,8 +42,8 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "db_query":           0o400,  # owner only
     "file_read":          0o400,
     "read_source":        0o400,
-    "history_search":     0o400,  # owner only — raw log semantic search
-    "history_expand":     0o400,  # owner only — read around anchors
+    "history_search":     0o444,  # everyone; rows scoped per requester (tools/history.py)
+    "history_expand":     0o444,  # everyone; anchors outside the scope withheld
     "subagent_status":    0o440,  # owner + family
     "memory_search":      0o444,  # public via Rule 765
     "memory_get_file":    0o444,
@@ -66,7 +66,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "send_file":          0o660,
     "send_voice":         0o660,
     "send_reaction":      0o666,  # public too — for group reactions
-    "spawn_subagent":     0o660,  # Syne-only in practice; users can't call directly
+    "spawn_subagent":     0o700,  # owner only — and so DM only (owner tools are stripped in groups)
     "manage_schedule":    0o660,  # add/update/delete schedule entry — additive-ish
 
     # ─── Action / destructive (rwx = 7, includes x bit → gate fires) ──

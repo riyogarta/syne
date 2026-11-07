@@ -15,11 +15,16 @@ around each anchor. This keeps the semantic space clean (one canonical
 anchor per topic) and mirrors the human intuition: "when did I ASK about
 X?" → jump to that user message → read around.
 
-Both tools are owner+family (0o440): raw messages include tool outputs, other
-family members' turns, redaction contexts, etc. Owner explicitly widened
-access to family level; public is still excluded. The dedicated
-``memory_search`` remains available to family for curated, permission-gated
-recall from the memory table.
+Visibility (Riyo, 7 Nov 2026): both tools are open to everyone (0o444), but
+every query is scoped in SQL by who is asking - see scope_sql():
+
+  * public        -> the chat they are asking from, nothing else
+  * owner/family  -> that chat plus their own DMs on the same platform
+                     (reminder sessions count as DM)
+  * owner in a DM -> may widen to any chat on any platform, explicitly
+
+The scope is built by ToolRegistry.execute from the live conversation and
+passed as ``_scope``; whatever the model puts under that name is overwritten.
 """
 
 from __future__ import annotations
@@ -44,6 +49,98 @@ _STEP_TIMEOUT = 60
 # shells are left out entirely (Riyo, 7 Nov 2026): the owner never saw
 # them, and a cut-off tool result invites wrong conclusions.
 _CONVO_FILTER = "role IN ('user', 'assistant') AND btrim(coalesce(content, '')) <> ''"
+
+
+# ---------------------------------------------------------------------------
+# Visibility scope (Riyo, 7 Nov 2026)
+# ---------------------------------------------------------------------------
+
+_NO_SCOPE_ERROR = (
+    "Error: no chat context for this call, so the allowed scope cannot be "
+    "determined. History tools only run inside a live chat."
+)
+
+
+def build_history_scope(conv, access_level: str) -> Optional[dict]:
+    """Who is asking, from where - taken from the live conversation.
+
+    Returns None when the chat cannot be identified; callers treat that as
+    "deny" (fail closed). In a group the sender is the person who typed
+    (inbound.sender_id); in a DM it is the session's user.
+    """
+    if conv is None:
+        return None
+    inbound = getattr(conv, "inbound", None)
+    user = getattr(conv, "user", None) or {}
+    is_group = bool(getattr(conv, "is_group", False))
+    platform = getattr(inbound, "platform", None) if inbound is not None else None
+    if not platform or platform == "unknown":
+        platform = user.get("platform")
+    chat_id = (getattr(inbound, "chat_id", None) if inbound is not None else None) \
+        or getattr(conv, "chat_id", None)
+    sender = None
+    if inbound is not None and getattr(inbound, "sender_id", None):
+        sender = str(inbound.sender_id)
+    elif not is_group:
+        sender = str(user.get("platform_id") or "") or None
+    if not platform or not chat_id:
+        return None
+    return {
+        "access": access_level or "public",
+        "platform": str(platform),
+        "chat_id": str(chat_id),
+        "is_group": is_group,
+        "sender_pid": sender,
+        "session_id": getattr(conv, "session_id", None),
+    }
+
+
+def group_session_sql(alias: str = "s") -> str:
+    """SQL predicate: this session is a group chat (or a group's reminder).
+
+    Group sessions are owned by whoever created them, so "owned by X" alone
+    would count a group as X's DM. Telegram groups have negative ids,
+    WhatsApp groups end in @g.us, Discord guilds are known only from the
+    groups table - which also catches any registered group on any platform.
+    """
+    a = alias
+    return (
+        f"({a}.platform_chat_id LIKE '-%'"
+        f" OR {a}.platform_chat_id LIKE '%@g.us'"
+        f" OR {a}.platform_chat_id LIKE 'scheduled:-%'"
+        f" OR {a}.platform_chat_id LIKE 'scheduled:%@g.us:%'"
+        f" OR EXISTS (SELECT 1 FROM groups g WHERE g.platform = {a}.platform"
+        f" AND g.platform_group_id = {a}.platform_chat_id))"
+    )
+
+
+def scope_sql(scope: dict, start: int) -> tuple:
+    """Default visibility as a SQL predicate on sessions ``s``.
+
+    Placeholders are numbered from ``start``. Returns (predicate, params).
+      * public: the current chat only
+      * owner/family: the current chat OR their own DMs on this platform.
+        A DM is recognised by the session OWNER (sessions.user_id ->
+        users.platform_id), not by platform_chat_id - on WhatsApp (@lid) and
+        Discord the DM chat id is not the person's id. Reminder sessions
+        (scheduled:<id>:<task>) are owned by their person, so they count.
+    """
+    params = [str(scope.get("platform") or ""), str(scope.get("chat_id") or "")]
+    current = f"(s.platform = ${start} AND s.platform_chat_id = ${start + 1})"
+    sender = scope.get("sender_pid")
+    if scope.get("access") not in ("owner", "family") or not sender:
+        return current, params
+    params.append(str(sender))
+    own_dm = (
+        f"(s.platform = ${start} AND NOT {group_session_sql('s')}"
+        f" AND EXISTS (SELECT 1 FROM users u WHERE u.id = s.user_id"
+        f" AND u.platform = s.platform AND u.platform_id = ${start + 2}))"
+    )
+    return f"({current} OR {own_dm})", params
+
+
+def _is_owner_dm(scope: Optional[dict]) -> bool:
+    return bool(scope) and scope.get("access") == "owner" and not scope.get("is_group")
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +203,10 @@ async def history_search_handler(
     until: Optional[str] = None,
     also_contains: Optional[list] = None,
     sort_by: str = "similarity",
+    platform: Optional[str] = None,
+    chat_id: Optional[str] = None,
+    all_chats: bool = False,
+    _scope: Optional[dict] = None,
 ) -> str:
     """Return an ordered list of anchor previews, JSON-formatted for the LLM."""
     if not query or not query.strip():
@@ -149,9 +250,36 @@ async def history_search_handler(
     # Assemble SQL. Sort direction depends on mode; recency mode still
     # applies the vector similarity as a tie-breaker so top matches still
     # semantically-close if two rows share the same second.
+    # Visibility - enforced here, never left to the model (see scope_sql).
+    if not _scope:
+        return _NO_SCOPE_ERROR
+    owner_dm = _is_owner_dm(_scope)
+    explicit = bool(all_chats) or bool(platform) or bool(chat_id)
+    if explicit and not owner_dm:
+        return (
+            "Error: platform / chat_id / all_chats are for the owner in a direct "
+            "message only. Omit them to search the chats this person may see."
+        )
+
     conditions = ["m.role = 'user'", "m.embedding IS NOT NULL"]
     params: list = [str(vector)]
     p = 2
+
+    if owner_dm and (explicit or session_id is not None):
+        # Owner asked about a specific place (or everything) from a DM.
+        if platform:
+            conditions.append(f"s.platform = ${p}")
+            params.append(str(platform).strip().lower())
+            p += 1
+        if chat_id:
+            conditions.append(f"s.platform_chat_id = ${p}")
+            params.append(str(chat_id).strip())
+            p += 1
+    else:
+        sc_sql, sc_params = scope_sql(_scope, p)
+        conditions.append(sc_sql)
+        params += sc_params
+        p += len(sc_params)
 
     if session_id is not None:
         conditions.append(f"m.session_id = ${p}")
@@ -189,7 +317,8 @@ async def history_search_handler(
         SELECT
             m.id, m.session_id, m.content, m.created_at,
             1 - (m.embedding <=> $1::vector) AS similarity,
-            s.platform_chat_id AS chat_id
+            s.platform_chat_id AS chat_id,
+            s.platform AS platform
         FROM messages m
         LEFT JOIN sessions s ON s.id = m.session_id
         WHERE {where}
@@ -212,6 +341,7 @@ async def history_search_handler(
         hits.append({
             "anchor_id": r["id"],
             "session_id": r["session_id"],
+            "platform": r.get("platform") or "",
             "chat_id": r["chat_id"] or "",
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             "similarity": round(float(r["similarity"] or 0.0), 4),
@@ -248,7 +378,11 @@ HISTORY_SEARCH_TOOL = {
         "first, then refine with more specific terms, or narrow with since/until "
         "(temporal), also_contains (keyword AND-filter), or session_id (scope to "
         "one chat). Sort by similarity (default) or recency (for 'terakhir kali' "
-        "/ 'kemarin' style questions). Owner-only."
+        "/ 'kemarin' style questions). SCOPE is enforced by the system from who "
+        "is asking: public = this chat only; owner/family = this chat plus their "
+        "own DMs on this platform. Only the owner in a direct message may widen it "
+        "with platform / chat_id / all_chats (or session_id) - use them when the "
+        "owner asks about another chat or platform; anywhere else they are refused."
     ),
     "parameters": {
         "type": "object",
@@ -286,6 +420,19 @@ HISTORY_SEARCH_TOOL = {
                     "many candidates."
                 ),
             },
+            "platform": {
+                "type": "string",
+                "enum": ["telegram", "whatsapp", "discord", "cli"],
+                "description": "Owner in a DM only: search this platform.",
+            },
+            "chat_id": {
+                "type": "string",
+                "description": "Owner in a DM only: search this chat (platform chat id, as shown in hits).",
+            },
+            "all_chats": {
+                "type": "boolean",
+                "description": "Owner in a DM only: search every chat on every platform.",
+            },
             "sort_by": {
                 "type": "string",
                 "enum": ["similarity", "recency"],
@@ -298,7 +445,7 @@ HISTORY_SEARCH_TOOL = {
         "required": ["query"],
     },
     "handler": history_search_handler,
-    "permission": 0o440,  # owner+family read-only (raw log incl. tool outputs)
+    "permission": 0o444,  # everyone; rows scoped per requester (scope_sql)
 }
 
 
@@ -311,6 +458,7 @@ async def history_expand_handler(
     anchor_ids: list,
     context_before: Optional[int] = None,
     context_after: Optional[int] = None,
+    _scope: Optional[dict] = None,
 ) -> str:
     """Return context blocks (turns around each anchor), JSON-formatted."""
     if not anchor_ids:
@@ -337,6 +485,12 @@ async def history_expand_handler(
     before = min(before, 20)
     after = min(after, 40)
 
+    # Visibility: the owner in a DM may open anything; everyone else only
+    # anchors inside their scope. Out-of-scope ids are reported as missing.
+    if not _scope:
+        return _NO_SCOPE_ERROR
+    unrestricted = _is_owner_dm(_scope)
+
     blocks = []
     missing = []
     _t0 = time.monotonic()
@@ -346,12 +500,22 @@ async def history_expand_handler(
         async with get_connection(timeout=_STEP_TIMEOUT) as conn:
             logger.info(f"history_expand: connection acquired in {time.monotonic() - _t0:.2f}s")
             _stage = "fetch anchors"
-            anchors = await conn.fetch(
-                "SELECT id, session_id, created_at FROM messages "
-                "WHERE id = ANY($1::int[])",
-                ids,
-                timeout=_STEP_TIMEOUT,
-            )
+            if unrestricted:
+                anchors = await conn.fetch(
+                    "SELECT id, session_id, created_at FROM messages "
+                    "WHERE id = ANY($1::int[])",
+                    ids,
+                    timeout=_STEP_TIMEOUT,
+                )
+            else:
+                sc_sql, sc_params = scope_sql(_scope, 2)
+                anchors = await conn.fetch(
+                    "SELECT m.id, m.session_id, m.created_at FROM messages m "
+                    "JOIN sessions s ON s.id = m.session_id "
+                    "WHERE m.id = ANY($1::int[]) AND " + sc_sql,
+                    ids, *sc_params,
+                    timeout=_STEP_TIMEOUT,
+                )
             anchor_map = {r["id"]: r for r in anchors}
             missing = [i for i in ids if i not in anchor_map]
 
@@ -488,7 +652,8 @@ HISTORY_EXPAND_TOOL = {
         "the search preview alone; expand to read what was actually said around "
         "it. Call SELECTIVELY — only expand previews that look promising, not the "
         "whole top-N. Returns the conversation only (user + assistant text); "
-        "tool results are not included. Owner-only."
+        "tool results are not included. Anchors outside the asker's scope "
+        "(same rule as history_search) are returned as missing."
     ),
     "parameters": {
         "type": "object",
@@ -510,5 +675,5 @@ HISTORY_EXPAND_TOOL = {
         "required": ["anchor_ids"],
     },
     "handler": history_expand_handler,
-    "permission": 0o440,
+    "permission": 0o444,  # everyone; anchors outside the scope are withheld
 }

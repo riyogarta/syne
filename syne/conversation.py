@@ -705,18 +705,16 @@ class Conversation:
         #     another instruction onto the layer that already failed. So hoist it
         #     into context the way memory is hoisted - no decision, no tool call.
         #
-        #     PRIVACY - the load-bearing part. sessions.user_id is NOT the sender
-        #     of a message: a group session is owned by whoever created it (YBA
-        #     is owned by user 1), and the messages table has no sender column at
-        #     all (metadata is empty on every user row). So "only this person's
-        #     own words" CANNOT be expressed as sessions.user_id = sender - that
-        #     would surface other members' group turns as if they were the
-        #     owner's. What IS reliable: a DM session's platform_chat_id equals
-        #     that person's own platform_id. Scoping to it admits only the
-        #     sender's own private chats and structurally excludes every group
-        #     and every scheduled:* session. If Yuli triggers recall in YBA,
-        #     Riyo's DM rows are not withheld by policy - they never enter the
-        #     result set at all.
+        #     PRIVACY - the load-bearing part. Scope is the same rule
+        #     history_search enforces (tools/history.py scope_sql, Riyo,
+        #     7 Nov 2026): the current chat, plus - for owner/family - the
+        #     sender's own DMs on the same platform. A DM is recognised by the
+        #     session's OWNER (sessions.user_id -> users.platform_id), not by
+        #     platform_chat_id: on WhatsApp and Discord the DM chat id is not the
+        #     person's id. Group sessions are owned by whoever created them, so
+        #     they are excluded from "own DM" explicitly (group_session_sql). The
+        #     messages table has no sender column, so a group row only counts as
+        #     the sender's own words when its embedded sender id matches.
         _raw_he = await _get_recall_config("history.auto_recall", True)
         if isinstance(_raw_he, str):
             _hist_enabled = _raw_he.strip().lower() not in ("false", "0", "no", "off", "")
@@ -739,76 +737,14 @@ class Conversation:
         except (TypeError, ValueError):
             _hist_min_chars = 40
 
-        # Trust tier of the CURRENT chat - option C (Riyo, 4 Nov 2026).
-        # One principle: never move a row into an audience more open than the
-        # one it was written for.
-        #   DM                      -> private, only the sender reads it
-        #   trusted group (family)  -> treated as private, by explicit opt-in
-        #   any other group         -> public, same-group rows only
-        # Trust is NOT hardcoded. It is a config list of platform_chat_ids, so
-        # granting or revoking a group never needs a code change. Default is
-        # empty, i.e. fail closed: until a group is named, it is public.
-        _raw_trusted = await _get_recall_config("history.trusted_group_ids", [])
-        if isinstance(_raw_trusted, str):
-            try:
-                _raw_trusted = json.loads(_raw_trusted)
-            except (ValueError, TypeError):
-                _raw_trusted = [
-                    x for x in _raw_trusted.replace(",", " ").split() if x
-                ]
-        if not isinstance(_raw_trusted, (list, tuple, set)):
-            _raw_trusted = []
-        _hist_trusted = {str(x).strip() for x in _raw_trusted if str(x).strip()}
-
-        _hist_chat_id = None
-        if self.inbound and self.inbound.chat_id:
-            _hist_chat_id = str(self.inbound.chat_id)
-        elif self.chat_id:
-            _hist_chat_id = str(self.chat_id)
-
-        # Eligibility - family-only recall (Riyo, 4 Nov 2026).
-        # One condition, applied to BOTH ends: the sender must be family, and
-        # every chat involved must be family. Inside that circle recall flows
-        # freely in every direction (DM<->DM, DM<->group, group<->group).
-        # Outside it there is no recall at all.
-        #
-        # "Family group" is a DECLARED list, never a computed one. It cannot be
-        # derived from settings.members: that map is filled by upsert when a
-        # person is first SEEN speaking (models.py:407), so a group would count
-        # as family merely because its outsiders have not spoken yet. Agent.ID
-        # is the live proof - 4 members registered, 3 of them (Wibisono, .a,
-        # Koe) not in the users table at all. A computed test would have
-        # admitted it and leaked DM content into a public group.
-        _hist_family_ok = access_level in ("owner", "family")
-        if self.is_group:
-            _hist_family_ok = _hist_family_ok and (
-                _hist_chat_id is not None and _hist_chat_id in _hist_trusted
-            )
-
-        # Telegram only (Riyo, 4 Nov 2026).
-        #
-        # Not a policy preference - an identity constraint. Authorship and DM
-        # scope both key on platform_id, and that id is per-platform: the same
-        # human is 3478983 on Telegram and 628111681624 on WhatsApp, with no
-        # mapping between them. Two consequences if platforms were mixed:
-        #
-        #   1. Nothing would match anyway. A WhatsApp DM session carries the
-        #      WhatsApp id as platform_chat_id, which never equals the Telegram
-        #      _sender_pid, so the rows are invisible rather than shared.
-        #   2. The family test would misfire. 628111681624 is registered
-        #      'public' under the name "Pak Riyo", so the owner writing from
-        #      WhatsApp would fail the owner/family check - denied as a
-        #      stranger, while a future id collision across platforms could
-        #      pass as family.
-        #
-        # So the honest fix is to stay on one platform until identities are
-        # unified. The right place for that is the identity mapping, not this
-        # query. trusted_group_ids holds Telegram chat ids, consistent with
-        # this. CLI sessions (platform 'cli') are excluded by the same test.
-        _hist_platform = (
-            str(self.inbound.platform) if self.inbound and self.inbound.platform else None
+        # One scope for every platform - the trusted-group list and the
+        # Telegram-only pin are gone (Riyo, 7 Nov 2026).
+        from .tools.history import (
+            build_history_scope as _build_hist_scope,
+            group_session_sql as _hist_group_sql,
+            scope_sql as _hist_scope_sql,
         )
-        _hist_family_ok = _hist_family_ok and _hist_platform == "telegram"
+        _hist_scope = _build_hist_scope(self, access_level)
 
         # Sender identity: inbound is the single source of truth. In a group this
         # is the person who actually typed; in a DM it is the chat owner.
@@ -843,7 +779,7 @@ class Conversation:
             return _qvec["v"]
 
         async def _do_history_recall():
-            if not _hist_enabled or not _sender_pid or not _hist_family_ok:
+            if not _hist_enabled or not _sender_pid or not _hist_scope:
                 return []
             # Query-side guard. A bare acknowledgement ("Test ya", "Opsi A",
             # "Ok cek") carries no topic, yet embeds close to every OTHER bare
@@ -859,25 +795,16 @@ class Conversation:
                 _vec = await _shared_query_vector()
                 if not _vec:
                     return []
-                # Authorship. A row was written by this sender if it comes
-                # from one of their own DM sessions (platform_chat_id equals
-                # their platform_id) OR if the inbound Sender block embedded in
-                # the message body carries their numeric id.
-                #
-                # The numeric id is the ONLY safe key. conversation_label is a
-                # display name the owner of the account can change at will, and
-                # the log proves it moves: id 41005565 appears as both "ItsAgha"
-                # and "Gamitra". Keying on the name would let anyone in a group
-                # impersonate anyone else simply by renaming themselves.
-                #
-                # metadata->>'sender_id' is checked first so that once rows
-                # carry it natively the regex stops being load-bearing. It is
-                # NULL on every existing row today (verified: 473 YBA user rows,
-                # 0 with metadata), hence the COALESCE fallback, which recovers
-                # authorship for the whole backlog.
+                # Authorship. Outside groups (a DM, a reminder session) every
+                # user row is the session owner's own words. In a group the
+                # writer is read from metadata->>'sender_id' or, for the
+                # backlog, the inbound Sender block in the body (metadata is
+                # NULL on old rows, hence the COALESCE). Only the numeric id is
+                # trusted - display names change at will (41005565 appears as
+                # both "ItsAgha" and "Gamitra").
                 _sender_re = 'Sender \\(untrusted metadata\\):[^}]*"id": ?"([0-9]+)"'
                 _author_sql = (
-                    "(s.platform_chat_id = $3 OR COALESCE("
+                    "(NOT " + _hist_group_sql("s") + " OR COALESCE("
                     "m.metadata->>'sender_id', "
                     "substring(m.content from '" + _sender_re + "')) = $3)"
                 )
@@ -885,28 +812,10 @@ class Conversation:
                     str(_vec), self.session_id, _sender_pid,
                     _hist_min_sim, _hist_min_chars, _hist_limit,
                 ]
-                # Source scope. A row is eligible only if it was written in a
-                # family chat: the sender's own DM (platform_chat_id equals
-                # their platform_id) or a declared family group. Rows from any
-                # other group are never candidates, in either direction.
-                #
-                # With an empty list this reduces to DM-only, which is the
-                # correct fail-closed default for a fresh install: no group
-                # participates until its id is named explicitly.
-                # Platform is pinned, not parameterised: it is a constant in
-                # this build, and a literal keeps it out of the arg numbering.
-                _plat_sql = "\n                          AND s.platform = 'telegram'"
-                _trusted_list = sorted(_hist_trusted)
-                if _trusted_list:
-                    _args.append(_trusted_list)
-                    _scope_sql = (
-                        "\n                          AND (s.platform_chat_id = $3"
-                        " OR s.platform_chat_id = ANY($7::text[]))" + _plat_sql
-                    )
-                else:
-                    _scope_sql = (
-                        "\n                          AND s.platform_chat_id = $3" + _plat_sql
-                    )
+                # Source scope: the same rule as history_search.
+                _sc_sql, _sc_params = _hist_scope_sql(_hist_scope, len(_args) + 1)
+                _args += _sc_params
+                _scope_sql = "\n                          AND " + _sc_sql
                 async with get_connection() as conn:
                     return await conn.fetch(
                         f"""
@@ -1027,9 +936,9 @@ class Conversation:
             hist_lines = [
                 "# Relevant Past Conversations (this sender's other chats)",
                 "Things THIS sender said to you in their other chats, "
-                "outside this session. Scoped by code to chats the sender "
-                "took part in - their own DM, plus any group declared "
-                "trusted in config - never another person's private chat.",
+                "outside this session. Scoped by code to this chat plus, for "
+                "owner/family, the sender's own DMs on this platform - never "
+                "another person's private chat.",
                 "These are real prior statements by the sender. If they refer to "
                 "something discussed in PM, the answer may be right here - do "
                 "NOT claim you have no knowledge of a topic that appears below.",

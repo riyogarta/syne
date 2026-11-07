@@ -150,6 +150,7 @@ class ToolRegistry:
         scheduled: bool = False,
         provider=None,
         conv=None,
+        history_scope: Optional[dict] = None,
     ) -> "ToolResult":
         """Execute a tool by name. Returns ToolResult with error classification.
 
@@ -209,6 +210,18 @@ class ToolRegistry:
         _t_handler = time.monotonic()
         try:
             call_args = {**arguments}
+            if name in ("history_search", "history_expand"):
+                # Visibility comes from the live chat, never from the model:
+                # anything it put under _scope is overwritten here. Sub-agents
+                # pass the scope captured from their parent chat.
+                from .history import build_history_scope
+                call_args["_scope"] = (
+                    history_scope if history_scope is not None
+                    else build_history_scope(conv, access_level)
+                )
+            if name == "spawn_subagent":
+                from .history import build_history_scope
+                call_args["_history_scope"] = build_history_scope(conv, access_level)
             if scheduled and name in ("send_message",):
                 call_args["_scheduled"] = True
             if name == "send_message":

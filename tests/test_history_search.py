@@ -13,6 +13,13 @@ import pytest
 
 from syne.tools import history as H
 
+# The handlers now refuse to run without a scope. The owner in a DM is the
+# unrestricted case, so the pre-existing shape tests keep their meaning.
+OWNER_DM = {
+    "access": "owner", "platform": "telegram", "chat_id": "3478983",
+    "is_group": False, "sender_pid": "3478983", "session_id": 1,
+}
+
 
 # ---------------------------------------------------------------------------
 # history_search: argument validation
@@ -22,29 +29,29 @@ from syne.tools import history as H
 class TestHistorySearchValidation:
 
     async def test_empty_query_returns_error(self):
-        result = await H.history_search_handler(query="")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="")
         assert result.startswith("Error:")
         assert "query is required" in result
 
     async def test_whitespace_query_returns_error(self):
-        result = await H.history_search_handler(query="   ")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="   ")
         assert result.startswith("Error:")
 
     async def test_bad_sort_by_returns_error(self):
         H.set_embedding_provider(MagicMock())
-        result = await H.history_search_handler(query="anything", sort_by="cosmic")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="anything", sort_by="cosmic")
         assert result.startswith("Error:")
         assert "sort_by" in result
 
     async def test_bad_since_returns_error(self):
         H.set_embedding_provider(MagicMock())
-        result = await H.history_search_handler(query="x", since="yesterday")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="x", since="yesterday")
         assert result.startswith("Error:")
         assert "since" in result.lower()
 
     async def test_bad_until_returns_error(self):
         H.set_embedding_provider(MagicMock())
-        result = await H.history_search_handler(
+        result = await H.history_search_handler(_scope=OWNER_DM, 
             query="x", since="2026-07-01", until="tomorrow"
         )
         assert result.startswith("Error:")
@@ -52,7 +59,7 @@ class TestHistorySearchValidation:
 
     async def test_no_provider_returns_clear_error(self):
         H.set_embedding_provider(None)
-        result = await H.history_search_handler(query="anything")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="anything")
         assert result.startswith("Error:")
         assert "embedding provider" in result.lower()
 
@@ -61,7 +68,7 @@ class TestHistorySearchValidation:
         # embed() itself is awaitable → AsyncMock; return value has .vector = []
         prov.embed = AsyncMock(return_value=MagicMock(vector=[]))
         H.set_embedding_provider(prov)
-        result = await H.history_search_handler(query="anything")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="anything")
         assert result.startswith("Error:")
         assert "empty vector" in result
 
@@ -69,7 +76,7 @@ class TestHistorySearchValidation:
         prov = MagicMock()
         prov.embed = AsyncMock(side_effect=RuntimeError("ollama down"))
         H.set_embedding_provider(prov)
-        result = await H.history_search_handler(query="anything")
+        result = await H.history_search_handler(_scope=OWNER_DM, query="anything")
         assert result.startswith("Error:")
         assert "ollama down" in result
 
@@ -105,7 +112,7 @@ class TestHistorySearchShape:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_search_handler(query="something obscure")
+            result = await H.history_search_handler(_scope=OWNER_DM, query="something obscure")
 
         assert "No matches" in result
         assert "broader" in result or "wider" in result or "different" in result
@@ -126,7 +133,7 @@ class TestHistorySearchShape:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_search_handler(
+            result = await H.history_search_handler(_scope=OWNER_DM, 
                 query="decay memory", limit=5, sort_by="similarity"
             )
 
@@ -163,7 +170,7 @@ class TestHistorySearchShape:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            await H.history_search_handler(query="x", limit=9999)
+            await H.history_search_handler(_scope=OWNER_DM, query="x", limit=9999)
 
         # Last two params of the SELECT are limit + offset (see handler SQL).
         params = captured_params["params"]
@@ -179,18 +186,18 @@ class TestHistorySearchShape:
 class TestHistoryExpandValidation:
 
     async def test_empty_anchor_ids_returns_error(self):
-        result = await H.history_expand_handler(anchor_ids=[])
+        result = await H.history_expand_handler(_scope=OWNER_DM, anchor_ids=[])
         assert result.startswith("Error:")
         assert "anchor_ids" in result
 
     async def test_non_integer_anchor_ids_returns_error(self):
-        result = await H.history_expand_handler(anchor_ids=["not-a-number"])
+        result = await H.history_expand_handler(_scope=OWNER_DM, anchor_ids=["not-a-number"])
         assert result.startswith("Error:")
         assert "integers" in result.lower()
 
     async def test_too_many_anchor_ids_returns_error(self):
         # Cap is 20 — 21 must reject.
-        result = await H.history_expand_handler(anchor_ids=list(range(1, 22)))
+        result = await H.history_expand_handler(_scope=OWNER_DM, anchor_ids=list(range(1, 22)))
         assert result.startswith("Error:")
         assert "at most 20" in result
 
@@ -207,7 +214,7 @@ class TestHistoryExpandValidation:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_expand_handler(
+            result = await H.history_expand_handler(_scope=OWNER_DM, 
                 anchor_ids=[42], context_before=99999, context_after=99999
             )
 
@@ -258,7 +265,7 @@ class TestHistoryExpandWindow:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_expand_handler(
+            result = await H.history_expand_handler(_scope=OWNER_DM, 
                 anchor_ids=[100], context_before=2, context_after=3
             )
 
@@ -298,7 +305,7 @@ class TestHistoryExpandWindow:
         ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_expand_handler(
+            result = await H.history_expand_handler(_scope=OWNER_DM, 
                 anchor_ids=[7], context_before=0, context_after=0
             )
         assert seen["params"] == (3, at, 7, at, 7)
@@ -315,7 +322,7 @@ class TestToolSchemas:
     def test_history_search_tool_schema_required_fields(self):
         t = H.HISTORY_SEARCH_TOOL
         assert t["name"] == "history_search"
-        assert t["permission"] == 0o440  # owner + family (widened from 0o400 in v1.18.36)
+        assert t["permission"] == 0o444  # owner + family (widened from 0o400 in v1.18.36)
         assert "query" in t["parameters"]["properties"]
         assert t["parameters"]["required"] == ["query"]
         assert callable(t["handler"])
@@ -323,7 +330,7 @@ class TestToolSchemas:
     def test_history_expand_tool_schema_required_fields(self):
         t = H.HISTORY_EXPAND_TOOL
         assert t["name"] == "history_expand"
-        assert t["permission"] == 0o440  # owner + family (widened from 0o400 in v1.18.36)
+        assert t["permission"] == 0o444  # owner + family (widened from 0o400 in v1.18.36)
         assert "anchor_ids" in t["parameters"]["properties"]
         assert t["parameters"]["required"] == ["anchor_ids"]
         assert callable(t["handler"])

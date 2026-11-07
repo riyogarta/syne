@@ -1027,7 +1027,7 @@ class SyneAgent:
                 "required": ["task", "planned_commands"],
             },
             handler=self._tool_spawn_subagent,
-            permission=0o750,
+            permission=0o700,  # owner only, hence DM only (Riyo, 7 Nov 2026)
         )
 
         # Sub-agent status tool
@@ -1336,7 +1336,8 @@ class SyneAgent:
         return "\n".join(lines)
 
     async def _tool_spawn_subagent(self, task: str, context: str = "", resume_from: str = "",
-                                   planned_commands=None, _provider=None) -> str:
+                                   planned_commands=None, _provider=None,
+                                   _history_scope=None) -> str:
         """Tool handler: spawn a sub-agent."""
         if not self.subagents:
             return "Sub-agent system not initialized."
@@ -1357,6 +1358,7 @@ class SyneAgent:
             provider=_provider,
             resume_from=resume_from or None,
             planned_commands=planned_commands,
+            history_scope=_history_scope,
         )
         
         if result["success"]:
