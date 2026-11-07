@@ -1,12 +1,16 @@
 """Tool registry — register and manage agent capabilities."""
 
 import logging
+import time
 from typing import Callable, Optional
 from dataclasses import dataclass, field
 
 from ..security import check_tool_access, TOOL_PERMISSIONS
 
 logger = logging.getLogger("syne.tools.registry")
+
+# Steps slower than this are logged so a stalled tool shows where it hung.
+_SLOW_STEP_S = 10
 
 
 @dataclass
@@ -154,6 +158,7 @@ class ToolRegistry:
         ConsentStore). Callers without a conversation (tests, background jobs)
         can pass None — the gate falls back accordingly.
         """
+        _t_start = time.monotonic()
         tool = self.get(name)
         if not tool:
             return ToolResult(f"Error: Tool '{name}' not found.", ok=False, error_type="not_found")
@@ -198,6 +203,10 @@ class ToolRegistry:
             # output rather than triggering error-recovery / retry logic.
             return ToolResult(gate_prompt or "", ok=True)
 
+        _t_gate = time.monotonic() - _t_start
+        if _t_gate > _SLOW_STEP_S:
+            logger.warning(f"Tool '{name}': pre-handler (approval/consent) took {_t_gate:.1f}s")
+        _t_handler = time.monotonic()
         try:
             call_args = {**arguments}
             if scheduled and name in ("send_message",):
@@ -243,6 +252,9 @@ class ToolRegistry:
             if provider and name in ("spawn_subagent",):
                 call_args["_provider"] = provider
             result = await tool.handler(**call_args)
+            _el = time.monotonic() - _t_handler
+            if _el > _SLOW_STEP_S:
+                logger.warning(f"Tool '{name}': handler took {_el:.1f}s")
             return ToolResult(str(result), ok=True)
         except TimeoutError as e:
             logger.error(f"Timeout executing tool '{name}': {e}")

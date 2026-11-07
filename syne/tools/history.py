@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -33,6 +34,10 @@ from ..db.connection import get_connection
 from ..db.models import get_config
 
 logger = logging.getLogger("syne.tools.history")
+
+# Per-step limit for history_expand (pool acquire + each query). A stall
+# surfaces as an explicit error instead of a silent multi-minute hang.
+_STEP_TIMEOUT = 60
 
 
 # ---------------------------------------------------------------------------
@@ -327,8 +332,14 @@ async def history_expand_handler(
     after = min(after, 40)
 
     blocks = []
+    missing = []
+    _t0 = time.monotonic()
+    _stage = "acquire connection"
+    logger.info(f"history_expand: start anchors={ids} before={before} after={after}")
     try:
-        async with get_connection() as conn:
+        async with get_connection(timeout=_STEP_TIMEOUT) as conn:
+            logger.info(f"history_expand: connection acquired in {time.monotonic() - _t0:.2f}s")
+            _stage = "fetch anchors"
             # Fetch anchor metadata first so we know each anchor's session +
             # created_at. We then do a per-anchor window fetch — this is
             # simpler than a lateral join and each window is small.
@@ -336,6 +347,7 @@ async def history_expand_handler(
                 "SELECT id, session_id, created_at FROM messages "
                 "WHERE id = ANY($1::int[])",
                 ids,
+                timeout=_STEP_TIMEOUT,
             )
             anchor_map = {r["id"]: r for r in anchors}
             missing = [i for i in ids if i not in anchor_map]
@@ -348,6 +360,8 @@ async def history_expand_handler(
 
                 # ROW_NUMBER by (session, created_at, id) so we can slice
                 # the neighbourhood deterministically.
+                _stage = f"fetch window for anchor {aid}"
+                _tw = time.monotonic()
                 window_rows = await conn.fetch(
                     """
                     WITH ordered AS (
@@ -366,6 +380,11 @@ async def history_expand_handler(
                     ORDER BY o.rn ASC
                     """,
                     sid, aid, before, after,
+                    timeout=_STEP_TIMEOUT,
+                )
+                logger.info(
+                    f"history_expand: anchor {aid} window {len(window_rows)} rows "
+                    f"in {time.monotonic() - _tw:.2f}s"
                 )
                 turns = []
                 for r in window_rows:
@@ -383,10 +402,18 @@ async def history_expand_handler(
                     "context_after": after,
                     "turns": turns,
                 })
+    except TimeoutError:
+        _el = time.monotonic() - _t0
+        logger.error(f"history_expand: timeout at '{_stage}' after {_el:.1f}s")
+        return (
+            f"Error: history_expand timed out at '{_stage}' "
+            f"(>{_STEP_TIMEOUT}s, total {_el:.1f}s)."
+        )
     except Exception as e:
-        logger.exception("history_expand DB error")
-        return f"Error: database query failed: {e}"
+        logger.exception(f"history_expand DB error at '{_stage}'")
+        return f"Error: database query failed at '{_stage}': {e}"
 
+    logger.info(f"history_expand: done in {time.monotonic() - _t0:.2f}s")
     payload = {"blocks": blocks}
     if missing:
         payload["missing_anchor_ids"] = missing

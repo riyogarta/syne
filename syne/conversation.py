@@ -2496,10 +2496,15 @@ class Conversation:
 
                 # Notify channel about tool activity (before execution for fast typing indicator)
                 if self._mgr and self._mgr._tool_callback:
+                    import time as _time
+                    _tcb = _time.monotonic()
                     try:
                         await self._mgr._tool_callback(name)
                     except Exception:
                         pass
+                    _tcb_el = _time.monotonic() - _tcb
+                    if _tcb_el > 5:
+                        logger.warning(f"Tool activity callback for '{name}' took {_tcb_el:.1f}s")
 
                 parsed_calls.append((name, args, tool_call_id, loop_record))
 

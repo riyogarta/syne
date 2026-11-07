@@ -54,10 +54,14 @@ def get_pool() -> asyncpg.Pool:
 
 
 @asynccontextmanager
-async def get_connection():
-    """Get a database connection from the pool."""
+async def get_connection(timeout: Optional[float] = None):
+    """Get a database connection from the pool.
+
+    ``timeout`` bounds the wait for a free pool connection (seconds). None
+    keeps the previous behaviour (wait indefinitely).
+    """
     pool = get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire(timeout=timeout) as conn:
         yield conn
 
 
