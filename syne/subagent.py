@@ -29,16 +29,20 @@ logger = logging.getLogger("syne.subagent")
 
 
 class SubAgentIncomplete(Exception):
-    """Raised when a sub-agent reaches max_rounds before finishing the task.
+    """Raised when a sub-agent stops before finishing the task.
 
+    Two causes: it reached max_rounds, or a shell command was blocked
+    pending owner consent (no interactive approval is possible headless).
     This is a FAILURE mode distinct from a clean error/timeout: the work was
     cut off mid-flight. It carries the partial result so it can still be
-    persisted and delivered to the user (not discarded).
+    persisted and delivered to the user (not discarded), plus the real
+    reason so neither the sub-agent nor the log misreports it.
     """
 
-    def __init__(self, partial_result: str):
+    def __init__(self, partial_result: str, reason: str = "reached max rounds"):
         self.partial_result = partial_result
-        super().__init__("Sub-agent reached max rounds before completing the task")
+        self.reason = reason
+        super().__init__(f"Sub-agent stopped before completing the task: {reason}")
 
 
 class SubAgentManager:
@@ -216,7 +220,7 @@ class SubAgentManager:
             await self._complete_run(run_id, "completed", result=result)
 
         except SubAgentIncomplete as e:
-            logger.warning(f"Sub-agent {run_id}: incomplete (reached max rounds)")
+            logger.warning(f"Sub-agent {run_id}: incomplete ({e.reason})")
             await self._complete_run(run_id, "incomplete", result=e.partial_result)
 
         except asyncio.TimeoutError:
@@ -529,11 +533,12 @@ class SubAgentManager:
                     "Cannot run and cannot be approved. Reporting task as unfinished."
                 )
             # NEEDS_CONSENT → headless stop, task incomplete.
-            raise SubAgentIncomplete(
+            _msg = (
                 f"Command blocked pending owner consent (no interactive approval "
                 f"possible in a sub-agent): `{_cmd}`. Reason: {_res.reason}. "
                 "Task stopped — owner must run this manually or pre-approve."
             )
+            raise SubAgentIncomplete(_msg, reason=_msg)
 
         # Try core tools first
         if self.tools and self.tools.get(name):
