@@ -107,8 +107,8 @@ class ContextManager:
                 result.append(current_msg)
             return result
 
-        # Trim history from oldest (safety fallback — compaction should
-        # have already run, but just in case)
+        # Trim history from oldest (safety fallback — the history window
+        # and adaptive reduction should already fit, but just in case)
         trimmed_history = []
         running_tokens = 0
 
@@ -122,8 +122,7 @@ class ContextManager:
         dropped = len(history_msgs) - len(trimmed_history)
         if dropped > 0:
             logger.warning(
-                f"Emergency trim: dropped {dropped} old messages "
-                f"(compaction should have prevented this)"
+                f"Emergency trim: dropped {dropped} old messages"
             )
             # Inject a notice so LLM knows context was lost
             notice = ChatMessage(
@@ -145,11 +144,6 @@ class ContextManager:
             result.append(current_msg)
 
         return result
-
-    def should_compact(self, messages: list[ChatMessage], threshold: float = 0.8) -> bool:
-        """Check if context is getting too full and compaction should be triggered."""
-        total = estimate_messages_tokens(messages, self.chars_per_token)
-        return total >= (self.available * threshold)
 
     def prune_tool_results(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Prune oversized tool results to fit context — OpenClaw 2-tier approach.

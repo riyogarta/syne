@@ -289,7 +289,7 @@ class AnthropicProvider(LLMProvider):
         2. Every tool_use in an assistant message must have a matching tool_result in the next user message
 
         This removes orphaned tool_results and converts orphaned tool_use assistant
-        messages to plain text to prevent 400 errors from context trimming/compaction.
+        messages to plain text to prevent 400 errors from context trimming.
         """
         if not conversation:
             return conversation

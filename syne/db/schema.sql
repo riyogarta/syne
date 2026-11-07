@@ -457,9 +457,6 @@ INSERT INTO config (key, value, description) VALUES
     ('abilities.self_modification_enabled', 'false', 'Allow LLM to create new abilities via update_ability(action=create). Default OFF — owner must explicitly enable to allow self-modification. Closes prompt-injection-to-RCE vector while preserving existing custom abilities.'),
     ('session.history_limit', '50', 'Max messages loaded into context per turn (adaptive — reduces if context overflows)'),
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)'),
-    ('session.compaction_keep_recent', '40', 'Number of recent messages to keep after compaction'),
-    ('session.compaction_overlap_percent', '15', 'Compaction overlap: keep this % of the summarized batch ALSO as raw messages (a verbatim bridge between summary and recent tail) for smooth transition. 0 = disabled. Char-budget guarded.'),
-    ('compaction.trigger_percent', '100', 'Compaction trigger: compact when context usage reaches this % of the active model context window (1-100). Default 100 = proactive compaction effectively OFF (rely on large window + history_search + permanent memory; trim_context handles overflow).'),
     ('session.thinking_budget', 'null', 'Thinking budget: 0=off, 1024=low, 4096=medium, 8192=high, 24576=max, null=model default'),
     ('session.reasoning_visible', 'false', 'Show model thinking/reasoning in responses (on/off)'),
     -- Time & locale (used for injected runtime time context)
@@ -991,21 +988,6 @@ ON CONFLICT (key) DO NOTHING;
 -- once true, the WHERE no longer matches.
 UPDATE config SET value = 'true'
   WHERE key = 'memory.auto_capture' AND value = 'false';
-
--- Migration: compaction.trigger_percent (single token-based compaction trigger)
-INSERT INTO config (key, value, description) VALUES
-    ('compaction.trigger_percent', '100', 'Compaction trigger: compact when context usage reaches this % of the active model context window (1-100). Default 100 = proactive compaction effectively OFF (rely on large window + history_search + permanent memory; trim_context handles overflow).')
-ON CONFLICT (key) DO NOTHING;
--- One-shot: migrate EXISTING installs still on the old default (40) -> 100
--- (disable proactive compaction). Conditional on old value so intentional
--- user settings are preserved; idempotent no-op on later restarts.
-UPDATE config SET value = '100'
-  WHERE key = 'compaction.trigger_percent' AND value = '40';
-
--- Migration: session.compaction_overlap_percent (smooth-transition overlap band)
-INSERT INTO config (key, value, description) VALUES
-    ('session.compaction_overlap_percent', '15', 'Compaction overlap: keep this % of the summarized batch ALSO as raw messages (a verbatim bridge between summary and recent tail) for smooth transition. 0 = disabled. Char-budget guarded.')
-ON CONFLICT (key) DO NOTHING;
 
 -- Migration: subagents.* (DB-driven sub-agent tuning — no more hardcoded fallbacks)
 INSERT INTO config (key, value, description) VALUES

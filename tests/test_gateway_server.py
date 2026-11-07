@@ -228,19 +228,6 @@ class TestSlashCommands:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_compact_no_active_conversation(self):
-        agent = MagicMock()
-        agent.conversations = MagicMock()
-        agent.conversations._active = {}
-        gw = Gateway(agent)
-        node = _make_node()
-
-        result = await gw._handle_slash_command(node, "/compact", "/home")
-        assert result is True
-        # Should send "No active conversation" + done
-        assert node.ws.send.call_count >= 1
-
-    @pytest.mark.asyncio
     @patch("syne.db.connection.get_connection")
     async def test_new_closes_session(self, mock_get_conn):
         conn = AsyncMock()

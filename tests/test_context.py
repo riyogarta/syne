@@ -124,31 +124,6 @@ class TestContextManagerInit:
         assert cm.chars_per_token == DEFAULT_CHARS_PER_TOKEN
 
 
-class TestShouldCompact:
-    """Tests for ContextManager.should_compact()."""
-
-    def test_below_threshold(self):
-        cm = ContextManager(max_context_tokens=1000, reserved_output_tokens=0)
-        # Small messages well below 80%
-        msgs = [ChatMessage(role="user", content="hi")]
-        assert cm.should_compact(msgs) is False
-
-    def test_above_threshold(self):
-        cm = ContextManager(max_context_tokens=100, reserved_output_tokens=0)
-        # available = int(100 / 1.2) = 83, threshold 80% = 66 tokens needed
-        # Big content to exceed that
-        big_content = "x" * 400  # 100 tokens + 4 overhead = 104 > 66
-        msgs = [ChatMessage(role="user", content=big_content)]
-        assert cm.should_compact(msgs) is True
-
-    def test_custom_threshold(self):
-        cm = ContextManager(max_context_tokens=100, reserved_output_tokens=0)
-        # available = 83, threshold=0.5 means compact at 41 tokens
-        content = "x" * 200  # 50 tokens + 4 overhead = 54 > 41
-        msgs = [ChatMessage(role="user", content=content)]
-        assert cm.should_compact(msgs, threshold=0.5) is True
-
-
 class TestGetUsage:
     """Tests for ContextManager.get_usage()."""
 

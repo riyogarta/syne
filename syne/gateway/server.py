@@ -367,33 +367,6 @@ class Gateway:
         chat_id = _make_chat_id(node.node_id, cwd)
         session_key = f"node:{chat_id}"
 
-        if cmd_name == "/compact":
-            conv = self.agent.conversations._active.get(session_key)
-            if not conv:
-                await node.send(ResponseChunkMsg(text="No active conversation.", done=False))
-                await node.send(ResponseChunkMsg(text="", done=True))
-                return True
-            msg_count = len(conv._message_cache) if conv._message_cache else 0
-            if msg_count < 4:
-                await node.send(ResponseChunkMsg(text="Conversation too short to compact.", done=False))
-                await node.send(ResponseChunkMsg(text="", done=True))
-                return True
-            await node.send(ResponseChunkMsg(text="Compacting conversation...", done=False))
-            try:
-                result = await conv.run_compact()
-                if result:
-                    await node.send(ResponseChunkMsg(
-                        text=f"Compacted: {result['messages_before']} → {result['messages_after']} messages",
-                        done=False,
-                    ))
-                else:
-                    await node.send(ResponseChunkMsg(text="Nothing to compact.", done=False))
-            except Exception as e:
-                logger.error(f"Compact error for node {node.node_id}: {e}", exc_info=True)
-                await node.send(ResponseChunkMsg(text=f"Compact failed: {e}", done=False))
-            await node.send(ResponseChunkMsg(text="", done=True))
-            return True
-
         if cmd_name == "/new":
             # Close session in DB + clear cache (same as local CLI fresh start)
             from ..db.connection import get_connection

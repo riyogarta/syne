@@ -323,7 +323,7 @@ When a public user searches memories, results outside the allowed categories are
 
 ### History & Recall — Lean Window + Semantic Search Over Full Archive (No Compaction)
 
-Syne loads a **lean window** of recent messages each turn (default: 50 via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. Compaction is **disabled by default** (`compaction.trigger_percent = 100`) — the summarizer function is still in the code, but the trigger threshold is unreachable in normal use.
+Syne loads a **lean window** of recent messages each turn (default: 50 via `session.history_limit`) and reaches beyond it via `history_search` for semantic recall over the entire chat log. There is no compaction — nothing is ever summarized.
 
 The 50-message default was chosen after measuring real production sessions: a 1000-message window cost ~316k tokens per request once a session got long (950 messages → 1.21M chars per call). At 50, the same session costs ~17k tokens per request — a ~95% cut with **no data loss**, since the full log stays in the DB and `history_search` can reach any turn on demand.
 
@@ -335,7 +335,7 @@ Compaction is a workaround for a constraint Syne doesn't have. Other assistants 
 - **Bias injection.** Summaries are LLM-generated text. If the summarizer hallucinates a claim ("we agreed to X"), that claim becomes "background context" for every subsequent turn — the model treats it as fact, not as one model's interpretation of a past exchange.
 - **Compounding drift.** Summaries of summaries progressively lose fidelity. Old decisions get restated in the summarizer's preferred framing rather than the owner's own words.
 
-Syne's tradeoff is different: it retains **every message forever** (marked `status='compacted'` only when a compaction summary was created historically — content is never deleted) and provides `history_search` to reach anything outside the lean window semantically. The tools loop is:
+Syne's tradeoff is different: it retains **every message forever** (content is never deleted or summarized) and provides `history_search` to reach anything outside the lean window semantically. The tools loop is:
 
 ```
 history_search(query, ...)        → previews (user messages, ground truth)
@@ -351,7 +351,6 @@ The retrieval is (a) unlimited in reach — full chat archive is searchable, (b)
 
 - `trim_context` — per-turn safety net that drops oldest non-system messages 4 at a time if the loaded window still exceeds the context budget. Non-destructive; nothing leaves the DB.
 - `session.history_limit` — the load window itself. 50 default is conservative; raise it (`syne config set session.history_limit 200`) if you want more raw context in the model's window and your token budget allows.
-- `run_compact()` — the summarizer stays in the code, dormant. If a specific installation observes that the lean-window + `history_search` pattern is a poor fit (e.g. extremely high-throughput group chat), reactivating is one config change: `syne config set compaction.trigger_percent 60`.
 
 **How this shows up in behavior:**
 
@@ -780,9 +779,6 @@ All configuration lives in the `config` table. Change via conversation or `updat
 |-----|---------|-------------|
 | `session.history_limit` | `50` | Max messages loaded into context per turn. Full history stays reachable via `history_search` — see [History & Recall](#history--recall--lean-window--semantic-search-over-full-archive-no-compaction). Raise (e.g. `200`) if you want more raw context in the window and your token budget allows. |
 | `session.tool_loop_timeout` | `1800` | Tool loop timeout in seconds (30 min default) |
-| `compaction.trigger_percent` | `100` | Compaction trigger: fires when context usage reaches this % of the model window. **Default 100 = proactive compaction OFF.** Set to `60–80` to reactivate if you observe the lean-window + `history_search` pattern is a poor fit for your workload. |
-| `session.compaction_keep_recent` | `40` | Messages preserved raw when compaction does run |
-| `session.compaction_overlap_percent` | `15` | Overlap: % of summarized batch also kept raw as a verbatim bridge |
 | `session.thinking_budget` | `null` | Global default only — per-model thinking is set via `/models` |
 | `session.reasoning_visible` | `false` | Show model thinking in responses (on/off) |
 
@@ -892,7 +888,6 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/memory` | Memory statistics | All |
 | `/identity` | Agent identity | All |
 | `/clear` | Clear conversation history | Owner |
-| `/compact` | Compact conversation | Owner |
 | `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
 | `/autocapture [on/off]` | Toggle auto memory capture | Owner |
 | `/consent [on/off]` | Toggle consent gate for destructive tools | Owner |
@@ -1030,7 +1025,6 @@ syne/
 │   ├── boot.py              # System prompt builder (identity, soul, rules, guides)
 │   ├── conversation.py      # Conversation loop: context → LLM → tools → response
 │   ├── context.py           # Context window manager (token counting)
-│   ├── compaction.py        # Conversation summarization
 │   ├── security.py          # Permission system, SSRF protection, credential masking
 │   ├── consent.py           # Per-action Yes/No gate (owner/family clean-turn skip, provenance-aware)
 │   ├── shell_guard.py       # Deterministic shell parser (ALLOW/CONSENT/HARD_DENY, fail-closed)

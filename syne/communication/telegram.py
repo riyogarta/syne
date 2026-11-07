@@ -264,7 +264,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("version", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
-        self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("consent", self._cmd_consent))
         self.app.add_handler(CommandHandler("checker", self._cmd_checker))
@@ -377,7 +376,6 @@ class TelegramChannel:
             BotCommand("denylist", "Manage shell command denylist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
-            BotCommand("compact", "Compact conversation history"),
             BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
@@ -2457,7 +2455,6 @@ class TelegramChannel:
 /memory — Memory stats
 /autocapture — Toggle auto memory capture (on/off)
 /graph — Manage knowledge-graph extractor model
-/compact — Compact conversation history
 
 *AI Models*
 /models — Manage LLM (chat) models
@@ -2514,7 +2511,6 @@ Or just send me a message!"""
         """Handle /status command — comprehensive agent status."""
         from ..db.connection import get_connection
         from ..db.models import get_identity, get_config
-        from ..compaction import get_session_stats
 
         chat_id = str(update.effective_chat.id)
 
@@ -2533,9 +2529,7 @@ Or just send me a message!"""
 
             # Current session info
             session_row = await conn.fetchrow("""
-                SELECT id, message_count, created_at, updated_at,
-                       (SELECT COUNT(*) FROM messages WHERE session_id = s.id 
-                        AND metadata @> '{"type": "compaction_summary"}'::jsonb) as compactions
+                SELECT id, message_count, created_at, updated_at
                 FROM sessions s
                 WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
                 ORDER BY updated_at DESC LIMIT 1
@@ -2580,11 +2574,14 @@ Or just send me a message!"""
         session_info = ""
         if session_row:
             msg_count = session_row["message_count"]
-            compactions = session_row["compactions"]
 
             # Estimate context usage
-            stats = await get_session_stats(session_row["id"])
-            chars = stats["total_chars"]
+            async with get_connection() as conn:
+                chars = await conn.fetchval(
+                    "SELECT COALESCE(SUM(LENGTH(content)), 0) FROM messages "
+                    "WHERE session_id = $1 AND status = 'active'",
+                    session_row["id"],
+                )
             est_tokens = int(chars / 3.5)
             reserved = self.agent.provider.reserved_output_tokens if self.agent else 4096
             available = context_window - reserved
@@ -2596,28 +2593,15 @@ Or just send me a message!"""
             else:
                 ctx_display = f"{context_window // 1000}K"
 
-            # Compaction thresholds — derived from context window (per-model)
-            msg_thresh = max(100, min(2000, context_window // 1000))
-            chr_thresh = int(context_window * 0.75 * 3.5)
-
             # Build progress bar (10 blocks)
             filled = min(10, pct // 10)
             bar = "█" * filled + "░" * (10 - filled)
 
-            # Compact trigger indicators
-            token_trigger = pct >= 90
-            msg_trigger = msg_count >= msg_thresh
-            char_trigger = chars >= chr_thresh
-
             session_info = (
                 f"📐 Context: {ctx_display} ({available:,} usable)\n"
                 f"`[{bar}]` {pct}% — ~{est_tokens:,}/{available:,} tokens\n"
-                f"📋 Messages: {msg_count}/{msg_thresh}"
-                f"{' ⚠️' if msg_trigger else ''}\n"
-                f"📝 Chars: {chars:,}/{chr_thresh:,}"
-                f"{' ⚠️' if char_trigger else ''}\n"
-                f"🧹 Compactions: {compactions}"
-                f"{' | ⚡ compact soon' if (token_trigger or msg_trigger or char_trigger) else ''}"
+                f"📋 Messages: {msg_count}\n"
+                f"📝 Chars: {chars:,}"
             )
 
         from .. import __version__ as syne_version
@@ -2735,88 +2719,6 @@ Or just send me a message!"""
             lines.append(f"⏳ KG pending: {kg_pending}")
 
         await update.message.reply_text("\n".join(lines))
-
-    async def _cmd_compact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /compact command — summarize old messages to free context."""
-        # Route to remote session if in remote mode
-        user = update.effective_user
-        if user.id in self._remote_node:
-            node_id = self._remote_node[user.id]
-            await self._remote_slash_command(update, context, "/compact", node_id)
-            return
-
-        from ..compaction import compact_session, get_session_stats, _build_preservation_context
-        from ..db.connection import get_connection
-
-        chat_id = str(update.effective_chat.id)
-
-
-        # Find active session
-        async with get_connection() as conn:
-            row = await conn.fetchrow("""
-                SELECT id FROM sessions
-                WHERE platform = 'telegram' AND platform_chat_id = $1 AND status = 'active'
-                ORDER BY updated_at DESC LIMIT 1
-            """, chat_id)
-
-        if not row:
-            await update.message.reply_text("No active session to compact.")
-            return
-
-        session_id = row["id"]
-
-        # Get pre-compact stats
-        stats = await get_session_stats(session_id)
-        if stats["message_count"] <= 25:
-            await update.message.reply_text(
-                f"📊 Session only has {stats['message_count']} messages ({stats['total_chars']:,} chars). "
-                f"Not enough to compact."
-            )
-            return
-
-        await update.message.reply_text(
-            f"🔄 Compacting session...\n"
-            f"Messages: {stats['message_count']} | Chars: {stats['total_chars']:,}"
-        )
-
-        try:
-            key = f"telegram:{chat_id}"
-            conv = self.agent.conversations._active.get(key)
-            if not conv:
-                # Session exists in DB but not loaded yet — trigger load via a dummy dispatch
-                from ..db.models import get_user
-                db_user = await get_user("telegram", str(user.id))
-                if db_user:
-                    conv = await self.agent.conversations.get_or_create_session(
-                        platform="telegram",
-                        chat_id=chat_id,
-                        user=db_user,
-                    )
-            if not conv:
-                await update.message.reply_text("No active conversation to compact.")
-                return
-
-            result = await conv.run_compact()
-
-            if result:
-                # Clear cached conversation so it reloads
-                key = f"telegram:{chat_id}"
-                if key in self.agent.conversations._active:
-                    await self.agent.conversations._active[key].load_history()
-
-                await update.message.reply_text(
-                    f"✅ **Compaction complete**\n\n"
-                    f"Messages: {result['messages_before']} → {result['messages_after']}\n"
-                    f"Chars: {result['chars_before']:,} → {result['chars_after']:,}\n"
-                    f"Summarized: {result['messages_summarized']} messages → {result['summary_length']:,} char summary",
-                    parse_mode="Markdown",
-                )
-            else:
-                await update.message.reply_text("Nothing to compact.")
-
-        except Exception as e:
-            logger.error(f"Compaction failed: {e}", exc_info=True)
-            await update.message.reply_text(f"❌ Compaction failed: {str(e)[:200]}")
 
     async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /evaluator command — manage evaluator model for auto-capture."""
@@ -5377,7 +5279,7 @@ Or just send me a message!"""
             await set_config("provider.active_model", model_key)
             await set_config("provider.chat_model", model_entry.get("model_id", model_key))
             
-            # Hot-reload provider in the running agent (handles context manager + compaction adjustment)
+            # Hot-reload provider in the running agent (handles context manager adjustment)
             await self.agent.reload_provider()
 
             return True, model_entry.get("label", model_key)
@@ -6274,11 +6176,6 @@ Or just send me a message!"""
             await update.message.reply_text("Exited remote mode.")
             return
 
-        # /compact on remote session
-        if text.strip().lower() == "/compact":
-            await self._remote_slash_command(update, context, text, node_id)
-            return
-
         # /new on remote session
         if text.strip().lower() == "/new":
             await self._remote_slash_command(update, context, text, node_id)
@@ -6335,27 +6232,7 @@ Or just send me a message!"""
         chat_id = _make_tg_chat_id(node_id)
         session_key = f"node:{chat_id}"
 
-        if cmd_name == "/compact":
-            conv = self.agent.conversations._active.get(session_key)
-            if not conv:
-                await update.message.reply_text("No active remote conversation.")
-                return
-            msg_count = len(conv._message_cache) if conv._message_cache else 0
-            if msg_count < 4:
-                await update.message.reply_text("Conversation too short to compact.")
-                return
-            try:
-                result = await conv.run_compact()
-                if result:
-                    await update.message.reply_text(
-                        f"Compacted: {result['messages_before']} → {result['messages_after']} messages"
-                    )
-                else:
-                    await update.message.reply_text("Nothing to compact.")
-            except Exception as e:
-                await update.message.reply_text(f"Compact failed: {e}")
-
-        elif cmd_name == "/new":
+        if cmd_name == "/new":
             from ..db.connection import get_connection
             self.agent.conversations._active.pop(session_key, None)
             async with get_connection() as conn:

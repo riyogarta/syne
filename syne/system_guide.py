@@ -20,7 +20,6 @@ syne/
 ├── agent.py             — Core agent: registers tools, manages conversations, OAuth
 ├── boot.py              — Builds system prompt from DB (identity, soul, rules, guides)
 ├── conversation.py      — Conversation loop: context → LLM → tool calls → response
-├── compaction.py         — Summarizes old messages when context gets too long
 ├── context.py           — Context window manager (token counting, message selection)
 ├── security.py          — Permission system, SSRF protection, credential masking
 ├── ratelimit.py         — Per-user rate limiting

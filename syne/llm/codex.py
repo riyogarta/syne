@@ -258,7 +258,7 @@ class CodexProvider(LLMProvider):
                 })
 
         # Validate: remove function_call_output entries without matching function_call
-        # This can happen after compaction removes part of the conversation
+        # This can happen after context trimming removes part of the conversation
         fc_ids = {m["call_id"] for m in input_msgs if m.get("type") == "function_call"}
         input_msgs = [
             m for m in input_msgs

@@ -389,7 +389,7 @@ class _MarkdownStream:
 
 # ── Slash commands ──
 _SLASH_COMMANDS = [
-    "/help", "/models", "/status", "/memory", "/compact",
+    "/help", "/models", "/status", "/memory",
     "/clear", "/cost", "/context", "/exit",
 ]
 
@@ -1491,7 +1491,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                f"  /status   — Show agent status\n"
                f"  /models   — Switch model\n"
                f"  /memory   — Search memories\n"
-               f"  /compact  — Compact conversation now\n"
                f"  /clear    — Clear conversation history\n"
                f"  /cost     — Show session token usage\n"
                f"  /context  — Show context usage\n"
@@ -1600,23 +1599,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             _write("\n")
         else:
             _write(f"  {_DIM}No memories found for '{query}'.{_RESET}\n\n")
-        return True
-
-    elif cmd == "/compact":
-        conv = agent.conversations._active.get(f"cli:{chat_id}")
-        if not conv:
-            _write(f"  {_DIM}No active conversation.{_RESET}\n\n")
-            return True
-        msg_count = len(conv._message_cache)
-        if msg_count < 4:
-            _write(f"  {_DIM}Conversation too short to compact.{_RESET}\n\n")
-            return True
-        _write(f"  {_DIM}Compacting conversation...{_RESET}\n")
-        result = await conv.run_compact()
-        if result:
-            _write(f"  {_DIM_GREEN}Compacted: {result['messages_before']} -> {result['messages_after']} messages{_RESET}\n\n")
-        else:
-            _write(f"  {_DIM}Nothing to compact.{_RESET}\n\n")
         return True
 
     elif cmd == "/models":

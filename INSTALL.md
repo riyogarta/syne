@@ -198,7 +198,6 @@ syne/
 ├── cli.py            # CLI commands
 ├── config.py         # Settings loader
 ├── context.py        # Context window management
-├── compaction.py     # Message compaction
 ├── subagent.py       # Sub-agent manager
 ├── auth/
 │   ├── codex_oauth.py   # ChatGPT/Codex OAuth

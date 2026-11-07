@@ -94,7 +94,7 @@ class ToolActivityMsg:
 
 @dataclass
 class StatusMsg:
-    """Status update (e.g. 'Compacting...', 'Searching memories...')."""
+    """Status update (e.g. 'Searching memories...')."""
     message: str
     type: str = field(default="status", init=False)
 

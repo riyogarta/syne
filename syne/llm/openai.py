@@ -113,7 +113,7 @@ def _to_responses_input(messages: list[ChatMessage]) -> tuple[str, list[dict]]:
     System messages are concatenated into instructions (never overwritten).
     Tool-call ids use the same fallbacks as the chat-completions formatter
     (call_<name>) so calls and outputs still pair up. Unpaired function calls
-    or outputs (e.g. after compaction) are dropped, since the API rejects
+    or outputs (e.g. after context trimming) are dropped, since the API rejects
     them.
     """
     instructions = ""
@@ -347,7 +347,7 @@ class OpenAIProvider(LLMProvider):
     ) -> list[dict]:
         """Convert ChatMessages to OpenAI format, handling tool calls/results.
 
-        Tracks active tool_call IDs to skip orphan tool results (e.g. after compaction).
+        Tracks active tool_call IDs to skip orphan tool results (e.g. after context trimming).
         """
         formatted = []
         active_tool_ids: set[str] = set()

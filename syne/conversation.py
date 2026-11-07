@@ -19,7 +19,6 @@ from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulat
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
 from .context import ContextManager, estimate_messages_tokens, DEFAULT_CHARS_PER_TOKEN
-from .compaction import compact_session, _build_preservation_context
 from .boot import get_full_prompt
 from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
@@ -273,39 +272,11 @@ class Conversation:
             return True
         return False
 
-    async def run_compact(self) -> Optional[dict]:
-        """Single compact implementation — used by auto-compact, manual /compact, and emergency compact.
-
-        Uses the conversation's own provider (same model as chat).
-        """
-        _ctx_tokens = self.context_mgr.available
-        from .db.models import get_config as _gc_hl
-        _history_limit = await _gc_hl("session.history_limit", 100)
-        if isinstance(_history_limit, str):
-            _history_limit = int(_history_limit)
-        # keep_recent must be less than history_limit so resume + recent all fit in loaded history
-        _keep = max(20, min(_history_limit - 10, _ctx_tokens // 5000))
-        _recent = self._message_cache[-_keep:] if self._message_cache else []
-        _preservation = _build_preservation_context(_recent)
-
-        _provider = self.provider
-
-        result = await compact_session(
-            session_id=self.session_id,
-            provider=_provider,
-            keep_recent=_keep,
-            recent_context=_preservation,
-            chars_per_token=self.context_mgr.chars_per_token,
-        )
-        if result:
-            await self.load_history()
-        return result
-
     async def load_history(self) -> list[ChatMessage]:
         """Load recent message history from database for this session.
 
         Loads at most N messages (from session.history_limit config, default 100).
-        Compaction controls total session size; this limits what enters context.
+        Older turns stay in the DB and are reachable via history_search.
         """
         from .db.models import get_config as _get_config
         limit = await _get_config("session.history_limit", 100)
@@ -450,8 +421,6 @@ class Conversation:
         # Only user role — see design note in migration v20 for rationale
         # (single canonical anchor per topic, 3-5x storage saving, reads
         # around anchor recover the assistant/tool context anyway).
-        # Compaction_summary rows are role='system' so they're excluded
-        # by the role check — no metadata inspection needed.
         if role == "user" and inserted_id is not None and content:
             asyncio.create_task(self._embed_message_row(inserted_id, content))
 
@@ -1270,8 +1239,7 @@ class Conversation:
         if not _patched:
             # Surgery couldn't find the held row. With the assistant(tool_use)
             # now correctly persisted during the tool loop, this branch should
-            # be extremely rare (missed only when compaction archived the
-            # source row between hold and bypass). Log for observability.
+            # be extremely rare. Log for observability.
             logger.warning(
                 f"Consent bypass: surgery failed to locate held row for "
                 f"tool={pending_tool} hash={pending_hash!r}. Continuation "
@@ -3230,7 +3198,7 @@ class ConversationManager:
             pass
 
     def add_status_callback(self, callback):
-        """Register a callback for status notifications (compaction, etc.).
+        """Register a callback for status notifications.
 
         callback(session_id: int, message: str) -> None
         Multiple channels can register (Telegram, WhatsApp, CLI, etc.).
@@ -3372,8 +3340,6 @@ class ConversationManager:
         await conv.load_history()
 
         # With Limit N history loading, only last N messages are loaded.
-        # Auto-compact on session load is no longer needed — the pre-flight
-        # compaction check in _chat_inner uses real DB totals.
 
         # Load per-model LLM params from model registry
         from .db.models import get_config as _get_config

@@ -902,6 +902,21 @@ async def _m31_history_expand_window(conn) -> None:
 
 
 
+async def _m32_drop_compaction_config(conn) -> None:
+    """Delete compaction config keys (Riyo, 7 Nov 2026).
+
+    Compaction was removed entirely: syne/compaction.py, run_compact() and
+    the /compact command are gone, so nothing reads these keys anymore.
+    Legacy compaction_summary rows and messages.status are left untouched.
+    """
+    await conn.execute(
+        "DELETE FROM config WHERE key IN ("
+        "'compaction.trigger_percent', "
+        "'session.compaction_keep_recent', "
+        "'session.compaction_overlap_percent')"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -934,6 +949,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (29, _m29_whatsapp_channel_config, "transactional"),
     (30, _m30_whatsapp_reply_prefix, "transactional"),
     (31, _m31_history_expand_window, "transactional"),
+    (32, _m32_drop_compaction_config, "transactional"),
 ]
 
 

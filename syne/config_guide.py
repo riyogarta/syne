@@ -120,28 +120,19 @@ Maps trigger keywords to target categories. Empty object = disabled (original be
 - **Caveat**: a topical question phrased without any trigger keyword misses its
   corpus. Keep keyword lists generous. The memory_search tool bypasses routing.
 
-## Session & Compaction
+## Session
 
-### Compaction Threshold
+### History Window
 | Key | Default | Type |
 |-----|---------|------|
-| `compaction.trigger_percent` | `40` | integer (1-100, %) |
-| `session.compaction_keep_recent` | `40` | integer (messages) |
-| `session.history_limit` | `100` | integer (messages) |
+| `session.history_limit` | `50` | integer (messages) |
 
-Controls when conversation history is compacted (summarized) to save context.
-- `compaction.trigger_percent` — **single token-based trigger** (1-100). Compaction runs
-  when context usage reaches this % of the ACTIVE model's context window. Relative per-model,
-  so it's safe across small (Ollama 8k) and large (Claude 200k) models. Old messages are
-  soft-archived (status='compacted'), NEVER deleted — retained for semantic search & recovery.
-- `compaction_keep_recent` — number of recent messages preserved verbatim after compaction.
 - `history_limit` — max messages loaded into context per turn. Only the last N messages
-  are loaded from DB. If they exceed context, oldest are dropped 4 at a time. Compaction
-  operates on full session in DB — not affected by this limit.
-- **Increase threshold when**: Owner wants longer uncompacted conversations (needs large context model).
-- **Decrease threshold when**: Running into context limits, responses slowing down.
-- **Increase keep_recent when**: Bot loses too much recent context after compaction.
-- **Warning**: Very high thresholds may cause API errors if the model's context window is exceeded.
+  are loaded from DB. If they exceed context, oldest are dropped 4 at a time.
+  Nothing is summarized or deleted — older turns stay in the DB and are reachable via
+  `history_search` / `history_expand`.
+- **Increase when**: the bot loses recent context too often and token budget allows.
+- **Decrease when**: requests are slow or too expensive.
 
 ### Thinking Budget
 | Key | Default | Type |
