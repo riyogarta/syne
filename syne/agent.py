@@ -10,10 +10,6 @@ from .config import SyneSettings
 from .db.connection import init_db, close_db
 from .db.models import get_config, set_config, get_or_create_user, migrate_access_levels
 from .llm.provider import LLMProvider
-from .llm.openai import OpenAIProvider
-from .llm.codex import CodexProvider
-from .llm.together import TogetherProvider
-from .llm.hybrid import HybridProvider
 from .llm.drivers import (
     create_hybrid_provider,
     get_model_from_list,
@@ -543,9 +539,8 @@ class SyneAgent:
         1. Read provider.active_model (key into provider.models)
         2. Look up the model entry from provider.models
         3. Use create_hybrid_provider() to instantiate
-        
-        Backward compatibility:
-        - If provider.primary exists (old format), migrate to new format
+
+        provider.models is created by `syne init`; without it nothing runs.
         """
         # ═══════════════════════════════════════════════════════════════
         # Check for new driver-based model system
@@ -598,154 +593,7 @@ class SyneAgent:
                 "Run 'syne init' to choose a provider."
             )
 
-        if models is not None:
-            # Registry exists but is empty (fresh DB, or every entry was a
-            # removed Gemini OAuth model) — there is nothing to migrate.
-            raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
-
-        # ═══════════════════════════════════════════════════════════════
-        # Backward compatibility: old provider.primary system
-        # Migrate to new format if possible
-        # ═══════════════════════════════════════════════════════════════
-        provider_config = await get_config("provider.primary", None)
-        if provider_config is None:
-            # Fresh DB (`syne db init` / `syne db reset`) or init never
-            # finished: there is no legacy config to migrate, and no provider
-            # works without credentials chosen in `syne init`.
-            raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
-        if isinstance(provider_config, dict):
-            provider_name = provider_config.get("name") or provider_config.get("driver") or "google"
-            legacy_auth = provider_config.get("auth", "oauth")
-        else:
-            provider_name, legacy_auth = "google", "oauth"
-        if provider_name in ("google", "google_cca") and legacy_auth == "oauth":
-            raise RuntimeError(
-                "This install is configured for Gemini OAuth, which Google has shut down. "
-                "Run 'syne init' and choose another provider (Gemini is available via API key)."
-            )
-        chat_model = await get_config("provider.chat_model", "")
-        
-        # Try to migrate to new format
-        await self._migrate_to_driver_system(provider_name, chat_model)
-        
-        # Now use driver system
-        models = await get_config("provider.models", None)
-        active_model_key = await get_config("provider.active_model", None)
-        
-        if models and active_model_key:
-            model_entry = get_model_from_list(models, active_model_key)
-            if model_entry:
-                return await create_hybrid_provider(model_entry)
-        
-        # Final fallback: use old system directly
-        logger.warning("Falling back to legacy provider initialization")
-        return await self._init_provider_legacy(provider_name, chat_model)
-
-    async def _migrate_to_driver_system(self, provider_name: str, chat_model: str):
-        """Migrate from old provider.primary format to new driver-based system."""
-        # Check if already migrated
-        models = await get_config("provider.models", None)
-        if models:
-            return  # Already has model registry
-        
-        # Build model registry based on detected provider
-        # (No Gemini OAuth entries — Google has shut that access down.)
-        # Current models only (2026-10): gpt-5.x is deprecated for ChatGPT
-        # sign-in, Claude Sonnet/Opus 4 (2025-05-14) are retired.
-        default_models = [
-            {"key": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "driver": "codex", "model_id": "gpt-6.1-sol", "auth": "oauth", "context_window": 1050000},
-            {"key": "gpt-6-luna", "label": "GPT-6 Luna", "driver": "codex", "model_id": "gpt-6-luna", "auth": "oauth", "context_window": 1050000},
-        ]
-
-        # Check if provider.primary has driver info (new init format)
-        provider_config = await get_config("provider.primary", None)
-        if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
-            auth = provider_config.get("auth", "oauth")
-            default_models.extend([
-                {"key": "claude-opus", "label": "Claude Opus 5.5", "driver": "anthropic", "model_id": "claude-opus-5-5", "auth": auth, "context_window": 1000000},
-                {"key": "claude-sonnet", "label": "Claude Sonnet 5.5", "driver": "anthropic", "model_id": "claude-sonnet-5-5", "auth": auth, "context_window": 1000000},
-            ])
-
-
-        # Handle anthropic provider mapping
-        if isinstance(provider_config, dict) and provider_config.get("driver") == "anthropic":
-            model_id = provider_config.get("model", chat_model)
-            if "opus" in model_id:
-                active_key = "claude-opus"
-            else:
-                active_key = "claude-sonnet"
-        else:
-            active_key = "gpt-6.1-sol"  # every legacy codex model maps to the current default
-        
-        # Save new format
-        await set_config("provider.models", default_models)
-        await set_config("provider.active_model", active_key)
-        logger.info(f"Migrated to driver-based model system: {active_key}")
-
-    async def _init_provider_legacy(self, provider_name: str, chat_model: str) -> LLMProvider:
-        """Legacy provider initialization for backward compatibility."""
-        import os
-        import json
-        
-        embedding_model = await get_config("provider.embedding_model", "text-embedding-004")
-
-        if provider_name == "google":
-            raise RuntimeError(
-                "This install is configured for Gemini OAuth, which Google has shut down. "
-                "Run 'syne init' and choose another provider (Gemini is available via API key)."
-            )
-
-        elif provider_name == "codex":
-            access_token = await get_config("credential.codex_access_token", "")
-            refresh_token = await get_config("credential.codex_refresh_token", "")
-            if not access_token:
-                access_token = os.environ.get("CODEX_ACCESS_TOKEN", "")
-                refresh_token = os.environ.get("CODEX_REFRESH_TOKEN", "")
-            
-            chat_provider = CodexProvider(
-                access_token=access_token,
-                refresh_token=refresh_token,
-                chat_model=chat_model,
-            )
-            
-            together_key = os.environ.get("TOGETHER_API_KEY")
-            if not together_key:
-                together_key = await get_config("credential.together_api_key", None)
-
-            if together_key:
-                embed_provider = TogetherProvider(
-                    api_key=together_key,
-                    embedding_model="BAAI/bge-base-en-v1.5",
-                )
-                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            return chat_provider
-
-        elif provider_name == "groq":
-            groq_key = await get_config("credential.groq_api_key", None)
-            if not groq_key:
-                groq_key = os.environ.get("GROQ_API_KEY")
-            
-            chat_provider = OpenAIProvider(
-                api_key=groq_key,
-                chat_model=chat_model,
-                base_url="https://api.groq.com/openai/v1",
-                provider_name="groq",
-            )
-            
-            together_key = os.environ.get("TOGETHER_API_KEY")
-            if not together_key:
-                together_key = await get_config("credential.together_api_key", None)
-
-            if together_key:
-                embed_provider = TogetherProvider(
-                    api_key=together_key,
-                    embedding_model="BAAI/bge-base-en-v1.5",
-                )
-                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            return chat_provider
-
-        else:
-            raise RuntimeError(f"Unknown provider: {provider_name}")
+        raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
 
     @staticmethod
     def _add_node_param(params: dict) -> dict:
