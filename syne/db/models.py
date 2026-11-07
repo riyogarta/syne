@@ -181,7 +181,7 @@ async def get_or_create_user(
                     access_level = "owner"
     else:
         # Group interaction — return ephemeral user dict, don't persist.
-        # Group-only users belong in group_members, not global /members.
+        # Group-only users belong in group_members, not the global users list.
         return {
             "id": None,
             "name": name,

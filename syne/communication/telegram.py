@@ -274,8 +274,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("evaluator", self._cmd_evaluator))
         self.app.add_handler(CommandHandler("graph", self._cmd_graph))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
-        self.app.add_handler(CommandHandler("groups", self._cmd_groups))
-        self.app.add_handler(CommandHandler("members", self._cmd_members))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("dcmembers", self._cmd_discordmembers))
         self.app.add_handler(CommandHandler("telemembers", self._cmd_telegrammembers))
@@ -383,11 +381,9 @@ class TelegramChannel:
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
-            BotCommand("groups", "Manage groups, members & aliases"),
             BotCommand("help", "Available commands"),
             BotCommand("identity", "Show agent identity"),
             BotCommand("imagegen", "Switch image generation provider (owner only)"),
-            BotCommand("members", "Manage global user access levels"),
             BotCommand("memory", "Memory statistics"),
             BotCommand("models", "Manage LLM models (owner only)"),
             BotCommand("nodes", "Manage remote nodes (owner only)"),
@@ -1063,7 +1059,7 @@ class TelegramChannel:
                 return None
         
         # Note: group users are NOT registered in global users table.
-        # Only DM users appear in /members. Group members are tracked
+        # Only DM users appear as users in /telemembers. Group members are tracked
         # separately via update_group_member below.
         
         # Auto-collect group member — store from.id + name + username
@@ -2472,8 +2468,7 @@ class TelegramChannel:
 /reset — Clear your consent grants
 
 *Users & Groups* (owner)
-/groups — Manage groups & members
-/members — Manage global user access
+/telemembers — Manage Telegram users & groups
 /wamembers — Manage WhatsApp members
 /dcmembers — Manage Discord members
 /nodes — Manage remote nodes
@@ -6246,68 +6241,6 @@ Or just send me a message!"""
                     await conn.execute("DELETE FROM messages WHERE session_id = ANY($1::int[])", session_ids)
             await update.message.reply_text("Remote session cleared.")
 
-    async def _cmd_groups(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /groups command — manage group members, aliases, access levels.
-
-        Usage (owner DM only):
-            /groups list                          — list all registered groups
-            /groups members <group_id_or_name>    — list members in a group
-            /groups set <group> <member_id> <level>  — set access (owner/family/public)
-            /groups alias <group> <member_id> <name>  — set per-group alias
-        """
-        user = update.effective_user
-        chat = update.effective_chat
-
-        # Owner-only, DM-only
-        from ..db.models import get_user
-        db_user = await get_user("telegram", str(user.id))
-        if not db_user or db_user.get("access_level") != "owner":
-            await update.message.reply_text("⚠️ Only the owner can manage groups.")
-            return
-        if chat.type != "private":
-            await update.message.reply_text("⚠️ Use /groups in DM only.")
-            return
-
-        args = context.args or []
-        if not args:
-            # Show interactive menu with group list
-            await self._group_menu_main(update)
-            return
-
-        subcommand = args[0].lower()
-
-        if subcommand == "add" and len(args) >= 2:
-            await self._group_add(update, args[1])
-        elif subcommand == "list":
-            await self._group_list(update)
-        elif subcommand == "members" and len(args) >= 2:
-            await self._group_members(update, args[1])
-        elif subcommand == "set" and len(args) >= 4:
-            await self._group_set_access(update, args[1], args[2], args[3])
-        elif subcommand == "alias" and len(args) >= 4:
-            alias_name = " ".join(args[3:])  # Allow multi-word aliases
-            await self._group_set_alias(update, args[1], args[2], alias_name)
-        elif subcommand == "model":
-            if len(args) >= 3:
-                await self._group_set_model(update, args[1], args[2])
-            elif len(args) >= 2:
-                await self._group_get_model(update, args[1])
-            else:
-                await update.message.reply_text("❌ Usage: /groups model <group> [model_key]")
-        elif subcommand == "settings" and len(args) >= 2:
-            if len(args) == 2:
-                # View settings
-                await self._group_view_settings(update, args[1])
-            elif len(args) >= 4:
-                # Set or delete a setting
-                key = args[2]
-                value = " ".join(args[3:])
-                await self._group_set_setting(update, args[1], key, value)
-            else:
-                await update.message.reply_text("❌ Usage: /groups settings <group> [key] [value|--delete]")
-        else:
-            await update.message.reply_text("❌ Invalid syntax. Use /groups for help.")
-
     async def _handle_group_callback(self, query, data: str):
         """Handle interactive group menu callbacks."""
         parts = data.split(":")
@@ -6557,10 +6490,14 @@ Or just send me a message!"""
             await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         
         elif action == "add_prompt":
+            self._auth_state[query.from_user.id] = {
+                "type": "group_add",
+                "chat_id": query.message.chat_id,
+            }
             await query.edit_message_text(
                 "➕ <b>Add Group</b>\n\n"
-                "Send the group ID to register:\n"
-                "<code>/groups add &lt;group_id&gt;</code>\n\n"
+                "Send the group ID now (e.g. <code>-1001234567890</code>), "
+                "or /cancel to abort.\n\n"
                 "To find group ID: add the bot to the group, "
                 "or forward a message from the group to @userinfobot.",
                 parse_mode="HTML",
@@ -6568,6 +6505,45 @@ Or just send me a message!"""
                     [InlineKeyboardButton("⬅️ Back", callback_data="groups:main")]
                 ]),
             )
+
+        elif action == "setting_prompt" and len(parts) >= 3:
+            group_id = parts[2]
+            self._auth_state[query.from_user.id] = {
+                "type": "group_setting",
+                "group_id": group_id,
+                "chat_id": query.message.chat_id,
+            }
+            await query.edit_message_text(
+                "✏️ <b>Set Setting</b>\n\n"
+                "Send <code>key value</code>, e.g. <code>language id</code>. "
+                "An existing key is overwritten.\n\n"
+                "Or /cancel to abort.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⬅️ Back", callback_data=f"groups:settings:{group_id}")]
+                ]),
+            )
+
+        elif action == "setting_del" and len(parts) >= 4:
+            group_id = parts[2]
+            from ..db.models import get_group
+            group = await get_group("telegram", group_id)
+            keys = self._group_custom_setting_keys(group)
+            try:
+                idx = int(parts[3])
+            except ValueError:
+                idx = -1
+            if group and 0 <= idx < len(keys):
+                from ..db.connection import get_connection
+                async with get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE groups SET settings = settings - $1, updated_at = NOW() "
+                        "WHERE platform = 'telegram' AND platform_group_id = $2",
+                        keys[idx], group_id,
+                    )
+                self._clear_group_conversation(group_id)
+            # Stale index (list changed meanwhile) just re-renders the view.
+            await self._group_menu_settings(query, group_id)
         
         else:
             await query.answer("Unknown action")
@@ -6576,8 +6552,7 @@ Or just send me a message!"""
         """Deprecated root — delegates to the unified /telemembers menu.
 
         Kept as a thin delegate so every existing caller and every
-        'groups:main' Back button lands on the single root. /groups
-        still works and now opens the unified menu. The '+ Add Group'
+        'groups:main' Back button lands on the single root. The '+ Add Group'
         action this used to own now lives on that root.
         """
         await self._telegrammembers_menu_main(update=update, query=query)
@@ -6740,105 +6715,157 @@ Or just send me a message!"""
         
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
+    @staticmethod
+    def _group_custom_setting_keys(group) -> list:
+        """Editable setting keys of a group, sorted. 'members' and 'model'
+        have their own buttons and are never shown or edited here."""
+        settings = (group or {}).get("settings") or {}
+        return sorted(k for k in settings if k not in ("members", "model"))
+
     async def _group_menu_settings(self, query, group_id: str):
-        """Show group settings with edit options."""
+        """Show group settings with set/delete buttons."""
+        import html as _html
         from ..db.models import get_group
         group = await get_group("telegram", group_id)
         if not group:
             await query.edit_message_text("❌ Group not found.")
             return
-        
-        name = group.get("name", group_id)
+
+        name = _html.escape(str(group.get("name") or group_id))
         settings = group.get("settings") or {}
-        custom = {k: v for k, v in settings.items() if k not in ("members", "model")}
-        
-        if custom:
+        keys = self._group_custom_setting_keys(group)
+
+        if keys:
             text = f"⚙️ <b>{name} — Settings</b>\n\n"
-            for k, v in custom.items():
-                text += f"• <code>{k}</code>: {v}\n"
+            for k in keys:
+                text += f"• <code>{_html.escape(k)}</code>: {_html.escape(str(settings[k]))}\n"
         else:
             text = f"⚙️ <b>{name} — Settings</b>\n\nNo custom settings."
-        
-        text += "\n\nTo set: <code>/groups settings " + name + " key value</code>"
-        
-        buttons = [[InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")]]
+        text += "\n\nTap ✏️ to add or change a setting, 🗑 to remove one."
+
+        buttons = [[InlineKeyboardButton(
+            "✏️ Set setting", callback_data=f"groups:setting_prompt:{group_id}")]]
+        # Index, not key, in callback_data: keys are free text and
+        # callback_data is capped at 64 bytes.
+        for i, k in enumerate(keys):
+            buttons.append([InlineKeyboardButton(
+                f"🗑 {k}", callback_data=f"groups:setting_del:{group_id}:{i}")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data=f"groups:view:{group_id}")])
         await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
 
-    async def _group_get_model(self, update: Update, group_ref: str):
-        """Show current model override for a group."""
+    async def _group_add(self, bot, chat_id: int, group_id_str: str):
+        """Register a group by ID (input from the ➕ Add Group button)."""
+        import html as _html
         from ..db.models import get_group
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-        
-        model = (group.get("settings") or {}).get("model")
-        name = group.get("name", group.get("platform_group_id"))
-        if model:
-            await update.message.reply_text(f"🤖 {name}: model = `{model}`", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"🤖 {name}: using default model (no override)")
+        back = InlineKeyboardMarkup([[InlineKeyboardButton(
+            "⬅️ Telegram Members", callback_data="tgm:main")]])
 
-    async def _group_set_model(self, update: Update, group_ref: str, model_key: str):
-        """Set model override for a group."""
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
+        existing = await get_group("telegram", group_id_str)
+        if existing:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=(f"ℹ️ Group <code>{group_id_str}</code> is already registered as "
+                      f"<b>{_html.escape(str(existing.get('name') or group_id_str))}</b>."),
+                parse_mode="HTML", reply_markup=back,
+            )
             return
-        
-        group_id = group["platform_group_id"]
-        name = group.get("name", group_id)
-        
-        # "default" or "none" clears the override
-        if model_key.lower() in ("default", "none", "clear"):
-            settings = group.get("settings") or {}
-            settings.pop("model", None)
-            from ..db.connection import get_connection
-            async with get_connection() as conn:
-                await conn.execute(
-                    "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
-                    json.dumps(settings), group_id,
-                )
-            # Clear cached conversation so new provider takes effect
-            self._clear_group_conversation(group_id)
-            await update.message.reply_text(f"✅ {name}: model override cleared (using default)")
-            return
-        
-        # Validate model key exists in registry
-        from ..db.models import get_config
-        models = await get_config("provider.models", None)
-        if models:
-            from ..llm.drivers import get_model_from_list
-            entry = get_model_from_list(models, model_key)
-            if not entry:
-                available = ", ".join(f"`{m.get('key')}`" for m in models if m.get("key"))
-                await update.message.reply_text(
-                    f"❌ Model `{model_key}` not found.\n\nAvailable: {available}",
-                    parse_mode="Markdown",
-                )
-                return
-        
-        # Save to group settings
-        settings = group.get("settings") or {}
-        settings["model"] = model_key
+
+        # Try to get group info from Telegram
+        group_name = f"Group {group_id_str}"
+        try:
+            chat = await self.app.bot.get_chat(int(group_id_str))
+            if chat.title:
+                group_name = chat.title
+        except Exception as e:
+            logger.warning(f"Could not get chat info for {group_id_str}: {e}")
+
         from ..db.connection import get_connection
         async with get_connection() as conn:
             await conn.execute(
-                "UPDATE groups SET settings = $1, updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $2",
-                json.dumps(settings), group_id,
+                """INSERT INTO groups (platform, platform_group_id, name, enabled, require_mention)
+                   VALUES ($1, $2, $3, true, true)
+                   ON CONFLICT (platform, platform_group_id) DO NOTHING""",
+                "telegram", group_id_str, group_name,
             )
-        
-        # Clear cached conversation so new provider takes effect
+
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(f"✅ Group registered:\n\n"
+                  f"• Name: {_html.escape(group_name)}\n"
+                  f"• ID: <code>{group_id_str}</code>\n"
+                  f"• Mention required: yes\n\n"
+                  f"Bot will now respond in this group when mentioned."),
+            parse_mode="HTML", reply_markup=back,
+        )
+
+    async def _process_group_add_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle the group ID sent after tapping ➕ Add Group."""
+        bot = context.bot if context else self.app.bot
+        gid = text.strip()
+        if not re.fullmatch(r"-?\d{5,20}", gid):
+            # Keep the state so the owner can simply resend.
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ That is not a group ID. Send digits like -1001234567890, or /cancel to abort.",
+            )
+            return True
+        self._auth_state.pop(user_id, None)
+        await self._group_add(bot, chat_id, gid)
+        return True
+
+    async def _process_group_setting_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
+        """Handle 'key value' sent after tapping ✏️ Set setting."""
+        import html as _html
+        bot = context.bot if context else self.app.bot
+        group_id = state.get("group_id", "")
+        parts = text.strip().split(None, 1)
+        if len(parts) < 2:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Send it as <code>key value</code>, or /cancel to abort.",
+                parse_mode="HTML",
+            )
+            return True
+        key, value = parts[0], parts[1].strip()
+        if key in ("members", "model"):
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ <code>{key}</code> has its own buttons in the group menu. Send another key, or /cancel.",
+                parse_mode="HTML",
+            )
+            return True
+        if not re.fullmatch(r"[A-Za-z0-9_.\-]{1,40}", key):
+            await bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Key may only contain letters, digits, _ . - (max 40). Try again, or /cancel.",
+            )
+            return True
+
+        from ..db.models import get_group
+        group = await get_group("telegram", group_id)
+        self._auth_state.pop(user_id, None)
+        if not group:
+            await bot.send_message(chat_id=chat_id, text="❌ Group not found.")
+            return True
+
+        from ..db.connection import get_connection
+        async with get_connection() as conn:
+            await conn.execute(
+                "UPDATE groups SET settings = jsonb_set(COALESCE(settings, '{}'::jsonb), $1, $2::jsonb), "
+                "updated_at = NOW() WHERE platform = 'telegram' AND platform_group_id = $3",
+                [key], json.dumps(value), group_id,
+            )
         self._clear_group_conversation(group_id)
-        
-        label = ""
-        if models:
-            from ..llm.drivers import get_model_from_list as gm
-            e = gm(models, model_key)
-            if e:
-                label = f" ({e.get('label', '')})"
-        
-        await update.message.reply_text(f"✅ {name}: model set to `{model_key}`{label}", parse_mode="Markdown")
+
+        name = _html.escape(str(group.get("name") or group_id))
+        await bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ <b>{name}</b>: <code>{_html.escape(key)}</code> = {_html.escape(value)}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(
+                "⬅️ Settings", callback_data=f"groups:settings:{group_id}")]]),
+        )
+        return True
 
     def _clear_group_conversation(self, group_id: str):
         """Clear cached conversation for a group so model override takes effect."""
@@ -6848,286 +6875,6 @@ Or just send me a message!"""
         if key in self.agent.conversations._active:
             del self.agent.conversations._active[key]
             logger.info(f"Cleared cached conversation for group {group_id}")
-
-    async def _group_add(self, update: Update, group_id_str: str):
-        """Manually register a group by ID."""
-        # Normalize group ID
-        group_id_str = group_id_str.strip()
-        
-        # Check if already registered
-        from ..db.models import get_group
-        existing = await get_group("telegram", group_id_str)
-        if existing:
-            await update.message.reply_text(f"ℹ️ Group `{group_id_str}` is already registered.", parse_mode="Markdown")
-            return
-        
-        # Try to get group info from Telegram
-        group_name = f"Group {group_id_str}"
-        try:
-            chat = await self.app.bot.get_chat(int(group_id_str))
-            if chat.title:
-                group_name = chat.title
-        except Exception as e:
-            logger.warning(f"Could not get chat info for {group_id_str}: {e}")
-        
-        # Register the group
-        from ..db.connection import get_connection
-        async with get_connection() as conn:
-            await conn.execute(
-                """INSERT INTO groups (platform, platform_group_id, name, enabled, require_mention)
-                   VALUES ($1, $2, $3, true, true)
-                   ON CONFLICT (platform, platform_group_id) DO NOTHING""",
-                "telegram", group_id_str, group_name,
-            )
-        
-        await update.message.reply_text(
-            f"✅ Group registered:\n\n"
-            f"• Name: {group_name}\n"
-            f"• ID: `{group_id_str}`\n"
-            f"• Mention required: yes\n\n"
-            f"Bot will now respond in this group when mentioned.",
-            parse_mode="Markdown",
-        )
-
-    async def _group_list(self, update: Update):
-        """List all registered groups."""
-        from ..db.models import list_groups, get_config
-        groups = await list_groups(platform="telegram", enabled_only=False)
-        if not groups:
-            await update.message.reply_text("No groups registered.")
-            return
-
-        # Build model label lookup
-        models = await get_config("provider.models", [])
-        active = await get_config("provider.active_model", "")
-        model_map = {m["key"]: m.get("label", m["key"]) for m in models if "key" in m}
-        default_label = model_map.get(active, active)
-
-        lines = ["📋 <b>Registered Groups</b>\n"]
-        for g in groups:
-            status = "✅" if g.get("enabled") else "❌"
-            mention = "📢" if not g.get("require_mention") else "🔇"
-            settings = g.get("settings", {}) or {}
-            member_count = len(settings.get("members", {}))
-            mk = settings.get("model")
-            mlabel = model_map.get(mk, mk) if mk else f"Default ({default_label})"
-            # Custom settings (excluding members and model)
-            custom = {k: v for k, v in settings.items() if k not in ("members", "model")}
-            settings_str = ""
-            if custom:
-                settings_str = "\n   ⚙️ " + ", ".join(f"{k}={v}" for k, v in sorted(custom.items()))
-
-            lines.append(
-                f"{status} <b>{g['name']}</b>\n"
-                f"   ID: <code>{g['platform_group_id']}</code>\n"
-                f"   🤖 {mlabel}\n"
-                f"   {mention} mention={'required' if g.get('require_mention') else 'optional'}"
-                f" | {member_count} members{settings_str}"
-            )
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    async def _group_members(self, update: Update, group_ref: str):
-        """List members in a group. group_ref can be ID or partial name."""
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-
-        settings = group.get("settings", {}) or {}
-        members = settings.get("members", {})
-
-        if not members:
-            await update.message.reply_text(
-                f"👥 <b>{group['name']}</b> — no members collected yet.\n"
-                f"Members are auto-collected when they chat in the group.",
-                parse_mode="HTML",
-            )
-            return
-
-        lines = [f"👥 <b>{group['name']}</b> — {len(members)} members\n"]
-        for mid, info in sorted(members.items(), key=lambda x: x[1].get("name", "")):
-            name = info.get("name", "?")
-            alias = info.get("alias")
-            access = info.get("access", "public")
-            username = info.get("username")
-
-            # Access level emoji
-            access_icon = {"owner": "👑", "family": "👨‍👩‍👧", "public": "👤"}.get(access, "❓")
-
-            alias_str = f' → "<b>{alias}</b>"' if alias else ""
-            user_str = f" (@{username})" if username else ""
-            lines.append(f"{access_icon} {name}{user_str}{alias_str}\n   ID: <code>{mid}</code> | {access}")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    async def _group_set_access(self, update: Update, group_ref: str, member_id: str, level: str):
-        """Set a member's access level in a group."""
-        level = level.lower()
-        if level not in ("owner", "family", "public"):
-            await update.message.reply_text("❌ Access level must be: owner, family, or public")
-            return
-
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-
-        from ..db.models import update_group_member
-        result = await update_group_member(
-            platform="telegram",
-            platform_group_id=group["platform_group_id"],
-            member_id=member_id,
-            access=level,
-        )
-        if result:
-            name = result.get("name", member_id)
-            await update.message.reply_text(
-                f"✅ <b>{name}</b> ({member_id}) set to <b>{level}</b> in {group['name']}",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("❌ Failed to update member.")
-
-    async def _group_set_alias(self, update: Update, group_ref: str, member_id: str, alias: str):
-        """Set a member's alias in a group."""
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-
-        from ..db.models import update_group_member
-        result = await update_group_member(
-            platform="telegram",
-            platform_group_id=group["platform_group_id"],
-            member_id=member_id,
-            alias=alias,
-        )
-        if result:
-            name = result.get("name", member_id)
-            await update.message.reply_text(
-                f"✅ <b>{name}</b> ({member_id}) will be called \"<b>{alias}</b>\" in {group['name']}",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("❌ Failed to update alias.")
-
-    async def _group_view_settings(self, update: Update, group_ref: str):
-        """View group settings (excluding members — those are in /groups members)."""
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-
-        settings = group.get("settings", {}) or {}
-        # Filter out 'members' — that's managed via /groups members
-        display = {k: v for k, v in settings.items() if k != "members"}
-
-        if not display:
-            await update.message.reply_text(
-                f"⚙️ <b>{group['name']}</b> — no custom settings.\n\n"
-                f"Set with: <code>/groups settings {group_ref} key value</code>",
-                parse_mode="HTML",
-            )
-            return
-
-        lines = [f"⚙️ <b>{group['name']}</b> settings:\n"]
-        for k, v in sorted(display.items()):
-            lines.append(f"  <b>{k}</b>: {v}")
-        lines.append(f"\nEdit: <code>/groups settings {group_ref} key value</code>")
-        lines.append(f"Delete: <code>/groups settings {group_ref} key --delete</code>")
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    async def _group_set_setting(self, update: Update, group_ref: str, key: str, value: str):
-        """Set or delete a group setting."""
-        group = await self._resolve_group(group_ref)
-        if not group:
-            await update.message.reply_text(f"❌ Group not found: {group_ref}")
-            return
-
-        # Protect 'members' key — managed via /groups set and /groups alias
-        if key == "members":
-            await update.message.reply_text("❌ Use /groups set and /groups alias to manage members.")
-            return
-
-        from ..db.connection import get_connection
-
-        if value == "--delete":
-            async with get_connection() as conn:
-                await conn.execute(
-                    "UPDATE groups SET settings = settings - $1 WHERE id = $2",
-                    key, group["id"],
-                )
-            await update.message.reply_text(
-                f"🗑️ Setting <b>{key}</b> removed from {group['name']}",
-                parse_mode="HTML",
-            )
-        else:
-            async with get_connection() as conn:
-                await conn.execute(
-                    "UPDATE groups SET settings = jsonb_set(COALESCE(settings, '{}'), $1, $2) WHERE id = $3",
-                    [key], f'"{value}"', group["id"],
-                )
-            await update.message.reply_text(
-                f"✅ <b>{group['name']}</b>: <b>{key}</b> = {value}",
-                parse_mode="HTML",
-            )
-
-    async def _resolve_group(self, ref: str) -> Optional[dict]:
-        """Resolve a group reference — by ID or partial name match."""
-        from ..db.models import get_group, list_groups
-
-        # Try exact ID match first (with or without minus)
-        group = await get_group("telegram", ref)
-        if group:
-            return group
-        if not ref.startswith("-"):
-            group = await get_group("telegram", f"-{ref}")
-            if group:
-                return group
-
-        # Partial name match
-        all_groups = await list_groups(platform="telegram", enabled_only=False)
-        ref_lower = ref.lower()
-        matches = [g for g in all_groups if ref_lower in (g.get("name") or "").lower()]
-        if len(matches) == 1:
-            return matches[0]
-        return None
-
-    async def _cmd_members(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /members command — manage global user access levels.
-
-        Usage (owner DM only):
-            /members list                     — list all registered users
-            /members set <id> <level>         — set access level (owner/family/public/blocked)
-        """
-        user = update.effective_user
-        chat = update.effective_chat
-
-        # Owner-only, DM-only
-        from ..db.models import get_user
-        db_user = await get_user("telegram", str(user.id))
-        if not db_user or db_user.get("access_level") != "owner":
-            await update.message.reply_text("⚠️ Only the owner can manage members.")
-            return
-        if chat.type != "private":
-            await update.message.reply_text("⚠️ Use /members in DM only.")
-            return
-
-        args = context.args or []
-        if not args:
-            await self._members_menu_main(update)
-            return
-
-        subcommand = args[0].lower()
-
-        if subcommand == "list":
-            await self._members_list(update)
-        elif subcommand == "set" and len(args) >= 3:
-            await self._members_set(update, args[1], args[2])
-        else:
-            await update.message.reply_text("❌ Invalid syntax. Use /members for help.")
-
-
 
     # ─── WhatsApp allowlist helpers ──────────────────────────────────────
 
@@ -8545,7 +8292,7 @@ Or just send me a message!"""
                 return
 
             # No first-owner / self-downgrade guard needed here, unlike
-            # /members: get_first_owner is pinned to platform 'telegram', and
+            # /telemembers: get_first_owner is pinned to platform 'telegram', and
             # the caller is a Telegram user while the target is a Discord row,
             # so neither can be the same account.
             await update_user("discord", eid, access_level=new_level)
@@ -8704,9 +8451,7 @@ Or just send me a message!"""
     async def _cmd_telegrammembers(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /telemembers -- one root over Telegram users AND groups.
 
-        Owner + DM only, matching /members and /groups. Takes no
-        subcommands: the text subcommands still live on /members and
-        /groups, which remain valid entry points.
+        Owner + DM only. Takes no subcommands: every action is a button.
         """
         try:
             user = update.effective_user
@@ -8735,7 +8480,7 @@ Or just send me a message!"""
 
         Reads the same two sources the split commands read -- users for the
         global level, groups (+ settings['members']) for the per-group one --
-        so nothing here can drift from what /members and /groups show.
+        so nothing here can drift from the user and group detail views.
         """
         from ..db.models import list_users, list_groups, get_config as _gc
 
@@ -8855,8 +8600,7 @@ Or just send me a message!"""
 
         Kept as a thin delegate so every existing caller and every
         'mbr:main' Back button lands on the single root instead of a
-        second, users-only list. /members still works and now opens
-        the unified menu.
+        second, users-only list.
         """
         await self._telegrammembers_menu_main(update=update, query=query)
 
@@ -9099,93 +8843,6 @@ Or just send me a message!"""
         else:
             await query.answer("Unknown action")
 
-    async def _members_list(self, update: Update):
-        """List all registered users with access levels (blocked excluded)."""
-        from ..db.models import list_users
-        users = await list_users(platform="telegram")
-        if not users:
-            await update.message.reply_text("No users registered.")
-            return
-
-        active_users = [u for u in users if u.get("access_level") != "blocked"]
-        blocked_count = len(users) - len(active_users)
-
-        lines = ["👥 <b>Registered Users</b>\n"]
-
-        # Sort: owner first, then family, then public, then others
-        level_order = {"owner": 0, "family": 1, "public": 2}
-        active_users.sort(key=lambda u: (level_order.get(u.get("access_level", "public"), 9), u.get("name", "")))
-
-        for u in active_users:
-            access = u.get("access_level", "public")
-            access_icon = {
-                "owner": "👑",
-                "family": "👨‍👩‍👧",
-                "public": "👤",
-            }.get(access, "❓")
-
-            name = u.get("display_name") or u.get("name", "?")
-            platform_id = u.get("platform_id", "?")
-            lines.append(f"{access_icon} <b>{name}</b> — {access}\n   ID: <code>{platform_id}</code>")
-
-        if blocked_count > 0:
-            lines.append(f"\n🚫 <i>{blocked_count} blocked user(s) hidden</i>")
-
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-
-    async def _members_set(self, update: Update, member_id: str, level: str):
-        """Set a user's global access level."""
-        level = level.lower()
-        valid_levels = ("owner", "family", "public", "blocked")
-        if level not in valid_levels:
-            await update.message.reply_text(
-                f"❌ Access level must be one of: {', '.join(valid_levels)}"
-            )
-            return
-
-        from ..db.models import get_user, update_user, get_first_owner
-
-        # Check user exists
-        db_user = await get_user("telegram", member_id)
-        if not db_user:
-            await update.message.reply_text(
-                f"❌ User with ID <code>{member_id}</code> not found.\n"
-                f"They need to DM the bot first (or chat in an approved group).",
-                parse_mode="HTML",
-            )
-            return
-
-        # IMMUTABLE: First owner cannot be changed via UI — ever
-        first_owner = await get_first_owner("telegram")
-        if first_owner and db_user.get("platform_id") == first_owner.get("platform_id"):
-            if level != "owner":
-                await update.message.reply_text(
-                    "🔒 The original owner's access level cannot be changed.\n"
-                    "This is a permanent protection — only direct database access can modify it."
-                )
-                return
-
-        # Prevent any owner from downgrading themselves
-        current_user = update.effective_user
-        if member_id == str(current_user.id) and level != "owner":
-            await update.message.reply_text(
-                "⚠️ You can't downgrade your own access level.\n"
-                "Another owner would need to do this."
-            )
-            return
-
-        result = await update_user("telegram", member_id, access_level=level)
-        if result:
-            name = result.get("display_name") or result.get("name", member_id)
-            prev_level = db_user.get("access_level", "?")
-            await update.message.reply_text(
-                f"✅ <b>{name}</b> (<code>{member_id}</code>)\n"
-                f"   {prev_level} → <b>{level}</b>",
-                parse_mode="HTML",
-            )
-        else:
-            await update.message.reply_text("❌ Failed to update access level.")
-
     async def _handle_auth_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> bool:
         """Handle user input during auth flow.
         
@@ -9227,6 +8884,10 @@ Or just send me a message!"""
             return await self._process_addgraph_input(user_id, chat_id, text, state, context)
         elif auth_type == "group_alias":
             return await self._process_group_alias_input(user_id, chat_id, text, state, context)
+        elif auth_type == "group_add":
+            return await self._process_group_add_input(user_id, chat_id, text, state, context)
+        elif auth_type == "group_setting":
+            return await self._process_group_setting_input(user_id, chat_id, text, state, context)
         elif auth_type == "wa_edit_name":
             return await self._process_wamembers_input(user_id, chat_id, text, state, context)
         elif auth_type == "dc_edit_name":

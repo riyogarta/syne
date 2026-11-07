@@ -549,7 +549,7 @@ class SyneAgent:
                 await set_config("provider.models", models)
 
         # The default model chosen in /models is used as-is. If it is missing
-        # or cannot be built, Syne still starts (so /models and /members keep
+        # or cannot be built, Syne still starts (so /models and /telemembers keep
         # working) with an UnavailableProvider that raises the original error
         # whenever the default model is used. No other model takes over and
         # the owner's choice is never rewritten.

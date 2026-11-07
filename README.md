@@ -899,8 +899,6 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/vision` | Manage vision provider (for OCR / image analysis) | Owner |
 | `/imagegen` | Manage image generation provider | Owner |
 | `/browse` | Browse directories (share session with CLI) | Owner |
-| `/groups` | Manage groups & members | Owner |
-| `/members` | Manage global user access levels | Owner |
 | `/telemembers` | Manage Telegram users & groups | Owner |
 | `/wamembers` | Manage WhatsApp members, groups & model overrides | Owner |
 | `/dcmembers` | Manage Discord users, servers & model overrides | Owner |
