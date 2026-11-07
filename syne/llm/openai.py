@@ -49,6 +49,216 @@ def _gpt_major(model: str) -> int:
     m = re.search(r"gpt-(\d+)", model or "")
     return int(m.group(1)) if m else 0
 
+# ── Responses API / reasoning_effort compatibility ──────────────────────
+# Some reasoning models (e.g. gpt-6-luna) reject reasoning_effort together
+# with function tools on /v1/chat/completions. On the official OpenAI
+# endpoint, reasoning models are therefore driven through /v1/responses,
+# where reasoning and tools work together. Fallbacks are learned at runtime
+# per (base_url, model), so no model names are hardcoded:
+#   * /responses answers 404/405 -> use chat/completions for that model.
+#   * chat/completions rejects reasoning_effort + tools -> retry once with
+#     reasoning_effort="none" and remember that for the model.
+_RESPONSES_UNSUPPORTED: set[str] = set()
+_EFFORT_NONE_WITH_TOOLS: set[str] = set()
+
+_RESPONSES_RETRYABLE_CODES = {
+    "rate_limit_exceeded", "server_is_overloaded", "server_error", "slow_down",
+}
+
+
+def _is_effort_tools_rejection(error_text: str) -> bool:
+    """True if a 400 says reasoning_effort cannot be combined with tools."""
+    t = (error_text or "").lower()
+    return "reasoning_effort" in t and "tools" in t and "not supported" in t
+
+
+class _ResponsesUnavailable(Exception):
+    """The endpoint has no usable /responses route (404/405)."""
+
+
+class _ResponsesStreamError(Exception):
+    """An error event inside a /responses SSE stream."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code or ""
+        self.message = message or ""
+        super().__init__(f"[{self.code}] {self.message}")
+
+
+def _format_responses_tools(tools: list[dict]) -> list[dict]:
+    """Chat-completions tool schemas -> Responses API function tools.
+
+    strict is set to False explicitly: strict mode requires every property
+    to be required and additionalProperties=false, which our schemas are not.
+    """
+    out = []
+    for tool in tools or []:
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            fn = tool["function"]
+            out.append({
+                "type": "function",
+                "name": fn.get("name", ""),
+                "description": fn.get("description", ""),
+                "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                "strict": False,
+            })
+        else:
+            out.append(tool)
+    return out
+
+
+def _to_responses_input(messages: list[ChatMessage]) -> tuple[str, list[dict]]:
+    """ChatMessages -> (instructions, input items) for /v1/responses.
+
+    System messages are concatenated into instructions (never overwritten).
+    Tool-call ids use the same fallbacks as the chat-completions formatter
+    (call_<name>) so calls and outputs still pair up. Unpaired function calls
+    or outputs (e.g. after compaction) are dropped, since the API rejects
+    them.
+    """
+    instructions = ""
+    items: list[dict] = []
+    for msg in messages:
+        meta = msg.metadata or {}
+        if msg.role == "system":
+            if msg.content:
+                instructions = f"{instructions}\n\n{msg.content}" if instructions else msg.content
+        elif msg.role == "user":
+            imgs: list = []
+            if isinstance(meta.get("images"), list):
+                imgs.extend([x for x in meta["images"] if isinstance(x, dict)])
+            if meta.get("image"):
+                imgs.append(meta["image"])
+            if imgs:
+                parts: list = [{"type": "input_text", "text": msg.content or ""}]
+                for img in imgs:
+                    mime = img.get("mime_type", "image/jpeg")
+                    b64 = img.get("base64", "")
+                    parts.append({"type": "input_image", "image_url": f"data:{mime};base64,{b64}"})
+                items.append({"role": "user", "content": parts})
+            else:
+                items.append({"role": "user", "content": msg.content or ""})
+        elif msg.role == "assistant":
+            if msg.content:
+                items.append({"role": "assistant", "content": msg.content})
+            for tc in meta.get("tool_calls") or []:
+                if "function" in tc:
+                    fn = tc.get("function") or {}
+                    name = fn.get("name", "")
+                    args = fn.get("arguments", "{}")
+                else:
+                    name = tc.get("name", "")
+                    args = tc.get("args", tc.get("arguments", {}))
+                if not isinstance(args, str):
+                    args = json.dumps(args or {})
+                call_id = tc.get("id") or tc.get("call_id") or f"call_{name or 'unknown'}"
+                items.append({
+                    "type": "function_call", "call_id": call_id,
+                    "name": name, "arguments": args or "{}",
+                })
+        elif msg.role == "tool":
+            name = meta.get("tool_name", "unknown")
+            call_id = meta.get("tool_call_id") or f"call_{name}"
+            items.append({
+                "type": "function_call_output", "call_id": call_id,
+                "output": msg.content or "",
+            })
+
+    call_ids = {i["call_id"] for i in items if i.get("type") == "function_call"}
+    out_ids = {i["call_id"] for i in items if i.get("type") == "function_call_output"}
+    items = [
+        i for i in items
+        if (i.get("type") != "function_call" or i["call_id"] in out_ids)
+        and (i.get("type") != "function_call_output" or i["call_id"] in call_ids)
+    ]
+    return instructions, items
+
+
+class _ResponsesStream:
+    """Accumulates /v1/responses SSE events into a ChatResponse payload."""
+
+    def __init__(self, stream_callbacks: Optional[StreamCallbacks] = None):
+        self._cb = stream_callbacks
+        self.text_parts: list[str] = []
+        self.thinking = ""
+        self._calls: dict[str, dict] = {}
+        self._order: list[str] = []
+        self.model: Optional[str] = None
+        self.usage: dict = {}
+        self.status = ""
+
+    @staticmethod
+    def _key(event: dict, item: Optional[dict] = None) -> str:
+        return ((item or {}).get("id") or event.get("item_id")
+                or f"#{event.get('output_index', 0)}")
+
+    def _call(self, key: str) -> dict:
+        if key not in self._calls:
+            self._calls[key] = {"id": "", "name": "", "arguments": ""}
+            self._order.append(key)
+        return self._calls[key]
+
+    def feed(self, event: dict) -> None:
+        et = event.get("type", "")
+        if et == "response.output_text.delta":
+            delta = event.get("delta", "")
+            if delta:
+                self.text_parts.append(delta)
+                if self._cb and self._cb.on_text:
+                    self._cb.on_text(delta)
+        elif et == "response.reasoning_summary_text.delta":
+            delta = event.get("delta", "")
+            if delta:
+                self.thinking += delta
+                if self._cb and self._cb.on_thinking:
+                    self._cb.on_thinking(delta)
+        elif et in ("response.output_item.added", "response.output_item.done"):
+            item = event.get("item") or {}
+            if item.get("type") == "function_call":
+                c = self._call(self._key(event, item))
+                c["id"] = item.get("call_id") or c["id"]
+                c["name"] = item.get("name") or c["name"]
+                if item.get("arguments"):
+                    c["arguments"] = item["arguments"]
+            elif item.get("type") == "reasoning" and et.endswith(".done") and not self.thinking:
+                summaries = item.get("summary") or []
+                self.thinking = "\n\n".join(s.get("text", "") for s in summaries if isinstance(s, dict))
+        elif et == "response.function_call_arguments.delta":
+            self._call(self._key(event))["arguments"] += event.get("delta", "")
+        elif et == "response.function_call_arguments.done":
+            c = self._call(self._key(event))
+            c["arguments"] = event.get("arguments", c["arguments"])
+        elif et in ("response.completed", "response.incomplete"):
+            r = event.get("response") or {}
+            self.model = r.get("model") or self.model
+            self.usage = r.get("usage") or self.usage
+            self.status = r.get("status", "")
+            if self.status == "incomplete":
+                logger.warning(f"OpenAI responses INCOMPLETE: {r.get('incomplete_details')}")
+        elif et == "response.failed":
+            err = (event.get("response") or {}).get("error") or {}
+            raise _ResponsesStreamError(err.get("code", ""), err.get("message", "") or str(err))
+        elif et == "error":
+            raise _ResponsesStreamError(event.get("code", ""), event.get("message", ""))
+
+    @property
+    def content(self) -> str:
+        return "".join(self.text_parts)
+
+    def tool_calls(self) -> Optional[list[dict]]:
+        out = []
+        for key in self._order:
+            c = self._calls[key]
+            if not c["name"]:
+                continue
+            try:
+                args = json.loads(c["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            out.append({"name": c["name"], "args": args, "id": c["id"] or f"call_{c['name']}"})
+        return out or None
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI-compatible API provider.
 
@@ -228,6 +438,21 @@ class OpenAIProvider(LLMProvider):
         model = model or self.chat_model
         is_reasoning = _gpt_major(model.lower()) >= 5 or "o3" in model.lower() or "o1" in model.lower()
 
+        # Reasoning models on the official endpoint go through /v1/responses,
+        # where reasoning_effort and function tools can be combined.
+        if is_reasoning and self._use_responses_api(model):
+            try:
+                return await self._chat_responses(
+                    messages, model=model, max_tokens=max_tokens, tools=tools,
+                    thinking_budget=thinking_budget, stream_callbacks=stream_callbacks,
+                )
+            except _ResponsesUnavailable as e:
+                logger.warning(
+                    f"OpenAI /responses unavailable for {model} ({e}); "
+                    "falling back to /chat/completions"
+                )
+                _RESPONSES_UNSUPPORTED.add(self._model_key(model))
+
         body: dict = {
             "model": model,
             "messages": self._format_messages(hoist_volatile(messages), tools),
@@ -237,6 +462,8 @@ class OpenAIProvider(LLMProvider):
         # Default to "high" — reduces hallucination significantly vs "none"/"low".
         if is_reasoning:
             effort = self._thinking_to_reasoning_effort(thinking_budget)
+            if tools and self._model_key(model) in _EFFORT_NONE_WITH_TOOLS:
+                effort = "none"  # learned: this model rejects effort + tools here
             body["reasoning_effort"] = effort
         else:
             body["temperature"] = temperature
@@ -279,6 +506,20 @@ class OpenAIProvider(LLMProvider):
                     if resp.status_code >= 400:
                         await resp.aread()
                         error_text = resp.text[:500]
+
+                        # Model rejects reasoning_effort together with tools on
+                        # this endpoint: retry once with "none" and remember it.
+                        if (resp.status_code == 400 and tools
+                                and body.get("reasoning_effort") not in (None, "none")
+                                and _is_effort_tools_rejection(resp.text)):
+                            _EFFORT_NONE_WITH_TOOLS.add(self._model_key(model))
+                            logger.warning(
+                                f"OpenAI: {model} rejects reasoning_effort with tools on "
+                                "/chat/completions; retrying with reasoning_effort='none'"
+                            )
+                            body["reasoning_effort"] = "none"
+                            stream_body["reasoning_effort"] = "none"
+                            continue
                         classification = _classify_openai_error(resp.status_code, resp.text, resp.headers)
 
                         if classification.is_terminal:
@@ -412,6 +653,153 @@ class OpenAIProvider(LLMProvider):
             output_tokens=usage.get("completion_tokens", 0),
             tool_calls=tool_calls,
             thinking=thinking_text,
+        )
+
+    def _model_key(self, model: str) -> str:
+        return f"{self.base_url}|{model}"
+
+    def _use_responses_api(self, model: str) -> bool:
+        """Use /v1/responses only on the official endpoint (OpenAI-compatible
+        hosts such as Groq/Together may not implement it), unless it already
+        proved unavailable for this model."""
+        return ("api.openai.com" in self.base_url
+                and self._model_key(model) not in _RESPONSES_UNSUPPORTED)
+
+    def _build_responses_body(
+        self,
+        messages: list[ChatMessage],
+        model: str,
+        max_tokens: Optional[int],
+        tools: Optional[list[dict]],
+        thinking_budget: Optional[int],
+    ) -> dict:
+        instructions, items = _to_responses_input(hoist_volatile(messages))
+        body: dict = {
+            "model": model,
+            "instructions": instructions or "You are a helpful assistant.",
+            "input": items,
+            "stream": True,
+            "store": False,
+            "reasoning": {"effort": self._thinking_to_reasoning_effort(thinking_budget)},
+        }
+        if max_tokens and max_tokens > 0:
+            body["max_output_tokens"] = max_tokens
+        if tools:
+            body["tools"] = _format_responses_tools(tools)
+            body["tool_choice"] = "auto"
+            body["parallel_tool_calls"] = True
+        return body
+
+    async def _chat_responses(
+        self,
+        messages: list[ChatMessage],
+        model: str,
+        max_tokens: Optional[int] = None,
+        tools: Optional[list[dict]] = None,
+        thinking_budget: Optional[int] = None,
+        stream_callbacks: Optional[StreamCallbacks] = None,
+    ) -> ChatResponse:
+        """Chat via /v1/responses (reasoning + tools). Raises
+        _ResponsesUnavailable on 404/405 so the caller can fall back."""
+        body = self._build_responses_body(messages, model, max_tokens, tools, thinking_budget)
+        url = f"{self.base_url}/responses"
+        logger.debug(
+            f"Responses request: model={model}, items={len(body['input'])}, "
+            f"tools={len(body.get('tools') or [])}, effort={body['reasoning']['effort']}"
+        )
+
+        acc = _ResponsesStream(stream_callbacks)
+        async with httpx.AsyncClient(timeout=180) as client:
+          for attempt in range(_TOTAL_ATTEMPTS):
+            last_attempt = attempt >= _MAX_RETRIES
+            acc = _ResponsesStream(stream_callbacks)
+            try:
+                async with client.stream(
+                    "POST", url, json=body, headers=self._get_headers(),
+                    timeout=httpx.Timeout(30.0 if attempt > 0 else 120.0, connect=10.0),
+                ) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
+                        error_text = resp.text[:500]
+                        if resp.status_code in (404, 405):
+                            raise _ResponsesUnavailable(f"HTTP {resp.status_code}")
+                        classification = _classify_openai_error(resp.status_code, resp.text, resp.headers)
+                        if classification.is_terminal:
+                            if "context_length" in (classification.reason or ""):
+                                raise LLMContextWindowError(classification.reason)
+                            raise LLMRateLimitError(classification.reason)
+                        if resp.status_code in (401, 403):
+                            raise LLMAuthError(classification.reason or f"Auth error ({resp.status_code})")
+                        if not classification.is_retryable or last_attempt:
+                            if resp.status_code == 400:
+                                raise LLMBadRequestError(f"OpenAI 400: {error_text}")
+                            raise RuntimeError(f"OpenAI {resp.status_code}: {error_text}")
+                        backoff = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                        server_delay = classification.delay_ms / 1000.0 if classification.delay_ms else 0
+                        delay = max(backoff, server_delay)
+                        logger.warning(
+                            f"OpenAI responses {resp.status_code}, retrying in {delay:.1f}s "
+                            f"(attempt {attempt + 1}/{_TOTAL_ATTEMPTS}): {error_text[:200]}"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    last_data_time = time.monotonic()
+                    async for line in resp.aiter_lines():
+                        now = time.monotonic()
+                        if now - last_data_time > _STREAM_IDLE_TIMEOUT:
+                            logger.warning(f"OpenAI responses stream idle for {_STREAM_IDLE_TIMEOUT}s, aborting")
+                            raise httpx.ReadTimeout(f"Stream idle timeout ({_STREAM_IDLE_TIMEOUT}s)")
+                        last_data_time = now
+                        if not line.startswith("data:"):
+                            continue
+                        data_str = line[5:].strip()
+                        if not data_str or data_str == "[DONE]":
+                            continue
+                        try:
+                            event = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+                        acc.feed(event)
+            except _ResponsesStreamError as e:
+                if e.code == "context_length_exceeded":
+                    raise LLMContextWindowError(e.message or "Context length exceeded")
+                if e.code == "insufficient_quota":
+                    raise LLMRateLimitError(e.message or "Insufficient quota")
+                if e.code in _RESPONSES_RETRYABLE_CODES and not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"OpenAI responses stream error [{e.code}], retrying in {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(f"OpenAI responses failed: [{e.code}] {e.message[:300]}")
+            except (LLMRateLimitError, LLMAuthError, LLMBadRequestError,
+                    LLMContextWindowError, _ResponsesUnavailable):
+                raise
+            except (httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.ReadError) as exc:
+                if not last_attempt:
+                    delay = _backoff_delay(_BASE_DELAY_MS, attempt + 1)
+                    logger.warning(f"OpenAI responses stream error ({type(exc).__name__}), retrying in {delay:.1f}s (attempt {attempt + 1}/{_TOTAL_ATTEMPTS})")
+                    await asyncio.sleep(delay)
+                    continue
+                raise RuntimeError(f"OpenAI responses stream failed after {_TOTAL_ATTEMPTS} attempts: {type(exc).__name__}")
+            break
+          else:
+            raise RuntimeError(f"OpenAI responses API failed after {_TOTAL_ATTEMPTS} attempts")
+
+        usage = acc.usage or {}
+        _itd = usage.get("input_tokens_details") or {}
+        logger.info(
+            "DIAG-CACHE provider=%s(responses) model=%s in=%s cached=%s out=%s",
+            self._provider_name, acc.model or model, usage.get("input_tokens", 0),
+            _itd.get("cached_tokens", 0), usage.get("output_tokens", 0),
+        )
+        return ChatResponse(
+            content=acc.content,
+            model=acc.model or model,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            tool_calls=acc.tool_calls(),
+            thinking=acc.thinking or None,
         )
 
     async def _embed_with_retry(
