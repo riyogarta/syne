@@ -79,10 +79,12 @@ class ImageAnalysisAbility(Ability):
                     err = result.get("error", "unknown")
                     logger.warning(f"Image analysis failed (photo {idx}/{total}): {err}")
                     parts.append(f"=== Foto {idx}/{total} ===\n[Analisis gagal: {err}]")
-            # Only return text if at least one photo produced a real analysis.
-            if any("[Analisis gagal" not in p and "gagal dibaca" not in p for p in parts):
-                return "\n\n".join(parts)
-            return None
+            # A photo that failed is a failure of the request — reported
+            # as-is, never silently dropped.
+            failed = [p for p in parts if "[Analisis gagal" in p or "gagal dibaca" in p]
+            if failed:
+                raise RuntimeError("\n".join(failed))
+            return "\n\n".join(parts)
 
         # Single-image path (unchanged).
         result = await self.execute(
@@ -96,8 +98,7 @@ class ImageAnalysisAbility(Ability):
 
         if result.get("success"):
             return result["result"]
-        logger.warning(f"Image analysis failed: {result.get('error', 'unknown')}")
-        return None
+        raise RuntimeError(result.get("error") or "Image analysis returned no result")
 
     async def execute(self, params: dict, context: dict) -> dict:
         image_url = params.get("image_url", "")

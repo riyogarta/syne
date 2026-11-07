@@ -3393,14 +3393,24 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-            # Use the user's preferred model, fallback to agent default
+            # The user's chosen model if set, else the default model. If the
+            # chosen model fails to load, report it — never run on another.
             _reprocess_provider = self.agent.provider
             _user_db = await get_user("telegram", str(query.from_user.id))
             _user_model = ((_user_db or {}).get("preferences") or {}).get("model")
             if _user_model and self.agent:
-                _override = await self.agent.create_provider_for_model(_user_model)
-                if _override:
-                    _reprocess_provider = _override
+                try:
+                    _reprocess_provider = await self.agent.create_provider_for_model(_user_model)
+                except Exception as e:
+                    logger.error(f"KG reprocess: model '{_user_model}' failed to load: {e}", exc_info=True)
+                    await self.app.bot.send_message(
+                        chat_id=query.message.chat_id,
+                        text=_classify_error(
+                            e, model=_user_model,
+                            access_level=await _sender_access_level(query.from_user),
+                        ),
+                    )
+                    return
 
             async def _bg_reprocess():
                 try:
@@ -4426,8 +4436,15 @@ Or just send me a message!"""
                 try:
                     await self.agent.reload_provider()
                 except Exception as e:
-                    # reload_provider() already restored the previous model
-                    await query.answer(f"Cannot switch: {str(e)[:150]}", show_alert=True)
+                    # The choice is kept. The default now reports this error
+                    # until it is fixed — shown here in full, unchanged.
+                    logger.error(f"Default model '{model_key}' failed to load: {e}", exc_info=True)
+                    await query.answer(f"Default → {entry.get('label', model_key)} (failed to load)")
+                    await query.message.reply_text(_classify_error(
+                        e, model=entry.get('label', model_key),
+                        access_level=await _sender_access_level(query.from_user),
+                    ))
+                    await self._models_menu_main(query)
                     return
             await query.answer(f"Default → {entry.get('label', model_key)}")
             await self._models_menu_main(query)

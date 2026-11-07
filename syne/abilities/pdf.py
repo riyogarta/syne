@@ -780,8 +780,8 @@ class PdfAbility(Ability):
         """Extract text from an uploaded PDF document.
 
         Returns the extracted text (with page-count header) so the LLM can
-        process the PDF content as plain text. Returns None on non-PDF or
-        extraction failure → conversation falls back to native handling.
+        process the PDF content as plain text. Returns None only for non-PDF
+        input; any failure raises and is shown to the user as-is.
         """
         mime = (input_data.get("mime_type") or "").lower()
         filename = input_data.get("filename") or ""
@@ -791,14 +791,14 @@ class PdfAbility(Ability):
 
         b64 = input_data.get("base64", "")
         if not b64:
-            return None
+            raise ValueError(f"PDF '{filename}' has no data")
 
         try:
             import base64
             content = base64.b64decode(b64)
         except Exception as e:
             logger.warning(f"PDF pre_process: base64 decode failed: {e}")
-            return None
+            raise
 
         if len(content) > self._MAX_PDF_BYTES:
             return f"[PDF too large: {len(content) / 1024 / 1024:.1f} MB, max {self._MAX_PDF_BYTES // 1024 // 1024} MB]"
@@ -807,7 +807,7 @@ class PdfAbility(Ability):
             import fitz  # PyMuPDF
         except ImportError:
             logger.warning("PDF pre_process: PyMuPDF (fitz) not installed")
-            return None
+            raise
 
         try:
             doc = fitz.open(stream=content, filetype="pdf")
@@ -853,11 +853,8 @@ class PdfAbility(Ability):
             per_page_vision: dict[int, str] = {}
             vision_used = 0
             if vision_budget:
-                try:
-                    per_page_vision = await self._describe_pages_via_vision(doc, vision_budget)
-                    vision_used = sum(1 for v in per_page_vision.values() if v)
-                except Exception as e:
-                    logger.warning(f"PDF vision fallback failed: {e}")
+                per_page_vision = await self._describe_pages_via_vision(doc, vision_budget)
+                vision_used = sum(1 for v in per_page_vision.values() if v)
 
             doc.close()
 
@@ -878,10 +875,10 @@ class PdfAbility(Ability):
             full_text = "\n\n".join(parts)
         except Exception as e:
             logger.warning(f"PDF pre_process: extraction failed: {e}")
-            return None
+            raise
 
         if not full_text.strip():
-            return f"[PDF '{filename or 'document.pdf'}' ({pages} pages): no extractable text and vision fallback unavailable]"
+            return f"[PDF '{filename or 'document.pdf'}' ({pages} pages): no extractable text]"
 
         truncated = ""
         if len(full_text) > self._MAX_TEXT_CHARS:
@@ -914,7 +911,7 @@ class PdfAbility(Ability):
             page_jobs: list of (page_index, mode) where mode is "drawing" or "image"
                        (selects the vision prompt).
 
-        Returns dict {page_index: description}. Pages that fail are omitted.
+        Returns dict {page_index: description}. Raises if any page fails.
         Bounded by _VISION_CONCURRENCY (parallelism) + _VISION_OVERALL_TIMEOUT.
         """
         import base64 as _b64
@@ -935,12 +932,12 @@ class PdfAbility(Ability):
                 img_b64 = _b64.b64encode(img_bytes).decode("ascii")
                 rendered.append((idx, mode, img_b64))
             except Exception as e:
-                logger.warning(f"PDF page {idx + 1} render failed: {e}")
+                raise RuntimeError(f"PDF page {idx + 1} render failed: {e}") from e
 
         # Parallel vision calls with concurrency cap
         sem = asyncio.Semaphore(self._VISION_CONCURRENCY)
 
-        async def _one(idx: int, mode: str, img_b64: str) -> tuple[int, str | None]:
+        async def _one(idx: int, mode: str, img_b64: str) -> tuple[int, str | None, str | None]:
             prompt = self._PROMPT_DRAWING if mode == "drawing" else self._PROMPT_OCR
             async with sem:
                 try:
@@ -953,28 +950,25 @@ class PdfAbility(Ability):
                         context={},
                     )
                     if result.get("success") and result.get("result"):
-                        return idx, str(result["result"]).strip()
-                    logger.warning(f"Vision page {idx + 1} ({mode}) failed: {result.get('error', 'unknown')}")
+                        return idx, str(result["result"]).strip(), None
+                    return idx, None, result.get("error") or "empty vision result"
                 except Exception as e:
-                    logger.warning(f"Vision page {idx + 1} ({mode}) exception: {e}")
-                return idx, None
+                    return idx, None, f"{type(e).__name__}: {e}"
 
-        results: dict[int, str] = {}
+        tasks = [_one(idx, mode, b64) for idx, mode, b64 in rendered]
         try:
-            tasks = [_one(idx, mode, b64) for idx, mode, b64 in rendered]
             outputs = await asyncio.wait_for(
-                asyncio.gather(*tasks, return_exceptions=False),
+                asyncio.gather(*tasks),
                 timeout=self._VISION_OVERALL_TIMEOUT,
             )
-            for idx, desc in outputs:
-                if desc:
-                    results[idx] = desc
-        except asyncio.TimeoutError:
-            logger.warning(
-                f"PDF vision overall timeout ({self._VISION_OVERALL_TIMEOUT}s) — "
-                f"partial results: {len(results)}/{len(rendered)} pages"
-            )
-        return results
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"PDF vision timed out after {self._VISION_OVERALL_TIMEOUT}s"
+            ) from e
+        errors = [f"page {idx + 1}: {err}" for idx, _desc, err in outputs if err]
+        if errors:
+            raise RuntimeError("PDF vision failed — " + "; ".join(errors))
+        return {idx: desc for idx, desc, _err in outputs if desc}
 
     # pip package name → import name mapping
     _DEPS = {

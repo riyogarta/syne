@@ -142,7 +142,9 @@ class Ability(ABC):
             
         Returns:
             Processed text result, or None if pre-processing failed.
-            When None is returned, the engine falls back to native LLM capability.
+            Return None ONLY when this input is not yours (another ability or
+            the model handles it). On failure RAISE — the error is shown to
+            the user as-is and nothing takes over.
         """
         return None
     

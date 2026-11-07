@@ -1641,17 +1641,18 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             if 0 <= idx < len(models):
                 new_key = models[idx].get("key", "")
                 if new_key != active_key:
+                    # Same behaviour as Telegram /models: the choice is kept;
+                    # if the model cannot load, its original error is shown.
                     await set_config("provider.active_model", new_key)
-                    new_provider = await agent.create_provider_for_model(new_key)
-                    if new_provider:
-                        agent.provider = new_provider
-                        agent.conversations.provider = new_provider
-                        conv_key = f"cli:{chat_id}"
-                        if conv_key in agent.conversations._active:
-                            del agent.conversations._active[conv_key]
+                    await set_config("provider.chat_model", models[idx].get("model_id", ""))
+                    conv_key = f"cli:{chat_id}"
+                    if conv_key in agent.conversations._active:
+                        del agent.conversations._active[conv_key]
+                    try:
+                        await agent.reload_provider()
                         _write(f"  {_DIM_GREEN}Switched to {models[idx].get('label', new_key)}{_RESET}\n\n")
-                    else:
-                        _write(f"  {_DIM_RED}Failed to create provider for {new_key}{_RESET}\n\n")
+                    except Exception as e:
+                        _write(f"  {_DIM_RED}Default set to {models[idx].get('label', new_key)}, but it failed to load: {type(e).__name__}: {e}{_RESET}\n\n")
                 else:
                     _write(f"  {_DIM}Already using {models[idx].get('label', new_key)}.{_RESET}\n\n")
         return True

@@ -12,8 +12,10 @@ from .db.models import get_config, set_config, get_or_create_user, migrate_acces
 from .llm.provider import LLMProvider
 from .llm.drivers import (
     create_hybrid_provider,
+    create_unavailable_provider,
     get_model_from_list,
 )
+from .llm.unavailable import UnavailableProvider
 from .memory.engine import MemoryEngine
 from .tools.registry import ToolRegistry
 from .abilities import AbilityRegistry
@@ -28,11 +30,6 @@ logger = logging.getLogger("syne.agent")
 
 # Config keys the update_config tool may read but never write.
 _TOOL_PROTECTED_CONFIG_PREFIXES = ("provider.", "credential.")
-
-
-def _is_gemini_oauth(entry: dict) -> bool:
-    """Gemini OAuth model entries can no longer work: Google shut that access down."""
-    return entry.get("driver") == "google_cca" and entry.get("auth", "oauth") == "oauth"
 
 
 class SyneAgent:
@@ -83,8 +80,7 @@ class SyneAgent:
         # 1.5. Migrate old access levels (admin→owner, friend/pending→public)
         await migrate_access_levels()
 
-        # 1.6. Config snapshot — taken before provider init, which may rewrite
-        # provider.active_model when the configured model is unusable.
+        # 1.6. Config snapshot — taken before provider init.
         from .db.config_snapshot import auto_snapshot
         await auto_snapshot("startup")
 
@@ -254,21 +250,11 @@ class SyneAgent:
         Called after /model switch to apply the new provider without restart.
         Updates: self.provider, memory engine, context manager, conversation manager, sub-agents.
         """
-        previous_key = getattr(self, "_active_model_key", None)
-        try:
-            new_provider = await self._init_provider()
-        except Exception:
-            # The new model can't be built (missing key, dead OAuth, ...).
-            # Keep the running provider and point the config back at it, so
-            # the next restart doesn't crash-loop on the broken choice.
-            if previous_key:
-                models = await get_config("provider.models", []) or []
-                prev_entry = get_model_from_list(models, previous_key)
-                if prev_entry:
-                    await set_config("provider.active_model", previous_key)
-                    await set_config("provider.chat_model", prev_entry.get("model_id", ""))
-                    logger.warning(f"Provider reload failed — active model restored to '{previous_key}'")
-            raise
+        # A default model that cannot be built becomes an UnavailableProvider
+        # that raises its original error on use. The owner's choice stays in
+        # config and no other model takes over. The error is re-raised at the
+        # end so the caller (/models) shows it.
+        new_provider = await self._init_provider()
         self.provider = new_provider
         logger.info(f"Provider reloaded: {new_provider.name}")
 
@@ -334,27 +320,23 @@ class SyneAgent:
         if self.subagents:
             self.subagents.provider = new_provider
 
+        if isinstance(new_provider, UnavailableProvider):
+            raise new_provider.error
+
     async def create_provider_for_model(self, model_key: str):
         """Create a provider for a specific model key from the registry.
-        
-        Used for per-group/per-user model overrides.
-        Returns None if model key not found.
+
+        Used for per-group/per-user/per-entry/per-node model choices. Never
+        substitutes another model: if the chosen model is missing from the
+        registry or cannot be built, the error is raised to the caller.
         """
         from .llm.drivers import get_model_from_list, create_hybrid_provider
-        
-        models = await get_config("provider.models", None)
-        if not models:
-            return None
-        
+
+        models = await get_config("provider.models", None) or []
         model_entry = get_model_from_list(models, model_key)
         if not model_entry:
-            return None
-        
-        try:
-            return await create_hybrid_provider(model_entry)
-        except Exception as e:
-            logger.warning(f"Failed to create provider for model '{model_key}': {e}")
-            return None
+            raise RuntimeError(f"Model '{model_key}' not found in provider.models.")
+        return await create_hybrid_provider(model_entry)
 
     def _get_oauth_provider(self):
         """Get the actual OAuth-capable provider (unwrap HybridProvider if needed).
@@ -566,34 +548,26 @@ class SyneAgent:
             if migrated:
                 await set_config("provider.models", models)
 
-            # New driver-based system
+        # The default model chosen in /models is used as-is. If it is missing
+        # or cannot be built, Syne still starts (so /models and /members keep
+        # working) with an UnavailableProvider that raises the original error
+        # whenever the default model is used. No other model takes over and
+        # the owner's choice is never rewritten.
+        self._active_model_key = active_model_key
+        try:
+            if not models:
+                raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
             model_entry = get_model_from_list(models, active_model_key) if active_model_key else None
-            if model_entry and not _is_gemini_oauth(model_entry):
-                logger.info(f"Using driver-based model: {model_entry.get('label', active_model_key)}")
-                provider = await create_hybrid_provider(model_entry)
-                self._active_model_key = active_model_key
-                return provider
-
-            # Active model missing or unusable (Gemini OAuth was shut down by
-            # Google): switch to the first usable entry so the service — and
-            # with it Telegram /models — still comes up.
-            fallback = next((m for m in models if not _is_gemini_oauth(m)), None)
-            if fallback:
-                logger.warning(
-                    f"Active model '{active_model_key}' is missing or unusable — "
-                    f"switching to '{fallback.get('key')}'"
-                )
-                provider = await create_hybrid_provider(fallback)
-                await set_config("provider.active_model", fallback["key"])
-                await set_config("provider.chat_model", fallback.get("model_id", ""))
-                self._active_model_key = fallback["key"]
-                return provider
-            raise RuntimeError(
-                "No usable chat model configured (Gemini OAuth was shut down by Google). "
-                "Run 'syne init' to choose a provider."
+            if not model_entry:
+                raise RuntimeError(f"Default model '{active_model_key}' not found in provider.models.")
+            logger.info(f"Using driver-based model: {model_entry.get('label', active_model_key)}")
+            return await create_hybrid_provider(model_entry)
+        except Exception as e:
+            logger.error(
+                f"Default model '{active_model_key}' failed to load: {type(e).__name__}: {e}",
+                exc_info=True,
             )
-
-        raise RuntimeError("No chat model configured. Run 'syne init' to choose a provider.")
+            return await create_unavailable_provider(e, label=active_model_key or "")
 
     @staticmethod
     def _add_node_param(params: dict) -> dict:

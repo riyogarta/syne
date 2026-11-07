@@ -155,7 +155,7 @@ class OfficeAbility(Ability):
         b64 = input_data.get("base64", "")
         path = input_data.get("path", "")
         if not b64 and not path:
-            return None
+            raise ValueError(f"Office document '{filename}' has no data")
 
         try:
             import base64
@@ -166,7 +166,7 @@ class OfficeAbility(Ability):
                     content = f.read()
         except Exception as e:
             logger.warning(f"Office pre_process: read failed: {e}")
-            return None
+            raise
 
         try:
             if kind == "docx":
@@ -184,7 +184,7 @@ class OfficeAbility(Ability):
                 header = f"PowerPoint: {filename or 'slides.pptx'} ({meta['slides']} slide(s), {len(text)} chars)"
         except Exception as e:
             logger.warning(f"Office pre_process: extraction failed ({kind}): {e}")
-            return None
+            raise
 
         if len(text) > self._MAX_EXTRACTED_CHARS:
             text = text[: self._MAX_EXTRACTED_CHARS] + f"\n\n[... truncated at {self._MAX_EXTRACTED_CHARS} chars]"

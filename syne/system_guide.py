@@ -52,7 +52,7 @@ syne/
 │   ├── codex.py         — ChatGPT via Codex OAuth
 │   ├── together.py      — Together AI
 │   ├── ollama.py        — Local Ollama models
-│   ├── hybrid.py        — Multi-provider with failover
+│   ├── hybrid.py        — Chat from one provider, embedding from another
 │   └── drivers.py       — Embedding drivers (Together, OpenAI, Ollama, Google)
 │
 ├── tools/               — Built-in tools (registered in agent.py)

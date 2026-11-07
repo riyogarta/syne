@@ -1642,7 +1642,8 @@ class Conversation:
         # For any input type (image, audio, document, etc.):
         #   1. Try matching ability's pre_process() first
         #   2. If ability succeeds → inject result as text, strip raw input
-        #   3. If ability fails → fallback to native LLM capability
+        #   3. If ability fails → its error is raised as-is (nothing takes over)
+        #   4. If no ability handles the input → native LLM capability
         # This applies to ALL abilities (bundled + self-created).
         # ═══════════════════════════════════════════════════════════════
         if message_metadata:
@@ -3067,38 +3068,34 @@ class Conversation:
                 if not registered.instance.handles_input_type(input_type):
                     continue
 
-                # Lazy dependency install on first pre_process call.
-                # Same logic as registry.execute() — bundled abilities
-                # enabled-by-default never trigger enable() so deps would
-                # otherwise stay uninstalled until first real failure.
+                # Lazy dependency install on first pre_process call (same as
+                # registry.execute()). A failed install is a failure of this
+                # ability: raised as-is, never handed to another ability or
+                # to the chat model.
                 if not getattr(registered, 'deps_ensured', False):
-                    try:
-                        dep_ok, dep_msg = await registered.instance.ensure_dependencies()
-                        if dep_ok:
-                            registered.deps_ensured = True
-                            if dep_msg:
-                                logger.info(f"Ability '{registered.name}' deps: {dep_msg}")
-                        else:
-                            logger.warning(f"Ability '{registered.name}' deps not ready, skipping pre_process: {dep_msg}")
-                            continue
-                    except Exception as e:
-                        logger.warning(f"Ability '{registered.name}' ensure_dependencies crashed: {e}")
-                        continue
-
-                try:
-                    result_text = await registered.instance.pre_process(
-                        input_type, input_data, ability_prompt,
-                        config=registered.config,
-                    )
-                    if result_text:
-                        logger.info(
-                            f"{spec['label']} via ability '{registered.name}': "
-                            f"{len(result_text)} chars"
+                    dep_ok, dep_msg = await registered.instance.ensure_dependencies()
+                    if not dep_ok:
+                        raise RuntimeError(
+                            f"Ability '{registered.name}' dependencies not ready: {dep_msg}"
                         )
-                        break  # First successful ability wins
-                except Exception as e:
-                    logger.error(f"Ability '{registered.name}' pre_process error: {e}")
-                    continue
+                    registered.deps_ensured = True
+                    if dep_msg:
+                        logger.info(f"Ability '{registered.name}' deps: {dep_msg}")
+
+                # pre_process contract: text = handled; None = not this
+                # ability's input (e.g. office ignores PDFs); exception =
+                # failed. A failure propagates unchanged and ends the turn —
+                # no other ability or model takes over.
+                result_text = await registered.instance.pre_process(
+                    input_type, input_data, ability_prompt,
+                    config=registered.config,
+                )
+                if result_text:
+                    logger.info(
+                        f"{spec['label']} via ability '{registered.name}': "
+                        f"{len(result_text)} chars"
+                    )
+                    break  # First ability that handles the input wins
 
             if result_text:
                 # Ability succeeded — inject result, strip raw input
@@ -3106,10 +3103,11 @@ class Conversation:
                 metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
                 self._message_metadata = metadata if metadata else None
             else:
-                # Ability failed — check if LLM can handle natively
+                # No ability claimed this input. That is not a failure —
+                # the chat model reads it natively if it can.
                 if spec["native_check"]():
                     # LLM supports this natively — keep metadata, let LLM handle it
-                    logger.info(f"{spec['label']} ability failed, falling back to native LLM")
+                    logger.info(f"{spec['label']}: no ability handles this input, passed to chat model natively")
                 else:
                     # Plain-text documents (.md/.txt/.csv/.json/source code)
                     # need no ability at all: their bytes ARE the content.
@@ -3131,8 +3129,8 @@ class Conversation:
                         self._message_metadata = metadata if metadata else None
                     else:
                         # No native support — strip and show error
-                        logger.warning(f"{spec['label']} failed — no native fallback available")
-                        user_message = f"{user_message}\n\n[{spec['label']} failed. Tell the user the analysis could not be completed and to try again later.]"
+                        logger.warning(f"{spec['label']}: no ability handles this input and the model cannot read it natively")
+                        user_message = f"{user_message}\n\n[{spec['label']}: no enabled ability handles this input and the model cannot read it natively. Tell the user exactly that.]"
                         metadata = {k: v for k, v in metadata.items() if k != spec["meta_key"]}
                         self._message_metadata = metadata if metadata else None
         

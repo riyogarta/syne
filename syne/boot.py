@@ -482,7 +482,7 @@ Always use dedicated tools instead of `db_query` for tables that have their own 
 ## Ability-First
 Input processing (images, audio, documents) tries abilities FIRST.
 - If you see "[... result: ...]" → use it, don't re-call the ability.
-- If raw data passes through (ability failed/absent) → use your native capability.
+- If raw data passes through (no ability handles that input) → use your native capability. A failed ability is shown to the user as an error; it is never passed to you.
 
 ## Creating Abilities
 New abilities go in `syne/abilities/custom/`. Override `handles_input_type()` and

@@ -21,6 +21,7 @@ from .together import TogetherProvider
 from .hybrid import HybridProvider
 from .anthropic import AnthropicProvider
 from .ollama import OllamaProvider
+from .unavailable import UnavailableProvider
 
 logger = logging.getLogger("syne.llm.drivers")
 
@@ -264,7 +265,7 @@ async def _create_provider_raw(model_entry: dict) -> LLMProvider:
     raise RuntimeError(f"Unhandled driver: {driver_name}")
 
 
-async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
+async def create_embedding_provider(embed_entry: dict) -> LLMProvider:
     """Instantiate an embedding provider from an embedding registry entry.
     
     Args:
@@ -277,15 +278,14 @@ async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
             - dimensions: (optional) Embedding dimensions
             
     Returns:
-        Configured LLMProvider instance or None on failure
+        Configured LLMProvider instance. Raises RuntimeError on failure.
     """
     driver_name = embed_entry.get("driver")
     model_id = embed_entry.get("model_id")
     credential_key = embed_entry.get("credential_key")
     
     if not driver_name or not model_id:
-        logger.error(f"Embedding entry missing driver/model_id: {embed_entry}")
-        return None
+        raise RuntimeError(f"Embedding entry missing driver/model_id: {embed_entry}")
     
     if driver_name == "ollama":
         # Ollama needs no API key — local only
@@ -298,8 +298,9 @@ async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
     # API-key-based providers need a key
     api_key = await _load_api_key(credential_key)
     if not api_key:
-        logger.error(f"No API key for embedding provider {embed_entry.get('label', model_id)}")
-        return None
+        raise RuntimeError(
+            f"No API key for embedding provider {embed_entry.get('label', model_id)} ({credential_key})"
+        )
 
     if driver_name == "together":
         return TogetherProvider(
@@ -315,15 +316,15 @@ async def create_embedding_provider(embed_entry: dict) -> Optional[LLMProvider]:
             provider_name="embedding",
         )
     else:
-        logger.error(f"Unsupported embedding driver: {driver_name}")
-        return None
+        raise RuntimeError(f"Unsupported embedding driver: {driver_name}")
 
 
 async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
     """Create a HybridProvider with chat from model_entry and embedding from registry.
     
     Uses the embedding model registry (provider.embedding_models + provider.active_embedding)
-    to select the embedding provider. Falls back to Together AI if registry not set.
+    to select the embedding provider (installs without a registry use the legacy
+    Together AI key). A failing embedding model raises — no silent switch.
     
     Args:
         model_entry: Model registry entry for chat provider
@@ -334,42 +335,66 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
     from ..db.models import get_config
     
     chat_provider = await create_provider(model_entry)
-    
-    # ═══════════════════════════════════════════════════════════════
-    # Try embedding model registry first
-    # ═══════════════════════════════════════════════════════════════
+    embed_provider = await create_active_embedding_provider()
+    if embed_provider is None:
+        return chat_provider
+    return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
+
+
+async def create_active_embedding_provider() -> Optional[LLMProvider]:
+    """Build the embedding provider selected in /embedding.
+
+    Raises if the selected embedding model is missing or cannot be built —
+    there is no silent switch to another embedding provider. Returns None
+    only when no embedding model is configured at all.
+    """
+    from ..db.models import get_config
+
     embed_models = await get_config("provider.embedding_models", None)
     active_embed_key = await get_config("provider.active_embedding", None)
-    
+
     if embed_models and active_embed_key:
         embed_entry = get_model_from_list(embed_models, active_embed_key)
-        if embed_entry:
-            embed_provider = await create_embedding_provider(embed_entry)
-            if embed_provider:
-                logger.info(f"Using embedding: {embed_entry.get('label', active_embed_key)}")
-                return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-            else:
-                logger.warning(f"Failed to create embedding provider '{active_embed_key}', falling back")
-    
-    # ═══════════════════════════════════════════════════════════════
-    # Fallback: Together AI from env or DB
-    # ═══════════════════════════════════════════════════════════════
+        if not embed_entry:
+            raise RuntimeError(
+                f"Embedding model '{active_embed_key}' not found in provider.embedding_models."
+            )
+        embed_provider = await create_embedding_provider(embed_entry)
+        logger.info(f"Using embedding: {embed_entry.get('label', active_embed_key)}")
+        return embed_provider
+
+    # No embedding registry configured: legacy Together AI key.
     together_key = os.environ.get("TOGETHER_API_KEY")
     if not together_key:
         together_key = await get_config("credential.together_api_key", None)
-    
     if together_key:
-        embed_provider = TogetherProvider(
+        return TogetherProvider(
             api_key=together_key,
             embedding_model="BAAI/bge-base-en-v1.5",
         )
-        return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)
-    else:
-        logger.warning(
-            "No embedding provider available. Memory search will not work. "
-            "Set TOGETHER_API_KEY for embeddings."
-        )
-        return chat_provider
+
+    logger.warning(
+        "No embedding provider configured. Memory search will not work. "
+        "Choose one in /embedding."
+    )
+    return None
+
+
+async def create_unavailable_provider(error: Exception, label: str = "") -> LLMProvider:
+    """Placeholder for a chosen chat model that failed to load.
+
+    Chat re-raises ``error`` unchanged; embedding still works through the
+    active embedding provider (memory does not depend on the chat model).
+    """
+    embed_provider = None
+    embed_error = None
+    try:
+        embed_provider = await create_active_embedding_provider()
+    except Exception as e:
+        embed_error = e
+    return UnavailableProvider(
+        error, label=label, embed_provider=embed_provider, embed_error=embed_error,
+    )
 
 
 async def _load_codex_tokens() -> tuple[str, str, float]:
