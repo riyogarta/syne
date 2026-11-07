@@ -24,7 +24,7 @@ def test_vertex_shape_keeps_name_and_args():
         ChatMessage("user", "hi"),
         ChatMessage("assistant", "", metadata={"tool_calls": [{
             "id": "call_8654607402812060376",
-            "function": {"name": "db_query", "arguments": "{\\"sql\\": \\"SELECT 1\\"}"},
+            "function": {"name": "db_query", "arguments": json.dumps({"sql": "SELECT 1"})},
             "thoughtSignature": "abc",
         }]}),
         ChatMessage("tool", "ok", metadata={"tool_call_id": "call_8654607402812060376",
