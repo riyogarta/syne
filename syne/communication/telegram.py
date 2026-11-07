@@ -209,6 +209,8 @@ class TelegramChannel:
         self._remote_node: dict[int, str] = {}
         # Active processing tasks per chat_id — for /cancel support
         self._active_tasks: dict[int, asyncio.Task] = {}
+        # Background xAI device-code polling tasks per user_id (/cancel aborts)
+        self._xai_device_tasks: dict[int, asyncio.Task] = {}
         # Deduplicate inbound Telegram messages (Telegram may retry delivering the same update)
         # Format: {chat_id: deque([message_id, ...], maxlen=200)}
         self._seen_inbound: dict[int, deque[int]] = {}
@@ -4716,6 +4718,7 @@ Or just send me a message!"""
             keyboard = [
                 [InlineKeyboardButton("OpenAI (OAuth)", callback_data="models:add:codex")],
                 [InlineKeyboardButton("Claude (OAuth)", callback_data="models:add:anthropic")],
+                [InlineKeyboardButton("xAI Grok (OAuth)", callback_data="models:add:xai")],
                 [InlineKeyboardButton("🔑 AI API Key", callback_data="models:add_apikey")],
                 [InlineKeyboardButton("🦙 Ollama (local)", callback_data="models:add_ak:ollama")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="models:main")],
@@ -4910,6 +4913,7 @@ Or just send me a message!"""
             _driver_to_auth = {
                 "codex": "codex",
                 "anthropic": "claude",
+                "xai": "xai",
             }
             auth_key = _driver_to_auth.get(driver)
             if not auth_key:
@@ -4974,6 +4978,7 @@ Or just send me a message!"""
             _oauth_meta = {
                 "codex": ("OpenAI (OAuth)", "gpt-6.1-sol, gpt-6-astra, gpt-6-luna"),
                 "anthropic": ("Claude (OAuth)", "claude-opus-5-5, claude-sonnet-5-5, claude-haiku-5-5"),
+                "xai": ("xAI Grok (OAuth)", "grok-4.6, grok-4.7, grok-4.3, grok-build-0.1"),
             }
             driver_label, examples = _oauth_meta.get(driver, (driver, "model-name"))
             self._auth_state[user.id] = {
@@ -5830,6 +5835,7 @@ Or just send me a message!"""
     _DEFAULT_AUTH_PROVIDERS = [
         {"key": "codex", "label": "OpenAI / Codex", "auth_type": "oauth", "oauth_driver": "codex"},
         {"key": "claude", "label": "Claude / Anthropic", "auth_type": "oauth", "oauth_driver": "claude"},
+        {"key": "xai", "label": "xAI Grok", "auth_type": "oauth", "oauth_driver": "xai"},
         {"key": "groq", "label": "Groq", "auth_type": "api_key", "credential_key": "credential.groq_api_key"},
         {"key": "together", "label": "Together AI", "auth_type": "api_key", "credential_key": "credential.together_api_key"},
         {"key": "openrouter", "label": "OpenRouter", "auth_type": "api_key", "credential_key": "credential.openrouter_api_key"},
@@ -5847,10 +5853,15 @@ Or just send me a message!"""
             return self._DEFAULT_AUTH_PROVIDERS
         # Older installs seeded a Google (Gemini) OAuth entry. Google has
         # closed all OAuth access paths for Gemini, so hide it everywhere.
-        return [
+        providers = [
             p for p in providers
             if not (p.get("auth_type") == "oauth" and p.get("oauth_driver", p.get("key")) == "google")
         ]
+        # Installs seeded before xAI support don't have it in DB. Expose it
+        # anyway (in memory only) so /models can add and re-auth Grok.
+        if not any(p.get("oauth_driver", p.get("key")) == "xai" for p in providers):
+            providers.append(next(p for p in self._DEFAULT_AUTH_PROVIDERS if p["key"] == "xai"))
+        return providers
 
     async def _cmd_cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /cancel command — abort active operation, auth flow, or running sub-agents."""
@@ -5868,6 +5879,12 @@ Or just send me a message!"""
         # Cancel auth flow
         if user.id in self._auth_state:
             self._auth_state.pop(user.id, None)
+            cancelled = True
+
+        # Cancel a pending xAI device-code login (runs in background)
+        xai_task = self._xai_device_tasks.pop(user.id, None)
+        if xai_task and not xai_task.done():
+            xai_task.cancel()
             cancelled = True
 
         # Cancel running sub-agents for this chat's session
@@ -9456,6 +9473,7 @@ Or just send me a message!"""
         "google_cca": 1048576,  # 1M
         "vertex": 1048576,      # 1M
         "codex": 1048576,       # 1M
+        "xai": 500000,          # grok-4.6/4.7 (per api.x.ai/v1/models)
         "anthropic": 200000,    # 200K
         "openai_compat": 128000,
         "groq": 131072,         # 128K
@@ -9466,6 +9484,7 @@ Or just send me a message!"""
         "google_cca": "api_key",  # Gemini OAuth closed by Google
         "vertex": "api_key",
         "codex": "oauth",
+        "xai": "oauth",
         "anthropic": "api_key",
         "openai_compat": "api_key",
         "groq": "api_key",
@@ -9478,6 +9497,7 @@ Or just send me a message!"""
         "google_cca":   {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
         "vertex":       {"temperature": 0.7, "max_tokens": None, "thinking_budget": -1,    "top_p": 0.95, "top_k": 40,   "frequency_penalty": None, "presence_penalty": None},
         "codex":        {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
+        "xai":          {"temperature": 0.7, "max_tokens": None, "thinking_budget": 10000, "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
         "anthropic":    {"temperature": 0.3, "max_tokens": None, "thinking_budget": 32000, "top_p": 0.99, "top_k": 50,   "frequency_penalty": None, "presence_penalty": None},
         "openai_compat":{"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
         "together":     {"temperature": 0.7, "max_tokens": None, "thinking_budget": None,  "top_p": 1.0,  "top_k": None, "frequency_penalty": 0,    "presence_penalty": 0},
@@ -9748,6 +9768,7 @@ Or just send me a message!"""
                 _driver_to_auth = {
                     "codex": "codex",
                     "anthropic": "claude",
+                    "xai": "xai",
                 }
                 auth_key = _driver_to_auth.get(driver)
                 if auth_key:
@@ -10212,6 +10233,11 @@ Or just send me a message!"""
         driver = provider_entry.get("oauth_driver", provider_entry.get("key", ""))
         label = provider_entry.get("label", driver)
 
+        # xAI: device-code flow. Nothing to paste; poll in the background.
+        if driver == "xai":
+            await self._start_xai_device_flow(label, chat_id, user_id, bot)
+            return
+
         # Map oauth_driver → URL generator
         _generators = {
             "codex": self._generate_codex_oauth_url,
@@ -10273,6 +10299,69 @@ Or just send me a message!"""
                 text=f"❌ Failed to start OAuth flow: {str(e)[:200]}",
             )
             self._auth_state.pop(user_id, None)
+
+    async def _start_xai_device_flow(self, label: str, chat_id: int, user_id: int, bot):
+        """xAI device-code login: send link + code, poll for approval in background.
+
+        Does NOT set _auth_state, so the user keeps chatting normally while we
+        wait. /cancel stops the poller.
+        """
+        import html as _h
+        from ..auth.xai_oauth import request_device_code
+
+        old = self._xai_device_tasks.pop(user_id, None)
+        if old and not old.done():
+            old.cancel()
+
+        try:
+            dev = await request_device_code()
+        except Exception as e:
+            logger.error(f"xAI device-code request failed: {e}", exc_info=True)
+            await bot.send_message(chat_id=chat_id, text=f"❌ Failed to start xAI login: {str(e)[:200]}")
+            return
+
+        minutes = max(1, int(dev["expires_in"]) // 60)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔐 <b>{_h.escape(label)} OAuth Setup</b>\n\n"
+                f"1️⃣ Open: {_h.escape(dev['verification_uri_complete'])}\n"
+                f"2️⃣ Sign in with your SuperGrok / X Premium+ account\n"
+                f"3️⃣ Confirm the code: <code>{_h.escape(dev['user_code'])}</code>\n\n"
+                f"Nothing to paste back. Approval is detected automatically.\n"
+                f"⏱️ Expires in {minutes} min. Send /cancel to abort."
+            ),
+            parse_mode="HTML",
+        )
+        logger.info(f"xAI device flow started by user {user_id}")
+
+        task = asyncio.create_task(self._xai_device_poll(dev, label, chat_id, user_id, bot))
+        self._xai_device_tasks[user_id] = task
+
+    async def _xai_device_poll(self, dev: dict, label: str, chat_id: int, user_id: int, bot):
+        """Background poller for the xAI device-code grant."""
+        from ..auth.xai_oauth import poll_device_token, save_tokens
+
+        try:
+            data = await poll_device_token(dev["device_code"], dev["interval"], dev["expires_in"])
+            await save_tokens(data)
+            logger.info("xAI OAuth credentials saved to DB")
+            await bot.send_message(chat_id=chat_id, text=f"✅ {label} OAuth configured successfully!")
+        except asyncio.CancelledError:
+            logger.info(f"xAI device flow cancelled by user {user_id}")
+            raise
+        except Exception as e:
+            logger.error(f"xAI device flow failed: {e}", exc_info=True)
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ xAI login failed: {str(e)[:200]}\n\nTry again via /models → Re-authenticate.",
+                )
+            except Exception:
+                pass
+        finally:
+            if self._xai_device_tasks.get(user_id) is asyncio.current_task():
+                self._xai_device_tasks.pop(user_id, None)
 
     async def _generate_codex_oauth_url(self) -> tuple[str, dict]:
         """Generate Codex/OpenAI OAuth URL with PKCE."""
@@ -10450,6 +10539,14 @@ Or just send me a message!"""
                         expired = time.time() >= float(exp or 0)
                         status = "⚠️ expired" if expired else "✅ active"
                         lines.append(f"🔑 **{label}:** {status}")
+                    else:
+                        lines.append(f"🔑 **{label}:** ❌ not configured")
+                elif driver == "xai":
+                    # Access token is short-lived (6h) and auto-refreshed;
+                    # the refresh token is what keeps the login alive.
+                    refresh = await get_credential("credential.xai_refresh_token")
+                    if refresh:
+                        lines.append(f"🔑 **{label}:** ✅ active (auto-refresh)")
                     else:
                         lines.append(f"🔑 **{label}:** ❌ not configured")
                 else:

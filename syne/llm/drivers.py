@@ -15,6 +15,7 @@ from .provider import LLMProvider, ChatMessage, ChatResponse, clean_capabilities
 from .google import GoogleProvider
 from .vertex import VertexProvider, detect_vertex_region
 from .codex import CodexProvider
+from .xai import XaiProvider
 from .openai import OpenAIProvider
 from .together import TogetherProvider
 from .hybrid import HybridProvider
@@ -31,6 +32,7 @@ _DRIVER_MAP: dict[str, Type[LLMProvider]] = {
     "google_cca": GoogleProvider,
     "vertex": VertexProvider,
     "codex": CodexProvider,
+    "xai": XaiProvider,
     "openai_compat": OpenAIProvider,
     "anthropic": AnthropicProvider,
     "others": OpenAIProvider,
@@ -160,6 +162,20 @@ async def _create_provider_raw(model_entry: dict) -> LLMProvider:
         provider._token_expires_at = expires_at
         return provider
     
+    # ═══════════════════════════════════════════════════════════════
+    # xAI Grok (SuperGrok / X Premium+ OAuth, device-code login)
+    # ═══════════════════════════════════════════════════════════════
+    elif driver_name == "xai":
+        from ..auth.xai_oauth import load_tokens as _load_xai_tokens
+        access_token, refresh_token, expires_at = await _load_xai_tokens()
+        provider = XaiProvider(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            chat_model=model_id,
+        )
+        provider._token_expires_at = expires_at
+        return provider
+
     # ═══════════════════════════════════════════════════════════════
     # Anthropic Claude (OAuth via claude.ai)
     # ═══════════════════════════════════════════════════════════════

@@ -42,6 +42,10 @@ class CodexProvider(LLMProvider):
     Tokens stored in DB (credential.codex_access_token, credential.codex_refresh_token).
     """
 
+    # Path appended to base_url for the Responses endpoint. Subclasses that
+    # talk to a different Responses API host (e.g. xAI) override this.
+    _responses_path = "/codex/responses"
+
     def __init__(
         self,
         access_token: str,
@@ -304,7 +308,7 @@ class CodexProvider(LLMProvider):
             body["tool_choice"] = "auto"
             body["parallel_tool_calls"] = True
 
-        url = f"{self.base_url}/codex/responses"
+        url = f"{self.base_url}{self._responses_path}"
         headers = self._get_headers()
 
         # Log request body (exclude input/instructions for brevity)

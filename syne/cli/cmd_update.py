@@ -140,6 +140,17 @@ def reauth():
                 console.print(f"[red]Codex re-auth failed: {e}[/red]")
                 return
 
+        elif driver == "xai":
+            console.print("[bold]Re-authenticating xAI Grok OAuth...[/bold]")
+            from syne.auth.xai_oauth import login_xai, save_tokens
+            try:
+                creds = await login_xai()
+                await save_tokens(creds)
+                console.print("[green]xAI OAuth tokens refreshed.[/green]")
+            except Exception as e:
+                console.print(f"[red]xAI re-auth failed: {e}[/red]")
+                return
+
         elif driver == "anthropic" and isinstance(primary, dict) and primary.get("auth") == "oauth":
             console.print("[bold]Re-authenticating Claude OAuth...[/bold]")
             from syne.auth.claude_oauth import login_claude

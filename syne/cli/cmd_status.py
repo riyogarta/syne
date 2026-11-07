@@ -109,9 +109,11 @@ def status():
                 auth_type = provider_cfg.get("auth", "") if isinstance(provider_cfg, dict) else ""
                 if auth_type == "oauth" and driver in ("google", "google_cca"):
                     table.add_row("OAuth Token", "[red]Gemini OAuth is no longer available — switch model via /models[/red]")
-                elif auth_type == "oauth" and driver in ("codex", "anthropic"):
+                elif auth_type == "oauth" and driver in ("codex", "anthropic", "xai"):
                     if driver == "codex":
                         expires_at = await get_config("credential.codex_expires_at", 0)
+                    elif driver == "xai":
+                        expires_at = await get_config("credential.xai_expires_at", 0)
                     else:
                         from syne.db.credentials import get_claude_oauth_credentials
                         _claude = await get_claude_oauth_credentials()
