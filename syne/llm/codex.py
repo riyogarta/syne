@@ -214,17 +214,35 @@ class CodexProvider(LLMProvider):
                     if msg.content:
                         input_msgs.append({"role": "assistant", "content": msg.content})
                     for tc in msg.metadata["tool_calls"]:
+                        # History may hold tool calls written by any driver:
+                        # Anthropic/OpenAI/Codex {"id", "name", "args"} or
+                        # Vertex/Gemini {"id", "function": {"name", "arguments"}}.
+                        # Reading only the flat shape sent name=null, and the
+                        # xAI Responses API rejects the whole request (422).
+                        fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                        name = tc.get("name") or fn.get("name")
+                        if not name:
+                            # Unusable: drop it. Its output is removed below
+                            # together with the other orphaned outputs.
+                            logger.warning(f"Codex: dropping history tool call without a name: id={tc.get('id')!r}")
+                            continue
                         # Codex requires IDs starting with "fc_"
-                        raw_id = tc.get("id", tc.get("call_id", ""))
-                        fc_id = raw_id if raw_id.startswith("fc") else f"fc_{raw_id or tc.get('name', 'unknown')}"
-                        args = tc.get("args", tc.get("arguments", {}))
-                        if isinstance(args, dict):
+                        raw_id = str(tc.get("id") or tc.get("call_id") or "")
+                        fc_id = raw_id if raw_id.startswith("fc") else f"fc_{raw_id or name}"
+                        args = tc.get("args")
+                        if args is None:
+                            args = tc.get("arguments")
+                        if args is None:
+                            args = fn.get("arguments")
+                        if args is None or args == "":
+                            args = {}
+                        if not isinstance(args, str):
                             args = json.dumps(args)
                         input_msgs.append({
                             "type": "function_call",
                             "id": fc_id,
                             "call_id": fc_id,
-                            "name": tc.get("name"),
+                            "name": name,
                             "arguments": args,
                         })
                 else:
