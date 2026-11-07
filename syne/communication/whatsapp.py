@@ -1338,7 +1338,23 @@ class WhatsAppChannel:
             )
             from .errors import classify_error
 
-            await self.send_response(chat_jid, classify_error(e))
+            _access = inbound.sender_access
+            if not _access:
+                try:
+                    _u = await get_user("whatsapp", sender_pn)
+                except Exception:
+                    _u = None
+                _access = (_u or {}).get("access_level") or "public"
+            _model = ""
+            try:
+                _conv = self.agent.conversations._active.get(f"whatsapp:{chat_jid}")
+                if _conv:
+                    _model = getattr(_conv.provider, "model_id", "") or _conv.provider.name
+            except Exception:
+                pass
+            await self.send_response(
+                chat_jid, classify_error(e, model=_model, access_level=_access)
+            )
         finally:
             await presence.stop()
 

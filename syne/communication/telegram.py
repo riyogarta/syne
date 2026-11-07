@@ -41,11 +41,12 @@ from ..db.models import (
 logger = logging.getLogger("syne.telegram")
 
 
-def _classify_error(e: Exception, model: str = "") -> str:
-    """Classify any exception into a user-friendly message for Telegram.
+def _classify_error(e: Exception, model: str = "", access_level: str = "public") -> str:
+    """Turn any exception into the user-facing message for Telegram.
 
-    Delegates to the channel-agnostic classify_error() and prepends the
-    warning emoji for Telegram display.
+    Delegates to the channel-agnostic classify_error(), which already
+    includes the warning emoji: owner/family senders see the raw error,
+    everyone else gets one generic message.
 
     Telegram-side delivery errors (TimedOut, NetworkError, etc.) are
     handled WITHOUT the model tag — they're not the LLM's fault.
@@ -55,10 +56,24 @@ def _classify_error(e: Exception, model: str = "") -> str:
     try:
         import telegram.error as _tg_err
         if isinstance(e, _tg_err.TelegramError):
-            return f"⚠️ {classify_error(e, model='')}"
+            return classify_error(e, model='', access_level=access_level)
     except ImportError:
         pass
-    return f"⚠️ {classify_error(e, model=model)}"
+    return classify_error(e, model=model, access_level=access_level)
+
+
+async def _sender_access_level(tg_user) -> str:
+    """Access level of the Telegram user who sent the message (users table).
+
+    Used only to pick the error message variant; never raises.
+    """
+    try:
+        if tg_user is None:
+            return "public"
+        _u = await get_user("telegram", str(tg_user.id))
+        return (_u or {}).get("access_level") or "public"
+    except Exception:
+        return "public"
 
 
 def _make_model_key(model_id: str, driver: str = "") -> str:
@@ -742,7 +757,7 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await self.app.bot.send_message(chat_id, _classify_error(e, model=_model))
+                await self.app.bot.send_message(chat_id, _classify_error(e, model=_model, access_level=access_level))
             except Exception:
                 pass
 
@@ -1007,7 +1022,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
             finally:
                 self._active_tasks.pop(chat.id, None)
 
@@ -1492,7 +1510,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
 
     # Album / media-group debounce window. After the last photo in a group
     # arrives we wait this long before flushing, on the assumption Telegram
@@ -1758,7 +1779,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
                 return
 
         if response:
@@ -1892,7 +1916,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document/file uploads — download, save to disk, pass path to LLM."""
@@ -2044,7 +2071,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""
@@ -2148,7 +2178,10 @@ class TelegramChannel:
                         _model = getattr(_conv.provider, 'model_id', '') or _conv.provider.name
                 except Exception:
                     pass
-                await update.message.reply_text(_classify_error(e, model=_model))
+                await update.message.reply_text(_classify_error(
+                    e, model=_model,
+                    access_level=await _sender_access_level(update.effective_user),
+                ))
 
     async def _reverse_geocode(self, lat: float, lng: float) -> str | None:
         """Reverse geocode coordinates to address using Google Maps API."""
@@ -6223,7 +6256,9 @@ Or just send me a message!"""
             except Exception as e:
                 logger.error(f"Remote message error: {e}", exc_info=True)
                 from ..communication.errors import classify_error
-                await update.message.reply_text(f"⚠️ {classify_error(e)}")
+                await update.message.reply_text(classify_error(
+                    e, access_level=await _sender_access_level(user),
+                ))
 
     async def _remote_slash_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE, cmd: str, node_id: str):
         """Handle slash commands in remote mode (server-side, like gateway does)."""

@@ -1585,19 +1585,27 @@ class Conversation:
                     return _bypass_response
                 try:
                     return await self._chat_inner(user_message, message_metadata)
-                except LLMBadRequestError:
+                except LLMBadRequestError as e:
                     # Provider rejected the request — most likely a safety
                     # refusal triggered by the just-saved user message.
                     # Remove it from history so it cannot poison subsequent
                     # turns (visible chat window is unaffected).
+                    logger.error(
+                        f"Provider rejected request: {type(e).__name__}: {e}",
+                        exc_info=True,
+                    )
                     if await self._delete_last_user_message():
-                        return (
-                            "⚠️ Your last message was rejected by the model "
-                            "(it likely contains wording that triggers a "
-                            "refusal). It has been removed from history so "
-                            "it won't affect future turns. Please rephrase "
-                            "and try again."
-                        )
+                        from .communication.errors import classify_error
+                        _model = ""
+                        try:
+                            _model = (getattr(self.provider, "model_id", "")
+                                      or getattr(self.provider, "name", "") or "")
+                        except Exception:
+                            pass
+                        _access = self.user.get("access_level", "public")
+                        if self.inbound and self.inbound.sender_access:
+                            _access = self.inbound.sender_access
+                        return classify_error(e, model=_model, access_level=_access)
                     raise
             finally:
                 self._processing = False

@@ -355,7 +355,9 @@ class Gateway:
         except Exception as e:
             logger.error(f"Chat error for node {node.node_id}: {e}", exc_info=True)
             from ..communication.errors import classify_error
-            await node.send(ErrorMsg(message=classify_error(e), code="chat_error"))
+            # Paired nodes always run as an owner user
+            # (conversation_remote._get_node_user forces access_level="owner").
+            await node.send(ErrorMsg(message=classify_error(e, access_level="owner"), code="chat_error"))
 
     async def _handle_slash_command(self, node: NodeConnection, cmd: str, cwd: str) -> bool:
         """Handle slash commands from the node. Returns True if handled."""

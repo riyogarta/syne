@@ -1,133 +1,36 @@
-"""Channel-agnostic error classification for user-facing messages."""
+"""Channel-agnostic error formatting for user-facing messages.
 
-import asyncio
-import httpx
+Policy (owner-approved):
+- Sender with access_level "owner" or "family" (DM or group, any channel)
+  sees the ORIGINAL error: ``⚠️ [<model>] <ExceptionType>: <str(e)>``.
+- Everyone else gets one generic message (GENERIC_ERROR_MESSAGE).
 
-from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMContextWindowError, LLMEmptyResponseError
+Callers are responsible for logging the full error (logger.error with
+exc_info) — this function only builds the text shown to the user.
+"""
+
+GENERIC_ERROR_MESSAGE = (
+    "⚠️ There is a problem with the model currently in use. Please try again later."
+)
+
+# Keep the raw error under Telegram's 4096-char message limit.
+_MAX_RAW_LEN = 3500
+_TRUNC_SUFFIX = "… (truncated, full error in log)"
+
+_PRIVILEGED_LEVELS = ("owner", "family")
 
 
-def classify_error(e: Exception, model: str = "") -> str:
-    """Classify any exception into a user-friendly message.
+def classify_error(e: Exception, model: str = "", access_level: str = "public") -> str:
+    """Build the user-facing error message for an exception.
 
-    Works for all channels (Telegram, WhatsApp, CLI). Returns a short
-    string suitable for sending directly to the user.
-    Includes model name for debugging.
+    Owner/family get the raw error (type + message, model-tagged);
+    all other access levels get GENERIC_ERROR_MESSAGE.
     """
+    if (access_level or "").lower() not in _PRIVILEGED_LEVELS:
+        return GENERIC_ERROR_MESSAGE
+
     tag = f"[{model}] " if model else ""
-
-    # 1-4: Typed LLM exceptions (from CCA streaming)
-    if isinstance(e, LLMRateLimitError):
-        return f"{tag}Rate limited. Please wait a moment and try again."
-    if isinstance(e, LLMAuthError):
-        return f"{tag}Authentication error. Owner may need to refresh credentials."
-    if isinstance(e, LLMContextWindowError):
-        return f"{tag}Context too large. Use /compact to free up space, or start a new session."
-    if isinstance(e, LLMBadRequestError):
-        return f"{tag}Provider rejected the request. Try /compact or send a shorter message."
-    if isinstance(e, LLMEmptyResponseError):
-        return f"{tag}No response received. Please try again."
-
-    # 5: httpx HTTP status errors (from non-CCA drivers)
-    if isinstance(e, httpx.HTTPStatusError):
-        code = e.response.status_code
-        if code == 429:
-            return f"{tag}Rate limited. Please wait a moment and try again."
-        if code in (401, 403):
-            return f"{tag}Authentication error. Owner may need to refresh credentials."
-        if code == 400:
-            return f"{tag}Provider rejected the request. Try /compact or send a shorter message."
-        if 500 <= code < 600:
-            return f"{tag}Provider is having server issues. Please try again later."
-        return f"{tag}Provider returned error ({code}). Please try again later."
-
-    # 6: RuntimeError with known message patterns (from Anthropic/other drivers)
-    if isinstance(e, RuntimeError):
-        msg = str(e)
-        if "429" in msg or "rate" in msg.lower():
-            # Try to extract reset time from usage_limit_reached errors
-            _reset_info = ""
-            if "resets_at" in msg:
-                try:
-                    import re as _re, json as _json
-                    _json_match = _re.search(r'\{.*\}', msg, _re.DOTALL)
-                    if _json_match:
-                        _data = _json.loads(_json_match.group())
-                        _err = _data.get("error", _data)
-                        _resets_at = _err.get("resets_at")
-                        if _resets_at:
-                            from datetime import datetime, timezone
-                            _dt = datetime.fromtimestamp(int(_resets_at), tz=timezone.utc)
-                            _reset_info = f" Resets: {_dt.strftime('%d %b %Y %H:%M UTC')}."
-                except Exception:
-                    pass
-            if "usage_limit" in msg:
-                return f"{tag}Usage limit reached.{_reset_info} Use a different model or wait."
-            return f"{tag}Rate limited.{_reset_info} Please wait a moment and try again."
-        if "401" in msg or "403" in msg or "auth" in msg.lower() or "credential" in msg.lower():
-            return f"{tag}Authentication error. Owner may need to refresh credentials."
-        if "400" in msg or "bad request" in msg.lower():
-            return f"{tag}Provider rejected the request. Try /compact or send a shorter message."
-        if "overloaded" in msg.lower() or "529" in msg:
-            return f"{tag}Provider is overloaded. Please try again later."
-        # Anthropic-specific in-stream error classifier — covers api_error,
-        # internal_server_error, timeout_error, and any future error types we
-        # haven't enumerated. RuntimeError raised by anthropic driver always
-        # starts with "Anthropic API" so this catches the whole family.
-        _low = msg.lower()
-        if "anthropic api" in _low:
-            if "timeout" in _low:
-                return f"{tag}Provider timed out. Please try again later."
-            if "internal_server" in _low or "api_error" in _low:
-                return f"{tag}Provider had a server error. Please try again later."
-            # Generic Anthropic stream error — still informative
-            return f"{tag}Provider returned a transient error. Please try again later."
-
-    # 7-8: Database errors
-    try:
-        import asyncpg
-        if isinstance(e, asyncpg.InterfaceError):
-            return "Database connection busy. Please try again in a moment."
-        if isinstance(e, asyncpg.PostgresError):
-            return "Database error. Please try again later."
-    except ImportError:
-        pass
-
-    # 9-10: Network / timeout errors
-    if isinstance(e, httpx.ConnectError):
-        return f"{tag}Cannot connect to provider. Please check connectivity."
-    if isinstance(e, (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.ConnectTimeout)):
-        return f"{tag}Request timed out. Please try again."
-    if isinstance(e, httpx.RemoteProtocolError):
-        return f"{tag}Connection lost. Please try again."
-
-    # 11: asyncio timeout
-    if isinstance(e, asyncio.TimeoutError):
-        return f"{tag}Request timed out. Please try again."
-
-    # 12: Unexpected response shape
-    if isinstance(e, (KeyError, IndexError)):
-        return f"{tag}Unexpected response from provider. Please try again."
-
-    # 13: Not implemented
-    if isinstance(e, NotImplementedError):
-        return f"{tag}This feature is not supported by the current provider."
-
-    # 13b: Telegram delivery errors (don't blame the LLM)
-    try:
-        import telegram.error as _tg_err
-        if isinstance(e, _tg_err.TimedOut):
-            return "Message delivery timed out. Please try again."
-        if isinstance(e, _tg_err.NetworkError):
-            return "Network error while sending message. Please try again."
-        if isinstance(e, _tg_err.RetryAfter):
-            return f"Telegram rate limited the bot. Retry after {getattr(e, 'retry_after', '?')}s."
-        if isinstance(e, _tg_err.BadRequest):
-            return f"Telegram rejected the message: {str(e)[:120]}"
-        if isinstance(e, _tg_err.TelegramError):
-            return f"Telegram error: {str(e)[:120]}"
-    except ImportError:
-        pass
-
-    # 14: Fallback
-    type_name = type(e).__name__
-    return f"{tag}Something went wrong ({type_name}). Please try again."
+    text = f"⚠️ {tag}{type(e).__name__}: {e}"
+    if len(text) > _MAX_RAW_LEN:
+        text = text[:_MAX_RAW_LEN] + _TRUNC_SUFFIX
+    return text

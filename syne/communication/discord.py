@@ -762,7 +762,24 @@ class DiscordChannel:
                 )
         except Exception as e:
             logger.error(f"Discord dispatch failed: {type(e).__name__}: {e}", exc_info=True)
-            await self._safe_send(message.channel, "⚠️ Something broke while handling that.")
+            from .errors import classify_error
+            _access = inbound.sender_access
+            if not _access:
+                try:
+                    _u = await get_user("discord", str(author.id))
+                except Exception:
+                    _u = None
+                _access = (_u or {}).get("access_level") or "public"
+            _model = ""
+            try:
+                _conv = self.agent.conversations._active.get(f"discord:{inbound.chat_id}")
+                if _conv:
+                    _model = getattr(_conv.provider, "model_id", "") or _conv.provider.name
+            except Exception:
+                pass
+            await self._safe_send(
+                message.channel, classify_error(e, model=_model, access_level=_access)
+            )
             return
 
         if not response:
