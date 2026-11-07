@@ -518,36 +518,33 @@ def _wrap_stray_tables(html: str) -> str:
     return ''.join(new_parts)
 
 
+_CODE_SPAN_RE = re.compile(r'`([^`]+)`')
+_CODE_PLACEHOLDER_RE = re.compile('\x00(\\d+)\x00')
+
+
 def _format_inline(text: str) -> str:
-    """Apply inline markdown formatting to a single line."""
-    # Process segments — protect code spans first
-    segments = []
-    pos = 0
-    
-    # Find all inline code spans first
-    code_pattern = re.compile(r'`([^`]+)`')
-    last_end = 0
-    
-    for match in code_pattern.finditer(text):
-        # Process text before this code span
-        if match.start() > last_end:
-            segments.append(('text', text[last_end:match.start()]))
-        segments.append(('code', match.group(1)))
-        last_end = match.end()
-    
-    # Remaining text after last code span
-    if last_end < len(text):
-        segments.append(('text', text[last_end:]))
-    
-    # Now format each segment
-    parts = []
-    for seg_type, seg_text in segments:
-        if seg_type == 'code':
-            parts.append(f'<code>{_escape(seg_text)}</code>')
-        else:
-            parts.append(_format_text_segment(seg_text))
-    
-    return ''.join(parts)
+    """Apply inline markdown formatting to a single line.
+
+    Inline code spans are swapped for placeholders first, then bold/italic/
+    links are applied to the WHOLE line, then the placeholders are restored
+    as <code>. Formatting the text between code spans piece by piece (the
+    old approach) split pairs like **bold `code` bold** across pieces, so
+    the ** markers never matched and reached the user raw.
+    """
+    if '\x00' in text:  # never let input collide with our placeholders
+        text = text.replace('\x00', '')
+
+    codes: list[str] = []
+
+    def _stash(m):
+        codes.append(m.group(1))
+        return f'\x00{len(codes) - 1}\x00'
+
+    protected = _CODE_SPAN_RE.sub(_stash, text)
+    formatted = _format_text_segment(protected)
+    return _CODE_PLACEHOLDER_RE.sub(
+        lambda m: f'<code>{_escape(codes[int(m.group(1))])}</code>', formatted
+    )
 
 
 def _format_text_segment(text: str) -> str:

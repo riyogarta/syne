@@ -168,3 +168,39 @@ class TestMarkdownToTelegramHtml:
         result = markdown_to_telegram_html(text)
         assert "<pre>" in result
         assert "<b>done</b>" in result
+
+
+
+# ── bold/italic spanning inline code (v1.22.29) ─────────────────────
+
+def test_bold_wrapping_inline_code():
+    from syne.communication.formatting import markdown_to_telegram_html as f
+    assert f("**1. GPT lewat `/v1/responses` (pilihan 3)**") == (
+        "<b>1. GPT lewat <code>/v1/responses</code> (pilihan 3)</b>"
+    )
+
+
+def test_italic_wrapping_inline_code():
+    from syne.communication.formatting import markdown_to_telegram_html as f
+    assert f("*pakai `x` dulu*") == "<i>pakai <code>x</code> dulu</i>"
+
+
+def test_markdown_inside_code_stays_literal():
+    from syne.communication.formatting import markdown_to_telegram_html as f
+    # NB: a literal "<b>" would trigger the raw-HTML pre-pass (by design),
+    # so HTML escaping inside code is checked with comparison operators.
+    assert f("lihat `**a**` dan `a < b && c > d`") == (
+        "lihat <code>**a**</code> dan <code>a &lt; b &amp;&amp; c &gt; d</code>"
+    )
+
+
+def test_mixed_code_and_bold_outside():
+    from syne.communication.formatting import markdown_to_telegram_html as f
+    assert f("Commit: `6b8959b` untuk **perbaikan** saja") == (
+        "Commit: <code>6b8959b</code> untuk <b>perbaikan</b> saja"
+    )
+
+
+def test_nul_in_input_is_dropped():
+    from syne.communication.formatting import markdown_to_telegram_html as f
+    assert f("a\x000\x00 `c`") == "a0 <code>c</code>"
