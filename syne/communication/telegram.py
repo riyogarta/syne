@@ -1137,6 +1137,52 @@ class TelegramChannel:
         except Exception as e:
             logger.error(f"Failed to clear pending flag for {platform_id}: {e}")
 
+    async def _revoke_member(self, platform: str, platform_id: str) -> dict | None:
+        """Delete from a members menu: revoke access, keep everything else.
+
+        The users row, chat history and memories all stay. The user is set
+        back to public with preferences.pending_approval = "revoked", which
+        the DM gates (Telegram here, Discord in discord.py) treat exactly
+        like a brand-new user: their next DM is held and the owner gets the
+        Approve/Reject prompt again. Approving clears the flag, and the old
+        history is still attached. "revoked" rather than True so the gate
+        still sends the user the one-time "pending approval" notice.
+
+        The row cannot simply be deleted: memory.user_id references it, and
+        detaching memories (user_id = NULL) would turn them into general
+        memories recalled for everyone.
+
+        Cached DM conversations are dropped so a later approval starts with
+        the new access level. Returns the updated row, or None if absent.
+        """
+        from ..db.connection import get_connection
+        from ..tools.history import group_session_sql
+        user = await get_user(platform, platform_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        prefs["pending_approval"] = "revoked"
+        result = await update_user(
+            platform, platform_id, access_level="public", preferences=prefs
+        )
+        chat_ids = [platform_id] if platform == "telegram" else []
+        try:
+            async with get_connection() as conn:
+                rows = await conn.fetch(
+                    "SELECT s.platform_chat_id FROM sessions s "
+                    "JOIN users u ON u.id = s.user_id "
+                    "WHERE u.platform = $1 AND u.platform_id = $2 "
+                    f"AND NOT {group_session_sql('s')}",
+                    platform, platform_id,
+                )
+            chat_ids += [r["platform_chat_id"] for r in rows if r["platform_chat_id"]]
+        except Exception as e:
+            logger.warning(f"[members] DM session lookup failed for {platform}:{platform_id}: {e}")
+        if self.agent and self.agent.conversations:
+            for cid in set(chat_ids):
+                self.agent.conversations._active.pop(f"{platform}:{cid}", None)
+        return result
+
     async def _handle_pending_user(self, update: Update, db_user: dict):
         """Handle messages from pending (unapproved) users.
         
@@ -1153,7 +1199,9 @@ class TelegramChannel:
         # message", which is what decides whether to acknowledge the user —
         # no in-memory set needed, and it stays correct across restarts.
         prefs = dict(db_user.get("preferences") or {})
-        first_hold = not prefs.get("pending_approval")
+        # "revoked" (set by the members-menu Delete) also counts as a first
+        # hold, so a revoked user is told once that they are pending again.
+        first_hold = prefs.get("pending_approval") is not True
         if first_hold:
             prefs["pending_approval"] = True
             try:
@@ -7765,6 +7813,7 @@ Or just send me a message!"""
                 "model": ov.get("model"),
                 "blocked": u.get("access_level") == "blocked",
                 "access_level": u.get("access_level") or "public",
+                "pending": bool((u.get("preferences") or {}).get("pending_approval")),
                 "exists": True,
             }
 
@@ -7894,7 +7943,10 @@ Or just send me a message!"""
     async def _discordmembers_menu_main(self, update=None, query=None):
         """Show Discord members split into DM / Servers sections."""
         entries = await self._dc_collect()
-        active = {k: v for k, v in entries.items() if not v.get("blocked")}
+        # Pending DM users (deleted via Delete, or not yet approved) are not
+        # listed; they reappear once approved.
+        active = {k: v for k, v in entries.items()
+                  if not v.get("blocked") and not v.get("pending")}
         blocked_count = sum(1 for v in entries.values() if v.get("blocked"))
 
         dm_entries = {k: v for k, v in active.items() if v.get("kind") != "guild"}
@@ -7990,6 +8042,8 @@ Or just send me a message!"""
         # and per-member access lives in groups.settings['members'].
         if not is_guild:
             lines.append(f"Access: <b>{access}</b>")
+            if entry.get("pending"):
+                lines.append("⏳ <i>Pending approval — held until approved</i>")
         lines.append(
             f"Status: {('⛔ Disabled' if is_guild else '🚫 Blocked') if blocked else '✅ Active'}"
         )
@@ -8030,6 +8084,9 @@ Or just send me a message!"""
             buttons.append([InlineKeyboardButton(
                 "⛔ Disable" if is_guild else "🚫 Block",
                 callback_data=f"dc:block:{eid}")])
+        if not is_guild and access != "owner" and entry.get("exists", True):
+            buttons.append([InlineKeyboardButton(
+                "🗑 Delete", callback_data=f"dc:delete_confirm:{eid}")])
         if is_guild:
             buttons.append([InlineKeyboardButton(
                 "🚪 Leave server", callback_data=f"dc:leave_confirm:{eid}")])
@@ -8354,6 +8411,46 @@ Or just send me a message!"""
                 await query.answer(f"Require mention: {'on' if want else 'off'}")
             await self._discordmembers_menu_detail(query, eid)
 
+        elif action == "delete_confirm" and eid:
+            entries = await self._dc_collect()
+            entry = entries.get(eid) or {}
+            name = entry.get("name") or eid
+            buttons = [[
+                InlineKeyboardButton("✅ Yes, delete", callback_data=f"dc:delete_yes:{eid}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"dc:view:{eid}"),
+            ]]
+            await query.edit_message_text(
+                f"🗑 Delete <b>{name}</b> (<code>{eid}</code>)?\n\n"
+                "Access is revoked: their next DM is held until you approve "
+                "them again. Chat history and memories are kept.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup(buttons),
+            )
+
+        elif action == "delete_yes" and eid:
+            entries = await self._dc_collect()
+            entry = entries.get(eid) or {}
+            if entry.get("kind") == "guild":
+                await query.answer("Servers are removed with Leave server", show_alert=True)
+                await self._discordmembers_menu_detail(query, eid)
+                return
+            if entry.get("access_level") == "owner":
+                await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
+                await self._discordmembers_menu_detail(query, eid)
+                return
+            revoked = await self._revoke_member("discord", eid)
+            if not revoked:
+                await query.answer("No database row to change", show_alert=True)
+                await self._discordmembers_menu_detail(query, eid)
+                return
+            # Let the Discord gate ask the owner again on their next DM.
+            from .registry import CHANNEL_DISCORD, get_channel
+            dc = get_channel(CHANNEL_DISCORD)
+            if dc is not None:
+                getattr(dc, "_pending_notified", set()).discard(f"dm:{eid}")
+            await query.answer("Deleted — must be approved again")
+            await self._discordmembers_menu_main(query=query)
+
         elif action == "leave_confirm" and eid:
             entries = await self._dc_collect()
             entry = entries.get(eid) or {}
@@ -8485,8 +8582,14 @@ Or just send me a message!"""
         from ..db.models import list_users, list_groups, get_config as _gc
 
         users = await list_users(platform="telegram")
-        active = [u for u in users if u.get("access_level") != "blocked"]
-        blocked_count = len(users) - len(active)
+        blocked_count = sum(1 for u in users if u.get("access_level") == "blocked")
+        # Pending users (deleted via Delete, or new and not yet approved) are
+        # not listed; they reappear once approved.
+        active = [
+            u for u in users
+            if u.get("access_level") != "blocked"
+            and not (u.get("preferences") or {}).get("pending_approval")
+        ]
 
         level_order = {"owner": 0, "family": 1, "public": 2}
         active.sort(key=lambda u: (
@@ -8647,6 +8750,8 @@ Or just send me a message!"""
             _def_lbl = next((m.get("label", _active) for m in _models if m.get("key") == _active), _active)
             model_label = f"<i>Default ({_def_lbl})</i>"
         text = f"👤 <b>{name}</b>\n\nID: <code>{platform_id}</code>\nAccess: <b>{access}</b>\nModel: {model_label}"
+        if (user.get("preferences") or {}).get("pending_approval"):
+            text += "\n⏳ <i>Pending approval — held until approved</i>"
         if is_first_owner:
             text += "\n🔒 <i>First owner (immutable)</i>"
 
@@ -8664,7 +8769,7 @@ Or just send me a message!"""
         caller_id = str(query.from_user.id)
         action_row = []
         if not is_first_owner and access != "owner" and platform_id != caller_id:
-            action_row.append(InlineKeyboardButton("🗑 Release", callback_data=f"mbr:release:{platform_id}"))
+            action_row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"mbr:delete:{platform_id}"))
         if action_row:
             buttons.append(action_row)
 
@@ -8775,28 +8880,30 @@ Or just send me a message!"""
                 await query.answer("Failed to update", show_alert=True)
             await self._members_menu_blocked(query)
 
-        elif action == "release" and len(parts) >= 3:
+        # "release" kept so buttons rendered before the rename still work.
+        elif action in ("delete", "release") and len(parts) >= 3:
             platform_id = parts[2]
-            from ..db.models import get_first_owner, delete_user
+            from ..db.models import get_first_owner
 
             first_owner = await get_first_owner("telegram")
             if first_owner and first_owner.get("platform_id") == platform_id:
-                await query.answer("🔒 First owner cannot be released!", show_alert=True)
+                await query.answer("🔒 First owner cannot be deleted!", show_alert=True)
                 return
             if platform_id == str(query.from_user.id):
-                await query.answer("⚠️ Can't release yourself!", show_alert=True)
+                await query.answer("⚠️ Can't delete yourself!", show_alert=True)
+                return
+            target = await get_user("telegram", platform_id)
+            if target and target.get("access_level") == "owner":
+                await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
                 return
 
-            deleted = await delete_user("telegram", platform_id)
-            if deleted:
-                # Clear cached DM conversation
-                if self.agent and self.agent.conversations:
-                    key = f"telegram:{platform_id}"
-                    if key in self.agent.conversations._active:
-                        del self.agent.conversations._active[key]
+            # Same as /wamembers Delete: access is revoked (they must be
+            # approved again), chat history and memories are kept.
+            revoked = await self._revoke_member("telegram", platform_id)
+            if revoked:
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(f"pending_notify:{platform_id}")
-                await query.answer("User released")
+                await query.answer("User deleted — must be approved again")
             else:
                 await query.answer("Failed to delete user", show_alert=True)
             await self._members_menu_main(query=query)

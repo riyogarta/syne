@@ -327,6 +327,16 @@ class DiscordChannel:
             if existing.get("access_level") == "blocked":
                 logger.debug("Ignoring blocked Discord user %s", message.author.id)
                 return False
+            # A user revoked via /dcmembers Delete keeps their row (and with it
+            # their history) but carries preferences.pending_approval: hold
+            # them exactly like an unknown sender until the owner approves.
+            prefs = existing.get("preferences") or {}
+            if prefs.get("pending_approval") and existing.get("access_level") == "public":
+                policy = str(await get_config("discord.dm_policy", "approval"))
+                if policy != "open":
+                    await self._handle_pending_dm(message, policy)
+                    return False
+                await self._clear_pending_flag(str(message.author.id), prefs)
             return True
 
         policy = str(await get_config("discord.dm_policy", "approval"))
@@ -522,6 +532,20 @@ class DiscordChannel:
         except Exception as e:
             logger.debug("Could not DM Discord user %s: %s", user_id, e)
 
+    async def _clear_pending_flag(self, user_id: str, prefs: Optional[dict] = None) -> None:
+        """Drop preferences.pending_approval, preserving every other key."""
+        if prefs is None:
+            existing = await get_user("discord", str(user_id))
+            prefs = (existing or {}).get("preferences") or {}
+        if not prefs.get("pending_approval"):
+            return
+        new_prefs = dict(prefs)
+        new_prefs.pop("pending_approval", None)
+        try:
+            await update_user("discord", str(user_id), preferences=new_prefs)
+        except Exception as e:
+            logger.error("Failed to clear pending flag for Discord user %s: %s", user_id, e)
+
     async def approve_user(self, user_id: str) -> tuple[bool, str]:
         """Admit a pending Discord DM user as "public". Returns (ok, label).
 
@@ -534,6 +558,7 @@ class DiscordChannel:
             existing = await get_user("discord", str(user_id))
             if existing:
                 await update_user("discord", str(user_id), access_level="public")
+                await self._clear_pending_flag(str(user_id))
             else:
                 await create_user(
                     name=name,
@@ -566,6 +591,7 @@ class DiscordChannel:
             existing = await get_user("discord", str(user_id))
             if existing:
                 await update_user("discord", str(user_id), access_level="blocked")
+                await self._clear_pending_flag(str(user_id))
             else:
                 await create_user(
                     name=name,
