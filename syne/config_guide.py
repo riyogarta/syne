@@ -199,6 +199,7 @@ Prevents users from flooding the bot.
 | Key | Default | Type |
 |-----|---------|------|
 | `telegram.dm_policy` | `"approval"` | string |
+| `members.idle_revoke_days` | `60` | int — daily auto-Delete of members with no DM for N days (Telegram, Discord, WhatsApp DM allowlist); owner/family/groups never; history kept; 0 disables |
 
 Controls who can DM the bot.
 - `"approval"` — new users must be approved by owner before they can chat.

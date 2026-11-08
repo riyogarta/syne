@@ -530,6 +530,8 @@ The first user to message Syne automatically becomes `owner`.
 
 On `/wamembers`, Delete only removes the entry from the allowlist.
 
+**Idle members are deleted automatically.** Once a day, any Telegram, Discord or WhatsApp DM member who has not messaged Syne in a DM for `members.idle_revoke_days` days (default `60`, `0` disables) gets the same Delete as above, and the owner receives a summary on Telegram. Owner and family users, blocked entries and groups are never touched. Activity is measured from DMs only: group messages are stored per group, not per sender, so someone active only in groups counts as idle. On WhatsApp this only drops their DM allowlist entry; it does not affect replies in groups.
+
 ### Permission Format: `0oOFP`
 
 Each digit controls access for Owner / Family / Public. Bits: `r`(4) read, `w`(2) write, `x`(1) execute.
@@ -814,6 +816,7 @@ All configuration lives in the `config` table. Change via conversation or `updat
 | Key | Default | Description |
 |-----|---------|-------------|
 | `telegram.dm_policy` | `"approval"` | DM policy: "approval" or "open" |
+| `members.idle_revoke_days` | `60` | Auto-Delete members with no DM for N days (all platforms, history kept); 0 disables |
 | `telegram.group_policy` | `"allowlist"` | Group policy: "allowlist" or "open" |
 | `telegram.require_mention` | `true` | Require @mention in groups |
 

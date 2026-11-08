@@ -199,6 +199,11 @@ class Scheduler:
                     await self._cleanup_workspace()
                 except Exception as e:
                     logger.error(f"Workspace cleanup error: {e}")
+                try:
+                    from .members_cleanup import revoke_idle_members
+                    await revoke_idle_members()
+                except Exception as e:
+                    logger.error(f"Idle member cleanup error: {e}")
 
             await asyncio.sleep(_CHECK_INTERVAL)
 
