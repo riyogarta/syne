@@ -935,6 +935,19 @@ async def _m33_history_expand_adaptive(conn) -> None:
     )
 
 
+async def _m34_ratification_config(conn) -> None:
+    """Seed user ratification switches (Riyo, 10 Nov 2026). On by default."""
+    await conn.execute(
+        """
+        INSERT INTO config (key, value, description) VALUES
+    ('history_search.ratification', 'true', 'User ratification: when a user message approves the previous assistant answer (text) or reacts to it with an approving emoji, that user row is embedded together with the answer so history_search can find facts only the assistant wrote. 👎 marks the answer disputed; a reaction taken back revokes it. Master switch; on by default, off only for experiments.'),
+    ('history_search.ratification_text', 'true', 'Ratification from text replies (lexicon, ambiguous ok/ya decided by memory.evaluator_model). Needs history_search.ratification.'),
+    ('history_search.ratification_reaction', 'true', 'Ratification from emoji reactions (Telegram). Needs history_search.ratification.')
+        ON CONFLICT (key) DO NOTHING
+        """
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -969,6 +982,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (31, _m31_history_expand_window, "transactional"),
     (32, _m32_drop_compaction_config, "transactional"),
     (33, _m33_history_expand_adaptive, "transactional"),
+    (34, _m34_ratification_config, "transactional"),
 ]
 
 

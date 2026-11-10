@@ -491,6 +491,17 @@ class Conversation:
                 )
                 return
 
+            # Ratification: an approval of the previous assistant answer is
+            # embedded together with that answer, so a fact only the
+            # assistant wrote becomes findable once the user endorsed it.
+            try:
+                from .ratification import ratify_user_row
+                combined = await ratify_user_row(self.session_id, message_id, content)
+                if combined:
+                    content = combined
+            except Exception as e:
+                logger.warning(f"ratification failed for row {message_id}: {e}")
+
             max_chars = int(await get_config("history_search.max_content_chars", 4000))
             body = content if len(content) <= max_chars else content[:max_chars]
             resp = await self.memory.provider.embed(body)

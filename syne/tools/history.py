@@ -680,6 +680,14 @@ def _build_blocks(pieces: list, in_context: set, merge: bool, before: int, after
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "is_anchor": r["id"] in anchors,
             }
+            rat = r.get("ratification")
+            if isinstance(rat, str):
+                try:
+                    rat = json.loads(rat)
+                except ValueError:
+                    rat = None
+            if r["role"] == "assistant" and isinstance(rat, dict) and rat.get("status"):
+                t["ratification"] = {k: rat[k] for k in ("status", "type", "emoji") if rat.get(k)}
             if r["id"] in in_context:
                 t["content"] = ""
                 t["already_in_context"] = True
@@ -838,7 +846,8 @@ async def history_expand_handler(
                 _stage = f"fetch window for anchor {aid}"
                 window_rows = await conn.fetch(
                     "/* history_expand:window */ "
-                    "SELECT id, role, content, created_at FROM messages WHERE "
+                    "SELECT id, role, content, created_at, "
+                    "metadata->'ratification' AS ratification FROM messages WHERE "
                     + " AND ".join(conds)
                     + " ORDER BY created_at ASC, id ASC",
                     *params,
@@ -939,7 +948,10 @@ HISTORY_EXPAND_TOOL = {
         "at a topic shift or a long time gap (see radius.stop_before / "
         "stop_after per anchor). Overlapping windows are merged into one block; "
         "turns already in your context window are marked already_in_context "
-        "with their text omitted."
+        "with their text omitted. An assistant turn may carry ratification "
+        "(status ratified / disputed / revoked): the user approved it (text or "
+        "reaction), rejected it with a reaction, or took the reaction back. "
+        "Ratified is not verified - it can still be wrong."
     ),
     "parameters": {
         "type": "object",

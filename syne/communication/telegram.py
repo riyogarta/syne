@@ -2301,9 +2301,17 @@ class TelegramChannel:
         # Get message preview from our tracking
         msg_preview = self._get_message_preview(chat.id, message_id)
         
+        # A reaction taken back revokes the ratification it made.
+        if removed_emojis:
+            try:
+                from ..ratification import revoke_reaction
+                await revoke_reaction("telegram", str(chat.id), message_id, removed_emojis)
+            except Exception as e:
+                logger.warning(f"revoke_reaction failed: {e}")
+
         if added_emojis:
             emoji_str = " ".join(added_emojis)
-            event_text = f"[Reaction: {emoji_str} from {user_name} on your message: '{msg_preview}']"
+            event_text = f"[Reaction: {emoji_str} from {user_name} on your message #{message_id}: '{msg_preview}']"
             logger.info(f"Reaction received: {emoji_str} from {user_id} on msg {message_id}")
 
             # Route reaction to agent so it can decide to respond
@@ -11132,6 +11140,9 @@ Or just send me a message!"""
                     except Exception:
                         sent_msg = await self._telegram_retry(_send_doc_plain, op="send_document_plain")
                 logger.info(f"Sent media: {media_path} to {chat_id}")
+                if sent_msg is not None:
+                    from ..ratification import record_sent_ids
+                    await record_sent_ids("telegram", str(chat_id), [sent_msg.message_id])
                 # Send the remaining attachments as follow-up messages. The
                 # caption already went out with the first file, so these go
                 # bare. Each one is isolated: a failure here must not sink
@@ -11284,7 +11295,10 @@ Or just send me a message!"""
         reply_params = {"message_id": reply_to_message_id} if reply_to_message_id else None
         last_msg = None
         logger.info(f"_send_response splitting into {len(chunks)} chunk(s) for chat {chat_id}")
+        _sent_ids: list = []
         for i, chunk in enumerate(chunks):
+            if last_msg is not None and last_msg.message_id not in _sent_ids:
+                _sent_ids.append(last_msg.message_id)
             rp = reply_params if i == 0 else None
 
             async def _send_html(_chunk=chunk, _rp=rp):
@@ -11331,6 +11345,13 @@ Or just send me a message!"""
                             f"{type(trunc_exc).__name__}: {trunc_exc} — GIVING UP, user will see nothing"
                         )
 
+        if last_msg is not None and last_msg.message_id not in _sent_ids:
+            _sent_ids.append(last_msg.message_id)
+        # Map every chunk to the assistant row so a later reaction on any
+        # of them can be tied to its content (ratification).
+        if _sent_ids:
+            from ..ratification import record_sent_ids
+            await record_sent_ids("telegram", str(chat_id), _sent_ids)
         return last_msg
 
     async def _deliver_subagent_result(self, message: str, parent_session_id: int):
