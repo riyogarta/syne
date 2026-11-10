@@ -917,6 +917,24 @@ async def _m32_drop_compaction_config(conn) -> None:
     )
 
 
+async def _m33_history_expand_adaptive(conn) -> None:
+    """Seed history_expand dedup + adaptive radius config (Riyo, 10 Nov 2026).
+
+    Both on by default; switched off only for experiment conditions.
+    """
+    await conn.execute(
+        """
+        INSERT INTO config (key, value, description) VALUES
+    ('history_search.dedup', 'true', 'history_expand merges overlapping windows of several anchors into one block and flags turns already in the live context window instead of repeating them. On by default; switch off only for experiments.'),
+    ('history_search.adaptive_radius', 'true', 'history_expand treats context_before/context_after as the maximum and stops the window at a topic shift (cosine between blocks of user-message embeddings below history_search.adaptive_threshold) or a time gap longer than history_search.adaptive_gap_minutes. The anchor exchange is always kept. On by default; off = fixed radius (experiment condition K3).'),
+    ('history_search.adaptive_threshold', '0.5', 'Adaptive radius: cosine floor between neighbouring blocks of user-message embeddings. Below it the window stops (topic shift). Tune on development data.'),
+    ('history_search.adaptive_gap_minutes', '120', 'Adaptive radius: a gap longer than this (minutes) between two exchanges stops the window. 0 disables the time rule.'),
+    ('history_search.adaptive_block', '2', 'Adaptive radius: number of user messages averaged per block when comparing topics (TextTiling-style).')
+        ON CONFLICT (key) DO NOTHING
+        """
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -950,6 +968,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (30, _m30_whatsapp_reply_prefix, "transactional"),
     (31, _m31_history_expand_window, "transactional"),
     (32, _m32_drop_compaction_config, "transactional"),
+    (33, _m33_history_expand_adaptive, "transactional"),
 ]
 
 

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from datetime import datetime
 from typing import Optional
@@ -92,6 +93,9 @@ def build_history_scope(conv, access_level: str) -> Optional[dict]:
         "is_group": is_group,
         "sender_pid": sender,
         "session_id": getattr(conv, "session_id", None),
+        # Size of the live context window (X). history_expand uses it to
+        # flag turns the model already has instead of repeating them.
+        "window_size": len(getattr(conv, "_message_cache", None) or []),
     }
 
 
@@ -454,6 +458,244 @@ HISTORY_SEARCH_TOOL = {
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# history_expand: adaptive radius + dedup (Riyo, 10 Nov 2026)
+#
+#   * Adaptive radius: context_before / context_after are only the MAXIMUM.
+#     Inside that window the read stops at the first exchange where the topic
+#     shifts (TextTiling-style: cosine between blocks of user-message
+#     embeddings falls below a threshold) or where a long time gap separates
+#     two exchanges. The anchor's own exchange is always kept. The reason each
+#     side stopped is returned and logged.
+#   * Dedup: overlapping windows of several anchors are merged into one block,
+#     and turns already in the live context window are flagged, not repeated.
+#
+# Both are on by default. history_search.adaptive_radius / history_search.dedup
+# switch them off for experiments (fixed-radius condition).
+# ---------------------------------------------------------------------------
+
+
+def _parse_vec(raw) -> Optional[list]:
+    """pgvector text form '[0.1,0.2,...]' (or a list) -> list of floats."""
+    if raw is None:
+        return None
+    if isinstance(raw, (list, tuple)):
+        return [float(x) for x in raw] or None
+    s = str(raw).strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    if not s:
+        return None
+    try:
+        return [float(x) for x in s.split(",")]
+    except ValueError:
+        return None
+
+
+def _mean(vecs: list) -> list:
+    n = len(vecs)
+    return [sum(col) / n for col in zip(*vecs)]
+
+
+def _cos(a: list, b: list) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def adaptive_bounds(
+    rows: list,
+    anchor_idx: int,
+    vecs: dict,
+    *,
+    threshold: float,
+    gap_seconds: float,
+    block: int,
+    edge_before: str = "max_radius",
+    edge_after: str = "max_radius",
+) -> tuple:
+    """Choose how far to read on each side of the anchor.
+
+    ``rows`` is the maximum window in time order (dicts with id, role,
+    created_at); ``vecs`` maps user-row id -> embedding. Rows are grouped into
+    exchanges (a user row plus the assistant rows after it). Exchanges are
+    added outward from the anchor's own exchange until one of:
+      * time_gap    - the gap to the next exchange exceeds ``gap_seconds``
+      * topic_shift - cosine(block of user embeddings already included,
+                      next block) < ``threshold``
+    otherwise the side ends at the window edge (``edge_before``/``edge_after``:
+    "session_edge" or "max_radius").
+
+    Returns (lo_index, hi_index, stop_before, stop_after), indices inclusive.
+    """
+    block = max(1, int(block))
+    groups: list = []
+    for i, r in enumerate(rows):
+        if r["role"] == "user" or not groups:
+            groups.append([i, i])
+        else:
+            groups[-1][1] = i
+    gi = next(k for k, g in enumerate(groups) if g[0] <= anchor_idx <= g[1])
+
+    def uvec(k):
+        r = rows[groups[k][0]]
+        return vecs.get(r["id"]) if r["role"] == "user" else None
+
+    def bvec(ks):
+        vs = [v for v in (uvec(k) for k in ks) if v is not None]
+        return _mean(vs) if vs else None
+
+    def gap(a, b):
+        ta, tb = rows[a].get("created_at"), rows[b].get("created_at")
+        if ta is None or tb is None:
+            return 0.0
+        return (tb - ta).total_seconds()
+
+    included = [gi]
+    stop_after = edge_after
+    for k in range(gi + 1, len(groups)):
+        if gap_seconds > 0 and gap(groups[k - 1][1], groups[k][0]) > gap_seconds:
+            stop_after = "time_gap"
+            break
+        ref = bvec(included[-block:])
+        cand = bvec(range(k, min(len(groups), k + block)))
+        if ref is not None and cand is not None and _cos(ref, cand) < threshold:
+            stop_after = "topic_shift"
+            break
+        included.append(k)
+
+    stop_before = edge_before
+    for k in range(gi - 1, -1, -1):
+        if gap_seconds > 0 and gap(groups[k][1], groups[k + 1][0]) > gap_seconds:
+            stop_before = "time_gap"
+            break
+        ref = bvec(included[:block])
+        cand = bvec(range(max(0, k - block + 1), k + 1))
+        if ref is not None and cand is not None and _cos(ref, cand) < threshold:
+            stop_before = "topic_shift"
+            break
+        included.insert(0, k)
+
+    return groups[included[0]][0], groups[included[-1]][1], stop_before, stop_after
+
+
+async def _expand_settings() -> dict:
+    """history_expand knobs, read on every call (a config change applies on
+    the next call, no restart)."""
+    out = {
+        "before": 10, "after": 10, "dedup": True, "adaptive": True,
+        "threshold": 0.5, "gap_minutes": 120.0, "block": 2,
+    }
+    keys = (
+        ("before", "history_search.context_before", int),
+        ("after", "history_search.context_after", int),
+        ("dedup", "history_search.dedup", bool),
+        ("adaptive", "history_search.adaptive_radius", bool),
+        ("threshold", "history_search.adaptive_threshold", float),
+        ("gap_minutes", "history_search.adaptive_gap_minutes", float),
+        ("block", "history_search.adaptive_block", int),
+    )
+    for name, key, cast in keys:
+        try:
+            out[name] = cast(await get_config(key, out[name]))
+        except Exception:
+            pass
+    out["block"] = max(1, out["block"])
+    return out
+
+
+async def _context_window_ids(conn, scope: Optional[dict]) -> set:
+    """Ids of the rows currently in the live context window (X).
+
+    The in-memory cache mirrors the tail of the session: load_history() reads
+    the newest active rows and save_message() appends each saved row, so the
+    newest ``window_size`` active rows are exactly what the model holds.
+    """
+    sid = (scope or {}).get("session_id")
+    try:
+        n = int((scope or {}).get("window_size") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    if not sid or n <= 0:
+        return set()
+    rows = await conn.fetch(
+        "/* history_expand:in_context */ SELECT id FROM messages "
+        "WHERE session_id = $1 AND status = 'active' "
+        "ORDER BY created_at DESC, id DESC LIMIT $2",
+        int(sid), n,
+        timeout=_STEP_TIMEOUT,
+    )
+    return {r["id"] for r in rows}
+
+
+def _row_key(r):
+    return (r["created_at"], r["id"])
+
+
+def _build_blocks(pieces: list, in_context: set, merge: bool, before: int, after: int) -> list:
+    """Turn per-anchor windows into output blocks (merged when ``merge``)."""
+    groups: list = []
+    if merge:
+        with_rows = sorted(
+            [p for p in pieces if p["rows"]],
+            key=lambda p: (p["session_id"], _row_key(p["rows"][0])),
+        )
+        for p in with_rows + [p for p in pieces if not p["rows"]]:
+            last = groups[-1] if groups else None
+            if (
+                last is not None and p["rows"] and last["rows"]
+                and last["session_id"] == p["session_id"]
+                and _row_key(p["rows"][0]) <= _row_key(last["rows"][-1])
+            ):
+                seen = {r["id"] for r in last["rows"]}
+                last["rows"] = sorted(
+                    last["rows"] + [r for r in p["rows"] if r["id"] not in seen],
+                    key=_row_key,
+                )
+                last["anchors"].append(p["anchor_id"])
+                last["radius"][str(p["anchor_id"])] = p["radius"]
+            else:
+                groups.append({
+                    "session_id": p["session_id"], "rows": list(p["rows"]),
+                    "anchors": [p["anchor_id"]],
+                    "radius": {str(p["anchor_id"]): p["radius"]},
+                })
+    else:
+        groups = [{
+            "session_id": p["session_id"], "rows": p["rows"],
+            "anchors": [p["anchor_id"]],
+            "radius": {str(p["anchor_id"]): p["radius"]},
+        } for p in pieces]
+
+    blocks = []
+    for g in groups:
+        anchors = set(g["anchors"])
+        turns = []
+        for r in g["rows"]:
+            t = {
+                "id": r["id"],
+                "role": r["role"],
+                "content": r["content"] or "",
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "is_anchor": r["id"] in anchors,
+            }
+            if r["id"] in in_context:
+                t["content"] = ""
+                t["already_in_context"] = True
+            turns.append(t)
+        blocks.append({
+            "anchor_id": g["anchors"][0],
+            "anchor_ids": g["anchors"],
+            "session_id": g["session_id"],
+            "context_before": before,
+            "context_after": after,
+            "radius": g["radius"],
+            "turns": turns,
+        })
+    return blocks
+
+
 async def history_expand_handler(
     anchor_ids: list,
     context_before: Optional[int] = None,
@@ -471,15 +713,11 @@ async def history_expand_handler(
 
     if len(ids) > 20:
         return "Error: expand at most 20 anchors at once (be selective — expand only promising previews)."
+    ids = list(dict.fromkeys(ids))  # same anchor twice = one anchor
 
-    try:
-        default_before = int(await get_config("history_search.context_before", 10))
-        default_after = int(await get_config("history_search.context_after", 10))
-    except Exception:
-        default_before, default_after = 10, 10
-
-    before = max(0, int(context_before) if context_before is not None else default_before)
-    after = max(0, int(context_after) if context_after is not None else default_after)
+    cfg = await _expand_settings()
+    before = max(0, int(context_before) if context_before is not None else cfg["before"])
+    after = max(0, int(context_after) if context_after is not None else cfg["after"])
 
     # Cap so a rogue call can't dump gigabytes.
     before = min(before, 20)
@@ -491,11 +729,15 @@ async def history_expand_handler(
         return _NO_SCOPE_ERROR
     unrestricted = _is_owner_dm(_scope)
 
-    blocks = []
+    pieces = []
     missing = []
+    in_context: set = set()
     _t0 = time.monotonic()
     _stage = "acquire connection"
-    logger.info(f"history_expand: start anchors={ids} before={before} after={after}")
+    logger.info(
+        f"history_expand: start anchors={ids} before={before} after={after} "
+        f"adaptive={cfg['adaptive']} dedup={cfg['dedup']}"
+    )
     try:
         async with get_connection(timeout=_STEP_TIMEOUT) as conn:
             logger.info(f"history_expand: connection acquired in {time.monotonic() - _t0:.2f}s")
@@ -602,28 +844,58 @@ async def history_expand_handler(
                     *params,
                     timeout=_STEP_TIMEOUT,
                 )
+                rows = [dict(r) for r in window_rows]
+
+                # Step 3 — adaptive radius inside the maximum window.
+                radius = {
+                    "adaptive": bool(cfg["adaptive"]),
+                    "before": None,
+                    "after": None,
+                    "stop_before": "session_edge" if len(before_rows) < before else "max_radius",
+                    "stop_after": "session_edge" if len(after_rows) < after else "max_radius",
+                }
+                a_idx = next((i for i, r in enumerate(rows) if r["id"] == aid), None)
+                if cfg["adaptive"] and a_idx is not None and len(rows) > 1:
+                    _stage = f"fetch embeddings for anchor {aid}"
+                    user_ids = [r["id"] for r in rows if r["role"] == "user"]
+                    emb_rows = await conn.fetch(
+                        "/* history_expand:emb */ SELECT id, embedding::text AS emb "
+                        "FROM messages WHERE id = ANY($1::int[]) AND embedding IS NOT NULL",
+                        user_ids,
+                        timeout=_STEP_TIMEOUT,
+                    )
+                    vecs = {}
+                    for er in emb_rows:
+                        v = _parse_vec(er["emb"])
+                        if v:
+                            vecs[er["id"]] = v
+                    lo_i, hi_i, sb, sa = adaptive_bounds(
+                        rows, a_idx, vecs,
+                        threshold=cfg["threshold"],
+                        gap_seconds=cfg["gap_minutes"] * 60.0,
+                        block=cfg["block"],
+                        edge_before=radius["stop_before"],
+                        edge_after=radius["stop_after"],
+                    )
+                    rows = rows[lo_i:hi_i + 1]
+                    a_idx -= lo_i
+                    radius["stop_before"], radius["stop_after"] = sb, sa
+                if a_idx is not None:
+                    radius["before"] = a_idx
+                    radius["after"] = len(rows) - a_idx - 1
+
                 logger.info(
                     f"history_expand: anchor {aid} window {len(window_rows)} rows "
-                    f"({len(before_rows)} before / {len(after_rows)} after) "
+                    f"({len(before_rows)} before / {len(after_rows)} after) -> kept "
+                    f"{len(rows)} (before={radius['before']} stop={radius['stop_before']}, "
+                    f"after={radius['after']} stop={radius['stop_after']}) "
                     f"in {time.monotonic() - _tw:.2f}s"
                 )
+                pieces.append({"anchor_id": aid, "session_id": sid, "rows": rows, "radius": radius})
 
-                turns = []
-                for r in window_rows:
-                    turns.append({
-                        "id": r["id"],
-                        "role": r["role"],
-                        "content": r["content"] or "",
-                        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-                        "is_anchor": r["id"] == aid,
-                    })
-                blocks.append({
-                    "anchor_id": aid,
-                    "session_id": sid,
-                    "context_before": before,
-                    "context_after": after,
-                    "turns": turns,
-                })
+            if cfg["dedup"] and pieces:
+                _stage = "fetch context window ids"
+                in_context = await _context_window_ids(conn, _scope)
     except TimeoutError:
         _el = time.monotonic() - _t0
         logger.error(f"history_expand: timeout at '{_stage}' after {_el:.1f}s")
@@ -635,12 +907,21 @@ async def history_expand_handler(
         logger.exception(f"history_expand DB error at '{_stage}'")
         return f"Error: database query failed at '{_stage}': {e}"
 
-    logger.info(f"history_expand: done in {time.monotonic() - _t0:.2f}s")
+    blocks = _build_blocks(pieces, in_context, bool(cfg["dedup"]), before, after)
+    flagged = sum(1 for b in blocks for t in b["turns"] if t.get("already_in_context"))
+    logger.info(
+        f"history_expand: done in {time.monotonic() - _t0:.2f}s, "
+        f"{len(pieces)} anchor(s) -> {len(blocks)} block(s), {flagged} turn(s) already in context"
+    )
     payload = {"blocks": blocks}
+    if flagged:
+        payload["note"] = (
+            "Turns marked already_in_context are in your current context window; "
+            "their text is omitted here - read them there."
+        )
     if missing:
         payload["missing_anchor_ids"] = missing
     return json.dumps(payload, ensure_ascii=False)
-
 
 HISTORY_EXPAND_TOOL = {
     "name": "history_expand",
@@ -653,7 +934,12 @@ HISTORY_EXPAND_TOOL = {
         "it. Call SELECTIVELY — only expand previews that look promising, not the "
         "whole top-N. Returns the conversation only (user + assistant text); "
         "tool results are not included. Anchors outside the asker's scope "
-        "(same rule as history_search) are returned as missing."
+        "(same rule as history_search) are returned as missing. "
+        "context_before/context_after are a MAXIMUM: the window may stop early "
+        "at a topic shift or a long time gap (see radius.stop_before / "
+        "stop_after per anchor). Overlapping windows are merged into one block; "
+        "turns already in your context window are marked already_in_context "
+        "with their text omitted."
     ),
     "parameters": {
         "type": "object",

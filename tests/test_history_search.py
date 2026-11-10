@@ -240,6 +240,8 @@ class TestHistoryExpandWindow:
         calls = {}
 
         async def fake_fetch(sql, *params, timeout=None):
+            if "history_expand:emb" in sql:
+                return []
             if "id = ANY" in sql:
                 return [{"id": 100, "session_id": 51, "created_at": t(100)}]
             if "history_expand:before" in sql:
@@ -310,6 +312,170 @@ class TestHistoryExpandWindow:
             )
         assert seen["params"] == (3, at, 7, at, 7)
         assert [x["id"] for x in json.loads(result)["blocks"][0]["turns"]] == [7]
+
+
+# ---------------------------------------------------------------------------
+# history_expand: adaptive radius (pure function)
+# ---------------------------------------------------------------------------
+
+
+def _rows(spec, base=None, step=60):
+    """spec: list of (id, role); created_at step seconds apart."""
+    from datetime import datetime, timedelta, timezone
+    base = base or datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc)
+    return [
+        {"id": i, "role": role, "created_at": base + timedelta(seconds=k * step)}
+        for k, (i, role) in enumerate(spec)
+    ]
+
+
+SPEC = [(1, "user"), (2, "assistant"), (3, "user"), (4, "assistant"),
+        (5, "user"), (6, "assistant"), (7, "user"), (8, "assistant"),
+        (9, "user"), (10, "assistant")]
+
+
+class TestAdaptiveBounds:
+
+    def test_no_embeddings_keeps_whole_window(self):
+        rows = _rows(SPEC)
+        lo, hi, sb, sa = H.adaptive_bounds(
+            rows, 4, {}, threshold=0.5, gap_seconds=7200, block=2,
+            edge_before="session_edge", edge_after="max_radius")
+        assert (lo, hi) == (0, 9)
+        assert (sb, sa) == ("session_edge", "max_radius")
+
+    def test_topic_shift_stops_both_sides(self):
+        rows = _rows(SPEC)
+        A, B = [1.0, 0.0], [0.0, 1.0]
+        vecs = {1: B, 3: A, 5: A, 7: A, 9: B}
+        lo, hi, sb, sa = H.adaptive_bounds(
+            rows, 4, vecs, threshold=0.5, gap_seconds=0, block=1)
+        # anchor exchange = rows 4..5 (user 5); keeps users 3,5,7
+        assert (lo, hi) == (2, 7)
+        assert (sb, sa) == ("topic_shift", "topic_shift")
+
+    def test_time_gap_stops(self):
+        from datetime import timedelta
+        rows = _rows(SPEC)
+        for r in rows[6:]:
+            r["created_at"] += timedelta(hours=5)
+        lo, hi, sb, sa = H.adaptive_bounds(
+            rows, 4, {}, threshold=0.5, gap_seconds=7200, block=2)
+        assert hi == 5 and sa == "time_gap"
+        assert lo == 0
+
+    def test_anchor_exchange_always_kept(self):
+        rows = _rows(SPEC)
+        A, B = [1.0, 0.0], [0.0, 1.0]
+        vecs = {1: B, 3: B, 5: A, 7: B, 9: B}
+        lo, hi, _, _ = H.adaptive_bounds(
+            rows, 4, vecs, threshold=0.5, gap_seconds=0, block=1)
+        assert (lo, hi) == (4, 5)
+
+    def test_leading_assistant_rows_grouped(self):
+        rows = _rows([(1, "assistant"), (2, "user"), (3, "assistant")])
+        lo, hi, _, _ = H.adaptive_bounds(
+            rows, 1, {}, threshold=0.5, gap_seconds=0, block=2)
+        assert (lo, hi) == (0, 2)
+
+    def test_parse_vec(self):
+        assert H._parse_vec("[0.5,-1,2e-1]") == [0.5, -1.0, 0.2]
+        assert H._parse_vec(None) is None
+        assert H._parse_vec("[]") is None
+
+
+# ---------------------------------------------------------------------------
+# history_expand: dedup (merge overlapping windows, flag in-context turns)
+# ---------------------------------------------------------------------------
+
+
+class TestExpandDedup:
+
+    def _piece(self, aid, ids, sid=51):
+        rows = [dict(r, content=f"c{r['id']}") for r in _rows([(i, "user" if i % 2 else "assistant") for i in ids])]
+        # make created_at follow id so different pieces line up
+        from datetime import datetime, timedelta, timezone
+        base = datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc)
+        for r in rows:
+            r["created_at"] = base + timedelta(seconds=r["id"])
+        return {"anchor_id": aid, "session_id": sid, "rows": rows,
+                "radius": {"adaptive": True}}
+
+    def test_overlapping_windows_merge(self):
+        blocks = H._build_blocks(
+            [self._piece(5, [3, 4, 5, 6, 7]), self._piece(7, [6, 7, 8, 9])],
+            set(), True, 10, 10)
+        assert len(blocks) == 1
+        b = blocks[0]
+        assert [t["id"] for t in b["turns"]] == [3, 4, 5, 6, 7, 8, 9]
+        assert b["anchor_ids"] == [5, 7]
+        assert sorted(t["id"] for t in b["turns"] if t["is_anchor"]) == [5, 7]
+        assert set(b["radius"]) == {"5", "7"}
+
+    def test_disjoint_windows_stay_apart(self):
+        blocks = H._build_blocks(
+            [self._piece(3, [1, 2, 3]), self._piece(9, [8, 9, 10])],
+            set(), True, 10, 10)
+        assert [b["anchor_id"] for b in blocks] == [3, 9]
+
+    def test_other_session_never_merges(self):
+        blocks = H._build_blocks(
+            [self._piece(3, [1, 2, 3], sid=1), self._piece(3_0, [2, 3], sid=2)],
+            set(), True, 10, 10)
+        assert len(blocks) == 2
+
+    def test_in_context_turns_flagged_and_blank(self):
+        blocks = H._build_blocks([self._piece(5, [4, 5, 6])], {6}, True, 10, 10)
+        t6 = blocks[0]["turns"][-1]
+        assert t6["already_in_context"] is True and t6["content"] == ""
+        assert "already_in_context" not in blocks[0]["turns"][0]
+
+    def test_dedup_off_keeps_overlap(self):
+        blocks = H._build_blocks(
+            [self._piece(5, [4, 5, 6]), self._piece(6, [5, 6, 7])],
+            set(), False, 10, 10)
+        assert len(blocks) == 2
+
+    async def test_handler_flags_window_rows(self):
+        """End to end: duplicate anchor ids collapse, in-context ids flagged."""
+        from datetime import datetime, timedelta, timezone
+        base = datetime(2026, 11, 10, 8, 0, tzinfo=timezone.utc)
+
+        def t(i):
+            return base + timedelta(seconds=i)
+
+        async def fake_fetch(sql, *params, timeout=None):
+            if "history_expand:emb" in sql:
+                return []
+            if "history_expand:in_context" in sql:
+                assert params == (51, 2)
+                return [{"id": 12}, {"id": 11}]
+            if "id = ANY" in sql:
+                return [{"id": 10, "session_id": 51, "created_at": t(10)}]
+            if "history_expand:before" in sql or "history_expand:after" in sql:
+                return []
+            if "history_expand:window" in sql:
+                return [
+                    {"id": 10, "role": "user", "content": "anchor", "created_at": t(10)},
+                    {"id": 11, "role": "assistant", "content": "a", "created_at": t(11)},
+                ]
+            raise AssertionError(sql)
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=fake_fetch)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        scope = dict(OWNER_DM, session_id=51, window_size=2)
+
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            out = json.loads(await H.history_expand_handler(
+                _scope=scope, anchor_ids=[10, 10]))
+        assert len(out["blocks"]) == 1
+        turns = out["blocks"][0]["turns"]
+        assert [x["id"] for x in turns] == [10, 11]
+        assert turns[1]["already_in_context"] is True
+        assert "note" in out
 
 
 # ---------------------------------------------------------------------------
