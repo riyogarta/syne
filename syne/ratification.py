@@ -1,253 +1,186 @@
-"""User ratification of assistant replies (Riyo, 10 Nov 2026).
+"""User ratification of assistant answers (Riyo, 10 Nov 2026).
 
-history_search anchors on USER messages only, so a fact that only the
-assistant wrote is unreachable when the user merely answered "ok". Following
-grounding (Clark & Brennan, 1991), a reply becomes shared knowledge once the
-user marks acceptance. When a user message is classified as approval, its
-embedding is replaced by the embedding of that message + the assistant reply
-it approves. The anchor stays the user row, so an assistant reply is only
-retrievable once the user ratified it.
+history_search anchors only on USER messages, so a fact that only the
+assistant wrote is invisible to search. When the user explicitly accepts
+that answer - a short approval ("setuju", "oke lanjutkan") or an approving
+emoji reaction - the user's row is re-embedded as user text + the approved
+assistant answer. The anchor stays a user row: an assistant answer only
+becomes searchable once the user has endorsed it (grounding, Clark &
+Brennan 1991). Ratification is not verification - an approved answer can
+still be wrong.
 
-Two channels:
-  * text     - a short reply made only of approval / acknowledgement words.
-               Clear approval ("setuju", "betul") is decided by the lexicon;
-               a bare "ok" is ambiguous (agree vs. just received - Jurafsky
-               et al., 1997) and is decided by the evaluator model.
-  * reaction - an emoji on a specific bot message. Approval emojis ratify,
-               rejection emojis mark the reply disputed, and removing the
-               emoji revokes it. Bot messages are mapped to their DB rows via
-               metadata.platform_message_ids, recorded when they are sent.
+  * text:     lexicon first. Clear approval words ratify directly; bare
+              acknowledgements ("ok", "ya") are ambiguous (agree vs. just
+              "received", Jurafsky et al. 1997) and go to the local
+              evaluator model, falling back to "ack" (no ratification).
+  * reaction: approving emoji -> ratified, 👎 -> disputed, a reaction that
+              is taken back -> revoked (own embedding restored).
 
-State lives in messages.metadata (no schema change):
-  user row:      ratification = {kind, label, ratifies, decided_by, status, at}
-  assistant row: ratification = {status: ratified|disputed, agree, reject}
-                 platform_message_ids = [telegram message ids of its chunks]
+The label is written to messages.metadata.ratification on the user row and
+the status on the assistant row, so history_expand can show it and the
+classification can be scored against human annotation.
 
-Ratification is not verification: a ratified reply can still be wrong.
-Switches: ratification.enabled / text_enabled / reaction_enabled / text_llm.
+Switches (all default on): history_search.ratification (master),
+history_search.ratification_text, history_search.ratification_reaction.
 """
-
-from __future__ import annotations
 
 import json
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 
 from .db.connection import get_connection
+from .db.models import get_config
 
 logger = logging.getLogger("syne.ratification")
 
 # ---------------------------------------------------------------------------
-# Settings
+# Inbound prefix (Conversation info / Sender / Replied message JSON blocks)
 # ---------------------------------------------------------------------------
 
-_DEFAULTS = {
-    "enabled": True,
-    "text": True,
-    "reaction": True,
-    "text_llm": True,
-    "max_chars": 120,
-    "agree_emojis": ["👍", "❤️", "👌", "💯"],
-    "reject_emojis": ["👎"],
-}
-_KEYS = {
-    "enabled": "ratification.enabled",
-    "text": "ratification.text_enabled",
-    "reaction": "ratification.reaction_enabled",
-    "text_llm": "ratification.text_llm",
-    "max_chars": "ratification.max_chars",
-    "agree_emojis": "ratification.agree_emojis",
-    "reject_emojis": "ratification.reject_emojis",
-}
+_PREFIX_BLOCK = re.compile(r"\A\s*[^\n`]*:\n```json\n.*?\n```[ \t]*\n*", re.S)
 
 
-async def settings() -> dict:
-    """Read on every call so a config change applies without a restart."""
-    from .db.models import get_config
-    out = dict(_DEFAULTS)
-    for name, key in _KEYS.items():
-        try:
-            val = await get_config(key, out[name])
-        except Exception:
-            continue
-        if val is not None:
-            out[name] = val
-    for name in ("enabled", "text", "reaction", "text_llm"):
-        out[name] = bool(out[name])
-    try:
-        out["max_chars"] = int(out["max_chars"])
-    except (TypeError, ValueError):
-        out["max_chars"] = _DEFAULTS["max_chars"]
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Text helpers
-# ---------------------------------------------------------------------------
-
-# Channels prepend untrusted JSON blocks ("Conversation info (untrusted
-# metadata):", "Replied message (untrusted content, ...):") to the stored
-# user message. Strip them to get what the person actually typed.
-_PREFIX_RE = re.compile(
-    r"\A(?:[^\n]*\(untrusted[^\n]*:\n```json\n.*?\n```\s*)+", re.DOTALL
-)
+def split_context_prefix(text: str) -> tuple:
+    """(prefix, body): peel the untrusted JSON context blocks that channels
+    prepend to every user message."""
+    text = text or ""
+    rest = text
+    while True:
+        m = _PREFIX_BLOCK.match(rest)
+        if not m:
+            break
+        rest = rest[m.end():]
+    return text[: len(text) - len(rest)], rest.strip()
 
 
 def strip_context_prefix(text: str) -> str:
-    return _PREFIX_RE.sub("", text or "").strip()
+    return split_context_prefix(text)[1]
 
 
-_AGREE = {
-    "setuju", "sepakat", "betul", "benar", "bener", "tepat", "persis",
-    "valid", "acc", "approve", "approved", "agree", "agreed", "correct",
-    "exactly", "right", "mantap", "mantab", "cocok", "sesuai",
-}
-_ACK = {
-    "ok", "oke", "okay", "okey", "okeh", "okee", "oce", "sip", "sipp", "siap",
-    "noted", "baik", "baiklah", "ya", "iya", "yaa", "iyaa", "yes", "yup", "yep",
-    "lanjut", "lanjutkan", "gas", "good", "nice", "cool", "thanks", "thank",
-    "you", "makasih", "terima", "kasih", "thx", "tq", "done", "beres", "paham",
-    "mengerti", "ngerti", "understood", "got", "it",
-}
-_FILLER = {
-    "nah", "deh", "dong", "sudah", "udah", "aja", "saja", "itu", "ini", "kok",
-    "banget", "sekali", "lah", "kak", "mas", "bro", "molt", "yah", "wah", "oh",
-    "jadi", "sih", "kan", "juga", "semua", "yang", "aku", "saya",
-}
-_VOCAB = _AGREE | _ACK | _FILLER
-_NONWORD = re.compile(r"[^\w\s]", re.UNICODE)
+# ---------------------------------------------------------------------------
+# Emoji
+# ---------------------------------------------------------------------------
 
 
-def _norm_emoji(e: str) -> str:
+def norm_emoji(e: str) -> str:
     return (e or "").replace("\ufe0f", "").strip()
 
 
-def classify_lexical(text: str, max_chars: int = 120, agree_emojis=None) -> Optional[str]:
-    """'agree' | 'ambiguous' | None (not an approval-type reply at all).
+APPROVE_EMOJIS = {norm_emoji(e) for e in (
+    "👍", "❤️", "👌", "💯", "🔥", "👏", "🙏", "🤝", "✅", "🥰", "😍", "🤩", "🎉",
+)}
+DISPUTE_EMOJIS = {norm_emoji(e) for e in ("👎", "❌")}
 
-    Only short replies made entirely of approval/acknowledgement words (plus
-    fillers) qualify; anything with other content ("setuju, tapi ...",
-    "tidak setuju") is None and left alone.
-    """
-    t = (text or "").strip()
-    if not t or len(t) > max_chars:
+_REACTION_RE = re.compile(
+    r"\A\[Reaction: (?P<emojis>.+?) from .+? on your message #(?P<mid>\d+)", re.S
+)
+
+# ---------------------------------------------------------------------------
+# Text lexicon
+# ---------------------------------------------------------------------------
+
+_STRONG = {
+    "setuju", "sepakat", "betul", "bener", "benar", "tepat", "sip", "mantap",
+    "mantab", "good", "great", "perfect", "agree", "agreed", "correct",
+    "exactly", "persis", "cocok", "acc", "approved", "approve", "lanjut",
+    "lanjutkan", "gas", "gaskan", "yes", "valid", "setujui", "disetujui",
+}
+_AMBIG = {
+    "ok", "oke", "okay", "okey", "okeh", "oce", "ya", "iya", "iyaa", "yaa",
+    "yup", "yap", "sure", "noted", "siap", "baik", "baiklah", "hmm", "oh",
+    "paham", "understood", "ngerti", "makasih", "thanks", "thx", "terima",
+    "kasih", "alright", "fine",
+}
+_FILLER = {
+    "deh", "dong", "aja", "saja", "kak", "molt", "bro", "sih", "nih", "yah",
+    "lah", "pak", "mas", "banget", "sekali", "juga", "udah", "sudah", "itu",
+    "ini", "kalau", "gitu", "nah", "yuk", "ayo", "begitu", "kok", "then", "please", "aku", "saya",
+}
+_NEG = {
+    "tidak", "tak", "nggak", "ngga", "gak", "ga", "enggak", "engga", "bukan",
+    "jangan", "no", "not", "belum", "salah", "kurang", "tapi", "but", "nope",
+}
+
+
+def _normalize(text: str) -> str:
+    s = (text or "").lower()
+    s = re.sub(r"[^\w\s]", " ", s)
+    s = re.sub(r"(.)\1{2,}", r"\1", s)  # okeee -> oke, sippp -> sip
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _only_approve_emojis(text: str) -> bool:
+    t = norm_emoji(text).replace(" ", "")
+    if not t:
+        return False
+    for e in sorted(APPROVE_EMOJIS, key=len, reverse=True):
+        t = t.replace(e, "")
+    return t == ""
+
+
+def classify_lexicon(text: str) -> Optional[str]:
+    """'approve' | 'ambiguous' | None (not an approval message at all)."""
+    if _only_approve_emojis(text):
+        return "approve"
+    s = _normalize(text)
+    if not s or len(s) > 60:
         return None
-    emojis = {_norm_emoji(e) for e in (agree_emojis or _DEFAULTS["agree_emojis"])}
-    squeezed = _norm_emoji("".join(t.split()))
-    if squeezed and all(ch in "".join(emojis) for ch in squeezed) and any(
-        e and e in squeezed for e in emojis
-    ):
-        return "agree"
-    toks = _NONWORD.sub(" ", t.lower()).split()
-    if not toks or any(tok not in _VOCAB for tok in toks):
+    toks = s.split()
+    if len(toks) > 6:
         return None
-    if any(tok in _AGREE for tok in toks):
-        return "agree"
-    if any(tok in _ACK for tok in toks):
+    if any(t in _NEG for t in toks):
+        return None
+    if not all(t in _STRONG or t in _AMBIG or t in _FILLER for t in toks):
+        return None
+    if any(t in _STRONG for t in toks):
+        return "approve"
+    if any(t in _AMBIG for t in toks):
         return "ambiguous"
     return None
 
 
-def is_acknowledgement(text: str) -> bool:
-    """True for approval/ack replies and reaction events - never memory-worthy."""
-    t = strip_context_prefix(text)
-    if t.lower().startswith("[reaction:"):
-        return True
-    return classify_lexical(t) is not None
-
-
-def reaction_label(emojis, cfg: Optional[dict] = None) -> Optional[str]:
-    cfg = cfg or _DEFAULTS
-    agree = {_norm_emoji(e) for e in cfg.get("agree_emojis") or []}
-    reject = {_norm_emoji(e) for e in cfg.get("reject_emojis") or []}
-    norm = {_norm_emoji(e) for e in emojis or []}
-    if norm & reject:
-        return "reject"
-    if norm & agree:
-        return "agree"
-    return None
-
-
-def _meta(raw) -> dict:
-    if isinstance(raw, dict):
-        return raw
-    if not raw:
-        return {}
-    try:
-        val = json.loads(raw)
-        return val if isinstance(val, dict) else {}
-    except (TypeError, ValueError):
-        return {}
-
-
-# ---------------------------------------------------------------------------
-# Ambiguous "ok": agree or just received?
-# ---------------------------------------------------------------------------
-
-_DECIDE_PROMPT = (
-    "You label one chat reply. The assistant wrote a message and the user "
-    "answered briefly.\n"
-    "AGREE = the user accepts the assistant's message as correct, or approves "
-    "what it proposed.\n"
-    "ACK = the user only acknowledges receipt, thanks, or asks to go on, "
-    "without endorsing the content.\n"
+_LLM_SYSTEM = (
+    "Classify the user's short reply to the assistant's previous message.\n"
+    "AGREE = the user accepts, endorses or approves what the assistant said or proposed.\n"
+    "ACK = the user only signals they received/read it, says thanks, or moves on without endorsing.\n"
     "Answer with exactly one word: AGREE or ACK."
 )
 
 
-async def _llm_decide(provider, user_text: str, assistant_text: str) -> tuple:
-    """Returns (label, decided_by). Any failure falls back to 'ack'."""
-    from .db.models import get_config
+def parse_llm_label(raw: str) -> str:
+    t = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.S).strip().upper()
+    return "approve" if t.startswith("AGREE") else "ack"
+
+
+async def classify_llm(reply: str, assistant_text: str) -> tuple:
+    """(label, method) for an ambiguous reply, via the local evaluator model."""
     try:
-        driver = await get_config("memory.evaluator_driver", "ollama")
         model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-    except Exception:
-        driver, model = "ollama", "qwen3:0.6b"
-    prompt = f"Assistant message:\n{(assistant_text or '')[:1500]}\n\nUser reply: {user_text}"
-    try:
-        if driver == "ollama":
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    "http://localhost:11434/api/chat",
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": _DECIDE_PROMPT},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "stream": False,
-                        "options": {"temperature": 0},
-                    },
-                )
-                resp.raise_for_status()
-                out = resp.json().get("message", {}).get("content", "")
-        elif provider is not None:
-            from .llm.provider import ChatMessage
-            resp = await provider.chat(
-                messages=[
-                    ChatMessage(role="system", content=_DECIDE_PROMPT),
-                    ChatMessage(role="user", content=prompt),
-                ],
-                temperature=0,
-                max_tokens=None,
-                thinking_budget=0,
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "http://localhost:11434/api/chat",
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": _LLM_SYSTEM},
+                        {"role": "user", "content": (
+                            f"Assistant said:\n{(assistant_text or '')[:1500]}\n\n"
+                            f"User replied: {reply}\n/no_think"
+                        )},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0},
+                },
             )
-            out = resp.content or ""
-        else:
-            return "ack", "fallback"
+            resp.raise_for_status()
+            raw = resp.json().get("message", {}).get("content", "")
+        return parse_llm_label(raw), "llm"
     except Exception as e:
-        logger.warning(f"ratification: classifier call failed: {type(e).__name__}: {e}")
+        logger.warning(f"ratification LLM classify failed, treating as ack: {e}")
         return "ack", "fallback"
-    out = re.sub(r"<think>.*?</think>", "", out or "", flags=re.DOTALL).strip().upper()
-    if out.startswith("AGREE"):
-        return "agree", "llm"
-    if out.startswith("ACK"):
-        return "ack", "llm"
-    return "ack", "fallback"
 
 
 # ---------------------------------------------------------------------------
@@ -255,93 +188,37 @@ async def _llm_decide(provider, user_text: str, assistant_text: str) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-async def _set_meta_key(conn, message_id: int, key: str, value) -> None:
-    await conn.execute(
-        "UPDATE messages SET metadata = jsonb_set(coalesce(metadata, '{}'::jsonb), "
-        "$2::text[], $3::jsonb, true) WHERE id = $1",
-        int(message_id), [key], json.dumps(value, ensure_ascii=False),
-    )
-
-
-async def previous_assistant(conn, session_id: int, message_id: int) -> Optional[dict]:
-    """The assistant reply this user message answers: the latest non-empty
-    assistant row before it, with no other user message in between."""
-    row = await conn.fetchrow(
-        """
-        WITH me AS (SELECT created_at FROM messages WHERE id = $2)
-        SELECT a.id, a.content, a.created_at FROM messages a, me
-        WHERE a.session_id = $1 AND a.role = 'assistant'
-          AND btrim(coalesce(a.content, '')) <> ''
-          AND a.created_at <= me.created_at AND a.id <> $2
-        ORDER BY a.created_at DESC, a.id DESC
-        LIMIT 1
-        """,
-        int(session_id), int(message_id),
-    )
-    if row is None:
-        return None
-    between = await conn.fetchval(
-        """
-        SELECT count(*) FROM messages
-        WHERE session_id = $1 AND role = 'user' AND id <> $2
-          AND created_at > $3
-          AND created_at <= (SELECT created_at FROM messages WHERE id = $2)
-        """,
-        int(session_id), int(message_id), row["created_at"],
-    )
-    if between:
-        return None
-    return dict(row)
-
-
-async def find_by_platform_id(conn, platform: str, chat_id: str, platform_message_id) -> Optional[dict]:
-    """Assistant row that was delivered as this platform message."""
+async def _flag(key: str) -> bool:
     try:
-        pmid = int(platform_message_id)
-    except (TypeError, ValueError):
-        return None
-    row = await conn.fetchrow(
-        """
-        SELECT m.id, m.session_id, m.content, m.created_at
-        FROM messages m JOIN sessions s ON s.id = m.session_id
-        WHERE s.platform = $1 AND s.platform_chat_id = $2
-          AND m.role = 'assistant'
-          AND m.metadata -> 'platform_message_ids' @> $3::jsonb
-        ORDER BY m.id DESC
-        LIMIT 1
-        """,
-        platform, str(chat_id), json.dumps([pmid]),
-    )
-    return dict(row) if row else None
+        return bool(await get_config(key, True))
+    except Exception:
+        return True
 
 
-async def refresh_status(conn, assistant_id: int, since) -> Optional[str]:
-    """Recompute the assistant row's status from its active ratifications."""
-    rows = await conn.fetch(
-        """
-        SELECT metadata -> 'ratification' ->> 'label' AS label, count(*) AS n
-        FROM messages
-        WHERE role = 'user' AND created_at >= $2
-          AND metadata -> 'ratification' ->> 'ratifies' = $1
-          AND metadata -> 'ratification' ->> 'status' = 'active'
-          AND metadata -> 'ratification' ->> 'label' IN ('agree', 'reject')
-        GROUP BY 1
-        """,
-        str(assistant_id), since,
-    )
-    counts = {r["label"]: int(r["n"]) for r in rows}
-    agree, reject = counts.get("agree", 0), counts.get("reject", 0)
-    status = "disputed" if reject else ("ratified" if agree else None)
-    if status:
-        await _set_meta_key(conn, assistant_id, "ratification",
-                            {"status": status, "agree": agree, "reject": reject})
-    else:
+def _combine(user_text: str, assistant_text: str) -> str:
+    return f"{user_text}\n\n{assistant_text or ''}".strip()
+
+
+async def _mark(user_row_id: int, assistant_row_id: int, info: dict) -> None:
+    async with get_connection() as conn:
         await conn.execute(
-            "UPDATE messages SET metadata = coalesce(metadata, '{}'::jsonb) - 'ratification' "
-            "WHERE id = $1",
-            int(assistant_id),
+            "UPDATE messages SET metadata = coalesce(metadata, '{}'::jsonb) "
+            "|| jsonb_build_object('ratification', $2::jsonb) WHERE id = $1",
+            user_row_id, json.dumps(info, ensure_ascii=False),
         )
-    return status
+        if info.get("label") in ("approve", "dispute"):
+            status = {
+                "status": "ratified" if info["label"] == "approve" else "disputed",
+                "type": info.get("type"),
+                "user_message_id": user_row_id,
+            }
+            if info.get("emoji"):
+                status["emoji"] = info["emoji"]
+            await conn.execute(
+                "UPDATE messages SET metadata = coalesce(metadata, '{}'::jsonb) "
+                "|| jsonb_build_object('ratification', $2::jsonb) WHERE id = $1",
+                assistant_row_id, json.dumps(status, ensure_ascii=False),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -349,192 +226,177 @@ async def refresh_status(conn, assistant_id: int, since) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
-async def resolve(
-    *,
-    provider,
-    session_id: int,
-    message_id: int,
-    content: str,
-    hint: Optional[dict],
-    max_chars: int = 4000,
-) -> Optional[str]:
-    """Classify a just-saved user row. Returns the text to embed in place of
-    the row content when it ratifies (or disputes) an assistant reply, else
-    None (embed the row as usual). Called from the background embed task."""
-    if not hint:
+async def ratify_user_row(session_id: int, message_id: int, content: str) -> Optional[str]:
+    """Classify a freshly saved user row. Returns the text to embed instead of
+    the row's own content when it ratifies an assistant answer, else None."""
+    if not await _flag("history_search.ratification"):
         return None
-    cfg = await settings()
-    if not cfg["enabled"]:
+    prefix, clean = split_context_prefix(content)
+    if not clean:
         return None
-    now = datetime.now(timezone.utc).isoformat()
 
-    if hint.get("is_reaction"):
-        if not cfg["reaction"]:
+    m = _REACTION_RE.match(clean)
+    if m:
+        if not await _flag("history_search.ratification_reaction"):
             return None
-        emojis = [e for e in (hint.get("reaction_emojis") or []) if e]
-        label = reaction_label(emojis, cfg)
-        if not label or hint.get("platform_message_id") is None:
-            return None
-        async with get_connection() as conn:
-            asst = await find_by_platform_id(
-                conn, hint.get("platform") or "telegram",
-                str(hint.get("chat_id") or ""), hint.get("platform_message_id"),
-            )
-            if not asst:
-                logger.info(
-                    f"ratification: reaction on platform msg {hint.get('platform_message_id')} "
-                    f"has no mapped assistant row (sent before mapping, or not a bot reply)"
-                )
-                return None
-            kind, user_text, decided_by = "reaction", "Reaksi " + " ".join(emojis), "emoji"
-            rec = {"kind": kind, "label": label, "ratifies": asst["id"],
-                   "decided_by": decided_by, "status": "active", "at": now}
-            await _set_meta_key(conn, message_id, "ratification", rec)
-            status = await refresh_status(conn, asst["id"], asst["created_at"])
+        return await _ratify_reaction_row(session_id, message_id, clean, m)
+
+    if not await _flag("history_search.ratification_text"):
+        return None
+    # A Telegram reply points at a specific (possibly older) message; the
+    # previous assistant row is then not necessarily the one approved.
+    if "Replied message (" in prefix:
+        return None
+    kind = classify_lexicon(clean)
+    if kind is None:
+        return None
+
+    async with get_connection() as conn:
+        a = await conn.fetchrow(
+            "SELECT id, content FROM messages WHERE session_id = $1 AND id < $2 "
+            "AND role = 'assistant' AND btrim(coalesce(content, '')) <> '' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            session_id, message_id,
+        )
+    if not a:
+        return None
+
+    if kind == "ambiguous":
+        label, method = await classify_llm(clean, a["content"])
     else:
-        if not cfg["text"]:
-            return None
-        text = hint.get("original_text") or strip_context_prefix(content)
-        cand = classify_lexical(text, cfg["max_chars"], cfg["agree_emojis"])
-        if cand is None:
-            return None
-        async with get_connection() as conn:
-            asst = await previous_assistant(conn, session_id, message_id)
-        if not asst:
-            return None
-        if cand == "agree":
-            label, decided_by = "agree", "lexicon"
-        elif cfg["text_llm"]:
-            label, decided_by = await _llm_decide(provider, text, asst["content"])
-        else:
-            label, decided_by = "ack", "lexicon"
-        kind, user_text = "text", text.strip()
-        rec = {"kind": kind, "label": label, "ratifies": asst["id"],
-               "decided_by": decided_by, "status": "active", "at": now}
-        async with get_connection() as conn:
-            # Kept for 'ack' too: the label is what gets compared with
-            # human annotation (agreement classification kappa).
-            await _set_meta_key(conn, message_id, "ratification", rec)
-            if label == "ack":
-                logger.info(f"ratification: msg {message_id} = ack ({decided_by}), embedded as-is")
-                return None
-            status = await refresh_status(conn, asst["id"], asst["created_at"])
-
-    logger.info(
-        f"ratification: msg {message_id} {kind}/{label} ({decided_by}) -> "
-        f"assistant {asst['id']} now {status}"
-    )
-    body = f"{user_text}\n\n{asst['content'] or ''}"
-    return body[:max_chars]
+        label, method = "approve", "lexicon"
+    info = {"type": "text", "label": label, "method": method, "assistant_id": a["id"]}
+    await _mark(message_id, a["id"], info)
+    logger.info(f"ratification: user row {message_id} -> {label} ({method}) on assistant row {a['id']}")
+    return _combine(clean, a["content"]) if label == "approve" else None
 
 
-async def record_sent_ids(platform: str, chat_id: str, platform_message_ids: list) -> None:
-    """Attach the platform ids of a just-delivered reply to its assistant row."""
-    ids = [int(i) for i in platform_message_ids or [] if i is not None]
+async def _ratify_reaction_row(session_id: int, message_id: int, clean: str, m) -> Optional[str]:
+    tg_id = int(m.group("mid"))
+    emojis = [norm_emoji(e) for e in m.group("emojis").split()]
+    label, emoji = None, None
+    for e in emojis:
+        if e in DISPUTE_EMOJIS:
+            label, emoji = "dispute", e
+            break
+        if e in APPROVE_EMOJIS and label is None:
+            label, emoji = "approve", e
+    if label is None:
+        return None
+
+    async with get_connection() as conn:
+        a = await conn.fetchrow(
+            "SELECT id, content FROM messages WHERE session_id = $1 AND role = 'assistant' "
+            "AND metadata->'tg_message_ids' @> to_jsonb($2::bigint) "
+            "ORDER BY id DESC LIMIT 1",
+            session_id, tg_id,
+        )
+    if not a:
+        logger.info(f"ratification: reaction on tg msg {tg_id} has no mapped assistant row")
+        return None
+
+    info = {
+        "type": "reaction", "label": label, "emoji": emoji,
+        "assistant_id": a["id"], "tg_message_id": tg_id,
+    }
+    await _mark(message_id, a["id"], info)
+    logger.info(f"ratification: reaction {emoji} row {message_id} -> {label} on assistant row {a['id']}")
+    return _combine(clean, a["content"]) if label == "approve" else None
+
+
+async def record_sent_ids(platform: str, chat_id: str, ids: list) -> None:
+    """Attach the platform message ids of a delivered answer to the newest
+    assistant row of that chat, so a later reaction can find its content."""
     if not ids:
         return
     try:
         async with get_connection() as conn:
-            row = await conn.fetchrow(
-                """
-                SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id
-                WHERE s.platform = $1 AND s.platform_chat_id = $2
-                  AND m.role = 'assistant' AND btrim(coalesce(m.content, '')) <> ''
-                  AND m.created_at > now() - interval '30 minutes'
-                ORDER BY m.created_at DESC, m.id DESC
-                LIMIT 1
-                """,
-                platform, str(chat_id),
-            )
-            if row is None:
-                logger.debug(f"record_sent_ids: no recent assistant row for {platform}:{chat_id}")
-                return
             await conn.execute(
                 """
                 UPDATE messages SET metadata = jsonb_set(
-                    coalesce(metadata, '{}'::jsonb), '{platform_message_ids}',
-                    coalesce(metadata -> 'platform_message_ids', '[]'::jsonb) || $2::jsonb, true)
-                WHERE id = $1
+                    coalesce(metadata, '{}'::jsonb), '{tg_message_ids}',
+                    coalesce(metadata->'tg_message_ids', '[]'::jsonb) || $3::jsonb)
+                WHERE id = (
+                    SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id
+                    WHERE s.platform = $1 AND s.platform_chat_id = $2
+                      AND m.role = 'assistant' AND btrim(coalesce(m.content, '')) <> ''
+                      AND m.created_at > now() - interval '10 minutes'
+                    ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
                 """,
-                row["id"], json.dumps(ids),
+                platform, str(chat_id), json.dumps([int(i) for i in ids]),
             )
-        logger.debug(f"record_sent_ids: assistant {row['id']} <- {platform} msgs {ids}")
     except Exception as e:
-        logger.warning(f"record_sent_ids failed for {platform}:{chat_id}: {type(e).__name__}: {e}")
+        logger.warning(f"record_sent_ids failed for {platform}:{chat_id}: {e}")
 
 
-async def lookup_sent_preview(platform: str, chat_id: str, platform_message_id) -> Optional[str]:
-    """Content of the assistant reply delivered as this platform message."""
-    try:
-        async with get_connection() as conn:
-            asst = await find_by_platform_id(conn, platform, chat_id, platform_message_id)
-        return (asst or {}).get("content")
-    except Exception as e:
-        logger.debug(f"lookup_sent_preview failed: {e}")
-        return None
-
-
-async def _reembed_plain(conn, message_id: int, content: str) -> None:
+async def _embed_text(text: str) -> Optional[list]:
     from .tools import history as _h
-    from .db.models import get_config
     prov = getattr(_h, "_embedding_provider", None)
     if prov is None:
-        return
-    try:
-        max_chars = int(await get_config("history_search.max_content_chars", 4000))
-    except Exception:
-        max_chars = 4000
-    resp = await prov.embed((content or "")[:max_chars])
-    vec = getattr(resp, "vector", None)
-    if vec:
-        await conn.execute(
-            "UPDATE messages SET embedding = $1::vector WHERE id = $2", str(vec), int(message_id)
-        )
+        return None
+    max_chars = int(await get_config("history_search.max_content_chars", 4000))
+    resp = await prov.embed(text[:max_chars])
+    return getattr(resp, "vector", None) or None
 
 
-async def revoke_reaction(platform: str, chat_id: str, platform_message_id, removed_emojis) -> int:
-    """A removed reaction revokes the ratification it created. Returns the
-    number of rows revoked."""
+async def revoke_reaction(platform: str, chat_id: str, tg_message_id: int, emojis: list) -> int:
+    """A reaction was taken back: restore each affected user row's own
+    embedding and mark it revoked. Returns the number of rows revoked."""
+    removed = {norm_emoji(e) for e in emojis}
+    revoked_ids = []
     try:
-        cfg = await settings()
-        if not cfg["enabled"]:
-            return 0
-        labels = {lb for lb in (reaction_label([e], cfg) for e in removed_emojis or []) if lb}
-        if not labels:
-            return 0
-        now = datetime.now(timezone.utc).isoformat()
         async with get_connection() as conn:
-            asst = await find_by_platform_id(conn, platform, chat_id, platform_message_id)
-            if not asst:
+            a = await conn.fetchrow(
+                "SELECT m.id, m.session_id, m.metadata->'ratification' AS r "
+                "FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE s.platform = $1 AND s.platform_chat_id = $2 AND m.role = 'assistant' "
+                "AND m.metadata->'tg_message_ids' @> to_jsonb($3::bigint) "
+                "ORDER BY m.id DESC LIMIT 1",
+                platform, str(chat_id), int(tg_message_id),
+            )
+            if not a:
                 return 0
             rows = await conn.fetch(
-                """
-                SELECT id, content FROM messages
-                WHERE role = 'user' AND created_at >= $2
-                  AND metadata -> 'ratification' ->> 'ratifies' = $1
-                  AND metadata -> 'ratification' ->> 'kind' = 'reaction'
-                  AND metadata -> 'ratification' ->> 'status' = 'active'
-                  AND metadata -> 'ratification' ->> 'label' = ANY($3::text[])
-                """,
-                str(asst["id"]), asst["created_at"], sorted(labels),
+                "SELECT id, content, metadata->'ratification' AS r FROM messages "
+                "WHERE session_id = $1 AND role = 'user' "
+                "AND metadata->'ratification'->>'type' = 'reaction' "
+                "AND metadata->'ratification'->>'assistant_id' = $2 "
+                "AND metadata->'ratification'->>'label' IN ('approve', 'dispute')",
+                a["session_id"], str(a["id"]),
             )
-            for r in rows:
+        for row in rows:
+            r = row["r"]
+            r = json.loads(r) if isinstance(r, str) else (r or {})
+            if norm_emoji(r.get("emoji", "")) not in removed:
+                continue
+            vec = None
+            if r.get("label") == "approve":
+                vec = await _embed_text(row["content"] or "")
+            r = dict(r, label="revoked", revoked_label=r.get("label"))
+            async with get_connection() as conn:
                 await conn.execute(
-                    """
-                    UPDATE messages SET metadata = jsonb_set(
-                        jsonb_set(metadata, '{ratification,status}', '"revoked"'::jsonb),
-                        '{ratification,revoked_at}', to_jsonb($2::text))
-                    WHERE id = $1
-                    """,
-                    r["id"], now,
+                    "UPDATE messages SET metadata = coalesce(metadata, '{}'::jsonb) "
+                    "|| jsonb_build_object('ratification', $2::jsonb) WHERE id = $1",
+                    row["id"], json.dumps(r, ensure_ascii=False),
                 )
-                await _reembed_plain(conn, r["id"], r["content"])
-            status = await refresh_status(conn, asst["id"], asst["created_at"])
-        logger.info(
-            f"ratification: revoked {len(rows)} reaction(s) {sorted(labels)} on assistant "
-            f"{asst['id']}, now {status}"
-        )
-        return len(rows)
+                if vec:
+                    await conn.execute(
+                        "UPDATE messages SET embedding = $1::vector WHERE id = $2",
+                        str(vec), row["id"],
+                    )
+            revoked_ids.append(row["id"])
+
+        cur = a["r"]
+        cur = json.loads(cur) if isinstance(cur, str) else (cur or {})
+        if revoked_ids and cur.get("user_message_id") in revoked_ids:
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE messages SET metadata = coalesce(metadata, '{}'::jsonb) "
+                    "|| jsonb_build_object('ratification', $2::jsonb) WHERE id = $1",
+                    a["id"], json.dumps(dict(cur, status="revoked"), ensure_ascii=False),
+                )
+        if revoked_ids:
+            logger.info(f"ratification: revoked rows {revoked_ids} on assistant row {a['id']}")
     except Exception as e:
-        logger.warning(f"revoke_reaction failed: {type(e).__name__}: {e}")
-        return 0
+        logger.warning(f"revoke_reaction failed for {platform}:{chat_id} msg {tg_message_id}: {e}")
+    return len(revoked_ids)
