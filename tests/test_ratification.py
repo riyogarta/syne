@@ -44,7 +44,7 @@ class TestPrefix:
 class TestLexicon:
 
     @pytest.mark.parametrize("text", [
-        "setuju", "Ya setuju", "oke lanjutkan", "sippp", "Nah setuju", "👍", "lanjut aja", "betul banget",
+        "setuju", "Ya setuju", "oke setuju", "sippp", "Nah setuju", "👍", "setuju lanjutkan", "betul banget",
     ])
     def test_approve(self, text):
         assert R.classify_lexicon(text) == "approve"
@@ -75,8 +75,8 @@ class TestRatifyUserRow:
         conn.execute = AsyncMock()
         with patch("syne.ratification.get_connection", return_value=_ctx(conn)), \
              patch("syne.ratification.get_config", side_effect=_cfg()):
-            out = await R.ratify_user_row(51, 10, HDR + "oke lanjutkan")
-        assert out == "oke lanjutkan\n\nRencana: A lalu B"
+            out = await R.ratify_user_row(51, 10, HDR + "oke setuju")
+        assert out == "oke setuju\n\nRencana: A lalu B"
         assert conn.fetchrow.call_args.args[1:] == (51, 10)
         assert conn.execute.call_count == 2
         user_info = json.loads(conn.execute.call_args_list[0].args[2])
@@ -274,3 +274,26 @@ class TestChannelHelpers:
         from syne.communication.discord import dc_chat_key
         assert dc_chat_key(SimpleNamespace(id=5, guild=None)) == "5"
         assert dc_chat_key(SimpleNamespace(id=5, guild=SimpleNamespace(id=9))) == "9"
+
+
+class TestContinuation:
+
+    @pytest.mark.parametrize("text", ["oke lanjutkan", "lanjut aja", "gas", "lanjutkan dong", "ok next"])
+    def test_lexicon(self, text):
+        assert R.classify_lexicon(text) == "continue"
+
+    async def test_marked_not_combined(self):
+        conn = AsyncMock()
+        conn.fetchrow = AsyncMock(return_value={"id": 9, "content": "Rencana: A lalu B"})
+        conn.execute = AsyncMock()
+        with patch("syne.ratification.get_connection", return_value=_ctx(conn)), \
+             patch("syne.ratification.get_config", side_effect=_cfg()):
+            out = await R.ratify_user_row(51, 10, HDR + "oke lanjutkan")
+        assert out is None
+        assert conn.execute.call_count == 1  # user row only, answer not ratified
+        info = json.loads(conn.execute.call_args_list[0].args[2])
+        assert info == {"type": "text", "label": "continue", "method": "lexicon", "assistant_id": 9}
+
+    def test_not_an_anchor(self):
+        import inspect
+        assert "<> 'continue'" in inspect.getsource(H)

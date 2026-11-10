@@ -2,7 +2,7 @@
 
 history_search anchors only on USER messages, so a fact that only the
 assistant wrote is invisible to search. When the user explicitly accepts
-that answer - a short approval ("setuju", "oke lanjutkan") or an approving
+that answer - a short approval ("setuju", "betul") or an approving
 emoji reaction - the user's row is re-embedded as user text + the approved
 assistant answer. The anchor stays a user row: an assistant answer only
 becomes searchable once the user has endorsed it (grounding, Clark &
@@ -13,6 +13,9 @@ still be wrong.
               acknowledgements ("ok", "ya") are ambiguous (agree vs. just
               "received", Jurafsky et al. 1997) and go to the local
               evaluator model, falling back to "ack" (no ratification).
+              Continuation requests ("lanjutkan", "gas") are labelled
+              "continue": asking the agent to go on is not an endorsement,
+              so they are never combined and never a history_search anchor.
   * reaction: approving emoji -> ratified, 👎 -> disputed, a reaction that
               is taken back -> revoked (own embedding restored).
 
@@ -122,8 +125,15 @@ def id_value(platform: Optional[str], raw):
 _STRONG = {
     "setuju", "sepakat", "betul", "bener", "benar", "tepat", "sip", "mantap",
     "mantab", "good", "great", "perfect", "agree", "agreed", "correct",
-    "exactly", "persis", "cocok", "acc", "approved", "approve", "lanjut",
-    "lanjutkan", "gas", "gaskan", "yes", "valid", "setujui", "disetujui",
+    "exactly", "persis", "cocok", "acc", "approved", "approve",
+    "yes", "valid", "setujui", "disetujui",
+}
+# Continuation requests: the user asks the agent to go on. That is not an
+# endorsement of what it said, so they are labelled "continue", never
+# combined with the answer, and excluded as history_search anchors.
+_CONTINUE = {
+    "lanjut", "lanjutkan", "lanjutin", "terus", "teruskan", "gas", "gaskan",
+    "go", "next", "continue", "proceed",
 }
 _AMBIG = {
     "ok", "oke", "okay", "okey", "okeh", "oce", "ya", "iya", "iyaa", "yaa",
@@ -159,7 +169,9 @@ def _only_approve_emojis(text: str) -> bool:
 
 
 def classify_lexicon(text: str) -> Optional[str]:
-    """'approve' | 'ambiguous' | None (not an approval message at all)."""
+    """'approve' | 'continue' | 'ambiguous' | None (not an approval message
+    at all). An approval word wins over a continuation word ("setuju,
+    lanjutkan" approves); "oke lanjutkan" is a continuation."""
     if _only_approve_emojis(text):
         return "approve"
     s = _normalize(text)
@@ -170,10 +182,12 @@ def classify_lexicon(text: str) -> Optional[str]:
         return None
     if any(t in _NEG for t in toks):
         return None
-    if not all(t in _STRONG or t in _AMBIG or t in _FILLER for t in toks):
+    if not all(t in _STRONG or t in _CONTINUE or t in _AMBIG or t in _FILLER for t in toks):
         return None
     if any(t in _STRONG for t in toks):
         return "approve"
+    if any(t in _CONTINUE for t in toks):
+        return "continue"
     if any(t in _AMBIG for t in toks):
         return "ambiguous"
     return None
@@ -313,7 +327,9 @@ async def ratify_user_row(session_id: int, message_id: int, content: str) -> Opt
     if not a:
         return None
 
-    if kind == "ambiguous":
+    if kind == "continue":
+        label, method = "continue", "lexicon"
+    elif kind == "ambiguous":
         label, method = await classify_llm(clean, a["content"])
     else:
         label, method = "approve", "lexicon"

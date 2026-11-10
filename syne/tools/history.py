@@ -265,7 +265,13 @@ async def history_search_handler(
             "message only. Omit them to search the chats this person may see."
         )
 
-    conditions = ["m.role = 'user'", "m.embedding IS NOT NULL"]
+    # A continuation request ("lanjutkan") is never an anchor on its own;
+    # the exchange it belongs to is still reached through its neighbours.
+    conditions = [
+        "m.role = 'user'",
+        "m.embedding IS NOT NULL",
+        "COALESCE(m.metadata->'ratification'->>'label', '') <> 'continue'",
+    ]
     params: list = [str(vector)]
     p = 2
 
