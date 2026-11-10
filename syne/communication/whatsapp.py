@@ -893,6 +893,121 @@ class WhatsAppChannel:
         return (text or "").strip(), (caption or "").strip(), kind
 
     @staticmethod
+    def _extract_reaction(ev: MessageEv) -> Optional[tuple]:
+        """(target message id, emoji) for a reaction event, else None.
+
+        An empty emoji means the reaction was taken back. A new emoji from the
+        same person replaces the old one; WhatsApp does not say which emoji
+        it replaced.
+        """
+        msg = ev.Message
+        try:
+            if not msg.HasField("reactionMessage"):
+                return None
+            r = msg.reactionMessage
+            target = r.key.ID if r.HasField("key") else ""
+        except (ValueError, AttributeError):
+            return None
+        if not target:
+            return None
+        return str(target), (r.text or "").strip()
+
+    async def _handle_reaction(self, ev: MessageEv, chat_jid: str, sender_jid: str,
+                               alt_pn: str, from_me: bool, is_group: bool,
+                               target_id: str, emoji: str) -> None:
+        """A reaction on one of Syne's replies, for ratification
+        (syne/ratification.py). Reactions on anything else are ignored, so
+        Syne's own 👀 receipts and chatter between people never reach the
+        agent. No trigger word: reacting to Syne's reply already addresses it.
+        """
+        from ..ratification import lookup_sent_preview, revoke_reaction
+
+        preview = await lookup_sent_preview("whatsapp", chat_jid, target_id)
+        if preview is None:
+            return
+
+        if is_group:
+            group_row = await get_group("whatsapp", chat_jid)
+            if group_row is not None and not group_row.get("enabled", True):
+                return
+            sender_pn = (self._own_pn if from_me else "") or alt_pn or self._local(sender_jid)
+        elif from_me:
+            chat_pn = await self._resolve_lid_pn(chat_jid) or self._local(chat_jid)
+            is_self_chat = (
+                self._local(sender_jid) == self._local(chat_jid)
+                or (bool(self._own_pn) and chat_pn == self._own_pn)
+            )
+            if not is_self_chat:
+                # The owner reacting in a DM with someone else: the session
+                # belongs to the other person, not a ratification by them.
+                return
+            sender_pn = self._own_pn or chat_pn
+        else:
+            sender_pn = alt_pn or self._local(chat_jid)
+
+        by_jid = await self._load_members()
+        _, member = self._match_member(by_jid, chat_jid, alt_pn)
+        if member and member.get("blocked"):
+            return
+
+        name = ev.Info.Pushname or sender_pn
+        who = f"{name} ({sender_pn})" if name != sender_pn else sender_pn
+
+        # A new emoji replaces this person's previous one, and an empty one
+        # removes it: either way the previous ratification no longer holds.
+        await revoke_reaction("whatsapp", chat_jid, target_id, None, reactor=sender_pn)
+        if not emoji:
+            return
+
+        logger.info("[whatsapp] reaction %s from %s on %s", emoji, sender_pn, target_id)
+        snippet = preview[:100].replace("\n", " ")
+        event_text = f"[Reaction: {emoji} from {who} on your message #{target_id}: '{snippet}']"
+
+        inbound = InboundContext(
+            channel="whatsapp",
+            platform="whatsapp",
+            chat_type="group" if is_group else "direct",
+            conversation_label=(member or {}).get("name") or name,
+            group_subject=(member or {}).get("name") if is_group else None,
+            chat_id=chat_jid,
+            sender_name=name if is_group else None,
+            sender_id=sender_pn if is_group else None,
+            was_mentioned=True,
+        )
+        await load_group_settings(inbound)
+        if not is_group:
+            try:
+                _u = await get_user("whatsapp", sender_pn)
+            except Exception:
+                _u = None
+            inbound.sender_access = (_u or {}).get("access_level", "public")
+
+        metadata = {
+            "message_id": target_id,
+            "chat_id": chat_jid,
+            "inbound": inbound,
+            "is_reaction": True,
+            "reaction_emojis": [emoji],
+            "wa_model_override": (member or {}).get("model") or None,
+        }
+        try:
+            response = await self.agent.handle_message(
+                platform="whatsapp",
+                chat_id=chat_jid,
+                user_name=name,
+                user_platform_id=sender_pn,
+                message=event_text,
+                display_name=name,
+                message_metadata=metadata,
+                is_dm=False,
+            )
+            if response and response.strip().upper() != "NO_REPLY":
+                await self.send_response(chat_jid, response)
+        except Exception as e:
+            logger.error("Error handling WhatsApp reaction: %s: %s", type(e).__name__, e,
+                         exc_info=True)
+
+    @staticmethod
     def _extract_quote(ev: MessageEv) -> tuple[str, str]:
         """(quoted message id, quoted text) if this message is a reply, else ("", "")."""
         msg = ev.Message
@@ -955,6 +1070,16 @@ class WhatsAppChannel:
         from_me = bool(src.IsFromMe)
         is_group = bool(src.IsGroup)
         msg_id = ev.Info.ID
+
+        # A reaction carries no text, so it must be caught before the
+        # protocol-only early return below.
+        reaction = self._extract_reaction(ev)
+        if reaction is not None:
+            if not self._is_duplicate(msg_id):
+                await self._handle_reaction(
+                    ev, chat_jid, sender_jid, alt_pn, from_me, is_group, *reaction
+                )
+            return
 
         text, caption, media_kind = self._extract_content(ev)
         if not text and not caption and not media_kind:
@@ -1418,11 +1543,12 @@ class WhatsAppChannel:
 
         target = self._to_jid(chat_jid)
         caption_used = False
+        _sent: list = []  # delivered ids, for ratification by reaction
 
         for idx, path in enumerate(media):
             cap = text if (idx == 0 and text) else None
             try:
-                await self._send_file(target, path, cap)
+                _sent.append(await self._send_file(target, path, cap))
                 if cap:
                     caption_used = True
                     self._record_echo(chat_jid, cap)
@@ -1435,11 +1561,18 @@ class WhatsAppChannel:
                 if not chunk.strip():
                     continue
                 try:
-                    self._mark_sent(await self.client.send_message(target, chunk))
+                    _resp = await self.client.send_message(target, chunk)
+                    self._mark_sent(_resp)
+                    _sent.append(str(getattr(_resp, "ID", "") or ""))
                     self._record_echo(chat_jid, chunk)
                     await asyncio.sleep(0.3)
                 except Exception as e:
                     logger.error("WhatsApp send failed: %s: %s", type(e).__name__, e)
+
+        _sent = [i for i in _sent if i]
+        if _sent:
+            from ..ratification import record_sent_ids
+            await record_sent_ids("whatsapp", chat_jid, _sent)
 
     async def _reply_prefix(self) -> str:
         """Marker for outgoing messages (config whatsapp.reply_prefix).
@@ -1454,7 +1587,7 @@ class WhatsAppChannel:
             return _DEFAULT_REPLY_PREFIX
         return str(raw).strip()
 
-    async def _send_file(self, target: Any, path: str, caption: Optional[str]) -> None:
+    async def _send_file(self, target: Any, path: str, caption: Optional[str]) -> str:
         """Send one attachment, routed by extension."""
         ext = os.path.splitext(path)[1].lower()
         if ext in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
@@ -1468,6 +1601,7 @@ class WhatsAppChannel:
             )
         self._mark_sent(resp)
         logger.info("[whatsapp] sent file: %s", path)
+        return str(getattr(resp, "ID", "") or "")
 
     # ── Used by the registry / cross-channel callers ─────────
 

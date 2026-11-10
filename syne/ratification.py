@@ -16,6 +16,12 @@ still be wrong.
   * reaction: approving emoji -> ratified, 👎 -> disputed, a reaction that
               is taken back -> revoked (own embedding restored).
 
+Channels: Telegram, WhatsApp and Discord. Each channel records the platform
+ids of every message it delivers on the assistant row (metadata
+tg_message_ids / wa_message_ids / dc_message_ids), so a reaction on any
+chunk - even an old one - resolves to its content. A reaction reaches the
+agent as "[Reaction: <emoji> from <name> on your message #<id>: '...']".
+
 The label is written to messages.metadata.ratification on the user row and
 the status on the assistant row, so history_expand can show it and the
 classification can be scored against human annotation.
@@ -41,15 +47,17 @@ logger = logging.getLogger("syne.ratification")
 # ---------------------------------------------------------------------------
 
 _PREFIX_BLOCK = re.compile(r"\A\s*[^\n`]*:\n```json\n.*?\n```[ \t]*\n*", re.S)
+# WhatsApp prepends a bracketed channel instruction before the JSON blocks.
+_CHANNEL_INSTRUCTION = re.compile(r"\A\s*\[[A-Za-z ]*channel instruction:[^\]]*\][ \t]*\n*")
 
 
 def split_context_prefix(text: str) -> tuple:
-    """(prefix, body): peel the untrusted JSON context blocks that channels
-    prepend to every user message."""
+    """(prefix, body): peel the channel instruction and the untrusted JSON
+    context blocks that channels prepend to every user message."""
     text = text or ""
     rest = text
     while True:
-        m = _PREFIX_BLOCK.match(rest)
+        m = _CHANNEL_INSTRUCTION.match(rest) or _PREFIX_BLOCK.match(rest)
         if not m:
             break
         rest = rest[m.end():]
@@ -75,8 +83,37 @@ APPROVE_EMOJIS = {norm_emoji(e) for e in (
 DISPUTE_EMOJIS = {norm_emoji(e) for e in ("👎", "❌")}
 
 _REACTION_RE = re.compile(
-    r"\A\[Reaction: (?P<emojis>.+?) from .+? on your message #(?P<mid>\d+)", re.S
+    r"\A\[Reaction: (?P<emojis>.+?) from (?P<who>.+?) on your message #(?P<mid>[^\s:]+)",
+    re.S,
 )
+
+# ---------------------------------------------------------------------------
+# Platform message ids
+# ---------------------------------------------------------------------------
+
+_ID_KEYS = {
+    "telegram": "tg_message_ids",
+    "whatsapp": "wa_message_ids",
+    "discord": "dc_message_ids",
+}
+
+
+def ids_key(platform: Optional[str]) -> Optional[str]:
+    """metadata key holding the delivered message ids for this platform."""
+    return _ID_KEYS.get((platform or "").lower())
+
+
+def id_value(platform: Optional[str], raw):
+    """Platform message id as stored: WhatsApp ids are strings, Telegram and
+    Discord ids are integers. None when unusable."""
+    if (platform or "").lower() == "whatsapp":
+        s = str(raw or "").strip()
+        return s or None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Text lexicon
@@ -221,6 +258,21 @@ async def _mark(user_row_id: int, assistant_row_id: int, info: dict) -> None:
             )
 
 
+async def _find_sent(conn, platform: str, chat_id: str, platform_message_id):
+    """Assistant row delivered as this platform message in this chat."""
+    key, val = ids_key(platform), id_value(platform, platform_message_id)
+    if key is None or val is None:
+        return None
+    return await conn.fetchrow(
+        "SELECT m.id, m.session_id, m.content, m.metadata->'ratification' AS r "
+        "FROM messages m JOIN sessions s ON s.id = m.session_id "
+        "WHERE s.platform = $1 AND s.platform_chat_id = $2 AND m.role = 'assistant' "
+        f"AND m.metadata->'{key}' @> $3::jsonb "
+        "ORDER BY m.id DESC LIMIT 1",
+        platform, str(chat_id), json.dumps([val]),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Entry points
 # ---------------------------------------------------------------------------
@@ -243,8 +295,8 @@ async def ratify_user_row(session_id: int, message_id: int, content: str) -> Opt
 
     if not await _flag("history_search.ratification_text"):
         return None
-    # A Telegram reply points at a specific (possibly older) message; the
-    # previous assistant row is then not necessarily the one approved.
+    # A reply points at a specific (possibly older) message; the previous
+    # assistant row is then not necessarily the one approved.
     if "Replied message (" in prefix:
         return None
     kind = classify_lexicon(clean)
@@ -272,7 +324,7 @@ async def ratify_user_row(session_id: int, message_id: int, content: str) -> Opt
 
 
 async def _ratify_reaction_row(session_id: int, message_id: int, clean: str, m) -> Optional[str]:
-    tg_id = int(m.group("mid"))
+    mid = m.group("mid")
     emojis = [norm_emoji(e) for e in m.group("emojis").split()]
     label, emoji = None, None
     for e in emojis:
@@ -285,19 +337,23 @@ async def _ratify_reaction_row(session_id: int, message_id: int, clean: str, m) 
         return None
 
     async with get_connection() as conn:
+        platform = await conn.fetchval("SELECT platform FROM sessions WHERE id = $1", session_id)
+        key, val = ids_key(platform), id_value(platform, mid)
+        if key is None or val is None:
+            return None
         a = await conn.fetchrow(
             "SELECT id, content FROM messages WHERE session_id = $1 AND role = 'assistant' "
-            "AND metadata->'tg_message_ids' @> to_jsonb($2::bigint) "
+            f"AND metadata->'{key}' @> $2::jsonb "
             "ORDER BY id DESC LIMIT 1",
-            session_id, tg_id,
+            session_id, json.dumps([val]),
         )
     if not a:
-        logger.info(f"ratification: reaction on tg msg {tg_id} has no mapped assistant row")
+        logger.info(f"ratification: reaction on {platform} msg {mid} has no mapped assistant row")
         return None
 
     info = {
-        "type": "reaction", "label": label, "emoji": emoji,
-        "assistant_id": a["id"], "tg_message_id": tg_id,
+        "type": "reaction", "label": label, "emoji": emoji, "reactor": m.group("who"),
+        "assistant_id": a["id"], "platform": platform, "platform_message_id": val,
     }
     await _mark(message_id, a["id"], info)
     logger.info(f"ratification: reaction {emoji} row {message_id} -> {label} on assistant row {a['id']}")
@@ -307,15 +363,17 @@ async def _ratify_reaction_row(session_id: int, message_id: int, clean: str, m) 
 async def record_sent_ids(platform: str, chat_id: str, ids: list) -> None:
     """Attach the platform message ids of a delivered answer to the newest
     assistant row of that chat, so a later reaction can find its content."""
-    if not ids:
+    key = ids_key(platform)
+    vals = [v for v in (id_value(platform, i) for i in ids or []) if v is not None]
+    if key is None or not vals:
         return
     try:
         async with get_connection() as conn:
             await conn.execute(
-                """
+                f"""
                 UPDATE messages SET metadata = jsonb_set(
-                    coalesce(metadata, '{}'::jsonb), '{tg_message_ids}',
-                    coalesce(metadata->'tg_message_ids', '[]'::jsonb) || $3::jsonb)
+                    coalesce(metadata, '{{}}'::jsonb), '{{{key}}}',
+                    coalesce(metadata->'{key}', '[]'::jsonb) || $3::jsonb)
                 WHERE id = (
                     SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id
                     WHERE s.platform = $1 AND s.platform_chat_id = $2
@@ -323,10 +381,30 @@ async def record_sent_ids(platform: str, chat_id: str, ids: list) -> None:
                       AND m.created_at > now() - interval '10 minutes'
                     ORDER BY m.created_at DESC, m.id DESC LIMIT 1)
                 """,
-                platform, str(chat_id), json.dumps([int(i) for i in ids]),
+                platform, str(chat_id), json.dumps(vals),
             )
     except Exception as e:
         logger.warning(f"record_sent_ids failed for {platform}:{chat_id}: {e}")
+
+
+async def lookup_sent_preview(platform: str, chat_id: str, platform_message_id) -> Optional[str]:
+    """Content of the assistant answer delivered as this platform message,
+    or None when it is not a mapped Syne reply."""
+    try:
+        async with get_connection() as conn:
+            a = await _find_sent(conn, platform, chat_id, platform_message_id)
+        return (a["content"] or "") if a else None
+    except Exception as e:
+        logger.debug(f"lookup_sent_preview failed for {platform}:{chat_id}: {e}")
+        return None
+
+
+def same_reactor(stored: Optional[str], reactor: str) -> bool:
+    """WhatsApp and Discord name a reactor as 'Name (stable-id)'; match on
+    the id so a changed display name still revokes."""
+    if not stored:
+        return True
+    return stored == reactor or stored.endswith(f"({reactor})")
 
 
 async def _embed_text(text: str) -> Optional[list]:
@@ -339,21 +417,23 @@ async def _embed_text(text: str) -> Optional[list]:
     return getattr(resp, "vector", None) or None
 
 
-async def revoke_reaction(platform: str, chat_id: str, tg_message_id: int, emojis: list) -> int:
+async def revoke_reaction(
+    platform: str,
+    chat_id: str,
+    platform_message_id,
+    emojis: Optional[list],
+    reactor: Optional[str] = None,
+) -> int:
     """A reaction was taken back: restore each affected user row's own
-    embedding and mark it revoked. Returns the number of rows revoked."""
-    removed = {norm_emoji(e) for e in emojis}
+    embedding and mark it revoked. emojis=None revokes every emoji (WhatsApp
+    removals and replacements do not say which one is gone); reactor limits
+    it to that person's reactions (their stable id, see same_reactor).
+    Returns the number of rows revoked."""
+    removed = None if emojis is None else {norm_emoji(e) for e in emojis}
     revoked_ids = []
     try:
         async with get_connection() as conn:
-            a = await conn.fetchrow(
-                "SELECT m.id, m.session_id, m.metadata->'ratification' AS r "
-                "FROM messages m JOIN sessions s ON s.id = m.session_id "
-                "WHERE s.platform = $1 AND s.platform_chat_id = $2 AND m.role = 'assistant' "
-                "AND m.metadata->'tg_message_ids' @> to_jsonb($3::bigint) "
-                "ORDER BY m.id DESC LIMIT 1",
-                platform, str(chat_id), int(tg_message_id),
-            )
+            a = await _find_sent(conn, platform, chat_id, platform_message_id)
             if not a:
                 return 0
             rows = await conn.fetch(
@@ -367,7 +447,9 @@ async def revoke_reaction(platform: str, chat_id: str, tg_message_id: int, emoji
         for row in rows:
             r = row["r"]
             r = json.loads(r) if isinstance(r, str) else (r or {})
-            if norm_emoji(r.get("emoji", "")) not in removed:
+            if removed is not None and norm_emoji(r.get("emoji", "")) not in removed:
+                continue
+            if reactor and not same_reactor(r.get("reactor"), reactor):
                 continue
             vec = None
             if r.get("label") == "approve":
@@ -398,5 +480,7 @@ async def revoke_reaction(platform: str, chat_id: str, tg_message_id: int, emoji
         if revoked_ids:
             logger.info(f"ratification: revoked rows {revoked_ids} on assistant row {a['id']}")
     except Exception as e:
-        logger.warning(f"revoke_reaction failed for {platform}:{chat_id} msg {tg_message_id}: {e}")
+        logger.warning(
+            f"revoke_reaction failed for {platform}:{chat_id} msg {platform_message_id}: {e}"
+        )
     return len(revoked_ids)

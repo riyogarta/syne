@@ -72,6 +72,14 @@ logger = logging.getLogger("syne.discord")
 DISCORD_MAX_MESSAGE = 2000
 
 
+def dc_chat_key(channel: Any) -> str:
+    """Session chat id for a Discord channel: the channel id for a DM, the
+    guild id inside a server (sessions are keyed on the guild, see
+    DiscordChannel._build_inbound)."""
+    guild = getattr(channel, "guild", None)
+    return str(guild.id) if guild is not None else str(channel.id)
+
+
 class DiscordChannel:
     """Discord bot adapter for Syne."""
 
@@ -200,6 +208,24 @@ class DiscordChannel:
                     exc_info=True,
                 )
 
+        # Raw events fire for uncached (old) messages too. Reactions are
+        # in Intents.default() (non-privileged), see _build_intents.
+        @client.event
+        async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+            try:
+                await self._handle_reaction(payload, added=True)
+            except Exception as e:
+                logger.error(f"Discord reaction add failed: {type(e).__name__}: {e}",
+                             exc_info=True)
+
+        @client.event
+        async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+            try:
+                await self._handle_reaction(payload, added=False)
+            except Exception as e:
+                logger.error(f"Discord reaction remove failed: {type(e).__name__}: {e}",
+                             exc_info=True)
+
     def _is_duplicate(self, message_id: int) -> bool:
         """True if this message id was already processed (bounded memory)."""
         if message_id in self._seen:
@@ -289,6 +315,97 @@ class DiscordChannel:
             logger.debug("Discord 👀 receipt failed: %s", e)
 
         await self._dispatch(message, text, is_dm)
+
+    async def _handle_reaction(self, payload: Any, added: bool) -> None:
+        """A reaction on one of Syne's replies, for ratification
+        (syne/ratification.py). Anything else is ignored. The same gates as a
+        message apply: a DM user must be admitted and not blocked or pending,
+        a server must be registered and enabled.
+        """
+        me = self.client.user if self.client else None
+        if me is None or payload.user_id == me.id:
+            return
+        if added and payload.message_author_id is not None and payload.message_author_id != me.id:
+            return
+        if payload.member is not None and getattr(payload.member, "bot", False):
+            return
+
+        from ..ratification import lookup_sent_preview, revoke_reaction
+
+        is_dm = payload.guild_id is None
+        chat_key = str(payload.channel_id) if is_dm else str(payload.guild_id)
+        preview = await lookup_sent_preview("discord", chat_key, payload.message_id)
+        if preview is None:
+            return
+        emoji = str(payload.emoji)
+        uid = str(payload.user_id)
+
+        if is_dm:
+            u = await get_user("discord", uid)
+            if not u or u.get("access_level") == "blocked":
+                return
+            if (u.get("preferences") or {}).get("pending_approval"):
+                return
+            name = u.get("name") or uid
+            display = u.get("display_name") or name
+        else:
+            group = await get_group("discord", chat_key)
+            if not group or not group.get("enabled", True):
+                return
+            if payload.member is not None:
+                name = payload.member.name
+                display = payload.member.display_name or name
+            else:
+                name, display = await self._resolve_user_names(uid)
+
+        if not added:
+            await revoke_reaction("discord", chat_key, payload.message_id, [emoji], reactor=uid)
+            return
+
+        logger.info("[discord] reaction %s from %s on %s", emoji, uid, payload.message_id)
+        snippet = preview[:100].replace("\n", " ")
+        event_text = (
+            f"[Reaction: {emoji} from {display} ({uid}) on your message "
+            f"#{payload.message_id}: '{snippet}']"
+        )
+
+        from .inbound import InboundContext, load_group_settings
+        guild = self.client.get_guild(payload.guild_id) if not is_dm else None
+        inbound = InboundContext(
+            channel="discord",
+            platform="discord",
+            chat_type="direct" if is_dm else "group",
+            conversation_label=display,
+            group_subject=guild.name if guild else None,
+            chat_id=chat_key,
+            sender_name=display if not is_dm else None,
+            sender_id=uid if not is_dm else None,
+            sender_username=name if not is_dm else None,
+            was_mentioned=not is_dm,
+        )
+        await load_group_settings(inbound)
+        metadata = {
+            "message_id": payload.message_id,
+            "chat_id": chat_key,
+            "inbound": inbound,
+            "is_reaction": True,
+            "reaction_emojis": [emoji],
+        }
+        response = await self.agent.handle_message(
+            platform="discord",
+            chat_id=chat_key,
+            user_name=name,
+            user_platform_id=uid,
+            message=event_text,
+            display_name=display,
+            message_metadata=metadata,
+            is_dm=False,  # ownership stays Telegram-only, as in _dispatch
+        )
+        if response and response.strip().upper() != "NO_REPLY":
+            channel = self.client.get_channel(payload.channel_id)
+            if channel is None:
+                channel = await self.client.fetch_channel(payload.channel_id)
+            await self.send_response(channel, response)
 
     def _strip_mention(self, text: str) -> str:
         """Remove a leading mention of this bot from the message text.
@@ -850,30 +967,39 @@ class DiscordChannel:
         text = markdown_to_discord(text)
 
         first = True
+        _sent: list = []  # delivered ids, for ratification by reaction
         if text.strip():
             for chunk in split_message(text, max_length=DISCORD_MAX_MESSAGE):
                 if not chunk.strip():
                     continue
                 # Only the first chunk quotes the user's message; quoting every
                 # chunk of a long answer is noise.
-                await self._safe_send(
+                _m = await self._safe_send(
                     channel, chunk, reply_to=reply_to if first else None
                 )
+                if _m is not None:
+                    _sent.append(_m.id)
                 first = False
 
         for path in media:
             try:
-                await channel.send(file=discord.File(path))
+                _m = await channel.send(file=discord.File(path))
+                _sent.append(_m.id)
             except Exception as e:
                 logger.error("Discord file send failed for %s: %s", path, e)
+
+        if _sent:
+            from ..ratification import record_sent_ids
+            await record_sent_ids("discord", dc_chat_key(channel), _sent)
 
     async def _safe_send(
         self,
         channel: Any,
         text: str,
         reply_to: Optional[discord.Message] = None,
-    ) -> None:
-        """Send one message, degrading instead of raising.
+    ) -> Optional[discord.Message]:
+        """Send one message, degrading instead of raising. Returns the sent
+        message, or None when the send failed.
 
         A failed send must never bubble into the event handler: that would
         abort the rest of a multi-chunk reply and leave the user with half an
@@ -881,9 +1007,8 @@ class DiscordChannel:
         """
         try:
             if reply_to is not None:
-                await reply_to.reply(text)
-            else:
-                await channel.send(text)
+                return await reply_to.reply(text)
+            return await channel.send(text)
         except discord.Forbidden:
             logger.warning(
                 "Discord refused the send (missing permission in that channel)."
