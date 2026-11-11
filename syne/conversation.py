@@ -491,19 +491,27 @@ class Conversation:
                 )
                 return
 
+            # Embed the message itself, without the channel instruction and
+            # the untrusted JSON context blocks every channel prepends: that
+            # header is identical on every row and pulls unrelated messages
+            # together. The stored content keeps the header.
+            from .ratification import anchor_text
+            text = anchor_text(content)
+
             # Ratification: an approval of the previous assistant answer is
             # embedded together with that answer, so a fact only the
             # assistant wrote becomes findable once the user endorsed it.
+            # ratify_user_row gets the raw content (it reads the header).
             try:
                 from .ratification import ratify_user_row
                 combined = await ratify_user_row(self.session_id, message_id, content)
                 if combined:
-                    content = combined
+                    text = combined
             except Exception as e:
                 logger.warning(f"ratification failed for row {message_id}: {e}")
 
             max_chars = int(await get_config("history_search.max_content_chars", 4000))
-            body = content if len(content) <= max_chars else content[:max_chars]
+            body = text if len(text) <= max_chars else text[:max_chars]
             resp = await self.memory.provider.embed(body)
             vector = getattr(resp, "vector", None)
             if not vector:

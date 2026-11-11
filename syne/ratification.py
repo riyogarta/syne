@@ -71,6 +71,14 @@ def strip_context_prefix(text: str) -> str:
     return split_context_prefix(text)[1]
 
 
+def anchor_text(content: str) -> str:
+    """Text a user row is embedded from: the message without the channel
+    instruction and the untrusted JSON context blocks. The header is the same
+    on every row, so embedding it pulls unrelated messages together. Falls
+    back to the full content when nothing else is left."""
+    return strip_context_prefix(content) or (content or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Emoji
 # ---------------------------------------------------------------------------
@@ -248,6 +256,24 @@ async def _flag(key: str) -> bool:
 
 def _combine(user_text: str, assistant_text: str) -> str:
     return f"{user_text}\n\n{assistant_text or ''}".strip()
+
+
+async def anchor_text_for_row(conn, content: str, metadata) -> str:
+    """Embedding text for a stored user row, as at save time: anchor_text,
+    combined with the approved assistant answer when the row ratified one.
+    Used by `syne memory reembed-history --all`."""
+    text = anchor_text(content)
+    meta = json.loads(metadata) if isinstance(metadata, str) else (metadata or {})
+    r = meta.get("ratification") or {}
+    if isinstance(r, str):
+        r = json.loads(r)
+    if r.get("label") == "approve" and r.get("assistant_id"):
+        a = await conn.fetchval(
+            "SELECT content FROM messages WHERE id = $1", int(r["assistant_id"]),
+        )
+        if a:
+            return _combine(text, a)
+    return text
 
 
 async def _mark(user_row_id: int, assistant_row_id: int, info: dict) -> None:
@@ -469,7 +495,7 @@ async def revoke_reaction(
                 continue
             vec = None
             if r.get("label") == "approve":
-                vec = await _embed_text(row["content"] or "")
+                vec = await _embed_text(anchor_text(row["content"] or ""))
             r = dict(r, label="revoked", revoked_label=r.get("label"))
             async with get_connection() as conn:
                 await conn.execute(

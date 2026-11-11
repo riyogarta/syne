@@ -231,21 +231,25 @@ def memory_prune(pattern, yes):
 @click.option("--batch", "-b", default=50, help="Rows to embed per batch (default 50)")
 @click.option("--limit", "-l", default=None, type=int, help="Cap total rows processed (default: no cap — process until done)")
 @click.option("--sleep", "-s", default=0.0, type=float, help="Seconds to sleep between batches (throttle if Ollama shared)")
-def memory_reembed_history(batch, limit, sleep):
-    """Backfill embeddings for user messages that don't have one yet.
+@click.option("--all", "-a", "all_rows", is_flag=True, help="Re-embed EVERY user message, not only rows without an embedding. Needed once after 1.22.48 (context header no longer embedded).")
+@click.option("--from-id", default=0, type=int, help="Resume after this message id (printed while running).")
+def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
+    """Embed user messages for history_search.
 
-    Only user-role rows are embedded (assistant/tool/system are anchors' context,
-    not anchors themselves). Rows already embedded are skipped. Resumable: safe
-    to Ctrl-C and re-run — the pending index picks up where you stopped.
+    Default: only rows without an embedding. --all: every user row. The text
+    embedded is the message without its context header, combined with the
+    approved assistant answer when the row ratified one (same as at save
+    time). Only user-role rows are anchors. Resumable with --from-id.
 
-    After the first batch succeeds, HNSW index is created automatically
-    (ensure_messages_hnsw_index()). Rebuilds are idempotent.
+    After the run, the HNSW index is created/refreshed
+    (ensure_messages_hnsw_index()).
     """
     async def _run():
         from syne.config import load_settings
         from syne.db.connection import init_db, close_db
         from syne.db.models import get_config
         from syne.llm.drivers import create_hybrid_provider, get_model_from_list
+        from syne.ratification import anchor_text_for_row
 
         settings = load_settings()
         pool = await init_db(settings.database_url)
@@ -269,51 +273,49 @@ def memory_reembed_history(batch, limit, sleep):
             return
 
         max_chars = int(await get_config("history_search.max_content_chars", 4000))
+        where = "role = 'user' AND content <> ''"
+        if not all_rows:
+            where += " AND embedding IS NULL"
+        last_id = int(from_id or 0)
 
-        # Count pending so the progress bar is meaningful.
         async with pool.acquire() as conn:
             total_pending = await conn.fetchval(
-                "SELECT COUNT(*) FROM messages "
-                "WHERE role = 'user' AND embedding IS NULL AND content <> ''"
+                f"SELECT COUNT(*) FROM messages WHERE {where} AND id > $1", last_id,
             )
         if not total_pending:
-            console.print("[green]Nothing to backfill — every user message already has an embedding.[/green]")
+            console.print("[green]Nothing to embed.[/green]")
             await close_db()
             return
 
         target = min(int(total_pending), int(limit)) if limit else int(total_pending)
         console.print(
-            f"[cyan]Backfill target: {target} user messages "
-            f"(batch={batch}, sleep={sleep}s between batches).[/cyan]"
+            f"[cyan]Target: {target} user messages "
+            f"({'all rows' if all_rows else 'missing embeddings'}, "
+            f"batch={batch}, sleep={sleep}s between batches).[/cyan]"
         )
 
         done = 0
         failed = 0
-        with console.status(f"Embedding batch...") as status:
-            while done < target:
-                remaining = target - done
-                take = min(int(batch), remaining)
-
+        import asyncio as _asyncio
+        with console.status("Embedding batch...") as status:
+            while done + failed < target:
+                take = min(int(batch), target - done - failed)
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
-                        "SELECT id, content FROM messages "
-                        "WHERE role = 'user' AND embedding IS NULL AND content <> '' "
-                        "ORDER BY id ASC LIMIT $1",
-                        take,
+                        f"SELECT id, content, metadata FROM messages WHERE {where} "
+                        "AND id > $1 ORDER BY id ASC LIMIT $2",
+                        last_id, take,
                     )
                 if not rows:
                     break
 
-                # Embed serially — Ollama semaphore keeps parallelism sane
-                # inside the driver already, and small batch sizes make
-                # concurrent DB writes noisy for tiny wins.
-                import asyncio as _asyncio
+                # Serial: the Ollama driver already limits parallelism.
                 for r in rows:
+                    last_id = r["id"]
                     try:
-                        body = r["content"]
-                        if len(body) > max_chars:
-                            body = body[:max_chars]
-                        resp = await provider.embed(body)
+                        async with pool.acquire() as conn:
+                            body = await anchor_text_for_row(conn, r["content"], r["metadata"])
+                        resp = await provider.embed(body[:max_chars])
                         vec = getattr(resp, "vector", None)
                         if not vec:
                             failed += 1
@@ -328,14 +330,11 @@ def memory_reembed_history(batch, limit, sleep):
                         failed += 1
                         console.print(f"[yellow]row id={r['id']} failed: {e}[/yellow]")
 
-                status.update(f"Embedded {done}/{target} (failed {failed})")
+                status.update(f"Embedded {done}/{target} (failed {failed}, last id {last_id})")
 
                 if sleep > 0:
                     await _asyncio.sleep(sleep)
 
-        # Try to build HNSW after backfill so subsequent searches are fast.
-        # ensure_messages_hnsw_index() no-ops if no embeddings exist yet, so
-        # this is safe even when everything failed.
         try:
             async with pool.acquire() as conn:
                 await conn.execute("SELECT ensure_messages_hnsw_index()")
@@ -344,7 +343,7 @@ def memory_reembed_history(batch, limit, sleep):
             console.print(f"[yellow]HNSW build skipped: {e}[/yellow]")
 
         console.print(
-            f"[green]✓ Backfill done. Embedded: {done}. Failed: {failed}.[/green]"
+            f"[green]✓ Done. Embedded: {done}. Failed: {failed}. Last id: {last_id}.[/green]"
         )
         await close_db()
 

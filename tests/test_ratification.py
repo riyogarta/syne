@@ -15,6 +15,9 @@ REPLY_HDR = (
 )
 
 
+WA_INSTR_A = "[WhatsApp channel instruction: reply in Indonesian.]\n\n"
+
+
 def _ctx(conn):
     ctx = AsyncMock()
     ctx.__aenter__ = AsyncMock(return_value=conn)
@@ -39,6 +42,38 @@ class TestPrefix:
 
     def test_no_prefix(self):
         assert R.strip_context_prefix("ok") == "ok"
+
+
+class TestAnchorText:
+
+    def test_strips_header(self):
+        assert R.anchor_text(HDR + "Gimana?") == "Gimana?"
+        assert R.anchor_text(WA_INSTR_A + HDR + "oke") == "oke"
+
+    def test_no_header(self):
+        assert R.anchor_text("halo") == "halo"
+
+    def test_bare_header_falls_back(self):
+        assert R.anchor_text(HDR) == HDR.strip()
+
+    async def test_for_row_plain(self):
+        conn = AsyncMock()
+        out = await R.anchor_text_for_row(conn, HDR + "kenapa lama?", json.dumps({"x": 1}))
+        assert out == "kenapa lama?"
+        conn.fetchval.assert_not_called()
+
+    async def test_for_row_ratified_combines(self):
+        conn = AsyncMock()
+        conn.fetchval = AsyncMock(return_value="Jawaban agen")
+        meta = {"ratification": {"label": "approve", "assistant_id": 70}}
+        out = await R.anchor_text_for_row(conn, HDR + "setuju", meta)
+        assert out == "setuju\n\nJawaban agen"
+
+    async def test_for_row_ack_not_combined(self):
+        conn = AsyncMock()
+        meta = {"ratification": json.dumps({"label": "ack", "assistant_id": 70})}
+        assert await R.anchor_text_for_row(conn, HDR + "ok", meta) == "ok"
+        conn.fetchval.assert_not_called()
 
 
 class TestLexicon:
