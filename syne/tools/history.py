@@ -211,15 +211,8 @@ async def history_search_handler(
     chat_id: Optional[str] = None,
     all_chats: bool = False,
     _scope: Optional[dict] = None,
-    _exclude_session: Optional[int] = None,
-    _query_vector: Optional[list] = None,
 ) -> str:
-    """Return an ordered list of anchor previews, JSON-formatted for the LLM.
-
-    ``_exclude_session`` / ``_query_vector`` are internal (history.auto_recall,
-    Riyo 12 Nov 2026): leave one session out, reuse the turn's query vector.
-    The registry strips both from model calls.
-    """
+    """Return an ordered list of anchor previews, JSON-formatted for the LLM."""
     if not query or not query.strip():
         return "Error: query is required (non-empty string)."
 
@@ -243,23 +236,20 @@ async def history_search_handler(
 
     also = [str(k).strip() for k in (also_contains or []) if str(k).strip()]
 
-    if _query_vector:
-        vector = list(_query_vector)
-    else:
-        if _embedding_provider is None:
-            return (
-                "Error: embedding provider not configured — history_search cannot "
-                "produce a query vector. Configure an embedding provider "
-                "(see /embedding) and try again."
-            )
+    if _embedding_provider is None:
+        return (
+            "Error: embedding provider not configured — history_search cannot "
+            "produce a query vector. Configure an embedding provider "
+            "(see /embedding) and try again."
+        )
 
-        try:
-            resp = await _embedding_provider.embed(query)
-        except Exception as e:
-            return f"Error: embedding provider failed: {e}"
-        vector = getattr(resp, "vector", None)
-        if not vector:
-            return "Error: embedding provider returned an empty vector."
+    try:
+        resp = await _embedding_provider.embed(query)
+    except Exception as e:
+        return f"Error: embedding provider failed: {e}"
+    vector = getattr(resp, "vector", None)
+    if not vector:
+        return "Error: embedding provider returned an empty vector."
 
     # Assemble SQL. Sort direction depends on mode; recency mode still
     # applies the vector similarity as a tie-breaker so top matches still
@@ -304,11 +294,6 @@ async def history_search_handler(
     if session_id is not None:
         conditions.append(f"m.session_id = ${p}")
         params.append(int(session_id))
-        p += 1
-
-    if _exclude_session is not None:
-        conditions.append(f"m.session_id <> ${p}")
-        params.append(int(_exclude_session))
         p += 1
 
     if since_dt is not None:
@@ -390,6 +375,10 @@ async def history_search_handler(
 HISTORY_SEARCH_TOOL = {
     "name": "history_search",
     "description": (
+        "WHEN TO CALL: only when the topic is NOT in your current context window "
+        "(this chat's messages, injected memories). If it is already there, do "
+        "not call it. Nothing searches past chats automatically - if the topic "
+        "is missing and you skip this tool, you will not see it. "
         "Semantic search over USER messages across the entire chat log. Indexing "
         "is user-only BY DESIGN: user messages are ground truth (what the owner "
         "actually said) so results can never be seeded by a past assistant "

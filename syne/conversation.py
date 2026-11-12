@@ -603,7 +603,7 @@ class Conversation:
     # recorded per model call next to them.
     #   S = system prompt + time block                       (not budgeted)
     #   X = session window: non-system messages present when the turn starts
-    #   R = injected recall: memories, cross-session history, knowledge graph
+    #   R = injected recall: memories, knowledge graph
     #   M = history_search / history_expand results produced in this turn
     #   W = the turn's other working messages: tool_use turns, other tool
     #       results, nudges                                  (not budgeted)
@@ -776,7 +776,7 @@ class Conversation:
     def _ts_fit_r(self, messages: list[ChatMessage]) -> None:
         """Enforce R: drop the weakest recall items until R fits.
 
-        Order: knowledge graph, then cross-session history, then memories;
+        Order: knowledge graph, then memories;
         inside a block the LAST item goes first (blocks are sorted best-first).
         A block left with no item is removed whole. Edits ``messages`` in place.
         """
@@ -797,7 +797,7 @@ class Conversation:
                 )
 
             dropped = 0
-            for part in ("r_graph", "r_history", "r_memory"):
+            for part in ("r_graph", "r_memory"):
                 while _r_total() > budget:
                     idx = next(
                         (i for i, m in enumerate(messages) if _part(m) == part), None
@@ -1021,44 +1021,9 @@ class Conversation:
         # 2b. Run memory recall + graph recall IN PARALLEL (saves ~400ms)
         from .memory.graph import recall_graph as _recall_graph
 
-        # 2c. Cross-session history recall - CODE-ENFORCED, not left to the LLM.
-        #     Rationale (Riyo, 4 Nov 2026): history_search is a tool the model
-        #     has to DECIDE to call, and in practice it kept answering "tidak ada
-        #     di konteksku" about things the owner had discussed in another chat.
-        #     Root cause is a category error no prompt can fix: "context" is this
-        #     session's window, "history" is the messages table across ALL
-        #     sessions. A rule telling the model to search first merely stacks
-        #     another instruction onto the layer that already failed. So hoist it
-        #     into context the way memory is hoisted - no decision, no tool call.
-        #
-        #     SAME AS THE TOOLS (Riyo, 12 Nov 2026): this IS history_search
-        #     followed by history_expand on every hit, called through the same
-        #     handlers with the same history_search.* settings and the same
-        #     scope (tools/history.py scope_sql). Only two differences from a
-        #     manual call: it runs for owner/family only (for public the scope
-        #     is the current chat alone, already in the window - pure waste),
-        #     and the current session is excluded (its rows are in the window).
-        _raw_he = await _get_recall_config("history.auto_recall", True)
-        if isinstance(_raw_he, str):
-            _hist_enabled = _raw_he.strip().lower() not in ("false", "0", "no", "off", "")
-        else:
-            _hist_enabled = bool(_raw_he)
-
-        from .tools.history import (
-            build_history_scope as _build_hist_scope,
-            history_expand_handler as _hist_expand,
-            history_search_handler as _hist_search,
-        )
-        _hist_scope = _build_hist_scope(self, access_level)
-
-        # One vector per turn, shared by both recall paths below. They run
-        # concurrently on the SAME query string and each used to embed it
-        # separately, so every turn paid for two identical vectors.
-        #
-        # Lazy, and each caller checks its own word-count floor BEFORE
-        # asking: a bare acknowledgement embeds nothing today and must
-        # keep embedding nothing. The lock makes the second caller wait
-        # for the first result instead of starting a duplicate request.
+        # Query vector for memory recall, embedded lazily: the caller checks
+        # recall()'s 2-word floor BEFORE asking, so a bare acknowledgement
+        # embeds nothing. The lock stops a duplicate request.
         _qvec: dict = {}
         _qvec_lock = asyncio.Lock()
 
@@ -1074,36 +1039,6 @@ class Conversation:
                         logger.debug(f"Query embed failed: {e}")
                         _qvec["v"] = None
             return _qvec["v"]
-
-        async def _do_history_recall():
-            """Return the history_expand JSON for this turn, or None."""
-            if not _hist_enabled or not _hist_scope:
-                return None
-            if access_level not in ("owner", "family"):
-                return None
-            try:
-                _vec = await _shared_query_vector()
-                if not _vec:
-                    return None
-                _found = await _hist_search(
-                    query=recall_query or user_message,
-                    _scope=_hist_scope,
-                    _exclude_session=self.session_id,
-                    _query_vector=_vec,
-                )
-                if not _found.startswith("{"):
-                    return None  # "No matches." or an error
-                _ids = [h["anchor_id"] for h in json.loads(_found).get("hits", [])]
-                if not _ids:
-                    return None
-                _opened = await _hist_expand(anchor_ids=_ids, _scope=_hist_scope)
-                if not _opened.startswith("{"):
-                    logger.debug(f"History recall expand skipped: {_opened[:200]}")
-                    return None
-                return _opened
-            except Exception as e:
-                logger.debug(f"History recall skipped: {e}")
-                return None
 
         async def _do_memory_recall():
             # Mirror recall()'s own 2-word floor before touching the
@@ -1140,8 +1075,8 @@ class Conversation:
                 return []
 
         _t_recall = _ts_time.monotonic()
-        memories, graph_lines, past_convos = await asyncio.gather(
-            _do_memory_recall(), _do_graph_recall(), _do_history_recall()
+        memories, graph_lines = await asyncio.gather(
+            _do_memory_recall(), _do_graph_recall()
         )
         self._ts_add_latency("recall", _ts_time.monotonic() - _t_recall)
 
@@ -1194,38 +1129,6 @@ class Conversation:
         else:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
-
-        # 4c. Cross-session history (fetched in parallel above): the
-        #     history_expand result of the automatic history_search.
-        if past_convos:
-            try:
-                _h_blocks = len(json.loads(past_convos).get("blocks", []))
-            except ValueError:
-                _h_blocks = 0
-            hist_lines = [
-                "# Relevant Past Conversations (this sender's other chats)",
-                "Run automatically for this turn: history_search over the "
-                "sender's messages in their OTHER chats (this session excluded), "
-                "then history_expand on every hit - the same tools, settings and "
-                "scope you get by calling them yourself, so do not re-run them "
-                "for the same query. Scoped by code to the sender's own DMs on "
-                "this platform plus the current chat - never another person's "
-                "private chat.",
-                "Blocks hold the user and assistant turns around each anchor. An "
-                "assistant turn may carry ratification (ratified = the user "
-                "approved it, not proof it is correct). Hits are ranked by "
-                "similarity only - ignore blocks unrelated to the current message.",
-                "In a group, do not expose more of this than the sender has "
-                "already raised in that group themselves.",
-                "",
-                past_convos,
-            ]
-            messages.append(ChatMessage(role="system", content="\n".join(hist_lines),
-                                        metadata={"volatile": True, "ctx_part": "r_history"}))
-            logger.info(
-                f"History recall: {_h_blocks} block(s), {len(past_convos)} chars "
-                f"from other sessions (excluded session={self.session_id})"
-            )
 
         # 4b. Knowledge graph context (already fetched in parallel above)
         if graph_lines:

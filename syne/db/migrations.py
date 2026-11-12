@@ -985,6 +985,19 @@ async def _m36_auto_recall_as_history_tools(conn) -> None:
     )
 
 
+async def _m37_remove_auto_recall(conn) -> None:
+    """history.auto_recall removed (Riyo, 12 Nov 2026).
+
+    Past chats are reached only through history_search + history_expand,
+    called when the topic is not in the context window. Idempotent.
+    """
+    await conn.execute("DELETE FROM config WHERE key = 'history.auto_recall'")
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'memory_budget.r_tokens'",
+        'Budget R (estimated tokens): injected recall, i.e. memories + knowledge graph. 0 = no limit.',
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1022,6 +1035,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (34, _m34_ratification_config, "transactional"),
     (35, _m35_memory_budget_config, "transactional"),
     (36, _m36_auto_recall_as_history_tools, "transactional"),
+    (37, _m37_remove_auto_recall, "transactional"),
 ]
 
 

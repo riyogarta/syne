@@ -211,9 +211,6 @@ class ToolRegistry:
         try:
             call_args = {**arguments}
             if name in ("history_search", "history_expand"):
-                # Internal knobs of history.auto_recall, never the model's.
-                for _k in ("_exclude_session", "_query_vector"):
-                    call_args.pop(_k, None)
                 # Visibility comes from the live chat, never from the model:
                 # anything it put under _scope is overwritten here. Sub-agents
                 # pass the scope captured from their parent chat.
