@@ -51,6 +51,12 @@ class ChatResponse:
     tool_calls: Optional[list] = None
     thinking: Optional[str] = None  # Model's reasoning/thinking text (if returned)
     stop_reason: Optional[str] = None  # Provider stop reason (e.g. 'refusal', 'end_turn')
+    # Prompt-cache usage as reported by the provider. 0 when the provider
+    # does not report it (or has no prompt cache). cache_read = input tokens
+    # served from cache; cache_write = input tokens written to cache
+    # (Anthropic cache_creation_input_tokens; other providers report 0).
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass
@@ -66,21 +72,37 @@ class UsageAccumulator:
 
     Tracks total output tokens (genuinely new per round) and snapshots
     the last call's input tokens (avoids inflated sums from growing context).
+    Cache counters follow the same split: totals are summed per call,
+    last_* snapshot the final call.
     """
     total_input: int = 0
     total_output: int = 0
     last_input: int = 0
     rounds: int = 0
+    total_cache_read: int = 0
+    total_cache_write: int = 0
+    last_cache_read: int = 0
+    last_cache_write: int = 0
 
     def add(self, response: ChatResponse):
         """Add a response's token counts to the accumulator."""
         self.total_input += response.input_tokens
         self.total_output += response.output_tokens
         self.last_input = response.input_tokens
+        _cr = int(getattr(response, "cache_read_tokens", 0) or 0)
+        _cw = int(getattr(response, "cache_write_tokens", 0) or 0)
+        self.total_cache_read += _cr
+        self.total_cache_write += _cw
+        self.last_cache_read = _cr
+        self.last_cache_write = _cw
         self.rounds += 1
 
     def apply_to(self, response: ChatResponse) -> ChatResponse:
-        """Return a new ChatResponse with accumulated token counts."""
+        """Return a new ChatResponse with accumulated token counts.
+
+        stop_reason is carried over: dropping it hid a final-round
+        refusal from the caller's refusal check.
+        """
         return ChatResponse(
             content=response.content,
             model=response.model,
@@ -88,6 +110,9 @@ class UsageAccumulator:
             output_tokens=self.total_output,
             tool_calls=response.tool_calls,
             thinking=response.thinking,
+            stop_reason=response.stop_reason,
+            cache_read_tokens=self.last_cache_read,
+            cache_write_tokens=self.last_cache_write,
         )
 
 

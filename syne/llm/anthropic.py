@@ -1078,6 +1078,8 @@ class AnthropicProvider(LLMProvider):
             tool_calls=tool_calls if tool_calls else None,
             thinking=thinking_text if thinking_text else None,
             stop_reason=stop_reason or None,
+            cache_read_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
         )
 
     async def embed(

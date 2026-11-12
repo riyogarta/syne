@@ -447,6 +447,7 @@ class VertexProvider(LLMProvider):
             output_tokens=output_tokens,
             tool_calls=tool_calls if tool_calls else None,
             thinking=thinking,
+            cache_read_tokens=int(_cache_stat.get("cached", 0) or 0),
         )
 
     async def embed(

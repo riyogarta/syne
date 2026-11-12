@@ -20,6 +20,11 @@ DEFAULT_CHARS_PER_TOKEN = 4.0
 # code tokens, JSON, special tokens. Same approach as OpenClaw.
 SAFETY_MARGIN = 1.2
 
+# Tool results that must never be head+tail trimmed: a cut through the
+# middle of a recalled conversation window loses the turns the model
+# asked for. They can still be cleared whole by Tier 2.
+NO_SOFT_TRIM_TOOLS = frozenset({"history_search", "history_expand"})
+
 
 def estimate_tokens(text: str, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
     """Rough token count estimation."""
@@ -183,6 +188,8 @@ class ContextManager:
         if ratio > 0.3:
             for idx in prunable:
                 msg = result[idx]
+                if (msg.metadata or {}).get("tool_name") in NO_SOFT_TRIM_TOOLS:
+                    continue
                 if len(msg.content) > SOFT_THRESHOLD:
                     head = msg.content[:HEAD_CHARS]
                     tail = msg.content[-TAIL_CHARS:]

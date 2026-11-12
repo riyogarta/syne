@@ -236,6 +236,7 @@ class GoogleProvider(LLMProvider):
             output_tokens=usage.get("candidatesTokenCount", 0),
             tool_calls=tool_calls if tool_calls else None,
             thinking="".join(thinking_parts) if thinking_parts else None,
+            cache_read_tokens=int(usage.get("cachedContentTokenCount", 0) or 0),
         )
 
     async def embed(

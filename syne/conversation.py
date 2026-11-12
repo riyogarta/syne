@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import logging
+import time as _ts_time
 from typing import Optional
 
 
@@ -18,7 +19,10 @@ from .db.connection import get_connection
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError
 from .memory.engine import MemoryEngine
 from .memory.evaluator import evaluate_and_store
-from .context import ContextManager, estimate_messages_tokens, DEFAULT_CHARS_PER_TOKEN
+from .context import (
+    ContextManager, estimate_messages_tokens, estimate_tokens,
+    DEFAULT_CHARS_PER_TOKEN, NO_SOFT_TRIM_TOOLS,
+)
 from .boot import get_full_prompt
 from .tools.registry import ToolRegistry, ToolResult
 from .abilities import AbilityRegistry
@@ -247,6 +251,8 @@ class Conversation:
         # command); a tainted turn still requires the Yes button so injection
         # from web/file/image content cannot silently trigger a destructive act.
         self._turn_untrusted: bool = False
+        # Per-turn instrumentation + memory budget state. See _ts_begin.
+        self._ts: Optional[dict] = None
 
     @staticmethod
     def _detect_untrusted(user_message, message_metadata) -> bool:
@@ -589,6 +595,338 @@ class Conversation:
         )
         return True
 
+    # ── Per-turn instrumentation + memory budget (turn_stats) ─────────────
+    # One dict per turn, opened in _chat_inner and stored on the final
+    # assistant row as metadata.turn_stats (no schema change). Sizes are
+    # chars-per-token ESTIMATES from the same estimator ContextManager uses;
+    # provider-reported usage (input / cache read / cache write / output) is
+    # recorded per model call next to them.
+    #   S = system prompt + time block                       (not budgeted)
+    #   X = session window: non-system messages present when the turn starts
+    #   R = injected recall: memories, cross-session history, knowledge graph
+    #   M = history_search / history_expand results produced in this turn
+    #   W = the turn's other working messages: tool_use turns, other tool
+    #       results, nudges                                  (not budgeted)
+    # Budgets: memory_budget.x_tokens / r_tokens / m_tokens (0 = no limit),
+    # checked on EVERY model call, tool rounds included. memory_budget.mode:
+    #   "log"     - record violations only, change nothing
+    #   "enforce" - also fit before the model sees it: X drops the oldest
+    #               messages in one chunk down to 70% of its budget (same
+    #               ratio as _trim_message_cache, keeps the prompt cache
+    #               stable), R drops its weakest items, M skips a result
+    #               WHOLE with a notice - never a cut through the middle.
+    # Instrumentation must never break a turn: every helper fails open.
+
+    async def _ts_begin(self) -> None:
+        """Open the stats dict for a new turn and load the budget config."""
+        from .db.models import get_config as _gc
+
+        async def _cfg_int(key: str) -> int:
+            try:
+                return max(0, int(await _gc(key, 0) or 0))
+            except Exception:
+                return 0
+
+        try:
+            mode = str(await _gc("memory_budget.mode", "log") or "log").strip().lower()
+        except Exception:
+            mode = "log"
+        if mode not in ("log", "enforce"):
+            mode = "log"
+        self._ts = {
+            "t0": _ts_time.monotonic(),
+            "mode": mode,
+            "budget": {
+                "x": await _cfg_int("memory_budget.x_tokens"),
+                "r": await _cfg_int("memory_budget.r_tokens"),
+                "m": await _cfg_int("memory_budget.m_tokens"),
+            },
+            "base_len": None,
+            "x_messages": 0,
+            "r_parts": {},
+            "m_used": 0,
+            "m_results": 0,
+            "m_skipped": 0,
+            "calls": [],
+            "lat": {"recall": 0.0, "llm": 0.0, "tool": 0.0},
+            "trimmed": {"x_messages": 0, "r_items": 0},
+            "violations": [],
+        }
+
+    def _ts_cpt(self) -> float:
+        try:
+            return float(self.context_mgr.chars_per_token)
+        except Exception:
+            return DEFAULT_CHARS_PER_TOKEN
+
+    def _ts_add_latency(self, kind: str, seconds: float) -> None:
+        ts = getattr(self, "_ts", None)
+        if ts is not None:
+            ts["lat"][kind] = ts["lat"].get(kind, 0.0) + seconds
+
+    def _ts_mark_base(self, context: list[ChatMessage]) -> None:
+        """Everything at or past this index was produced during the turn."""
+        ts = getattr(self, "_ts", None)
+        if ts is None:
+            return
+        ts["base_len"] = len(context)
+        ts["x_messages"] = sum(1 for m in context if m.role != "system")
+
+    def _ts_measure(self, messages: list[ChatMessage]) -> tuple[dict, dict]:
+        """Estimated tokens per part (S/X/R/M/W) plus the R breakdown."""
+        ts = getattr(self, "_ts", None) or {}
+        base = ts.get("base_len")
+        if base is None:
+            base = len(messages)
+        cpt = self._ts_cpt()
+        est = {"s": 0, "x": 0, "r": 0, "m": 0, "w": 0}
+        r_parts: dict = {}
+        for i, m in enumerate(messages):
+            tok = estimate_tokens(m.content or "", cpt) + 4
+            meta = m.metadata or {}
+            part = str(meta.get("ctx_part") or "")
+            if i < base:
+                if m.role == "system":
+                    if part.startswith("r_"):
+                        est["r"] += tok
+                        r_parts[part[2:]] = r_parts.get(part[2:], 0) + tok
+                    else:
+                        est["s"] += tok
+                else:
+                    est["x"] += tok
+            elif m.role == "tool" and meta.get("tool_name") in NO_SOFT_TRIM_TOOLS:
+                est["m"] += tok
+            else:
+                est["w"] += tok
+        return est, r_parts
+
+    def _ts_note_call(self, phase: str, messages: list[ChatMessage],
+                      resp: ChatResponse, latency: float) -> None:
+        """Record one model call and check every budget against it."""
+        ts = getattr(self, "_ts", None)
+        if ts is None:
+            return
+        est, r_parts = self._ts_measure(messages)
+        idx = len(ts["calls"])
+        if idx == 0:
+            ts["r_parts"] = r_parts
+        ts["calls"].append({
+            "phase": phase,
+            "in": int(resp.input_tokens or 0),
+            "out": int(resp.output_tokens or 0),
+            "cache_read": int(getattr(resp, "cache_read_tokens", 0) or 0),
+            "cache_write": int(getattr(resp, "cache_write_tokens", 0) or 0),
+            "est": est,
+            "lat": round(latency, 3),
+        })
+        ts["lat"]["llm"] += latency
+        for part in ("x", "r", "m"):
+            b = ts["budget"][part]
+            if b > 0 and est[part] > b:
+                ts["violations"].append({
+                    "call": idx, "phase": phase, "part": part,
+                    "tokens": est[part], "budget": b,
+                })
+
+    async def _llm_call(self, phase: str, **kwargs) -> ChatResponse:
+        """provider.chat() plus per-call stats. Failures are not recorded."""
+        _t = _ts_time.monotonic()
+        resp = await self.provider.chat(**kwargs)
+        try:
+            self._ts_note_call(
+                phase, kwargs.get("messages") or [], resp, _ts_time.monotonic() - _t
+            )
+        except Exception as e:
+            logger.debug(f"turn_stats: note_call failed: {e}")
+        return resp
+
+    def _ts_fit_x(self) -> None:
+        """Enforce X: drop the oldest cached messages in ONE chunk.
+
+        Over budget -> keep the newest messages that fit in 70% of it, so the
+        head of history stays byte-stable until the next chunk (prompt cache).
+        The current user message is never dropped.
+        """
+        ts = getattr(self, "_ts", None)
+        if ts is None or ts["mode"] != "enforce" or ts["budget"]["x"] <= 0:
+            return
+        try:
+            budget = ts["budget"]["x"]
+            cpt = self._ts_cpt()
+            cache = self._message_cache
+            sizes = [estimate_tokens(m.content or "", cpt) + 4 for m in cache]
+            total = sum(sizes)
+            if total <= budget:
+                return
+            target = int(budget * _TRIM_KEEP_RATIO)
+            drop = 0
+            while drop < len(cache) - 1 and total > target:
+                total -= sizes[drop]
+                drop += 1
+            if drop:
+                self._message_cache = cache[drop:]
+                ts["trimmed"]["x_messages"] += drop
+                logger.info(
+                    f"memory_budget X: dropped {drop} oldest message(s), "
+                    f"~{total} tokens left (budget {budget}, target {target})"
+                )
+        except Exception as e:
+            logger.warning(f"memory_budget X fit failed (left as is): {e}")
+
+    def _ts_fit_r(self, messages: list[ChatMessage]) -> None:
+        """Enforce R: drop the weakest recall items until R fits.
+
+        Order: knowledge graph, then cross-session history, then memories;
+        inside a block the LAST item goes first (blocks are sorted best-first).
+        A block left with no item is removed whole. Edits ``messages`` in place.
+        """
+        ts = getattr(self, "_ts", None)
+        if ts is None or ts["mode"] != "enforce" or ts["budget"]["r"] <= 0:
+            return
+        try:
+            budget = ts["budget"]["r"]
+            cpt = self._ts_cpt()
+
+            def _part(m):
+                return str((m.metadata or {}).get("ctx_part") or "")
+
+            def _r_total():
+                return sum(
+                    estimate_tokens(m.content or "", cpt) + 4
+                    for m in messages if _part(m).startswith("r_")
+                )
+
+            dropped = 0
+            for part in ("r_graph", "r_history", "r_memory"):
+                while _r_total() > budget:
+                    idx = next(
+                        (i for i, m in enumerate(messages) if _part(m) == part), None
+                    )
+                    if idx is None:
+                        break
+                    lines = (messages[idx].content or "").split("\n")
+                    items = [j for j, ln in enumerate(lines) if ln.startswith("- ")]
+                    if len(items) <= 1:
+                        messages.pop(idx)
+                        dropped += len(items)
+                        break
+                    lines.pop(items[-1])
+                    dropped += 1
+                    messages[idx] = ChatMessage(
+                        role=messages[idx].role,
+                        content="\n".join(lines),
+                        metadata=messages[idx].metadata,
+                    )
+                if _r_total() <= budget:
+                    break
+            if dropped:
+                ts["trimmed"]["r_items"] += dropped
+                logger.info(
+                    f"memory_budget R: dropped {dropped} recall item(s), "
+                    f"~{_r_total()} tokens left (budget {budget})"
+                )
+        except Exception as e:
+            logger.warning(f"memory_budget R fit failed (left as is): {e}")
+
+    def _ts_gate_m(self, name: str, result_str: str) -> str:
+        """Gate M: a history result that does not fit is skipped WHOLE.
+
+        Never truncated. In enforce mode the model gets a notice telling it
+        how to ask for less; in log mode the result passes and the per-call
+        check records the violation.
+        """
+        ts = getattr(self, "_ts", None)
+        if ts is None:
+            return result_str
+        try:
+            cpt = self._ts_cpt()
+            tok = estimate_tokens(result_str or "", cpt) + 4
+            budget = ts["budget"]["m"]
+            used = ts["m_used"]
+            ts["m_results"] += 1
+            if budget > 0 and used + tok > budget and ts["mode"] == "enforce":
+                notice = (
+                    f"[{name} result skipped whole: ~{tok} tokens would exceed the "
+                    f"per-turn memory budget M ({used}/{budget} tokens already used). "
+                    f"Nothing was cut or truncated. To retrieve it, narrow the request "
+                    f"(fewer anchor_ids, smaller context_before/context_after, or a "
+                    f"lower limit) and call {name} again.]"
+                )
+                ts["m_skipped"] += 1
+                ts["m_used"] += estimate_tokens(notice, cpt) + 4
+                logger.info(
+                    f"memory_budget M: skipped {name} result (~{tok} tokens, "
+                    f"used {used}/{budget})"
+                )
+                return notice
+            ts["m_used"] += tok
+        except Exception as e:
+            logger.warning(f"memory_budget M gate failed (result passed): {e}")
+        return result_str
+
+    def _ts_finish(self) -> Optional[dict]:
+        """Close the turn: build the stored dict and log one TURN-STATS line."""
+        ts = getattr(self, "_ts", None)
+        if ts is None:
+            return None
+        self._ts = None
+        try:
+            calls = ts["calls"]
+            first = calls[0]["est"] if calls else {}
+
+            def _max(k):
+                return max((c["est"][k] for c in calls), default=0)
+
+            def _sum(k):
+                return sum(c[k] for c in calls)
+
+            stats = {
+                "v": 1,
+                "mode": ts["mode"],
+                "budget": ts["budget"],
+                "tokens_est": {
+                    "s": first.get("s", 0),
+                    "x": first.get("x", 0),
+                    "r": first.get("r", 0),
+                    "m_max": _max("m"),
+                    "w_max": _max("w"),
+                },
+                "x_messages": ts["x_messages"],
+                "r_parts": ts["r_parts"],
+                "m": {"results": ts["m_results"], "skipped": ts["m_skipped"]},
+                "usage": {
+                    "in": _sum("in"),
+                    "out": _sum("out"),
+                    "cache_read": _sum("cache_read"),
+                    "cache_write": _sum("cache_write"),
+                },
+                "rounds": sum(1 for c in calls if c["phase"] == "tool_loop"),
+                "calls": calls,
+                "latency": {
+                    "total": round(_ts_time.monotonic() - ts["t0"], 3),
+                    "recall": round(ts["lat"]["recall"], 3),
+                    "llm": round(ts["lat"]["llm"], 3),
+                    "tool": round(ts["lat"]["tool"], 3),
+                },
+                "trimmed": ts["trimmed"],
+                "violations": ts["violations"],
+            }
+            te, us, la = stats["tokens_est"], stats["usage"], stats["latency"]
+            logger.info(
+                "TURN-STATS session=%s mode=%s calls=%d rounds=%d "
+                "S=%d X=%d R=%d Mmax=%d Wmax=%d in=%d cache_r=%d cache_w=%d out=%d "
+                "lat=%.2fs recall=%.2fs llm=%.2fs tool=%.2fs viol=%d",
+                self.session_id, stats["mode"], len(calls), stats["rounds"],
+                te["s"], te["x"], te["r"], te["m_max"], te["w_max"],
+                us["in"], us["cache_read"], us["cache_write"], us["out"],
+                la["total"], la["recall"], la["llm"], la["tool"],
+                len(stats["violations"]),
+            )
+            return stats
+        except Exception as e:
+            logger.warning(f"turn_stats: finish failed: {e}")
+            return None
+
     async def build_context(self, user_message: str, recall_query: Optional[str] = None) -> list[ChatMessage]:
         """Build full context: system prompt + memories + history + current message.
 
@@ -860,13 +1198,17 @@ class Conversation:
                 logger.debug(f"Graph recall skipped: {e}")
                 return []
 
+        _t_recall = _ts_time.monotonic()
         memories, graph_lines, past_convos = await asyncio.gather(
             _do_memory_recall(), _do_graph_recall(), _do_history_recall()
         )
+        self._ts_add_latency("recall", _ts_time.monotonic() - _t_recall)
 
         # 3. Conversation history
         if not self._message_cache:
             await self.load_history()
+        # Memory budget X (enforce mode): chunked drop of the oldest messages.
+        self._ts_fit_x()
         messages.extend(self._message_cache)
 
         # 4. Inject recalled memories AFTER history, close to the user message.
@@ -902,7 +1244,7 @@ class Conversation:
                     flag = ""
                 memory_lines.append(f"- [{mem['category']}]{when} {mem['content']} {score}{flag}")
             messages.append(ChatMessage(role="system", content="\n".join(memory_lines),
-                                        metadata={"volatile": True}))
+                                        metadata={"volatile": True, "ctx_part": "r_memory"}))
             # Log recalled memories for debugging
             _actual_query = recall_query or user_message
             logger.info(f"Recalled {len(memories)} memories for query: {_actual_query[:80]}")
@@ -947,7 +1289,7 @@ class Conversation:
                     _txt = _txt[:399] + "\u2026"
                 hist_lines.append(f"- (match: {_h['similarity']:.0%}){_when} {_txt}")
             messages.append(ChatMessage(role="system", content="\n".join(hist_lines),
-                                        metadata={"volatile": True}))
+                                        metadata={"volatile": True, "ctx_part": "r_history"}))
             logger.info(
                 f"History recall: {len(past_convos)} rows from other sessions "
                 f"(sender={_sender_pid}, excluded session={self.session_id})"
@@ -961,8 +1303,11 @@ class Conversation:
                 "",
             ] + graph_lines)
             messages.append(ChatMessage(role="system", content=graph_block,
-                                        metadata={"volatile": True}))
+                                        metadata={"volatile": True, "ctx_part": "r_graph"}))
             logger.info(f"Graph: injected {len(graph_lines)} relations")
+
+        # 4d. Memory budget R (enforce mode): drop the weakest recall items.
+        self._ts_fit_r(messages)
 
         # 5. Prune oversized tool results
         # NOTE: user message is already in _message_cache (added by save_message in _chat_inner)
@@ -1532,6 +1877,7 @@ class Conversation:
 
     async def _chat_inner(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Inner chat logic. Wrapped by chat() with try/finally for _processing flag."""
+        await self._ts_begin()
 
         # ═══════════════════════════════════════════════════════════════
         # ABILITY-FIRST PRE-PROCESSING
@@ -1571,6 +1917,7 @@ class Conversation:
         # Build context — use original text (without context prefix) for memory recall
         recall_query = (message_metadata or {}).get("original_text", user_message)
         context = await self.build_context(user_message, recall_query=recall_query)
+        self._ts_mark_base(context)
 
         # Log context usage
         usage = self.context_mgr.get_usage(context)
@@ -1626,7 +1973,8 @@ class Conversation:
             _vague_retries = 3
             for _vague_attempt in range(_vague_retries):
                 try:
-                    response = await self.provider.chat(
+                    response = await self._llm_call(
+                        "initial",
                         messages=context,
                         tools=tool_schemas if tool_schemas else None,
                         stream_callbacks=self.stream_callbacks,
@@ -1760,8 +2108,12 @@ class Conversation:
                 # continue with the LLM's original response untouched.
                 logger.exception("Rule checker crashed — sending original response as-is")
 
-        # Save assistant response
-        await self.save_message("assistant", response.content)
+        # Save assistant response, with this turn's instrumentation
+        _turn_stats = self._ts_finish()
+        await self.save_message(
+            "assistant", response.content,
+            metadata={"turn_stats": _turn_stats} if _turn_stats else None,
+        )
 
         # Store thinking for the channel to optionally display
         self._last_thinking = response.thinking
@@ -2225,7 +2577,8 @@ class Conversation:
                 ),
             ))
             try:
-                new_resp = await self.provider.chat(
+                new_resp = await self._llm_call(
+                    "rule_retry",
                     messages=retry_ctx,
                     tools=tool_schemas if tool_schemas else None,
                     stream_callbacks=None,  # retry never streams
@@ -2264,6 +2617,9 @@ class Conversation:
                 output_tokens=current.output_tokens,
                 tool_calls=current.tool_calls,
                 thinking=current.thinking,
+                stop_reason=current.stop_reason,
+                cache_read_tokens=current.cache_read_tokens,
+                cache_write_tokens=current.cache_write_tokens,
             )
         return current
 
@@ -2604,6 +2960,7 @@ class Conversation:
                 else _execute_single_tool(name, args, tc_id)
                 for _i, (name, args, tc_id, _) in enumerate(parsed_calls)
             ]
+            _t_tools = _ts_time.monotonic()
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Wrap exceptions as ToolResult
@@ -2630,6 +2987,8 @@ class Conversation:
                             results[i] = ToolResult(str(retry_result), ok=True)
                     except Exception as e:
                         results[i] = ToolResult(f"Error (retry failed): {e}", ok=False, error_type="unknown")
+
+            self._ts_add_latency("tool", _ts_time.monotonic() - _t_tools)
 
             # ── Phase 3: Post-process results (sequential) ──
             from .security import redact_content_output, redact_secrets_in_text
@@ -2691,6 +3050,11 @@ class Conversation:
                 # Strip server paths (bypass for owner DM — platform-verified identity)
                 if not is_owner_dm:
                     result_str = strip_server_paths(result_str)
+
+                # Memory budget M: a history result that does not fit is
+                # skipped whole (never cut), with a notice. See _ts_gate_m.
+                if name in NO_SOFT_TRIM_TOOLS:
+                    result_str = self._ts_gate_m(name, result_str)
 
                 # Notify CLI about tool execution details
                 if self._mgr and self._mgr._tool_detail_callback:
@@ -2761,7 +3125,8 @@ class Conversation:
             # Auto-retry on vague 400 errors
             for _vague_attempt in range(3):
                 try:
-                    current = await self.provider.chat(
+                    current = await self._llm_call(
+                        "tool_loop",
                         messages=context,
                         tools=tool_schemas if tool_schemas else None,
                         stream_callbacks=self.stream_callbacks,
@@ -2803,7 +3168,8 @@ class Conversation:
             _forced_kwargs["thinking_budget"] = 0
             _forced_kwargs.pop("top_p", None)
             _forced_kwargs.pop("top_k", None)
-            current = await self.provider.chat(
+            current = await self._llm_call(
+                "forced_final",
                 messages=context,
                 tools=None,
                 stream_callbacks=self.stream_callbacks,
@@ -2856,7 +3222,8 @@ class Conversation:
                 else:
                     _retry_context.append(ChatMessage(role="system", content=_nudge))
 
-                current = await self.provider.chat(
+                current = await self._llm_call(
+                    "empty_nudge",
                     messages=_retry_context,
                     tools=None,
                     stream_callbacks=self.stream_callbacks,
@@ -2880,6 +3247,9 @@ class Conversation:
                 output_tokens=current.output_tokens,
                 tool_calls=None,
                 thinking=current.thinking,
+                stop_reason=current.stop_reason,
+                cache_read_tokens=current.cache_read_tokens,
+                cache_write_tokens=current.cache_write_tokens,
             )
 
         logger.info(f"Tool loop done: {usage.rounds} rounds, in={usage.last_input}, out={usage.total_output}")

@@ -656,6 +656,7 @@ class OpenAIProvider(LLMProvider):
             output_tokens=usage.get("completion_tokens", 0),
             tool_calls=tool_calls,
             thinking=thinking_text,
+            cache_read_tokens=int(_ptd.get("cached_tokens", 0) or 0),
         )
 
     def _is_reasoning(self, model: str) -> bool:
@@ -818,6 +819,7 @@ class OpenAIProvider(LLMProvider):
             output_tokens=usage.get("output_tokens", 0),
             tool_calls=acc.tool_calls(),
             thinking=acc.thinking or None,
+            cache_read_tokens=int(_itd.get("cached_tokens", 0) or 0),
         )
 
     async def _embed_with_retry(

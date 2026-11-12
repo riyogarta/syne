@@ -948,6 +948,24 @@ async def _m34_ratification_config(conn) -> None:
     )
 
 
+async def _m35_memory_budget_config(conn) -> None:
+    """Seed per-turn memory budget config (Riyo, 12 Nov 2026).
+
+    Ships in log mode with every budget 0 (no limit): turn_stats collects
+    real X/R/M sizes first, budgets are set from that data, then enforce.
+    """
+    await conn.execute(
+        """
+        INSERT INTO config (key, value, description) VALUES
+    ('memory_budget.mode', '"log"', 'Per-turn memory budget mode. log = measure and record violations in metadata.turn_stats only, change nothing. enforce = also fit X/R/M to their budgets before every model call (X drops oldest messages in one chunk to 70% of budget, R drops weakest recall items, M skips a history result whole with a notice; never truncates). Start in log, set budgets from turn_stats data, then switch to enforce.'),
+    ('memory_budget.x_tokens', '0', 'Budget X (estimated tokens): session window, the non-system messages present when the turn starts. 0 = no limit.'),
+    ('memory_budget.r_tokens', '0', 'Budget R (estimated tokens): injected recall, i.e. memories + cross-session history + knowledge graph. 0 = no limit.'),
+    ('memory_budget.m_tokens', '0', 'Budget M (estimated tokens): history_search + history_expand results produced within one turn. 0 = no limit.')
+        ON CONFLICT (key) DO NOTHING
+        """
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -983,6 +1001,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (32, _m32_drop_compaction_config, "transactional"),
     (33, _m33_history_expand_adaptive, "transactional"),
     (34, _m34_ratification_config, "transactional"),
+    (35, _m35_memory_budget_config, "transactional"),
 ]
 
 

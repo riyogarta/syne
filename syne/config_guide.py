@@ -134,6 +134,27 @@ Maps trigger keywords to target categories. Empty object = disabled (original be
 - **Increase when**: the bot loses recent context too often and token budget allows.
 - **Decrease when**: requests are slow or too expensive.
 
+### Memory Budget (per turn)
+| Key | Default | Type |
+|-----|---------|------|
+| `memory_budget.mode` | `"log"` | `"log"` or `"enforce"` |
+| `memory_budget.x_tokens` | `0` | integer (estimated tokens, 0 = no limit) |
+| `memory_budget.r_tokens` | `0` | integer (estimated tokens, 0 = no limit) |
+| `memory_budget.m_tokens` | `0` | integer (estimated tokens, 0 = no limit) |
+
+Every turn stores `metadata.turn_stats` on the final assistant row and logs one
+`TURN-STATS` line: estimated S/X/R/M/W sizes, provider usage per model call
+(input, cache read/write, output), tool rounds, latency, and budget violations.
+- **X** = session window, **R** = memories + cross-session history + knowledge graph,
+  **M** = `history_search` / `history_expand` results of the turn. S (system) and W
+  (other working messages) are measured but not budgeted.
+- Budgets are checked on EVERY model call, tool rounds included.
+- `log` — record violations only. `enforce` — X drops the oldest messages in one chunk
+  down to 70% of its budget; R drops its weakest items (graph, then history, then
+  memories); M skips a history result whole with a notice. Nothing is ever cut mid-text.
+- **Set budgets when**: enough `turn_stats` data exists to see real X/R/M sizes. Then
+  switch to `enforce`.
+
 ### Thinking Budget
 | Key | Default | Type |
 |-----|---------|------|

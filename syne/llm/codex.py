@@ -577,6 +577,7 @@ class CodexProvider(LLMProvider):
             output_tokens=usage["output_tokens"],
             tool_calls=parsed_tool_calls,
             thinking=thinking_text or None,
+            cache_read_tokens=int(usage.get("cached_tokens", 0) or 0),
         )
 
     async def embed(self, text: str, model: Optional[str] = None) -> EmbeddingResponse:
