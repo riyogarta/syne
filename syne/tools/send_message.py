@@ -14,7 +14,10 @@ one call with no per-channel special casing here.
 Permission 770: Owner and family can send messages.
 """
 
+import json
 import logging
+import os
+import re
 
 logger = logging.getLogger("syne.tools.send_message")
 
@@ -28,12 +31,141 @@ def set_telegram_channel(channel):
     _telegram_channel = channel
 
 
+# ── Attachments ──────────────────────────────────────────────
+# Files ride on the same MEDIA: protocol every channel already parses
+# (extract_all_media). The difference from send_file / memory_get_file:
+# those hand their MEDIA: line to the CURRENT turn's final reply, which a
+# scheduled task never delivers (scheduler.echo_response_to_creator) and
+# which can never reach a different chat. Here the trailer is part of the
+# message itself, so it lands wherever chat_id points.
+
+_TELEGRAM_CAPTION_MAX = 1024
+_MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024  # Telegram Bot API upload limit
+_MEMORY_REF_RE = re.compile(r"^memory:\s*#?(\d+)$", re.IGNORECASE)
+
+
+def _workspace_root() -> str:
+    """Resolved workspace/ directory (same one file_write is sandboxed to)."""
+    try:
+        from .file_ops import _workspace_dir
+    except Exception:
+        _workspace_dir = None
+    root = _workspace_dir or os.path.join(os.getcwd(), "workspace")
+    return os.path.realpath(root)
+
+
+def _normalize_attachments(attachments) -> list[str]:
+    """Accept a list, a JSON-array string, or a single string."""
+    if not attachments:
+        return []
+    if isinstance(attachments, str):
+        s = attachments.strip()
+        if not s:
+            return []
+        if s.startswith("["):
+            try:
+                parsed = json.loads(s)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(a).strip() for a in parsed if str(a).strip()]
+        return [s]
+    if isinstance(attachments, (list, tuple)):
+        return [str(a).strip() for a in attachments if str(a).strip()]
+    return [str(attachments).strip()]
+
+
+async def _fetch_memory_blob(memory_id: int):
+    """Category + attached file of one memory (file columns NULL if none)."""
+    from ..db.connection import get_connection
+
+    async with get_connection() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT m.category, b.filename, b.content
+            FROM memory m
+            LEFT JOIN memory_blobs b ON b.memory_id = m.id
+            WHERE m.id = $1
+            """,
+            memory_id,
+        )
+
+
+async def _materialize_memory_file(memory_id: int, access_level: str) -> tuple[str | None, str]:
+    """Write a memory's attached file to workspace/temp/. Returns (path, error).
+
+    Same permission gate (Rule 760) and same file naming as memory_get_file.
+    """
+    row = await _fetch_memory_blob(memory_id)
+    if not row:
+        return None, f"memory #{memory_id} not found"
+
+    from ..security import check_rule_760
+
+    allowed, reason = check_rule_760(row["category"] or "", access_level)
+    if not allowed:
+        return None, reason
+    if row["content"] is None:
+        return None, f"memory #{memory_id} has no attached file"
+
+    temp_dir = os.path.join(_workspace_root(), "temp")
+    os.makedirs(temp_dir, exist_ok=True)
+    fname = row["filename"] or f"memory_{memory_id}.bin"
+    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", fname)[:120] or f"memory_{memory_id}"
+    out_path = os.path.join(temp_dir, f"mem{memory_id}_{safe}")
+    with open(out_path, "wb") as f:
+        f.write(bytes(row["content"]))
+    return out_path, ""
+
+
+async def _resolve_attachments(items: list[str], access_level: str) -> tuple[list[str], str]:
+    """Turn attachment items into existing file paths. Returns (paths, error).
+
+    'memory:<id>' -> the memory's file, written to workspace/temp/.
+    Anything else -> a path that must resolve inside workspace/ (relative
+    paths are taken from workspace/). Any bad item fails the whole send, so
+    a message never goes out silently missing its file.
+    """
+    root = _workspace_root()
+    paths: list[str] = []
+    for item in items:
+        m = _MEMORY_REF_RE.match(item)
+        if m:
+            path, err = await _materialize_memory_file(int(m.group(1)), access_level)
+            if err:
+                return [], f"Error: attachment '{item}': {err}"
+        else:
+            p = os.path.expanduser(item)
+            if not os.path.isabs(p):
+                p = os.path.join(root, p)
+            path = os.path.realpath(p)
+            if not path.startswith(root + os.sep):
+                return [], (
+                    f"Error: attachment '{item}' is outside workspace/. Only files "
+                    f"inside workspace/ or memory:<id> can be attached."
+                )
+        if not os.path.isfile(path):
+            return [], f"Error: attachment '{item}' not found."
+        size = os.path.getsize(path)
+        if size == 0:
+            return [], f"Error: attachment '{item}' is empty."
+        if size > _MAX_ATTACHMENT_SIZE:
+            return [], (
+                f"Error: attachment '{item}' is too large "
+                f"({size / (1024 * 1024):.1f} MB, limit 50 MB)."
+            )
+        if path not in paths:
+            paths.append(path)
+    return paths, ""
+
+
 async def send_message_handler(
     chat_id: str,
     message: str,
     reply_to_message_id: int = 0,
     relay_from: str = "",
     platform: str = "telegram",
+    attachments: list | str | None = None,
     _scheduled: bool = False,
     _access_level: str = "public",
 ) -> str:
@@ -48,6 +180,8 @@ async def send_message_handler(
             only; silently ignored elsewhere since send_to_chat has no
             equivalent.
         platform: "telegram" (default), "whatsapp", or "discord".
+        attachments: Optional files sent with the message (the text becomes
+            the caption): 'memory:<id>' or a path inside workspace/.
         _scheduled: Injected by tool registry when called from scheduled context.
         _access_level: Injected by tool registry -- the caller's access level.
 
@@ -59,7 +193,9 @@ async def send_message_handler(
     if not chat_id:
         return "Error: chat_id is required"
 
-    if not message or not message.strip():
+    items = _normalize_attachments(attachments)
+    message = message or ""
+    if not message.strip() and not items:
         return "Error: message cannot be empty"
 
     # Deterministic relay attribution: if this is a forwarded/relayed message,
@@ -81,6 +217,24 @@ async def send_message_handler(
             "Error: Cannot send to groups from a regular conversation. "
             "Use manage_schedule to create a scheduled task instead."
         )
+
+    # Attachments become MEDIA: trailers on the message itself. Resolved only
+    # after the group guard, so a refused send never writes files.
+    media_paths: list[str] = []
+    if items:
+        if plat == "telegram" and len(message.strip()) > _TELEGRAM_CAPTION_MAX:
+            return (
+                f"Error: with attachments the message becomes the caption, and "
+                f"Telegram captions are limited to {_TELEGRAM_CAPTION_MAX} characters "
+                f"(this one is {len(message.strip())}). Shorten it, or send the long "
+                f"text in a separate send_message call without attachments."
+            )
+        media_paths, err = await _resolve_attachments(items, _access_level)
+        if err:
+            return err
+        trailer = "\n".join(f"MEDIA: {p}" for p in media_paths)
+        message = f"{message.rstrip()}\n\n{trailer}" if message.strip() else trailer
+    _att = f" with {len(media_paths)} attachment(s)" if media_paths else ""
 
     # Non-Telegram platforms go through the channel registry. Returning the
     # channel's own failure reason matters: "not connected" (WhatsApp unpaired
@@ -126,7 +280,7 @@ async def send_message_handler(
             return f"Error sending message via {plat}: {type(e).__name__}: {e}"
         if ok:
             logger.info(f"Message sent via {plat} to {dest}")
-            return f"Message sent to {plat} chat {dest}"
+            return f"Message sent to {plat} chat {dest}{_att}"
         return f"Error: {plat} refused the send to {dest} (see logs)."
 
     if not _telegram_channel:
@@ -143,9 +297,9 @@ async def send_message_handler(
 
         if sent:
             logger.info(f"Message sent to chat {chat_id} (msg_id: {sent.message_id})")
-            return f"Message sent to chat {chat_id} (message_id: {sent.message_id})"
+            return f"Message sent to chat {chat_id} (message_id: {sent.message_id}){_att}"
         else:
-            return f"Message sent to chat {chat_id} (no confirmation)"
+            return f"Message sent to chat {chat_id} (no confirmation){_att}"
 
     except Exception as e:
         logger.error(f"Error sending message to {chat_id}: {e}")
@@ -166,7 +320,8 @@ SEND_MESSAGE_TOOL = {
         "Use for proactive messaging (reminders, alerts, notifications) "
         "and cross-session relay (forwarding info between chats). "
         "Requires chat_id in the target platform's own format, plus "
-        "platform='whatsapp'/'discord' when it is not Telegram."
+        "platform='whatsapp'/'discord' when it is not Telegram. "
+        "Can carry files/images via attachments."
     ),
     "parameters": {
         "type": "object",
@@ -193,6 +348,19 @@ SEND_MESSAGE_TOOL = {
             "message": {
                 "type": "string",
                 "description": "Message text to send. Supports Markdown formatting.",
+            },
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional files sent with the message; the message text "
+                    "becomes the caption. Each item: 'memory:<id>' (the file "
+                    "stored with that memory) or a path inside workspace/ "
+                    "(e.g. 'outputs/chart.png'). Use this, not send_file or "
+                    "memory_get_file, whenever the file must reach a chat other "
+                    "than the current one, and in every scheduled task. "
+                    "Telegram: caption max 1024 characters when attaching."
+                ),
             },
             "reply_to_message_id": {
                 "type": "integer",

@@ -962,8 +962,10 @@ class DiscordChannel:
         # any leftover tag instead of showing it.
         text, _ = parse_reply_tag(text or "")
         text, _ = parse_react_tags(text)
-        text = process_outbound(text)
+        # MEDIA: paths must be pulled BEFORE process_outbound strips server
+        # paths (/home/...), otherwise every attachment line loses its path.
         text, media = extract_all_media(text)
+        text = process_outbound(text)
         text = markdown_to_discord(text)
 
         first = True

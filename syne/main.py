@@ -137,7 +137,11 @@ async def _scheduler_callback(
             effective_payload = (
                 f"Deliver the following message by calling send_message(chat_id=\"{target_chat_id}\", message=...).\n"
                 f"Target chat: {target_chat_id}{type_hint}.\n"
-                f"Do NOT reply with text — use the send_message tool.\n\n"
+                f"Do NOT reply with text — use the send_message tool.\n"
+                f"To include a file or image, pass it in send_message's attachments "
+                f"parameter (e.g. attachments=[\"memory:<id>\"] or a workspace/ path); "
+                f"send_file and memory_get_file do NOT reach the target chat from a "
+                f"scheduled task.\n\n"
                 f"--- PAYLOAD ---\n{payload}"
             )
         await _telegram_channel.process_scheduled_message(
