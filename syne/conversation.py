@@ -1031,54 +1031,25 @@ class Conversation:
         #     another instruction onto the layer that already failed. So hoist it
         #     into context the way memory is hoisted - no decision, no tool call.
         #
-        #     PRIVACY - the load-bearing part. Scope is the same rule
-        #     history_search enforces (tools/history.py scope_sql, Riyo,
-        #     7 Nov 2026): the current chat, plus - for owner/family - the
-        #     sender's own DMs on the same platform. A DM is recognised by the
-        #     session's OWNER (sessions.user_id -> users.platform_id), not by
-        #     platform_chat_id: on WhatsApp and Discord the DM chat id is not the
-        #     person's id. Group sessions are owned by whoever created them, so
-        #     they are excluded from "own DM" explicitly (group_session_sql). The
-        #     messages table has no sender column, so a group row only counts as
-        #     the sender's own words when its embedded sender id matches.
+        #     SAME AS THE TOOLS (Riyo, 12 Nov 2026): this IS history_search
+        #     followed by history_expand on every hit, called through the same
+        #     handlers with the same history_search.* settings and the same
+        #     scope (tools/history.py scope_sql). Only two differences from a
+        #     manual call: it runs for owner/family only (for public the scope
+        #     is the current chat alone, already in the window - pure waste),
+        #     and the current session is excluded (its rows are in the window).
         _raw_he = await _get_recall_config("history.auto_recall", True)
         if isinstance(_raw_he, str):
             _hist_enabled = _raw_he.strip().lower() not in ("false", "0", "no", "off", "")
         else:
             _hist_enabled = bool(_raw_he)
-        try:
-            _hist_limit = int(await _get_recall_config("history.auto_recall_limit", 3))
-        except (TypeError, ValueError):
-            _hist_limit = 3
-        try:
-            _hist_min_sim = float(
-                await _get_recall_config("history.auto_recall_min_similarity", 0.60)
-            )
-        except (TypeError, ValueError):
-            _hist_min_sim = 0.60
-        try:
-            _hist_min_chars = int(
-                await _get_recall_config("history.auto_recall_min_chars", 40)
-            )
-        except (TypeError, ValueError):
-            _hist_min_chars = 40
 
-        # One scope for every platform - the trusted-group list and the
-        # Telegram-only pin are gone (Riyo, 7 Nov 2026).
         from .tools.history import (
             build_history_scope as _build_hist_scope,
-            group_session_sql as _hist_group_sql,
-            scope_sql as _hist_scope_sql,
+            history_expand_handler as _hist_expand,
+            history_search_handler as _hist_search,
         )
         _hist_scope = _build_hist_scope(self, access_level)
-
-        # Sender identity: inbound is the single source of truth. In a group this
-        # is the person who actually typed; in a DM it is the chat owner.
-        _sender_pid = None
-        if self.inbound and self.inbound.sender_id:
-            _sender_pid = str(self.inbound.sender_id)
-        elif not self.is_group:
-            _sender_pid = str(self.user.get("platform_id") or "") or None
 
         # One vector per turn, shared by both recall paths below. They run
         # concurrently on the SAME query string and each used to embed it
@@ -1105,64 +1076,34 @@ class Conversation:
             return _qvec["v"]
 
         async def _do_history_recall():
-            if not _hist_enabled or not _sender_pid or not _hist_scope:
-                return []
-            # Query-side guard. A bare acknowledgement ("Test ya", "Opsi A",
-            # "Ok cek") carries no topic, yet embeds close to every OTHER bare
-            # acknowledgement in the log - which is precisely how "Ok" scored
-            # 65% against "Test ya" on the first live test, and "Opsi A" 70% on
-            # the second. For a query like that the right answer is ZERO rows,
-            # not the three least-bad ones, so this floor is on word count. No
-            # similarity threshold can fix it: the query itself is the problem.
-            _hw = [w for w in (recall_query or user_message).strip().split() if len(w) > 1]
-            if len(_hw) < 4:
-                return []
+            """Return the history_expand JSON for this turn, or None."""
+            if not _hist_enabled or not _hist_scope:
+                return None
+            if access_level not in ("owner", "family"):
+                return None
             try:
                 _vec = await _shared_query_vector()
                 if not _vec:
-                    return []
-                # Authorship. Outside groups (a DM, a reminder session) every
-                # user row is the session owner's own words. In a group the
-                # writer is read from metadata->>'sender_id' or, for the
-                # backlog, the inbound Sender block in the body (metadata is
-                # NULL on old rows, hence the COALESCE). Only the numeric id is
-                # trusted - display names change at will (41005565 appears as
-                # both "ItsAgha" and "Gamitra").
-                _sender_re = 'Sender \\(untrusted metadata\\):[^}]*"id": ?"([0-9]+)"'
-                _author_sql = (
-                    "(NOT " + _hist_group_sql("s") + " OR COALESCE("
-                    "m.metadata->>'sender_id', "
-                    "substring(m.content from '" + _sender_re + "')) = $3)"
+                    return None
+                _found = await _hist_search(
+                    query=recall_query or user_message,
+                    _scope=_hist_scope,
+                    _exclude_session=self.session_id,
+                    _query_vector=_vec,
                 )
-                _args = [
-                    str(_vec), self.session_id, _sender_pid,
-                    _hist_min_sim, _hist_min_chars, _hist_limit,
-                ]
-                # Source scope: the same rule as history_search.
-                _sc_sql, _sc_params = _hist_scope_sql(_hist_scope, len(_args) + 1)
-                _args += _sc_params
-                _scope_sql = "\n                          AND " + _sc_sql
-                async with get_connection() as conn:
-                    return await conn.fetch(
-                        f"""
-                        SELECT m.id, m.content, m.created_at,
-                               1 - (m.embedding <=> $1::vector) AS similarity
-                        FROM messages m
-                        JOIN sessions s ON s.id = m.session_id
-                        WHERE m.role = 'user'
-                          AND m.embedding IS NOT NULL
-                          AND m.session_id <> $2
-                          AND {_author_sql}
-                          AND 1 - (m.embedding <=> $1::vector) >= $4
-                          AND LENGTH(m.content) >= $5{_scope_sql}
-                        ORDER BY (m.embedding <=> $1::vector) ASC
-                        LIMIT $6
-                        """,
-                        *_args,
-                    )
+                if not _found.startswith("{"):
+                    return None  # "No matches." or an error
+                _ids = [h["anchor_id"] for h in json.loads(_found).get("hits", [])]
+                if not _ids:
+                    return None
+                _opened = await _hist_expand(anchor_ids=_ids, _scope=_hist_scope)
+                if not _opened.startswith("{"):
+                    logger.debug(f"History recall expand skipped: {_opened[:200]}")
+                    return None
+                return _opened
             except Exception as e:
                 logger.debug(f"History recall skipped: {e}")
-                return []
+                return None
 
         async def _do_memory_recall():
             # Mirror recall()'s own 2-word floor before touching the
@@ -1254,45 +1195,36 @@ class Conversation:
             _actual_query = recall_query or user_message
             logger.info(f"No memories recalled for query: {_actual_query[:80]}")
 
-        # 4c. Cross-session history (fetched in parallel above). Injected as
-        #     context so that "it is not in my context" stops being a true
-        #     sentence whenever the sender's own earlier chat holds the answer.
+        # 4c. Cross-session history (fetched in parallel above): the
+        #     history_expand result of the automatic history_search.
         if past_convos:
-            from .memory.engine import format_relative_time as _frt
             try:
-                _h_locale = (await _load_time_config())['time.locale']
-            except Exception:
-                _h_locale = 'id'
+                _h_blocks = len(json.loads(past_convos).get("blocks", []))
+            except ValueError:
+                _h_blocks = 0
             hist_lines = [
                 "# Relevant Past Conversations (this sender's other chats)",
-                "Things THIS sender said to you in their other chats, "
-                "outside this session. Scoped by code to this chat plus, for "
-                "owner/family, the sender's own DMs on this platform - never "
-                "another person's private chat.",
-                "These are real prior statements by the sender. If they refer to "
-                "something discussed in PM, the answer may be right here - do "
-                "NOT claim you have no knowledge of a topic that appears below.",
-                "Only the sender's OWN messages are indexed here - your own past "
-                "replies are NOT. You therefore cannot tell who authored any number, "
-                "link or decision below: a value the sender quotes may have "
-                "originated from you. Never attribute authorship from this block, "
-                "and never guess why something changed.",
+                "Run automatically for this turn: history_search over the "
+                "sender's messages in their OTHER chats (this session excluded), "
+                "then history_expand on every hit - the same tools, settings and "
+                "scope you get by calling them yourself, so do not re-run them "
+                "for the same query. Scoped by code to the sender's own DMs on "
+                "this platform plus the current chat - never another person's "
+                "private chat.",
+                "Blocks hold the user and assistant turns around each anchor. An "
+                "assistant turn may carry ratification (ratified = the user "
+                "approved it, not proof it is correct). Hits are ranked by "
+                "similarity only - ignore blocks unrelated to the current message.",
                 "In a group, do not expose more of this than the sender has "
                 "already raised in that group themselves.",
                 "",
+                past_convos,
             ]
-            for _h in past_convos:
-                _rel = _frt(_h["created_at"], locale=_h_locale)
-                _when = f" [{_rel}]" if _rel else ""
-                _txt = " ".join((_h["content"] or "").split())
-                if len(_txt) > 400:
-                    _txt = _txt[:399] + "\u2026"
-                hist_lines.append(f"- (match: {_h['similarity']:.0%}){_when} {_txt}")
             messages.append(ChatMessage(role="system", content="\n".join(hist_lines),
                                         metadata={"volatile": True, "ctx_part": "r_history"}))
             logger.info(
-                f"History recall: {len(past_convos)} rows from other sessions "
-                f"(sender={_sender_pid}, excluded session={self.session_id})"
+                f"History recall: {_h_blocks} block(s), {len(past_convos)} chars "
+                f"from other sessions (excluded session={self.session_id})"
             )
 
         # 4b. Knowledge graph context (already fetched in parallel above)

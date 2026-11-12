@@ -966,6 +966,25 @@ async def _m35_memory_budget_config(conn) -> None:
     )
 
 
+async def _m36_auto_recall_as_history_tools(conn) -> None:
+    """history.auto_recall = history_search + history_expand (Riyo, 12 Nov 2026).
+
+    Its own limit / similarity / length knobs are gone: it reads the
+    history_search.* settings exactly like the tools. Idempotent.
+    """
+    await conn.execute("""
+        DELETE FROM config WHERE key IN (
+            'history.auto_recall_limit',
+            'history.auto_recall_min_similarity',
+            'history.auto_recall_min_chars'
+        )
+    """)
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'history.auto_recall'",
+        "Automatic history_search + history_expand before every answer, for owner/family only: searches the sender's other chats (current session excluded) with the same scope and the same history_search.* settings as the tools, and injects the expanded blocks into context.",
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1002,6 +1021,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (33, _m33_history_expand_adaptive, "transactional"),
     (34, _m34_ratification_config, "transactional"),
     (35, _m35_memory_budget_config, "transactional"),
+    (36, _m36_auto_recall_as_history_tools, "transactional"),
 ]
 
 
