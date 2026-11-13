@@ -506,6 +506,9 @@ class Conversation:
             # carry no header and pass through unchanged.
             from .anchor_text import anchor_text
             text = anchor_text(content)
+            if not text.strip():
+                logger.debug(f"_embed_message_row skipped id={message_id}: nothing to embed")
+                return
 
             max_chars = int(await get_config("history_search.max_content_chars", 4000))
             body = text if len(text) <= max_chars else text[:max_chars]

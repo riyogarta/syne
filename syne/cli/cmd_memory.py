@@ -278,7 +278,10 @@ def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, fr
 
         max_chars = int(await get_config("history_search.max_content_chars", 4000))
         roles = {"user": "('user')", "assistant": "('assistant')", "all": "('user', 'assistant')"}[role]
-        where = f"role IN {roles} AND btrim(content) <> ''"
+        # Rows with at least one non-whitespace character. btrim() only strips
+        # spaces, so a row holding a lone newline would be selected and then
+        # fail at the embed call with nothing to embed.
+        where = f"role IN {roles} AND content ~ '[^[:space:]]'"
         if not all_rows:
             where += " AND embedding IS NULL"
         # Oldest first walks ids upward from --from-id; newest first walks
@@ -309,10 +312,11 @@ def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, fr
 
         done = 0
         failed = 0
+        skipped = 0
         import asyncio as _asyncio
         with console.status("Embedding batch...") as status:
-            while done + failed < target:
-                take = min(int(batch), target - done - failed)
+            while done + failed + skipped < target:
+                take = min(int(batch), target - done - failed - skipped)
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
                         f"SELECT id, content FROM messages WHERE {where} "
@@ -327,6 +331,11 @@ def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, fr
                     last_id = r["id"]
                     try:
                         body = anchor_text(r["content"])
+                        if not body.strip():
+                            # Nothing left to embed (whitespace the SQL filter
+                            # did not catch, e.g. non-ASCII spaces).
+                            skipped += 1
+                            continue
                         resp = await provider.embed(body[:max_chars])
                         vec = getattr(resp, "vector", None)
                         if not vec:
@@ -342,7 +351,7 @@ def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, fr
                         failed += 1
                         console.print(f"[yellow]row id={r['id']} failed: {e}[/yellow]")
 
-                status.update(f"Embedded {done}/{target} (failed {failed}, last id {last_id})")
+                status.update(f"Embedded {done}/{target} (failed {failed}, skipped {skipped}, last id {last_id})")
 
                 if sleep > 0:
                     await _asyncio.sleep(sleep)
@@ -355,7 +364,7 @@ def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, fr
             console.print(f"[yellow]HNSW build skipped: {e}[/yellow]")
 
         console.print(
-            f"[green]✓ Done. Embedded: {done}. Failed: {failed}. Last id: {last_id}.[/green]"
+            f"[green]✓ Done. Embedded: {done}. Failed: {failed}. Skipped: {skipped}. Last id: {last_id}.[/green]"
         )
         await close_db()
 
