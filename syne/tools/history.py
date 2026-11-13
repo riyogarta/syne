@@ -1,19 +1,21 @@
 """history_search + history_expand — semantic recall over the chat log.
 
-Two-primitive design (Riyo, 13 Jul 2026):
+Two levels, every hit expanded (Riyo, 13 Nov 2026):
 
-  * ``history_search`` returns anchor PREVIEWS only, ordered by similarity or
-    recency, with filters (session, time range, keyword co-occurrence). Cheap
-    on tokens so the model can skim like a human scanning search results.
-  * ``history_expand`` fetches the surrounding turns for a specific anchor.
-    Called SELECTIVELY after previews — the model only "opens" candidates
-    that look promising, not the whole top-N.
-
-Anchors are user messages ONLY (embedded at save-time in Conversation.
-save_message). Assistant / tool / system rows are the context you scroll
-around each anchor. This keeps the semantic space clean (one canonical
-anchor per topic) and mirrors the human intuition: "when did I ASK about
-X?" → jump to that user message → read around.
+  * ``history_search`` level 1 searches USER rows (what the user said);
+    level 2 searches ASSISTANT rows (what the assistant said). The model
+    starts at level 1 and moves to level 2 itself when level 1 did not find
+    it. A level-2 hit is the assistant's own earlier statement: a claim,
+    not a verified fact.
+  * Every hit comes back already expanded (adaptive radius + dedup, the
+    same code as history_expand), so a conclusion is never drawn from a
+    bare snippet. Fewer hits per call (default 5, cap 10) keep the size
+    bounded; ``offset`` pages further.
+  * ``history_expand`` stays, only to widen one block.
+  * Every search is written to history_search_log (query, level, hit ids,
+    similarities) for choosing a similarity threshold later. A level-2
+    search with the same query in the same session marks the newest
+    level-1 search as escalated: the model judged level 1 not found.
 
 Visibility (Riyo, 7 Nov 2026): both tools are open to everyone (0o444), but
 every query is scoped in SQL by who is asking - see scope_sql():
@@ -172,14 +174,6 @@ def set_embedding_provider(provider) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _preview(text: str, n: int = 160) -> str:
-    """Collapse whitespace + truncate for cheap-token previews."""
-    if not text:
-        return ""
-    flat = " ".join(text.split())
-    return flat if len(flat) <= n else flat[: n - 1] + "…"
-
-
 def _iso_or_none(raw: Optional[str]) -> Optional[datetime]:
     """Accept 'YYYY-MM-DD' or full ISO. Return None on parse failure so the
     handler can reject with a clear message instead of a raw exception."""
@@ -198,9 +192,48 @@ def _iso_or_none(raw: Optional[str]) -> Optional[datetime]:
 # ---------------------------------------------------------------------------
 
 
+# Level -> role of the rows searched. Fixed literals, safe to inline in SQL.
+_LEVEL_ROLE = {1: "user", 2: "assistant"}
+
+
+async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: list) -> None:
+    """One history_search_log row per search, for threshold research.
+
+    A level-2 search whose query equals (case- and edge-whitespace-
+    insensitive) the newest level-1 search of the same session marks that
+    level-1 row as escalated: the model judged level 1 not found.
+    Fail-quiet: logging never breaks a search.
+    """
+    sid = scope.get("session_id")
+    try:
+        async with get_connection() as conn:
+            if level == 2 and sid is not None:
+                await conn.execute(
+                    "UPDATE history_search_log SET escalated = true WHERE id = ("
+                    "SELECT id FROM history_search_log WHERE session_id = $1 "
+                    "AND level = 1 AND lower(btrim(query)) = lower(btrim($2)) "
+                    "ORDER BY id DESC LIMIT 1)",
+                    int(sid), query,
+                )
+            await conn.execute(
+                "INSERT INTO history_search_log (session_id, platform, chat_id, "
+                "query, level, sort_by, hit_ids, similarities) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::int[], $8::float8[])",
+                int(sid) if sid is not None else None,
+                str(scope.get("platform") or ""),
+                str(scope.get("chat_id") or ""),
+                query, level, sort_by,
+                [int(r["id"]) for r in rows],
+                [float(r["similarity"] or 0.0) for r in rows],
+            )
+    except Exception as e:
+        logger.warning(f"history_search_log write failed: {e}")
+
+
 async def history_search_handler(
     query: str,
-    limit: int = 10,
+    level: int = 1,
+    limit: Optional[int] = None,
     offset: int = 0,
     session_id: Optional[int] = None,
     since: Optional[str] = None,
@@ -212,16 +245,24 @@ async def history_search_handler(
     all_chats: bool = False,
     _scope: Optional[dict] = None,
 ) -> str:
-    """Return an ordered list of anchor previews, JSON-formatted for the LLM."""
+    """Search one level and return every hit expanded, JSON-formatted."""
     if not query or not query.strip():
         return "Error: query is required (non-empty string)."
 
-    # Bounds — defensive against pathological calls.
     try:
-        default_limit = int(await get_config("history_search.default_limit", 10))
+        lvl = int(level) if level is not None else 1
+    except (TypeError, ValueError):
+        lvl = None
+    if lvl not in _LEVEL_ROLE:
+        return f"Error: level must be 1 (user messages) or 2 (assistant replies), got {level!r}."
+    level = lvl
+
+    # Bounds. Every hit is expanded, so the cap is small.
+    try:
+        default_limit = int(await get_config("history_search.default_limit", 5))
     except Exception:
-        default_limit = 10
-    limit = max(1, min(50, int(limit) if limit is not None else default_limit))
+        default_limit = 5
+    limit = max(1, min(10, int(limit) if limit is not None else default_limit))
     offset = max(0, int(offset) if offset is not None else 0)
 
     if sort_by not in ("similarity", "recency"):
@@ -251,9 +292,6 @@ async def history_search_handler(
     if not vector:
         return "Error: embedding provider returned an empty vector."
 
-    # Assemble SQL. Sort direction depends on mode; recency mode still
-    # applies the vector similarity as a tie-breaker so top matches still
-    # semantically-close if two rows share the same second.
     # Visibility - enforced here, never left to the model (see scope_sql).
     if not _scope:
         return _NO_SCOPE_ERROR
@@ -265,13 +303,13 @@ async def history_search_handler(
             "message only. Omit them to search the chats this person may see."
         )
 
-    # A continuation request ("lanjutkan") is never an anchor on its own;
-    # the exchange it belongs to is still reached through its neighbours.
     conditions = [
-        "m.role = 'user'",
+        f"m.role = '{_LEVEL_ROLE[level]}'",
         "m.embedding IS NOT NULL",
-        "COALESCE(m.metadata->'ratification'->>'label', '') <> 'continue'",
     ]
+    if level == 2:
+        # Tool-call shells carry no text; they are never embedded, but say so.
+        conditions.append("btrim(m.content) <> ''")
     params: list = [str(vector)]
     p = 2
 
@@ -325,7 +363,7 @@ async def history_search_handler(
 
     sql = f"""
         SELECT
-            m.id, m.session_id, m.content, m.created_at,
+            m.id, m.session_id, m.role, m.created_at,
             1 - (m.embedding <=> $1::vector) AS similarity,
             s.platform_chat_id AS chat_id,
             s.platform AS platform
@@ -343,33 +381,51 @@ async def history_search_handler(
         logger.exception("history_search DB error")
         return f"Error: database query failed: {e}"
 
+    await _log_search(_scope, query, level, sort_by, rows)
+
     if not rows:
-        return "No matches. Try a broader query, a different keyword, or wider since/until range."
+        msg = "No matches. Try a broader query, a different keyword, or wider since/until range."
+        if level == 1:
+            msg += " If it may be something you said, search level=2 with the same query."
+        return msg
 
     hits = []
     for r in rows:
         hits.append({
             "anchor_id": r["id"],
+            "role": r.get("role") or _LEVEL_ROLE[level],
             "session_id": r["session_id"],
             "platform": r.get("platform") or "",
             "chat_id": r["chat_id"] or "",
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
             "similarity": round(float(r["similarity"] or 0.0), 4),
-            "preview": _preview(r["content"]),
         })
 
-    return json.dumps({
+    payload = {
+        "level": level,
         "sort_by": sort_by,
         "limit": limit,
         "offset": offset,
         "returned": len(hits),
         "hits": hits,
         "next_offset": offset + len(hits),
-        "hint": (
-            "Call history_expand([anchor_id, ...]) to read full context around "
-            "promising previews. Reject obvious no-matches without expanding."
-        ),
-    }, ensure_ascii=False)
+    }
+    expanded = await _expand([r["id"] for r in rows], None, None, _scope)
+    if isinstance(expanded, str):
+        payload["expand_error"] = expanded
+    else:
+        payload.update(expanded)  # blocks (+ note, missing_anchor_ids)
+    if level == 1:
+        payload["hint"] = (
+            "Each hit is expanded in 'blocks' (is_anchor marks it). If none of "
+            "this answers the question, search level=2 with the same query."
+        )
+    else:
+        payload["hint"] = (
+            "Level-2 hits are your own earlier replies: claims, not verified "
+            "facts. Say so when you rely on one."
+        )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 HISTORY_SEARCH_TOOL = {
@@ -379,24 +435,26 @@ HISTORY_SEARCH_TOOL = {
         "(this chat's messages, injected memories). If it is already there, do "
         "not call it. Nothing searches past chats automatically - if the topic "
         "is missing and you skip this tool, you will not see it. "
-        "Semantic search over USER messages across the entire chat log. Indexing "
-        "is user-only BY DESIGN: user messages are ground truth (what the owner "
-        "actually said) so results can never be seeded by a past assistant "
-        "hallucination. Returns anchor PREVIEWS only — a snippet of the USER "
-        "message, WITHOUT the surrounding assistant reply or context. "
-        "MANDATORY: after finding a relevant anchor you MUST call history_expand "
-        "to read the full turn context (which includes ALL roles: user, "
-        "assistant, tool) BEFORE concluding or answering. NEVER draw a conclusion "
-        "from the preview alone — the preview is only the question, not the "
-        "answer. Iterate like scrolling through search results: broad query "
-        "first, then refine with more specific terms, or narrow with since/until "
-        "(temporal), also_contains (keyword AND-filter), or session_id (scope to "
-        "one chat). Sort by similarity (default) or recency (for 'terakhir kali' "
-        "/ 'kemarin' style questions). SCOPE is enforced by the system from who "
-        "is asking: public = this chat only; owner/family = this chat plus their "
-        "own DMs on this platform. Only the owner in a direct message may widen it "
-        "with platform / chat_id / all_chats (or session_id) - use them when the "
-        "owner asks about another chat or platform; anywhere else they are refused."
+        "Semantic search over the chat log in two levels. level=1 (default) "
+        "searches USER messages: what the user actually said. level=2 searches "
+        "ASSISTANT replies: what you said before. Start with level 1; move to "
+        "level 2 only when level 1 did not find it, with the same query. A "
+        "level-2 hit is your own earlier statement - a claim, not a verified "
+        "fact; say so when you rely on it. Every hit comes back already "
+        "expanded: 'hits' lists the matched rows (anchor_id, role, similarity) "
+        "and 'blocks' holds the surrounding conversation (user + assistant "
+        "text, no tool results) with the matched rows flagged is_anchor. A "
+        "block stops early at a topic shift or a long time gap; overlapping "
+        "blocks are merged; turns already in your context window are flagged "
+        "already_in_context with their text omitted. Use history_expand only to "
+        "widen one block. Narrow with since/until, also_contains (keyword "
+        "AND-filter) or session_id; sort by similarity (default) or recency "
+        "(for 'terakhir kali' / 'kemarin' questions); page with offset. SCOPE is "
+        "enforced by the system from who is asking: public = this chat only; "
+        "owner/family = this chat plus their own DMs on this platform. Only the "
+        "owner in a direct message may widen it with platform / chat_id / "
+        "all_chats (or session_id) - use them when the owner asks about another "
+        "chat or platform; anywhere else they are refused."
     ),
     "parameters": {
         "type": "object",
@@ -405,13 +463,21 @@ HISTORY_SEARCH_TOOL = {
                 "type": "string",
                 "description": "Semantic query — natural language.",
             },
+            "level": {
+                "type": "integer",
+                "enum": [1, 2],
+                "description": (
+                    "1 = user messages (default). 2 = your own earlier replies; "
+                    "use only after level 1 did not find it, with the same query."
+                ),
+            },
             "limit": {
                 "type": "integer",
-                "description": "Max previews to return (default 10, cap 50).",
+                "description": "Max hits (default 5, cap 10). Every hit is returned expanded.",
             },
             "offset": {
                 "type": "integer",
-                "description": "Skip N results — for pagination.",
+                "description": "Skip N hits — for paging to the next results.",
             },
             "session_id": {
                 "type": "integer",
@@ -430,7 +496,7 @@ HISTORY_SEARCH_TOOL = {
                 "items": {"type": "string"},
                 "description": (
                     "AND-filter: each keyword must appear (case-insensitive) in "
-                    "the message content. Use to narrow when semantic returns too "
+                    "the matched message. Use to narrow when semantic returns too "
                     "many candidates."
                 ),
             },
@@ -690,14 +756,6 @@ def _build_blocks(pieces: list, in_context: set, merge: bool, before: int, after
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
                 "is_anchor": r["id"] in anchors,
             }
-            rat = r.get("ratification")
-            if isinstance(rat, str):
-                try:
-                    rat = json.loads(rat)
-                except ValueError:
-                    rat = None
-            if r["role"] == "assistant" and isinstance(rat, dict) and rat.get("status"):
-                t["ratification"] = {k: rat[k] for k in ("status", "type", "emoji") if rat.get(k)}
             if r["id"] in in_context:
                 t["content"] = ""
                 t["already_in_context"] = True
@@ -714,25 +772,9 @@ def _build_blocks(pieces: list, in_context: set, merge: bool, before: int, after
     return blocks
 
 
-async def history_expand_handler(
-    anchor_ids: list,
-    context_before: Optional[int] = None,
-    context_after: Optional[int] = None,
-    _scope: Optional[dict] = None,
-) -> str:
-    """Return context blocks (turns around each anchor), JSON-formatted."""
-    if not anchor_ids:
-        return "Error: anchor_ids is required (list of message ids from history_search)."
-
-    try:
-        ids = [int(x) for x in anchor_ids]
-    except (TypeError, ValueError):
-        return "Error: anchor_ids must be a list of integers."
-
-    if len(ids) > 20:
-        return "Error: expand at most 20 anchors at once (be selective — expand only promising previews)."
-    ids = list(dict.fromkeys(ids))  # same anchor twice = one anchor
-
+async def _expand(ids: list, context_before, context_after, _scope) -> object:
+    """Context blocks around message ids: the payload dict, or an error
+    string. Shared by history_search (every hit) and history_expand."""
     cfg = await _expand_settings()
     before = max(0, int(context_before) if context_before is not None else cfg["before"])
     after = max(0, int(context_after) if context_after is not None else cfg["after"])
@@ -856,8 +898,7 @@ async def history_expand_handler(
                 _stage = f"fetch window for anchor {aid}"
                 window_rows = await conn.fetch(
                     "/* history_expand:window */ "
-                    "SELECT id, role, content, created_at, "
-                    "metadata->'ratification' AS ratification FROM messages WHERE "
+                    "SELECT id, role, content, created_at FROM messages WHERE "
                     + " AND ".join(conds)
                     + " ORDER BY created_at ASC, id ASC",
                     *params,
@@ -865,7 +906,9 @@ async def history_expand_handler(
                 )
                 rows = [dict(r) for r in window_rows]
 
-                # Step 3 — adaptive radius inside the maximum window.
+                # Step 3 — adaptive radius inside the maximum window. Topic
+                # shifts are measured on user-row embeddings, also when the
+                # anchor itself is an assistant row (level 2).
                 radius = {
                     "adaptive": bool(cfg["adaptive"]),
                     "before": None,
@@ -940,28 +983,48 @@ async def history_expand_handler(
         )
     if missing:
         payload["missing_anchor_ids"] = missing
-    return json.dumps(payload, ensure_ascii=False)
+    return payload
+
+
+async def history_expand_handler(
+    anchor_ids: list,
+    context_before: Optional[int] = None,
+    context_after: Optional[int] = None,
+    _scope: Optional[dict] = None,
+) -> str:
+    """Return context blocks (turns around each id), JSON-formatted."""
+    if not anchor_ids:
+        return "Error: anchor_ids is required (list of message ids from history_search)."
+
+    try:
+        ids = [int(x) for x in anchor_ids]
+    except (TypeError, ValueError):
+        return "Error: anchor_ids must be a list of integers."
+
+    if len(ids) > 20:
+        return "Error: expand at most 20 anchors at once (widen only the blocks you need)."
+    ids = list(dict.fromkeys(ids))  # same anchor twice = one anchor
+
+    out = await _expand(ids, context_before, context_after, _scope)
+    if isinstance(out, str):
+        return out
+    return json.dumps(out, ensure_ascii=False)
 
 HISTORY_EXPAND_TOOL = {
     "name": "history_expand",
     "description": (
-        "Fetch full turn context around one or more anchor message IDs found by "
-        "history_search. This is the ONLY way to see the ASSISTANT replies and "
-        "tool results around a hit — history_search previews are user-only. "
-        "REQUIRED before concluding from any relevant anchor: never answer from "
-        "the search preview alone; expand to read what was actually said around "
-        "it. Call SELECTIVELY — only expand previews that look promising, not the "
-        "whole top-N. Returns the conversation only (user + assistant text); "
-        "tool results are not included. Anchors outside the asker's scope "
-        "(same rule as history_search) are returned as missing. "
+        "Widen the context around one or more message ids (an anchor_id from "
+        "history_search hits, or the id of any turn in a block). history_search "
+        "already returns every hit expanded with the default window; call this "
+        "only when a block is too short, with a larger context_before / "
+        "context_after. Returns the conversation only (user + assistant text); "
+        "tool results are not included. Ids outside the asker's scope (same "
+        "rule as history_search) are returned as missing. "
         "context_before/context_after are a MAXIMUM: the window may stop early "
         "at a topic shift or a long time gap (see radius.stop_before / "
         "stop_after per anchor). Overlapping windows are merged into one block; "
         "turns already in your context window are marked already_in_context "
-        "with their text omitted. An assistant turn may carry ratification "
-        "(status ratified / disputed / revoked): the user approved it (text or "
-        "reaction), rejected it with a reaction, or took the reaction back. "
-        "Ratified is not verified - it can still be wrong."
+        "with their text omitted."
     ),
     "parameters": {
         "type": "object",
@@ -969,7 +1032,7 @@ HISTORY_EXPAND_TOOL = {
             "anchor_ids": {
                 "type": "array",
                 "items": {"type": "integer"},
-                "description": "Message IDs from history_search hits.",
+                "description": "Message ids: anchor_id of a hit, or a turn id from a block.",
             },
             "context_before": {
                 "type": "integer",

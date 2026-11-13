@@ -131,28 +131,35 @@ class TestHistorySearchShape:
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=conn)
         ctx.__aexit__ = AsyncMock(return_value=False)
+        blocks = {"blocks": [{"session_id": 5, "turns": []}]}
+        expand = AsyncMock(return_value=blocks)
 
-        with patch("syne.tools.history.get_connection", return_value=ctx):
-            result = await H.history_search_handler(_scope=OWNER_DM, 
+        with patch("syne.tools.history.get_connection", return_value=ctx), \
+                patch("syne.tools.history._expand", expand):
+            result = await H.history_search_handler(_scope=OWNER_DM,
                 query="decay memory", limit=5, sort_by="similarity"
             )
 
         payload = json.loads(result)
+        assert payload["level"] == 1
         assert payload["sort_by"] == "similarity"
         assert payload["limit"] == 5
         assert payload["returned"] == 2
         assert payload["next_offset"] == 2
         assert len(payload["hits"]) == 2
-        # anchor_id + preview + similarity all present
         for hit in payload["hits"]:
             assert "anchor_id" in hit
-            assert "preview" in hit
+            assert hit["role"] == "user"
             assert "similarity" in hit
             assert "created_at" in hit
-        # First hit ordered by similarity DESC (cosmetic — order preserved from SQL)
+            assert "preview" not in hit
         assert payload["hits"][0]["anchor_id"] == 101
+        # Every hit comes back expanded, in one _expand call.
+        assert payload["blocks"] == blocks["blocks"]
+        assert expand.await_args.args[0] == [101, 202]
+        assert "level=2" in payload["hint"]
 
-    async def test_limit_clamped_to_50(self):
+    async def test_limit_clamped_to_10(self):
         prov = MagicMock()
         prov.embed = AsyncMock(return_value=MagicMock(vector=[0.1]))
         H.set_embedding_provider(prov)
@@ -174,8 +181,89 @@ class TestHistorySearchShape:
 
         # Last two params of the SELECT are limit + offset (see handler SQL).
         params = captured_params["params"]
-        assert params[-2] == 50, "limit must be clamped to 50"
+        assert params[-2] == 10, "limit must be clamped to 10"
         assert params[-1] == 0
+
+
+class TestHistorySearchLevels:
+
+    async def _run(self, **kw):
+        prov = MagicMock()
+        prov.embed = AsyncMock(return_value=MagicMock(vector=[0.1]))
+        H.set_embedding_provider(prov)
+        cap = {"execute": []}
+
+        async def fetch(sql, *params):
+            cap["sql"] = sql
+            return []
+
+        async def execute(sql, *params):
+            cap["execute"].append((sql, params))
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=fetch)
+        conn.execute = AsyncMock(side_effect=execute)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            res = await H.history_search_handler(_scope=OWNER_DM, query="kopi", **kw)
+        return res, cap
+
+    async def test_bad_level_is_refused(self):
+        H.set_embedding_provider(MagicMock())
+        for bad in (0, 3, "x"):
+            res = await H.history_search_handler(_scope=OWNER_DM, query="x", level=bad)
+            assert res.startswith("Error:") and "level" in res
+
+    async def test_level_1_searches_user_rows(self):
+        res, cap = await self._run()
+        assert "m.role = 'user'" in cap["sql"]
+        assert "assistant" not in cap["sql"]
+        # No hits at level 1 points to level 2.
+        assert "level=2" in res
+
+    async def test_level_2_searches_assistant_rows_with_text(self):
+        res, cap = await self._run(level=2)
+        assert "m.role = 'assistant'" in cap["sql"]
+        assert "btrim(m.content) <> ''" in cap["sql"]
+        assert "level=2" not in res
+
+    async def test_every_search_is_logged(self):
+        _, cap = await self._run()
+        inserts = [c for c in cap["execute"] if "INSERT INTO history_search_log" in c[0]]
+        assert len(inserts) == 1
+        params = inserts[0][1]
+        assert params[3] == "kopi" and params[4] == 1  # query, level
+        # Level 1 never marks escalation.
+        assert not [c for c in cap["execute"] if "escalated = true" in c[0]]
+
+    async def test_level_2_marks_level_1_escalated(self):
+        _, cap = await self._run(level=2)
+        sqls = [c[0] for c in cap["execute"]]
+        assert any("escalated = true" in s for s in sqls)
+        assert any("INSERT INTO history_search_log" in s for s in sqls)
+        # The escalation update runs before this search's own row is inserted.
+        assert "escalated = true" in sqls[0]
+
+    async def test_log_failure_does_not_break_search(self):
+        prov = MagicMock()
+        prov.embed = AsyncMock(return_value=MagicMock(vector=[0.1]))
+        H.set_embedding_provider(prov)
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(return_value=[])
+        conn.execute = AsyncMock(side_effect=RuntimeError("no table"))
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            res = await H.history_search_handler(_scope=OWNER_DM, query="x")
+        assert "No matches" in res
+
+    def test_schema_exposes_level(self):
+        props = H.HISTORY_SEARCH_TOOL["parameters"]["properties"]
+        assert props["level"]["enum"] == [1, 2]
+        assert "preview" not in H.HISTORY_SEARCH_TOOL["description"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -503,24 +591,22 @@ class TestToolSchemas:
 
 
 # ---------------------------------------------------------------------------
-# _preview helper — cheap unit test on the shape guarantee
+# anchor_text (moved from ratification.py)
 # ---------------------------------------------------------------------------
 
 
-class TestPreviewHelper:
+class TestAnchorText:
 
-    def test_preview_collapses_whitespace(self):
-        assert H._preview("a   b\n\nc") == "a b c"
+    def test_strips_context_header(self):
+        from syne.anchor_text import anchor_text
+        raw = 'Conversation info (untrusted metadata):\n```json\n{"a": 1}\n```\n\nhalo kopi'
+        assert anchor_text(raw) == "halo kopi"
 
-    def test_preview_short_text_untouched(self):
-        assert H._preview("hello") == "hello"
+    def test_assistant_text_passes_through(self):
+        from syne.anchor_text import anchor_text
+        assert anchor_text("  Jawaban biasa.  ") == "Jawaban biasa."
 
-    def test_preview_long_text_gets_ellipsis(self):
-        long = "x" * 200
-        out = H._preview(long, n=50)
-        assert len(out) == 50
-        assert out.endswith("…")
-
-    def test_preview_empty_stays_empty(self):
-        assert H._preview("") == ""
-        assert H._preview(None) == ""
+    def test_header_only_falls_back_to_content(self):
+        from syne.anchor_text import anchor_text
+        raw = 'Sender:\n```json\n{"a": 1}\n```'
+        assert anchor_text(raw) == raw

@@ -231,15 +231,19 @@ def memory_prune(pattern, yes):
 @click.option("--batch", "-b", default=50, help="Rows to embed per batch (default 50)")
 @click.option("--limit", "-l", default=None, type=int, help="Cap total rows processed (default: no cap — process until done)")
 @click.option("--sleep", "-s", default=0.0, type=float, help="Seconds to sleep between batches (throttle if Ollama shared)")
-@click.option("--all", "-a", "all_rows", is_flag=True, help="Re-embed EVERY user message, not only rows without an embedding. Needed once after 1.22.48 (context header no longer embedded).")
-@click.option("--from-id", default=0, type=int, help="Resume after this message id (printed while running).")
-def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
-    """Embed user messages for history_search.
+@click.option("--all", "-a", "all_rows", is_flag=True, help="Re-embed EVERY selected message, not only rows without an embedding.")
+@click.option("--role", "role", default="all", type=click.Choice(["user", "assistant", "all"]), help="Which rows: user (history_search level 1), assistant (level 2) or all (default).")
+@click.option("--newest-first", is_flag=True, help="Process the newest messages first, so recent history is searchable soonest.")
+@click.option("--from-id", default=0, type=int, help="Resume from this message id (printed while running): rows after it, or before it with --newest-first.")
+def memory_reembed_history(batch, limit, sleep, all_rows, role, newest_first, from_id):
+    """Embed user and assistant messages for history_search.
 
-    Default: only rows without an embedding. --all: every user row. The text
-    embedded is the message without its context header, combined with the
-    approved assistant answer when the row ratified one (same as at save
-    time). Only user-role rows are anchors. Resumable with --from-id.
+    Default: only rows without an embedding. --all: every selected row.
+    --role picks user rows (level 1), assistant rows (level 2) or both.
+    Empty rows (assistant tool-call shells) are skipped. The text embedded
+    is the message without its context header, same as at save time.
+    Resumable with --from-id (oldest first by default, --newest-first to
+    start from the latest).
 
     After the run, the HNSW index is created/refreshed
     (ensure_messages_hnsw_index()).
@@ -249,7 +253,7 @@ def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
         from syne.db.connection import init_db, close_db
         from syne.db.models import get_config
         from syne.llm.drivers import create_hybrid_provider, get_model_from_list
-        from syne.ratification import anchor_text_for_row
+        from syne.anchor_text import anchor_text
 
         settings = load_settings()
         pool = await init_db(settings.database_url)
@@ -273,14 +277,22 @@ def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
             return
 
         max_chars = int(await get_config("history_search.max_content_chars", 4000))
-        where = "role = 'user' AND content <> ''"
+        roles = {"user": "('user')", "assistant": "('assistant')", "all": "('user', 'assistant')"}[role]
+        where = f"role IN {roles} AND btrim(content) <> ''"
         if not all_rows:
             where += " AND embedding IS NULL"
-        last_id = int(from_id or 0)
+        # Oldest first walks ids upward from --from-id; newest first walks
+        # them downward from --from-id (0 = from the very latest).
+        if newest_first:
+            last_id = int(from_id) if from_id else 2**31 - 1
+            id_cond, id_order = "id < $1", "id DESC"
+        else:
+            last_id = int(from_id or 0)
+            id_cond, id_order = "id > $1", "id ASC"
 
         async with pool.acquire() as conn:
             total_pending = await conn.fetchval(
-                f"SELECT COUNT(*) FROM messages WHERE {where} AND id > $1", last_id,
+                f"SELECT COUNT(*) FROM messages WHERE {where} AND {id_cond}", last_id,
             )
         if not total_pending:
             console.print("[green]Nothing to embed.[/green]")
@@ -289,8 +301,9 @@ def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
 
         target = min(int(total_pending), int(limit)) if limit else int(total_pending)
         console.print(
-            f"[cyan]Target: {target} user messages "
-            f"({'all rows' if all_rows else 'missing embeddings'}, "
+            f"[cyan]Target: {target} messages (role={role}, "
+            f"{'newest first' if newest_first else 'oldest first'}, "
+            f"{'all rows' if all_rows else 'missing embeddings'}, "
             f"batch={batch}, sleep={sleep}s between batches).[/cyan]"
         )
 
@@ -302,8 +315,8 @@ def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
                 take = min(int(batch), target - done - failed)
                 async with pool.acquire() as conn:
                     rows = await conn.fetch(
-                        f"SELECT id, content, metadata FROM messages WHERE {where} "
-                        "AND id > $1 ORDER BY id ASC LIMIT $2",
+                        f"SELECT id, content FROM messages WHERE {where} "
+                        f"AND {id_cond} ORDER BY {id_order} LIMIT $2",
                         last_id, take,
                     )
                 if not rows:
@@ -313,8 +326,7 @@ def memory_reembed_history(batch, limit, sleep, all_rows, from_id):
                 for r in rows:
                     last_id = r["id"]
                     try:
-                        async with pool.acquire() as conn:
-                            body = await anchor_text_for_row(conn, r["content"], r["metadata"])
+                        body = anchor_text(r["content"])
                         resp = await provider.embed(body[:max_chars])
                         vec = getattr(resp, "vector", None)
                         if not vec:

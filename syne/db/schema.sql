@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS messages (
     metadata JSONB DEFAULT '{}',          -- tool calls, attachments, etc.
     token_count INT DEFAULT 0,
     status VARCHAR(20) DEFAULT 'active',  -- 'active' | 'compacted' (archived, retained for search — NEVER deleted)
-    embedding vector,                     -- user rows only: anchor for history_search (dim set by embedding provider)
+    embedding vector,                     -- user + assistant rows with text: history_search level 1 / 2 (dim set by embedding provider)
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -167,10 +167,30 @@ CREATE INDEX IF NOT EXISTS idx_messages_status ON messages (session_id, status, 
 -- rows that still need embedding without a full-table scan.
 CREATE INDEX IF NOT EXISTS idx_messages_embedding_pending
     ON messages (session_id, id)
-    WHERE role = 'user' AND embedding IS NULL;
+    WHERE role IN ('user', 'assistant') AND embedding IS NULL;
+
+-- HISTORY_SEARCH_LOG: one row per history_search call (Riyo, 13 Nov 2026).
+-- Research data for a similarity threshold: query, level (1 = user rows,
+-- 2 = assistant rows), hit ids + similarities. escalated = a level-2 search
+-- with the same query followed in the same session (level 1 judged not found).
+CREATE TABLE IF NOT EXISTS history_search_log (
+    id           BIGSERIAL PRIMARY KEY,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    session_id   INT,
+    platform     TEXT,
+    chat_id      TEXT,
+    query        TEXT NOT NULL,
+    level        SMALLINT NOT NULL,
+    sort_by      TEXT,
+    hit_ids      INT[] NOT NULL DEFAULT '{}',
+    similarities FLOAT8[] NOT NULL DEFAULT '{}',
+    escalated    BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS idx_history_search_log_session
+    ON history_search_log (session_id, id);
 
 -- HNSW builder for messages.embedding, same shape as ensure_memory_hnsw_index.
--- Call after user messages have been embedded so the column can be typed to
+-- Call after messages have been embedded so the column can be typed to
 -- the actual provider dimension and indexed.
 CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index() RETURNS void AS $$
 DECLARE
@@ -444,19 +464,16 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
     ('memory.category_routes', '{}', 'Keyword -> category routing for recall. JSON object, empty = disabled'),
     ('memory.auto_capture_category', '"auto"', 'Quarantine category for auto-captured memories. Every non-explicit auto-capture is filed here instead of an evaluator-invented category, so cleanup is a single WHERE clause. Keep it OUT of memory.category_routes so it stays in the default recall bucket. Empty string = disabled (evaluator category is used as-is).'),
-    ('messages.embedding_enabled', 'true', 'When true, save_message fires a background embed for role=user rows so history_search can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.'),
-    ('history_search.default_limit', '10', 'Default number of anchor previews returned per history_search call.'),
+    ('messages.embedding_enabled', 'true', 'When true, save_message fires a background embed for user rows and assistant rows with text, so history_search (level 1 = user, level 2 = assistant) can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.'),
+    ('history_search.default_limit', '5', 'Default number of hits per history_search call (cap 10). Every hit is returned expanded, so keep it small.'),
     ('history_search.context_before', '10', 'Default number of conversation messages (user + assistant text) to include BEFORE each anchor in history_expand. Tool results are not included. Re-evaluate against real use (Riyo, 7 Nov 2026).'),
     ('history_search.context_after', '10', 'Default number of conversation messages (user + assistant text) to include AFTER each anchor in history_expand. Tool results are not included.'),
-    ('history_search.max_content_chars', '4000', 'Truncate user message content to this many chars before embedding. Long messages average their semantic signal into noise otherwise.'),
+    ('history_search.max_content_chars', '4000', 'Truncate message content (user and assistant) to this many chars before embedding. Long messages average their semantic signal into noise otherwise.'),
     ('history_search.dedup', 'true', 'history_expand merges overlapping windows of several anchors into one block and flags turns already in the live context window instead of repeating them. On by default; switch off only for experiments.'),
     ('history_search.adaptive_radius', 'true', 'history_expand treats context_before/context_after as the maximum and stops the window at a topic shift (cosine between blocks of user-message embeddings below history_search.adaptive_threshold) or a time gap longer than history_search.adaptive_gap_minutes. The anchor exchange is always kept. On by default; off = fixed radius (experiment condition K3).'),
     ('history_search.adaptive_threshold', '0.5', 'Adaptive radius: cosine floor between neighbouring blocks of user-message embeddings. Below it the window stops (topic shift). Tune on development data.'),
     ('history_search.adaptive_gap_minutes', '120', 'Adaptive radius: a gap longer than this (minutes) between two exchanges stops the window. 0 disables the time rule.'),
     ('history_search.adaptive_block', '2', 'Adaptive radius: number of user messages averaged per block when comparing topics (TextTiling-style).'),
-    ('history_search.ratification', 'true', 'User ratification: when a user message approves the previous assistant answer (text) or reacts to it with an approving emoji, that user row is embedded together with the answer so history_search can find facts only the assistant wrote. 👎 marks the answer disputed; a reaction taken back revokes it. Master switch; on by default, off only for experiments.'),
-    ('history_search.ratification_text', 'true', 'Ratification from text replies (lexicon, ambiguous ok/ya decided by memory.evaluator_model). Needs history_search.ratification.'),
-    ('history_search.ratification_reaction', 'true', 'Ratification from emoji reactions (Telegram). Needs history_search.ratification.'),
     ('memory_budget.mode', '"log"', 'Per-turn memory budget mode. log = measure and record violations in metadata.turn_stats only, change nothing. enforce = also fit X/R/M to their budgets before every model call (X drops oldest messages in one chunk to 70% of budget, R drops weakest recall items, M skips a history result whole with a notice; never truncates). Start in log, set budgets from turn_stats data, then switch to enforce.'),
     ('memory_budget.x_tokens', '0', 'Budget X (estimated tokens): session window, the non-system messages present when the turn starts. 0 = no limit.'),
     ('memory_budget.r_tokens', '0', 'Budget R (estimated tokens): injected recall, i.e. memories + knowledge graph. 0 = no limit.'),

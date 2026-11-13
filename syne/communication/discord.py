@@ -317,8 +317,8 @@ class DiscordChannel:
         await self._dispatch(message, text, is_dm)
 
     async def _handle_reaction(self, payload: Any, added: bool) -> None:
-        """A reaction on one of Syne's replies, for ratification
-        (syne/ratification.py). Anything else is ignored. The same gates as a
+        """A reaction on one of Syne's replies is routed to the agent
+        (syne/sent_ids.py). Anything else is ignored. The same gates as a
         message apply: a DM user must be admitted and not blocked or pending,
         a server must be registered and enabled.
         """
@@ -330,7 +330,7 @@ class DiscordChannel:
         if payload.member is not None and getattr(payload.member, "bot", False):
             return
 
-        from ..ratification import lookup_sent_preview, revoke_reaction
+        from ..sent_ids import lookup_sent_preview
 
         is_dm = payload.guild_id is None
         chat_key = str(payload.channel_id) if is_dm else str(payload.guild_id)
@@ -359,7 +359,6 @@ class DiscordChannel:
                 name, display = await self._resolve_user_names(uid)
 
         if not added:
-            await revoke_reaction("discord", chat_key, payload.message_id, [emoji], reactor=uid)
             return
 
         logger.info("[discord] reaction %s from %s on %s", emoji, uid, payload.message_id)
@@ -969,7 +968,7 @@ class DiscordChannel:
         text = markdown_to_discord(text)
 
         first = True
-        _sent: list = []  # delivered ids, for ratification by reaction
+        _sent: list = []  # delivered ids, so a reaction can find its reply
         if text.strip():
             for chunk in split_message(text, max_length=DISCORD_MAX_MESSAGE):
                 if not chunk.strip():
@@ -991,7 +990,7 @@ class DiscordChannel:
                 logger.error("Discord file send failed for %s: %s", path, e)
 
         if _sent:
-            from ..ratification import record_sent_ids
+            from ..sent_ids import record_sent_ids
             await record_sent_ids("discord", dc_chat_key(channel), _sent)
 
     async def _safe_send(

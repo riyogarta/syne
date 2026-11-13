@@ -998,6 +998,72 @@ async def _m37_remove_auto_recall(conn) -> None:
     )
 
 
+async def _m38_history_search_levels(conn) -> None:
+    """history_search level 1/2 + auto-expand + log; ratification removed
+    (Riyo, 13 Nov 2026). Idempotent.
+
+      * the three history_search.ratification* switches are gone
+      * default_limit 5: every hit now comes back expanded
+      * history_search_log: one row per search (query, level, hit ids,
+        similarities, escalated) for choosing a similarity threshold
+      * idx_messages_embedding_pending covers assistant rows too, which are
+        now embedded (level 2)
+      * user rows embedded together with an approved assistant answer get
+        their embedding cleared, so reembed-history embeds their own text
+    """
+    await conn.execute("""
+        DELETE FROM config WHERE key IN (
+            'history_search.ratification',
+            'history_search.ratification_text',
+            'history_search.ratification_reaction'
+        )
+    """)
+    await conn.execute(
+        "UPDATE config SET value = '5'::jsonb, description = $1 "
+        "WHERE key = 'history_search.default_limit'",
+        'Default number of hits per history_search call (cap 10). Every hit is returned expanded, so keep it small.',
+    )
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'messages.embedding_enabled'",
+        'When true, save_message fires a background embed for user rows and assistant rows with text, so history_search (level 1 = user, level 2 = assistant) can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.',
+    )
+    await conn.execute(
+        "UPDATE config SET description = replace(description, "
+        "'Truncate user message content', 'Truncate message content (user and assistant)') "
+        "WHERE key = 'history_search.max_content_chars'"
+    )
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS history_search_log (
+            id           BIGSERIAL PRIMARY KEY,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+            session_id   INT,
+            platform     TEXT,
+            chat_id      TEXT,
+            query        TEXT NOT NULL,
+            level        SMALLINT NOT NULL,
+            sort_by      TEXT,
+            hit_ids      INT[] NOT NULL DEFAULT '{}',
+            similarities FLOAT8[] NOT NULL DEFAULT '{}',
+            escalated    BOOLEAN NOT NULL DEFAULT false
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_history_search_log_session "
+        "ON history_search_log (session_id, id)"
+    )
+    await conn.execute("DROP INDEX IF EXISTS idx_messages_embedding_pending")
+    await conn.execute("""
+        CREATE INDEX idx_messages_embedding_pending
+            ON messages (session_id, id)
+            WHERE role IN ('user', 'assistant') AND embedding IS NULL
+    """)
+    await conn.execute("""
+        UPDATE messages SET embedding = NULL
+         WHERE role = 'user' AND embedding IS NOT NULL
+           AND metadata->'ratification'->>'label' = 'approve'
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1036,6 +1102,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (35, _m35_memory_budget_config, "transactional"),
     (36, _m36_auto_recall_as_history_tools, "transactional"),
     (37, _m37_remove_auto_recall, "transactional"),
+    (38, _m38_history_search_levels, "transactional"),
 ]
 
 

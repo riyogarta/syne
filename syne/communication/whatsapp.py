@@ -915,12 +915,12 @@ class WhatsAppChannel:
     async def _handle_reaction(self, ev: MessageEv, chat_jid: str, sender_jid: str,
                                alt_pn: str, from_me: bool, is_group: bool,
                                target_id: str, emoji: str) -> None:
-        """A reaction on one of Syne's replies, for ratification
-        (syne/ratification.py). Reactions on anything else are ignored, so
-        Syne's own 👀 receipts and chatter between people never reach the
-        agent. No trigger word: reacting to Syne's reply already addresses it.
+        """A reaction on one of Syne's replies is routed to the agent.
+        Reactions on anything else are ignored, so Syne's own 👀 receipts and
+        chatter between people never reach the agent (syne/sent_ids.py). No
+        trigger word: reacting to Syne's reply already addresses it.
         """
-        from ..ratification import lookup_sent_preview, revoke_reaction
+        from ..sent_ids import lookup_sent_preview
 
         preview = await lookup_sent_preview("whatsapp", chat_jid, target_id)
         if preview is None:
@@ -939,7 +939,7 @@ class WhatsAppChannel:
             )
             if not is_self_chat:
                 # The owner reacting in a DM with someone else: the session
-                # belongs to the other person, not a ratification by them.
+                # belongs to the other person, not a reaction by them.
                 return
             sender_pn = self._own_pn or chat_pn
         else:
@@ -953,9 +953,7 @@ class WhatsAppChannel:
         name = ev.Info.Pushname or sender_pn
         who = f"{name} ({sender_pn})" if name != sender_pn else sender_pn
 
-        # A new emoji replaces this person's previous one, and an empty one
-        # removes it: either way the previous ratification no longer holds.
-        await revoke_reaction("whatsapp", chat_jid, target_id, None, reactor=sender_pn)
+        # An empty emoji is a reaction taken back: nothing to route.
         if not emoji:
             return
 
@@ -1543,7 +1541,7 @@ class WhatsAppChannel:
 
         target = self._to_jid(chat_jid)
         caption_used = False
-        _sent: list = []  # delivered ids, for ratification by reaction
+        _sent: list = []  # delivered ids, so a reaction can find its reply
 
         for idx, path in enumerate(media):
             cap = text if (idx == 0 and text) else None
@@ -1571,7 +1569,7 @@ class WhatsAppChannel:
 
         _sent = [i for i in _sent if i]
         if _sent:
-            from ..ratification import record_sent_ids
+            from ..sent_ids import record_sent_ids
             await record_sent_ids("whatsapp", chat_jid, _sent)
 
     async def _reply_prefix(self) -> str:

@@ -423,11 +423,13 @@ class Conversation:
         self._message_cache.append(ChatMessage(role=role, content=content, metadata=metadata))
         await self._trim_message_cache()
 
-        # Fire-and-forget: embed user rows as anchors for history_search.
-        # Only user role — see design note in migration v20 for rationale
-        # (single canonical anchor per topic, 3-5x storage saving, reads
-        # around anchor recover the assistant/tool context anyway).
-        if role == "user" and inserted_id is not None and content:
+        # Fire-and-forget: embed user rows (history_search level 1) and
+        # assistant rows with text (level 2). Tool and system rows, and
+        # empty assistant tool-call shells, are never embedded.
+        if (
+            role in ("user", "assistant") and inserted_id is not None
+            and content and content.strip()
+        ):
             asyncio.create_task(self._embed_message_row(inserted_id, content))
 
     async def _delete_last_user_message(self) -> bool:
@@ -478,7 +480,7 @@ class Conversation:
         return deleted_db or deleted_cache
 
     async def _embed_message_row(self, message_id: int, content: str) -> None:
-        """Background task: embed a user-role message and UPDATE messages.embedding.
+        """Background task: embed a user or assistant message and UPDATE messages.embedding.
 
         Fail-quiet: any error (kill switch off, provider missing, embed call
         fails, DB write fails) is logged at info/warning and swallowed. The
@@ -500,21 +502,10 @@ class Conversation:
             # Embed the message itself, without the channel instruction and
             # the untrusted JSON context blocks every channel prepends: that
             # header is identical on every row and pulls unrelated messages
-            # together. The stored content keeps the header.
-            from .ratification import anchor_text
+            # together. The stored content keeps the header. Assistant rows
+            # carry no header and pass through unchanged.
+            from .anchor_text import anchor_text
             text = anchor_text(content)
-
-            # Ratification: an approval of the previous assistant answer is
-            # embedded together with that answer, so a fact only the
-            # assistant wrote becomes findable once the user endorsed it.
-            # ratify_user_row gets the raw content (it reads the header).
-            try:
-                from .ratification import ratify_user_row
-                combined = await ratify_user_row(self.session_id, message_id, content)
-                if combined:
-                    text = combined
-            except Exception as e:
-                logger.warning(f"ratification failed for row {message_id}: {e}")
 
             max_chars = int(await get_config("history_search.max_content_chars", 4000))
             body = text if len(text) <= max_chars else text[:max_chars]
