@@ -1251,6 +1251,23 @@ async def _m42_kg_relation_sources(conn) -> None:
     )
 
 
+async def _m43_seed_kg_rule_config(conn) -> None:
+    """Rule-built KG settings live in config (Riyo, 14 Nov 2026). Idempotent.
+
+    Seeds kg.ref_sources (references, title patterns and per-reference
+    aliases), kg.qs_pattern, kg.part_pattern, kg.max_mention_range and
+    kg.chunk_link_limit from syne.memory.kg_build.default_config(). Keys
+    that already exist are left untouched (ON CONFLICT DO NOTHING).
+    """
+    from ..memory.kg_build import default_config
+    for key, (value, desc) in default_config().items():
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+            "ON CONFLICT (key) DO NOTHING",
+            key, json.dumps(value, ensure_ascii=False), desc,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1294,6 +1311,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (40, _m40_kg_semantic_recall, "transactional"),
     (41, _m41_remove_auto_capture, "transactional"),
     (42, _m42_kg_relation_sources, "transactional"),
+    (43, _m43_seed_kg_rule_config, "transactional"),
 ]
 
 

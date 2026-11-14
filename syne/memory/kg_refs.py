@@ -34,7 +34,8 @@ _FOLDS = (
 )
 
 # Names that folding cannot join (a different name, or a vowel change).
-# Merged with config kg.surah_aliases by the builder; config wins.
+# Code fallback: used only when the Qur'an entry in config kg.ref_sources
+# has no 'aliases' (the config list, when present, replaces this one).
 DEFAULT_SURAH_ALIASES: dict[str, int] = {
     "Al-Kahfi": 18,
     "Thaha": 20,
@@ -48,6 +49,11 @@ DEFAULT_SURAH_ALIASES: dict[str, int] = {
     "Adhdhuha": 93,
     "Adh-Dhuha": 93,
     "Al-Mu'min": 40,
+    "Alu 'Imran": 3,
+    "Qn-Nisa": 4,
+    "Lukman": 31,
+    "As Sajadah": 32,
+    "Al Hujarat": 49,
 }
 
 

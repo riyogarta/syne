@@ -203,9 +203,9 @@ def test_migration_40_registered():
 
 def test_migration_42_registered():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 42
-    assert M.MIGRATIONS[-1][1] is M._m42_kg_relation_sources
-    assert M.CURRENT_SCHEMA_VERSION == 42
+    entry = next(m for m in M.MIGRATIONS if m[0] == 42)
+    assert entry[1] is M._m42_kg_relation_sources
+    assert M.CURRENT_SCHEMA_VERSION >= 42
 
 
 async def test_migration_42_creates_backfills_and_drops():

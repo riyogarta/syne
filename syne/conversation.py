@@ -1076,6 +1076,25 @@ class Conversation:
         memories, graph_lines = await asyncio.gather(
             _do_memory_recall(), _do_graph_recall()
         )
+        # 2c. Rule-built KG links of the recalled reference chunks: memory
+        #     id -> its 'chunk' entity -> ayahs -> other chunks. Appended after
+        #     the keyword lines; config kg.chunk_link_limit = 0 turns it off.
+        if memories:
+            try:
+                from .memory.graph import recall_chunk_links as _recall_chunk_links
+                _link_limit = int(await _get_recall_config("kg.chunk_link_limit", 10) or 0)
+                if _link_limit > 0:
+                    _links = await _recall_chunk_links(
+                        [m.get("id") for m in memories],
+                        limit=_link_limit,
+                        requester_access_level=access_level,
+                    )
+                    _have = set(graph_lines or [])
+                    graph_lines = list(graph_lines or []) + [
+                        _l for _l in _links if _l not in _have
+                    ]
+            except Exception as e:
+                logger.debug(f"Chunk link recall skipped: {e}")
         self._ts_add_latency("recall", _ts_time.monotonic() - _t_recall)
 
         # 3. Conversation history

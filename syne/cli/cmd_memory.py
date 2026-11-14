@@ -523,7 +523,7 @@ def memory_kg_build(categories, dry_run, prune):
 
     One 'ayah' entity per Qur'an verse ("QS 2:27"), one 'chunk' entity per
     reference chunk; links chunk->verse and part->next part. Rules come
-    from config kg.ref_sources / kg.surah_aliases / kg.qs_pattern /
+    from config kg.ref_sources (incl. aliases) / kg.qs_pattern /
     kg.part_pattern / kg.max_mention_range. Idempotent: safe to re-run.
     """
     async def _run():

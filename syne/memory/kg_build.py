@@ -9,9 +9,10 @@ and writes them into the existing KG tables (Riyo, 14 Nov 2026):
     and part i -> part i+1 ('next_part');
   * every relation gets a kg_relation_sources row, origin 'rule'.
 
-Per-reference rules live in config (kg.ref_sources, kg.surah_aliases,
-kg.qs_pattern, kg.part_pattern, kg.max_mention_range); the defaults
-below apply when a key is not set. Idempotent: re-running upserts.
+Rules live in config (kg.ref_sources with per-reference aliases,
+kg.qs_pattern, kg.part_pattern, kg.max_mention_range), seeded by
+migration 43 from default_config(); the code defaults below apply
+only when a key is missing. Idempotent: re-running upserts.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ logger = logging.getLogger("syne.memory.kg_build")
 QURAN = "quran"
 
 DEFAULT_REF_SOURCES: dict[str, dict] = {
-    "alquran": {"kind": QURAN},
+    "alquran": {"kind": QURAN, "aliases": dict(R.DEFAULT_SURAH_ALIASES)},
     "ibnukatsir": {"title": R.DEFAULT_TITLE_PATTERNS["ibnukatsir"],
                    "title_predicate": "explains", "mentions": True},
     "asbabnuzul": {"title": R.DEFAULT_TITLE_PATTERNS["asbabnuzul"],
@@ -44,6 +45,39 @@ DEFAULT_REF_SOURCES: dict[str, dict] = {
     "kaidah": {"mentions": True},
 }
 DEFAULT_MAX_MENTION_RANGE = 50
+DEFAULT_CHUNK_LINK_LIMIT = 10
+
+
+def default_config() -> dict:
+    """{config key: (default value, description)} for the rule-built KG."""
+    return {
+        "kg.ref_sources": (
+            DEFAULT_REF_SOURCES,
+            "Rule-built KG: references to link, by memory category. "
+            "{category: {kind: 'quran' = link target, with aliases {name: surah} "
+            "for spellings that folding cannot join | title: regex, title_predicate, "
+            "mentions: true}}. Re-run `syne memory kg-build` after a change.",
+        ),
+        "kg.qs_pattern": (
+            R.DEFAULT_QS_PATTERN,
+            "Rule-built KG: regex for 'QS ...' mentions in reference text "
+            "(groups name, snum, snum2, a1, a2).",
+        ),
+        "kg.part_pattern": (
+            R.DEFAULT_PART_PATTERN,
+            "Rule-built KG: regex for '(bagian i/n)' in a chunk title (groups i, n); "
+            "consecutive parts are linked next_part.",
+        ),
+        "kg.max_mention_range": (
+            DEFAULT_MAX_MENTION_RANGE,
+            "Rule-built KG: a mentioned ayah range longer than this is not linked.",
+        ),
+        "kg.chunk_link_limit": (
+            DEFAULT_CHUNK_LINK_LIMIT,
+            "Max KG lines added per turn from the links of recalled reference "
+            "chunks (chunk -> ayah -> other chunks). 0 = off.",
+        ),
+    }
 
 AYAH = "ayah"
 CHUNK = "chunk"
@@ -92,9 +126,16 @@ def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
     """Pure: rows [{id, category, content}] -> BuildPlan."""
     plan = BuildPlan()
     quran_cats = {c for c, s in sources.items() if s.get("kind") == QURAN}
+    # Aliases come from the Qur'an entry itself; the code list is only a
+    # fallback for an entry without 'aliases'. `aliases` adds on top.
+    base: dict = {}
+    for c in quran_cats:
+        s = sources[c]
+        base.update(s["aliases"] if isinstance(s.get("aliases"), dict)
+                    else R.DEFAULT_SURAH_ALIASES)
     index = R.build_surah_index(
         (r["content"] for r in rows if r["category"] in quran_cats),
-        {**R.DEFAULT_SURAH_ALIASES, **(aliases or {})},
+        {**base, **(aliases or {})},
     )
 
     def ayah_key(surah: int, ayah: int) -> tuple:
@@ -166,7 +207,7 @@ async def load_settings_from_config() -> dict:
     from ..db.models import get_config
     return {
         "sources": await get_config("kg.ref_sources", None) or DEFAULT_REF_SOURCES,
-        "aliases": await get_config("kg.surah_aliases", None) or {},
+        "aliases": {},  # per reference, inside kg.ref_sources
         "qs_pattern": await get_config("kg.qs_pattern", None) or R.DEFAULT_QS_PATTERN,
         "part_pattern": await get_config("kg.part_pattern", None) or R.DEFAULT_PART_PATTERN,
         "max_range": int(await get_config("kg.max_mention_range", None)

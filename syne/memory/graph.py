@@ -378,6 +378,145 @@ async def recall_graph(
     return lines
 
 
+# Links of recalled reference chunks (rule-built KG, v1.22.65).
+_KG_LINK_HOP1 = 200        # hop-1 relations fetched for the recalled chunks
+_KG_LINK_PER_AYAH = 5      # hop-2 relations fetched per ayah reached
+_KG_LINK_FIRST = ("explains", "asbab_of", "cites")
+
+
+async def recall_chunk_links(
+    memory_ids,
+    limit: int = 10,
+    requester_access_level: str = "owner",
+) -> list[str]:
+    """KG lines from the rule-built links of the memories recalled this turn.
+
+    Entry is the recalled memories, not query words: each linked reference
+    chunk has one 'chunk' entity whose description is 'memory:<id>'.
+      hop 1: the chunk's own relations (tafsir/asbab/cites -> ayah, Qur'an
+             chunk -> its ayahs, part -> next part);
+      hop 2: for every ayah reached, other chunks linked to that ayah (the
+             Qur'an chunk holding it first, then tafsir, hadith citing it).
+    Order: hop-1 explains/asbab_of/cites, then hop 2, then the rest of hop 1;
+    within hop 1 by the recall rank of the seed chunk. Rule 760/765: for a
+    non-owner/family requester every relation must come from a public
+    category, same gate as recall_graph. Returns [] on no-match/failure.
+    """
+    ids: list[int] = []
+    for i in memory_ids or []:
+        try:
+            i = int(i)
+        except (TypeError, ValueError):
+            continue
+        if i not in ids:
+            ids.append(i)
+    try:
+        limit = int(limit or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if not ids or limit <= 0:
+        return []
+
+    public_cats: list[str] | None = None
+    if requester_access_level not in ("owner", "family"):
+        from ..security import _load_public_categories
+        public_cats = await _load_public_categories() or []
+        if not public_cats:
+            return []
+    cat_join = "JOIN memory m ON m.id = r.source_memory_id" if public_cats is not None else ""
+    extra = [public_cats] if public_cats is not None else []
+
+    def _line(r) -> str:
+        return (f"- {r['subject']} [{r['s_type']}] --{r['predicate']}--> "
+                f"{r['object']} [{r['o_type']}]")
+
+    try:
+        async with get_connection() as conn:
+            seeds = await conn.fetch(
+                "SELECT id, description FROM kg_entities "
+                "WHERE entity_type = 'chunk' AND description = ANY($1::text[])",
+                [f"memory:{i}" for i in ids],
+            )
+            if not seeds:
+                return []
+            rank = {f"memory:{i}": n for n, i in enumerate(ids)}
+            seed_rank = {int(r["id"]): rank.get(r["description"], len(ids)) for r in seeds}
+            seed_ids = list(seed_rank)
+
+            cond1 = "AND LOWER(TRIM(m.category)) = ANY($3)" if extra else ""
+            hop1 = await conn.fetch(
+                f"""
+                SELECT r.id AS rid, r.subject_id, r.object_id, r.predicate,
+                       s.name AS subject, s.entity_type AS s_type,
+                       o.name AS object, o.entity_type AS o_type
+                FROM kg_relations r
+                {cat_join}
+                JOIN kg_entities s ON s.id = r.subject_id
+                JOIN kg_entities o ON o.id = r.object_id
+                WHERE (r.subject_id = ANY($1::int[]) OR r.object_id = ANY($1::int[]))
+                {cond1}
+                ORDER BY r.id
+                LIMIT $2
+                """,
+                seed_ids, _KG_LINK_HOP1, *extra,
+            )
+
+            def _srank(r) -> int:
+                big = 1 << 30
+                return min(seed_rank.get(int(r["subject_id"]), big),
+                           seed_rank.get(int(r["object_id"]), big))
+
+            hop1 = sorted(hop1, key=lambda r: (_srank(r), int(r["rid"])))
+            ayah_ids: list[int] = []
+            for r in hop1:
+                for eid, et in ((r["subject_id"], r["s_type"]), (r["object_id"], r["o_type"])):
+                    if et == "ayah" and int(eid) not in ayah_ids:
+                        ayah_ids.append(int(eid))
+
+            hop2: list = []
+            if ayah_ids:
+                cond2 = "AND LOWER(TRIM(m.category)) = ANY($4)" if extra else ""
+                hop2 = await conn.fetch(
+                    f"""
+                    SELECT x.rid, x.subject_id, x.object_id, x.predicate,
+                           s.name AS subject, s.entity_type AS s_type,
+                           o.name AS object, o.entity_type AS o_type
+                    FROM unnest($1::int[]) WITH ORDINALITY AS a(eid, ord)
+                    CROSS JOIN LATERAL (
+                        SELECT r.id AS rid, r.subject_id, r.object_id, r.predicate,
+                               a.ord AS ord
+                        FROM kg_relations r
+                        {cat_join}
+                        WHERE r.object_id = a.eid AND r.subject_id <> ALL($3::int[])
+                        {cond2}
+                        ORDER BY (r.predicate = 'contains') DESC, r.id
+                        LIMIT $2
+                    ) x
+                    JOIN kg_entities s ON s.id = x.subject_id
+                    JOIN kg_entities o ON o.id = x.object_id
+                    ORDER BY x.ord, (x.predicate = 'contains') DESC, x.rid
+                    """,
+                    ayah_ids, _KG_LINK_PER_AYAH, seed_ids, *extra,
+                )
+    except Exception as e:
+        logger.error(f"Chunk link recall failed: {e}")
+        return []
+
+    first = [r for r in hop1 if r["predicate"] in _KG_LINK_FIRST]
+    rest = [r for r in hop1 if r["predicate"] not in _KG_LINK_FIRST]
+    out: list[str] = []
+    seen: set = set()
+    for r in first + list(hop2) + rest:
+        rid = int(r["rid"])
+        if rid in seen:
+            continue
+        seen.add(rid)
+        out.append(_line(r))
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def get_graph_stats() -> dict:
     """Get knowledge graph statistics."""
     try:
