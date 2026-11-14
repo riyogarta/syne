@@ -111,8 +111,6 @@ def repair(fix):
                     # No chat provider is seeded here: the provider and its
                     # credentials can only be chosen interactively in `syne init`.
                     defaults = {
-                        "memory.auto_capture": False,
-                        "memory.auto_evaluate": True,
                         "memory.recall_limit": 10,
                         "memory.max_importance": 1.0,
                         "provider.embedding_model": "text-embedding-004",

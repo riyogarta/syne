@@ -1536,7 +1536,6 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
             total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
         tool_count = len(agent.tools.list_tools("owner"))
         ability_count = len(agent.abilities.list_all()) if agent.abilities else 0
-        auto_capture = await get_config("memory.auto_capture", False)
         models = await get_config("provider.models", [])
         active_key = await get_config("provider.active_model", "gemini-pro")
         _active_entry = next((m for m in models if m.get("key") == active_key), {})
@@ -1549,8 +1548,7 @@ async def _handle_cli_command(command: str, agent: SyneAgent, user: dict, chat_i
                f"  Users: {user_count} | Groups: {group_count}\n"
                f"  Sessions: {session_count} active · {total_messages} messages\n"
                f"  Tools: {tool_count} | Abilities: {ability_count}\n"
-               f"  Thinking: {thinking}\n"
-               f"  Auto-capture: {'ON' if auto_capture else 'OFF'}\n\n")
+               f"  Thinking: {thinking}\n\n")
         return True
 
     elif cmd == "/clear":

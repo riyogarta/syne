@@ -18,7 +18,6 @@ except Exception:  # pragma: no cover
 from .db.connection import get_connection
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError
 from .memory.engine import MemoryEngine
-from .memory.evaluator import evaluate_and_store
 from .context import (
     ContextManager, estimate_messages_tokens, estimate_tokens,
     DEFAULT_CHARS_PER_TOKEN, NO_SOFT_TRIM_TOOLS,
@@ -2032,35 +2031,6 @@ class Conversation:
             for _mp in _attached:
                 final_response = f"{final_response}\n\nMEDIA: {_mp}"
             logger.info(f"Attached pending media to response: {_attached}")
-
-        # Evaluate memory (only if auto_capture enabled)
-        # Rule 760: Only owner and family can write to global memory.
-        # Non-family messages stay in session history only.
-        # Fire-and-forget. Delay only when using main provider (rate limit).
-        from .db.models import get_config
-        access_level = self.user.get("access_level", "public")
-        can_write_memory = access_level in ("owner", "family")
-        auto_capture = await get_config("memory.auto_capture", False)
-        if auto_capture and can_write_memory:
-            eval_driver = await get_config("memory.evaluator_driver", "ollama")
-            eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-            # Use original text (without context prefix) for memory evaluation
-            eval_text = (message_metadata or {}).get("original_text", user_message)
-            async def _deferred_evaluate():
-                try:
-                    result = await evaluate_and_store(
-                        provider=self.provider,
-                        memory_engine=self.memory,
-                        user_message=eval_text,
-                        user_id=self.user.get("id"),
-                        evaluator_driver=eval_driver,
-                        evaluator_model=eval_model,
-                        speaker_name=self.user.get("display_name") or self.user.get("name", ""),
-                    )
-                    logger.debug(f"Evaluator done: {'stored #' + str(result) if result else 'skipped'}")
-                except Exception as e:
-                    logger.warning(f"Deferred memory evaluation failed: {type(e).__name__}: {e}")
-            asyncio.create_task(_deferred_evaluate())
 
         return final_response
 

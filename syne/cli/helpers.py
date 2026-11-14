@@ -184,12 +184,12 @@ def _ensure_evaluator_model(eval_model="qwen3:0.6b"):
 
     # Pull model
     console.print(f"\n[bold]Downloading evaluator model {model_name} ({download_size})...[/bold]")
-    console.print("[dim]Used for memory auto-capture (local, no API costs).[/dim]")
+    console.print("[dim]Used by the rule checker (local, no API costs).[/dim]")
     sys.stdout.flush()
     sys.stderr.flush()
     ret = subprocess.run(["ollama", "pull", model_name]).returncode
     if ret != 0:
-        console.print(f"[yellow]⚠️ Failed to pull {model_name} — auto_capture will need manual setup.[/yellow]")
+        console.print(f"[yellow]⚠️ Failed to pull {model_name} — rule checker will need manual setup.[/yellow]")
         console.print(f"[dim]Try manually: ollama pull {model_name}[/dim]")
         return
     console.print(f"[green]✓ Evaluator model {model_name} ready[/green]")
@@ -261,21 +261,15 @@ def _ensure_ability_ollama_models(syne_dir: str):
 
 def _ensure_evaluator_if_enabled(syne_dir: str):
     """Ensure Ollama models are available: embedding always; evaluator
-    whenever ANY feature that depends on it is enabled.
+    whenever the rule checker is enabled.
 
-    Two features use the evaluator model on the same DB key
-    (memory.evaluator_model, default qwen3:0.6b):
-
-      1. memory.auto_capture — LLM judges what user messages are worth
-         storing as long-term memory.
-      2. security.rule_checker_enabled — every final response is scored
-         against the hard rules; violations trigger a rewrite.
-
-    Both default ON in fresh installs. If EITHER is on we MUST have the
-    model pulled, otherwise the rule checker degrades to fail-open on
-    every turn (silent loss of enforcement) and auto_capture is a no-op.
-    Only skip the pull when both are explicitly disabled — that's the one
-    case where the model would truly go unused.
+    The evaluator model (memory.evaluator_model, default qwen3:0.6b) is
+    used by security.rule_checker_enabled: every final response is scored
+    against the hard rules; violations trigger a rewrite. The checker
+    defaults ON in fresh installs. If it is on we MUST have the model
+    pulled, otherwise it degrades to fail-open on every turn (silent loss
+    of enforcement). Memory auto-capture, the other former consumer, was
+    removed in 1.22.59.
 
     Called during `syne update` / `syne updatedev`. Reads the config
     table directly via asyncpg to avoid importing the full Syne stack.
@@ -292,12 +286,6 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
         import json
         conn = await asyncpg.connect(db_url)
         try:
-            # Read auto_capture status (defaults to True per v1.19.6+)
-            row = await conn.fetchrow(
-                "SELECT value FROM config WHERE key = 'memory.auto_capture'"
-            )
-            auto_capture = bool(json.loads(row["value"])) if row else True
-
             # Read rule-checker status (defaults to True per v1.19.9+).
             # If the row doesn't exist yet (installs older than the
             # rule_checker migration), assume True — the migration will
@@ -329,12 +317,12 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
                         if m.get("key") == active_key:
                             embed_model_id = m.get("model_id", embed_model_id)
                             break
-            return auto_capture, rule_checker, eval_model, embed_model_id
+            return rule_checker, eval_model, embed_model_id
         finally:
             await conn.close()
 
     try:
-        auto_capture, rule_checker, eval_model, embed_model = asyncio.run(_check())
+        rule_checker, eval_model, embed_model = asyncio.run(_check())
     except Exception:
         return
 
@@ -346,23 +334,16 @@ def _ensure_evaluator_if_enabled(syne_dir: str):
         console.print("[yellow]⚠️ Ollama setup failed — embedding may not work until fixed.[/yellow]")
         return
 
-    # Evaluator model — pull if EITHER consumer is enabled.
-    if auto_capture or rule_checker:
-        # Report why: helps the owner see what the pull is guarding.
-        reasons = []
-        if auto_capture:
-            reasons.append("auto-capture")
-        if rule_checker:
-            reasons.append("rule-checker")
+    # Evaluator model — pull only when the rule checker needs it.
+    if rule_checker:
         console.print(
             f"[dim]Ensuring evaluator model ({eval_model}) — "
-            f"required by: {', '.join(reasons)}...[/dim]"
+            f"required by: rule-checker...[/dim]"
         )
         _ensure_evaluator_model(eval_model=eval_model)
     else:
         console.print(
-            "[dim]⏭ Auto-capture AND rule-checker both disabled — "
-            "skipping evaluator model[/dim]"
+            "[dim]⏭ Rule checker disabled — skipping evaluator model[/dim]"
         )
 
     # Ability Ollama models (image_analysis, etc.)

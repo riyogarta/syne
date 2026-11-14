@@ -17,31 +17,6 @@ Always inform the owner of **both positive and negative impacts** before changin
 
 ## Memory System
 
-### Auto-Capture
-| Key | Default | Type |
-|-----|---------|------|
-| `memory.auto_capture` | `false` | boolean |
-| `memory.auto_evaluate` | `true` | boolean |
-| `memory.auto_capture_category` | `"auto"` | string |
-
-- `auto_capture` — automatically evaluates every message for memory-worthy content.
-- `auto_evaluate` — use LLM to judge what is worth storing (only applies when auto_capture is ON).
-  If false, auto_capture stores everything without evaluation.
-- **Enable auto_capture when**: Owner wants the bot to learn from conversations without explicit "remember" commands.
-- **Disable when**: Privacy is priority, or conversations are mostly transactional.
-- **Positive**: Bot learns preferences, facts, and context over time without manual effort.
-- **Negative**: Uses extra compute per message (evaluator model call). May store unwanted info.
-  Non-permanent auto-captured memories decay naturally, so low-value ones will fade.
-- `auto_capture_category` — quarantine category for auto-captured memories. Every
-  non-explicit capture is filed under this single category instead of whatever the
-  small evaluator model invents (`usage`, `conflict`, `personal facts`, ...), so cleanup
-  is one `WHERE category = 'auto'` instead of guesswork.
-  - An explicit "ingat ini" / "remember this" keeps the evaluator's category — that
-    one is a deliberate instruction from the owner, not a guess.
-  - Keep this category OUT of `memory.category_routes` so it stays in the default
-    recall bucket and remains searchable exactly as before.
-  - Set to `""` to disable and restore the old free-for-all behaviour.
-
 ### Evaluator Model
 | Key | Default | Type |
 |-----|---------|------|
@@ -50,14 +25,12 @@ Always inform the owner of **both positive and negative impacts** before changin
 | `memory.evaluator_models` | *(registry)* | JSON array |
 | `memory.active_evaluator` | `"qwen3-0-6b"` | string |
 
-Which model judges whether a message is worth remembering.
+Which model the rule checker uses (security.rule_checker_*). The `memory.` prefix is historical.
 - `evaluator_driver` / `evaluator_model` — legacy shorthand (still works).
 - `evaluator_models` — registry of available evaluator models (managed via `/evaluator` command).
 - `active_evaluator` — key of the currently active evaluator from the registry.
 - `"ollama"` driver — local model, free, fast, no API cost. Recommended.
 - `"provider"` driver — uses the main chat model. More accurate but costs tokens.
-- **Change when**: Auto-captured memories are low quality (switch to better model) or
-  evaluator is too slow (switch to smaller/local model).
 - **Warning**: Evaluator models must be pre-pulled in Ollama. Use `/evaluator` to manage.
 
 ### Memory Decay
@@ -73,7 +46,6 @@ Controls how fast non-permanent memories fade and when they get promoted.
 - `promotion_threshold` — when recall_count exceeds this, memory is promoted to permanent + KG extraction.
 - **Increase interval when**: Memories disappear too fast, bot forgets useful context.
 - **Decrease interval when**: Too many stale memories accumulate, bot recalls irrelevant things.
-- **Increase initial_recall_count when**: Auto-captured memories should last longer by default.
 - **Note**: Decay v2 does not delete on `recall_count` reaching zero. Every decay cycle
   lowers the count of untouched rows, but life or death is decided by `memory.max_records`:
   when non-permanent rows exceed that cap, the lowest-recall / oldest ones are evicted.
@@ -490,7 +462,6 @@ For quick reference when deciding permission level:
 
 | Change | Risk | Reversible |
 |--------|------|------------|
-| Enable auto_capture | Low — memories decay naturally | Yes — disable anytime |
 | Increase decay_interval | Low — memories last longer | Yes |
 | Decrease decay_interval | Medium — memories deleted faster | Partially — deleted memories gone |
 | Change chat model | Medium — different response quality | Yes — switch back anytime |

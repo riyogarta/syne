@@ -350,55 +350,26 @@ def init():
     else:
         console.print("[dim]  Skipped — you can set it up later by giving Syne your API key via chat.[/dim]")
 
-    # 3c. Auto-capture memory
+    # 3c. Evaluator model (rule checker)
     # Auto-select evaluator model based on tier
     selected_eval_model = tier_eval or "qwen3:0.6b"
     selected_eval_size = tier_eval_size or "~400MB"
-
-    console.print("\n[bold]Step 3c: Auto-capture Memory[/bold]")
-    console.print("  When enabled, Syne automatically remembers important facts from conversations")
-    console.print("  (e.g. \"I live in Jakarta\", \"My wife's name is Yuli\").")
-    console.print()
-    if ollama_available:
-        console.print(f"  Uses a local AI model ([bold]{selected_eval_model}[/bold], {selected_eval_size}) via Ollama —")
-        console.print("  no extra API costs, no rate limit impact.")
-        console.print(f"  [dim]Evaluator model auto-selected for your server ({tier_name} tier).[/dim]")
-    else:
-        console.print("  Uses a local AI model via Ollama — no extra API costs.")
-    console.print()
     can_run_ollama = ollama_available or embed_choice in (3, 4, 5)
+
+    # The evaluator model powers the rule checker
+    # (security.rule_checker_enabled, defaults ON in schema.sql). Pull it
+    # whenever Ollama can run: without it the rule checker fails-open on
+    # every turn (silent loss of enforcement).
     if can_run_ollama:
-        console.print("  1. ON  [green](recommended)[/green]")
-        console.print("  2. OFF [dim](memory only stored on explicit request)[/dim]")
-    else:
-        console.print("  1. ON  [dim](requires Ollama — your server may be too small)[/dim]")
-        console.print("  2. OFF [green](recommended for your server)[/green]")
-        console.print()
-        console.print("  [yellow]Your system has limited resources for local AI.[/yellow]")
-        console.print("  [dim]Auto-capture requires Ollama (~1.3GB RAM when active).[/dim]")
-    console.print()
-
-    auto_capture_choice = click.prompt("Enable auto-capture?", type=click.IntRange(1, 2), default=1 if can_run_ollama else 2)
-    auto_capture_enabled = auto_capture_choice == 1
-
-    if auto_capture_enabled:
-        console.print("[green]✓ Auto-capture enabled[/green]")
-    else:
-        console.print("[dim]  Auto-capture disabled — you can enable it later via /autocapture or chat.[/dim]")
-
-    # Evaluator model — used by BOTH auto_capture (optional above) AND the
-    # rule_checker (security.rule_checker_enabled, defaults ON in schema.sql).
-    # Pull it unconditionally when Ollama can run: without it, the rule
-    # checker fails-open on every turn (silent loss of enforcement) even
-    # for owners who left auto_capture off. This is why the pull is not
-    # gated behind auto_capture_enabled.
-    if can_run_ollama:
+        console.print("\n[bold]Step 3c: Evaluator Model[/bold]")
+        console.print(
+            f"  Rule checker model: [bold]{selected_eval_model}[/bold] "
+            f"({selected_eval_size}) via Ollama — no extra API costs."
+        )
         if embed_choice not in (3, 4, 5):
             _ensure_ollama()
         _ensure_evaluator_model(eval_model=selected_eval_model)
-        console.print(
-            "[green]✓ Evaluator model ready — powers rule checker + auto-capture.[/green]"
-        )
+        console.print("[green]✓ Evaluator model ready — powers the rule checker.[/green]")
     else:
         console.print(
             "[yellow]⚠️  Evaluator model NOT installed — Ollama isn't available on "
@@ -781,11 +752,9 @@ def init():
             await set_config("provider.embedding_models", [embed_entry])
             await set_config("provider.active_embedding", active_key)
             console.print("[green]✓ Embedding config saved to database[/green]")
-        # Save auto_capture setting
-        await set_config("memory.auto_capture", auto_capture_enabled)
-        # The evaluator model also powers the rule checker, so point the
-        # config at the model that was actually pulled, whether or not
-        # auto-capture is on (same writes as /evaluator).
+        # The evaluator model powers the rule checker, so point the
+        # config at the model that was actually pulled (same writes as
+        # /evaluator).
         if can_run_ollama:
             eval_models = await get_config("memory.evaluator_models", []) or []
             eval_entry = next((m for m in eval_models if m.get("model_id") == selected_eval_model), None)

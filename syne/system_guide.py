@@ -83,7 +83,7 @@ syne/
 │
 ├── memory/              — Semantic memory engine
 │   ├── engine.py        — Store, recall, decay, dedup, conflict detection
-│   └── evaluator.py     — Auto-capture evaluation (is this worth remembering?)
+│   └── evaluator.py     — Evaluator model helper (check_model_available, used by rule checker)
 │
 ├── db/                  — Database layer
 │   ├── connection.py    — asyncpg connection pool
@@ -121,9 +121,7 @@ syne/
        ↓
 10. Final text response → format → send back via channel
        ↓
-11. Auto-capture evaluation (async, if enabled)
-       ↓
-12. Memory decay check (every N conversations)
+11. Memory decay check (every N conversations)
 ```
 
 ## Database Tables
@@ -168,7 +166,6 @@ shell(command="ls -la ~/.log-syne/")                       — list all log file
 **Memory not working**
 1. Check embedding service: `shell(command="journalctl -u syne --no-pager | grep -i embed | tail -10")`
 2. Check memory count: `db_query(query="SELECT COUNT(*) FROM memory")`
-3. Check if auto_capture is on: `update_config(action='get', key='memory.auto_capture')`
 
 **Ability fails**
 1. Read the error in logs

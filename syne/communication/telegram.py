@@ -284,7 +284,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("version", self._cmd_version))
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("memory", self._cmd_memory))
-        self.app.add_handler(CommandHandler("autocapture", self._cmd_autocapture))
         self.app.add_handler(CommandHandler("consent", self._cmd_consent))
         self.app.add_handler(CommandHandler("checker", self._cmd_checker))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
@@ -387,7 +386,6 @@ class TelegramChannel:
         # Register bot commands menu (the "/" button in Telegram)
         from telegram import BotCommand, BotCommandScopeDefault, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
         commands = [
-            BotCommand("autocapture", "Toggle auto memory capture (on/off)"),
             BotCommand("backup", "Backup database (owner only)"),
             BotCommand("backupconf", "Backup config only (owner only)"),
             BotCommand("allowlist", "Manage shell command allowlist (owner only)"),
@@ -2517,7 +2515,6 @@ class TelegramChannel:
 
 *Memory & Context*
 /memory — Memory stats
-/autocapture — Toggle auto memory capture (on/off)
 /graph — Manage knowledge-graph extractor model
 
 *AI Models*
@@ -2613,7 +2610,6 @@ Or just send me a message!"""
         else:
             chat_model = await get_config("provider.chat_model", "unknown")
         
-        auto_capture = await get_config("memory.auto_capture", False)
         # Read thinking/reasoning from active model entry (per-model, not global)
         _model_params = (active_model_entry.get("params") or {}) if active_model_entry else {}
         thinking_budget = _model_params.get("thinking_budget")
@@ -2679,7 +2675,6 @@ Or just send me a message!"""
             f"💬 Active sessions: {session_count['c']}",
             f"🔧 Tools: {tool_count} | Abilities: {abilities}",
             f"💭 Thinking: {self._format_thinking_level(thinking_budget)} | Reasoning: {'ON' if reasoning_visible else 'OFF'}",
-            f"📝 Auto-capture: {'ON' if auto_capture else 'OFF'}",
         ]
 
         # Evaluator model
@@ -2784,7 +2779,7 @@ Or just send me a message!"""
         await update.message.reply_text("\n".join(lines))
 
     async def _cmd_evaluator(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /evaluator command — manage evaluator model for auto-capture."""
+        """Handle /evaluator command — manage evaluator model (rule checker)."""
         user = update.effective_user
         existing_user = await get_user("telegram", str(user.id))
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
@@ -2794,11 +2789,9 @@ Or just send me a message!"""
         await self._eval_menu_main(update)
 
     async def _eval_menu_main(self, update_or_query):
-        """Render evaluator model list + auto-capture toggle."""
+        """Render evaluator model list."""
         eval_models = await get_config("memory.evaluator_models", [])
         active_key = await get_config("memory.active_evaluator", "qwen3-0-6b")
-        auto_capture = await get_config("memory.auto_capture", False)
-        ac_label = "ON" if auto_capture else "OFF"
 
         buttons = []
         for m in eval_models:
@@ -2809,13 +2802,9 @@ Or just send me a message!"""
                 f"{prefix}{label}", callback_data=f"eval:detail:{key}"
             )])
         buttons.append([InlineKeyboardButton("➕ Add Evaluator", callback_data="eval:add_menu")])
-        buttons.append([InlineKeyboardButton(
-            f"{'✅ ' if auto_capture else '⬜ '}Auto-capture: {ac_label}",
-            callback_data="eval:toggle_ac",
-        )])
 
         count = len(eval_models)
-        text = f"🔬 <b>Evaluator</b> — {count} registered | Auto-capture: <b>{ac_label}</b>"
+        text = f"🔬 <b>Evaluator</b> — {count} registered"
         markup = InlineKeyboardMarkup(buttons)
 
         if hasattr(update_or_query, 'message') and update_or_query.message:
@@ -2874,26 +2863,6 @@ Or just send me a message!"""
             await set_config("memory.evaluator_driver", entry.get("driver", "ollama"))
             await set_config("memory.evaluator_model", entry.get("model_id", ""))
             await query.answer(f"Active → {entry.get('label', eval_key)}")
-            await self._eval_menu_main(query)
-
-        elif data == "eval:toggle_ac":
-            auto_capture = await get_config("memory.auto_capture", False)
-            new_val = not auto_capture
-            if new_val:
-                # Check if evaluator model is available before enabling
-                eval_driver = await get_config("memory.evaluator_driver", "ollama")
-                if eval_driver == "ollama":
-                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-                    from ..memory.evaluator import check_model_available
-                    available = await check_model_available(model=eval_model)
-                    if not available:
-                        await query.answer(
-                            f"Evaluator model '{eval_model}' not available. Run: ollama pull {eval_model}",
-                            show_alert=True,
-                        )
-                        return
-            await set_config("memory.auto_capture", new_val)
-            await query.answer(f"Auto-capture {'ON' if new_val else 'OFF'}")
             await self._eval_menu_main(query)
 
         elif data.startswith("eval:delete_confirm:"):
@@ -3547,65 +3516,6 @@ Or just send me a message!"""
             return True
 
         return False
-
-    async def _cmd_autocapture(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /autocapture command — toggle with inline buttons."""
-        user = update.effective_user
-
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("⚠️ Only the owner can change auto-capture settings.")
-            return
-
-        args = update.message.text.split(maxsplit=1)
-        toggle = args[1].strip().lower() if len(args) > 1 else None
-
-        if toggle is None:
-            current = await get_config("memory.auto_capture", False)
-            state = "ON" if current else "OFF"
-            buttons = [
-                InlineKeyboardButton(f"{'✅ ' if current else ''}ON", callback_data="autocapture:on"),
-                InlineKeyboardButton(f"{'✅ ' if not current else ''}OFF", callback_data="autocapture:off"),
-            ]
-            await update.message.reply_text(
-                f"📝 **Auto-capture:** {state}\n"
-                f"⚠️ ON = extra LLM + embedding per message",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
-            return
-
-        if toggle not in ("on", "off"):
-            await update.message.reply_text(f"❌ Use: `on` or `off`", parse_mode="Markdown")
-            return
-
-        enabled = toggle == "on"
-        if enabled:
-            # Check if evaluator model is available before enabling
-            eval_driver = await get_config("memory.evaluator_driver", "ollama")
-            if eval_driver == "ollama":
-                eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-                from ..memory.evaluator import check_model_available
-                available = await check_model_available(model=eval_model)
-                if not available:
-                    await update.message.reply_text(
-                        f"❌ Evaluator model `{eval_model}` not available.\n"
-                        f"Run `ollama pull {eval_model}` first, or use /evaluator to configure.",
-                        parse_mode="Markdown",
-                    )
-                    return
-        await set_config("memory.auto_capture", enabled)
-        if enabled:
-            await update.message.reply_text(
-                "📝 Auto-capture **ON** ⚠️\nExtra LLM + embedding calls per message.",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text(
-                "📝 Auto-capture **OFF**\nMemory only stored on explicit request.",
-                parse_mode="Markdown",
-            )
 
     async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manage the shell_guard runtime allowlist (owner only).
@@ -10470,34 +10380,6 @@ Or just send me a message!"""
 
         elif data.startswith("graph:"):
             await self._handle_graph_callback(query, data)
-
-        elif data.startswith("autocapture:"):
-            toggle = data.split(":", 1)[1]
-            enabled = toggle == "on"
-            if enabled:
-                eval_driver = await get_config("memory.evaluator_driver", "ollama")
-                if eval_driver == "ollama":
-                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-                    from ..memory.evaluator import check_model_available
-                    available = await check_model_available(model=eval_model)
-                    if not available:
-                        await query.edit_message_text(
-                            f"❌ Evaluator model `{eval_model}` not available.\n"
-                            f"Run `ollama pull {eval_model}` first, or use /evaluator to configure.",
-                            parse_mode="Markdown",
-                        )
-                        return
-            await set_config("memory.auto_capture", enabled)
-            buttons = [
-                InlineKeyboardButton(f"{'✅ ' if enabled else ''}ON", callback_data="autocapture:on"),
-                InlineKeyboardButton(f"{'✅ ' if not enabled else ''}OFF", callback_data="autocapture:off"),
-            ]
-            msg = "📝 **Auto-capture:** ON ⚠️" if enabled else "📝 **Auto-capture:** OFF"
-            await query.edit_message_text(
-                msg,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
 
         elif data.startswith("consent_toggle:"):
             toggle = data.split(":", 1)[1]

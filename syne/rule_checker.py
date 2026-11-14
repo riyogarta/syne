@@ -1,7 +1,7 @@
 """Hard-rule compliance checker for final assistant responses.
 
-Runs a cheap second-pass LLM (the same evaluator model used by memory
-auto-capture) against a draft response and every hard rule from the rules
+Runs a cheap second-pass LLM (the evaluator model, memory.evaluator_model)
+against a draft response and every hard rule from the rules
 table. Returns a small verdict object the conversation loop consumes to
 either send the draft, prepend a warning, or force a rewrite.
 
@@ -196,7 +196,7 @@ async def _check_via_ollama(
     prompt: str, model: str, base_url: str = "http://localhost:11434",
     timeout: float = 120.0,
 ) -> str:
-    """Direct HTTP to Ollama /api/chat — same shape as evaluate_message_ollama."""
+    """Direct HTTP to Ollama /api/chat."""
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             f"{base_url.rstrip('/')}/api/chat",

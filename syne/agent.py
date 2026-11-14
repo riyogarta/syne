@@ -1150,7 +1150,7 @@ class SyneAgent:
                     },
                     "key": {
                         "type": "string",
-                        "description": "Config key (e.g. 'memory.auto_capture'). provider.* and credential.* are read-only here.",
+                        "description": "Config key (e.g. 'memory.recall_limit'). provider.* and credential.* are read-only here.",
                     },
                     "value": {
                         "type": "string",
@@ -1862,20 +1862,6 @@ class SyneAgent:
             from .db.config_snapshot import auto_snapshot
             await auto_snapshot(f"before-{key}")
             await set_config(key, parsed)
-
-            # Guard: check evaluator model availability when enabling auto_capture
-            if key == "memory.auto_capture" and parsed:
-                eval_driver = await get_config("memory.evaluator_driver", "ollama")
-                if eval_driver == "ollama":
-                    eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-                    from .memory.evaluator import check_model_available
-                    available = await check_model_available(model=eval_model)
-                    if not available:
-                        await set_config(key, False)  # Revert
-                        return (
-                            f"❌ Cannot enable auto_capture: evaluator model `{eval_model}` not available.\n"
-                            f"Run `ollama pull {eval_model}` first, or set `memory.evaluator_driver` to `\"provider\"`."
-                        )
 
             return f"Config updated: `{key}` = {self._mask_sensitive_value(key, parsed)}"
 

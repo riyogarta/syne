@@ -265,6 +265,6 @@ async def test_store_graph_without_provider_does_not_embed():
 
 def test_migration_40_registered():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 40
-    assert M.MIGRATIONS[-1][1] is M._m40_kg_semantic_recall
-    assert M.CURRENT_SCHEMA_VERSION == 40
+    entry = next(m for m in M.MIGRATIONS if m[0] == 40)
+    assert entry[1] is M._m40_kg_semantic_recall
+    assert M.CURRENT_SCHEMA_VERSION >= 40

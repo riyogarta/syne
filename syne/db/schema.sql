@@ -87,6 +87,28 @@ CREATE TABLE IF NOT EXISTS memory (
     kg_processed BOOLEAN DEFAULT false    -- true = KG extraction has been attempted
 );
 
+-- Archive of removed memory auto-capture rows (migration 41, v1.22.59).
+-- Same columns as memory + archived_at. Not recalled, not decayed; kept
+-- for analysing why auto-capture was removed. Empty on fresh installs.
+CREATE TABLE IF NOT EXISTS memory_auto_archive (
+    id INT PRIMARY KEY,
+    content TEXT NOT NULL,
+    category VARCHAR(50),
+    embedding vector,
+    source VARCHAR(30),
+    user_id INT,
+    importance FLOAT,
+    access_count INT,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    accessed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    permanent BOOLEAN,
+    recall_count INTEGER,
+    kg_processed BOOLEAN,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- HNSW vector index — created dynamically because embedding dimensions vary per provider.
 -- Call SELECT ensure_memory_hnsw_index() after embeddings exist to create/rebuild.
 CREATE OR REPLACE FUNCTION ensure_memory_hnsw_index() RETURNS void AS $$
@@ -456,8 +478,6 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.chat_model', '""', 'Chat model name (mirror of the active model_id)'),
     ('provider.embedding_model', '"text-embedding-004"', 'Embedding model name'),
     ('provider.embedding_dimensions', '768', 'Embedding vector dimensions'),
-    ('memory.auto_capture', 'true', 'Auto-evaluate messages for memory storage (default ON — LLM judges what is worth remembering; explicit stores are permanent, auto-captured ones are non-permanent and subject to decay)'),
-    ('memory.auto_evaluate', 'true', 'Use LLM to judge what is worth storing (only when auto_capture is ON)'),
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '5', 'Max memories to recall per query'),
     ('memory.decay_interval', '50', 'Decay every N conversations'),
@@ -468,7 +488,6 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
     ('memory.category_routes', '{}', 'Keyword -> category routing for recall. JSON object, empty = disabled'),
-    ('memory.auto_capture_category', '"auto"', 'Quarantine category for auto-captured memories. Every non-explicit auto-capture is filed here instead of an evaluator-invented category, so cleanup is a single WHERE clause. Keep it OUT of memory.category_routes so it stays in the default recall bucket. Empty string = disabled (evaluator category is used as-is).'),
     ('messages.embedding_enabled', 'true', 'When true, save_message fires a background embed for user rows and assistant rows with text, so history_search (level 1 = user, level 2 = assistant) can retrieve them semantically. Safe to toggle off in emergencies — content is always kept, only the embedding stops.'),
     ('history_search.default_limit', '5', 'Default number of hits per history_search call (cap 10). Every hit is returned expanded, so keep it small.'),
     ('history_search.context_before', '10', 'Default number of conversation messages (user + assistant text) to include BEFORE each anchor in history_expand. Tool results are not included. Re-evaluate against real use (Riyo, 7 Nov 2026).'),
@@ -1039,31 +1058,11 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.category_routes', '{}', 'Keyword -> category routing for recall. JSON object: {"islam, fiqih, ayat": ["fiqih","alquran"]}. Keys are comma-separated trigger keywords; a fired route restricts recall to its categories, no match excludes all routed categories. Empty = disabled.')
 ON CONFLICT (key) DO NOTHING;
 
--- Migration: memory.auto_capture_category (auto-capture quarantine)
--- Auto-captured memories all land in one category ("auto") instead of
--- whatever the small evaluator model invents. Not routed => still recalled
--- via the default bucket. Set to '""' to restore the old behaviour.
-INSERT INTO config (key, value, description) VALUES
-    ('memory.auto_capture_category', '"auto"', 'Quarantine category for auto-captured memories. Every non-explicit auto-capture is filed here instead of an evaluator-invented category, so cleanup is a single WHERE clause. Keep it OUT of memory.category_routes so it stays in the default recall bucket. Empty string = disabled (evaluator category is used as-is).')
-ON CONFLICT (key) DO NOTHING;
-
 -- Migration: session.tool_loop_timeout (replaces max_tool_rounds)
 INSERT INTO config (key, value, description) VALUES
     ('session.tool_loop_timeout', '1800', 'Tool loop timeout in seconds (default 30 min, like OpenClaw)')
 ON CONFLICT (key) DO NOTHING;
 DELETE FROM config WHERE key = 'session.max_tool_rounds';
-
--- Migration: memory.auto_capture (default ON)
-INSERT INTO config (key, value, description) VALUES
-    ('memory.auto_capture', 'true', 'Auto-evaluate messages for memory storage (default ON — LLM judges what is worth remembering; explicit stores are permanent, auto-captured ones are non-permanent and subject to decay)')
-ON CONFLICT (key) DO NOTHING;
--- One-shot: force EXISTING installs still on the old default (false) -> true.
--- Conditional on old value so a deliberate user opt-out isn't clobbered on
--- every restart... EXCEPT here Riyo explicitly asked existing installs be
--- forced ON, so we migrate any value that is currently 'false'. Idempotent:
--- once true, the WHERE no longer matches.
-UPDATE config SET value = 'true'
-  WHERE key = 'memory.auto_capture' AND value = 'false';
 
 -- Migration: subagents.* (DB-driven sub-agent tuning — no more hardcoded fallbacks)
 INSERT INTO config (key, value, description) VALUES

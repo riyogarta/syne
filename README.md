@@ -83,7 +83,7 @@ During `syne init`, the installer detects your server's CPU and RAM to recommend
 
 | Server | CPU | RAM | Embedding | Evaluator |
 |--------|-----|-----|-----------|-----------|
-| No Ollama | <2 core | <2 GB | Together AI (cloud) | - (no auto-capture) |
+| No Ollama | <2 core | <2 GB | Together AI (cloud) | - (rule checker: main LLM) |
 | Minimal | 2+ core | 2-4 GB | qwen3-embedding:0.6b (1024d) | qwen3:0.6b |
 | Moderate | 2+ core | 4-8 GB | qwen3-embedding:0.6b (1024d) | qwen3:1.7b |
 | Strong | 4+ core | 8-16 GB | qwen3-embedding:4b (2560d) | qwen3:1.7b |
@@ -120,53 +120,22 @@ Fresh install comes with sensible defaults. Override anything through conversati
 Syne's memory has one guarantee and one design consequence, stated up front so nothing surprises you later:
 
 - **Explicit facts never fade.** Anything you tell Syne to *remember* becomes a permanent memory and stays forever — no cap, no decay, no eviction.
-- **Casual mentions decay if unused.** Auto-captured facts (when `auto_capture=true`) enter a bounded pool that decays with disuse and eventually gets evicted when the pool exceeds `memory.max_records` (default 1000). Details in [Decay Engine](#3-decay-engine--what-should-i-forget).
+- **Everything else stays in chat history.** What you mention in passing is not copied into memory; Syne finds it again with `history_search` / `history_expand`, reading your own words instead of a paraphrase.
 
-Three components work together: the **evaluator** decides what's worth storing, **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **decay engine** manages the transient pool.
+Three components work together: **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, the **decay engine** manages non-permanent memories, and the **evaluator model** powers the rule checker.
 
 ### Memory Flow
 
-Two modes, depending on whether `auto_capture` is enabled:
-
-#### Auto Capture OFF
-
 ```
-Chat ──→ "Ingat/Remember" detected?
+Chat ──→ "Ingat/Remember"?
           │
           ├─ Yes → memory_store tool → permanent=true → Embed + KG
           │
-          └─ No  → nothing stored (chat history only)
+          └─ No  → nothing copied to memory; the message stays in chat history
+                   (searchable via history_search / history_expand)
 ```
 
-Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") trigger memory storage. Zero cost when not storing.
-
-#### Auto Capture ON (default since v1.19.6)
-
-```
-Chat ──→ "Ingat/Remember" detected?
-          │
-          ├─ Yes → memory_store tool → permanent=true → Embed + KG
-          │        (evaluator also processes as safety net — dedup prevents double store)
-          │
-          └─ No  → Evaluator processes message:
-                    │
-                    ├─ Layer 1: Quick Filter (no LLM call)
-                    │   └─ Skip: greetings, 1-word messages, questions-only, technical noise
-                    │
-                    ├─ Layer 2: LLM Evaluation (Ollama, $0)
-                    │   └─ Worth storing? Assigns category, importance, cleaned content
-                    │
-                    └─ Layer 3: Similarity Dedup (embedding)
-                        └─ New? → permanent=false → Embed (no KG) → subject to decay
-                        └─ Duplicate? → skip
-```
-
-The evaluator runs **asynchronously** — it never blocks the chat response. Only user-confirmed facts are stored, never assistant suggestions.
-
-| Evaluator Driver | Model | Cost | Speed | Accuracy |
-|------------------|-------|------|-------|----------|
-| **Ollama** (default) | qwen3:0.6b | **$0** | Fast (local) | Good for most content |
-| Provider (main LLM) | Same as chat model | Tokens + 40s delay | Slower | Higher accuracy |
+Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") store a memory. Memory auto-capture — a small model paraphrasing every message into memory — was removed in v1.22.59: the paraphrases were lossy, added noise to every recall, and duplicated words that were already in the history. Rows it created were moved to `memory_auto_archive` for later analysis.
 
 #### Memory Recall
 
@@ -184,9 +153,9 @@ Both results are injected into the conversation context — the LLM sees everyth
 
 ### The Three Engines
 
-#### 1. Evaluator — "Is this worth remembering?"
+#### 1. Evaluator model — rule checker
 
-A small, local LLM (default: Ollama qwen3:0.6b, **$0**) evaluates messages when `auto_capture` is enabled. Explicit "remember" commands bypass the evaluator entirely — the LLM's `memory_store` tool handles them directly as permanent memories.
+A small, local LLM (default: Ollama qwen3:0.6b, **$0**) scores every final response against the hard rules (`security.rule_checker_*`); a violation triggers a rewrite. Manage it with `/evaluator`. It no longer decides what to store — memory is only written on explicit request.
 
 #### 2. Embedding & Knowledge Graph — "How do I find this later?"
 
@@ -369,15 +338,6 @@ When storing a new memory, similarity to existing memories determines the action
 | ≥ 0.85 | **Skip** duplicate | "I live in Jakarta" (already stored) |
 
 Source priority resolves conflicts: `user_confirmed` > `observed` > `auto_captured` > `system`.
-
-### Auto Capture vs Manual
-
-| Mode | Trigger | Cost impact |
-|------|---------|-------------|
-| `auto_capture = true` (default since v1.19.6) | Every message evaluated | +1 evaluator call + 1 embedding per message |
-| `auto_capture = false` | Only when user says "remember this" | No extra calls |
-
-With Ollama as both evaluator and embedding provider, auto-capture costs **$0** — both run locally.
 
 ### Managing Memories
 
@@ -779,7 +739,6 @@ All configuration lives in the `config` table. Change via conversation or `updat
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `memory.auto_capture` | `true` | Auto-evaluate messages for storage (default ON since v1.19.6). Explicit stores are permanent regardless; only auto-captured rows are non-permanent and decay. |
 | `memory.recall_limit` | `5` | Max memories per query |
 | `memory.max_records` | `1000` | Decay v2 cap: max non-permanent memories. Above this, LRU/LFU eviction runs during the next `decay_interval` sweep. Permanent memories are never counted or evicted. |
 | `memory.decay_interval` | `50` | Every N conversations, run the eviction sweep against `memory.max_records`. Decay itself is event-driven (per store + per recall) — this knob paces the CAP CHECK, not the decrement. |
@@ -905,7 +864,6 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/identity` | Agent identity | All |
 | `/clear` | Clear conversation history | Owner |
 | `/reasoning [on/off]` | Toggle reasoning visibility | Owner |
-| `/autocapture [on/off]` | Toggle auto memory capture | Owner |
 | `/consent [on/off]` | Toggle consent gate for destructive tools | Owner |
 | `/allowlist` | Manage shell_guard runtime allowlist (add/remove binaries) | Owner |
 | `/denylist` | Manage shell_guard runtime denylist (binaries + patterns) | Owner |

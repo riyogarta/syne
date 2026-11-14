@@ -75,7 +75,7 @@ def _do_update(syne_dir: str):
         console.print("[dim]Node mode — skipping service restart.[/dim]")
         return True
 
-    # Ensure Ollama + evaluator model if auto_capture is enabled (non-fatal).
+    # Ensure Ollama + evaluator model if the rule checker is enabled (non-fatal).
     # Run as subprocess so we use the NEWLY installed code, not the old
     # module still loaded in this process's memory.
     venv_python = os.path.join(venv_dir, "bin", "python")

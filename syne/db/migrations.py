@@ -37,6 +37,7 @@ Adding a migration:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Callable, Awaitable
 
@@ -1135,6 +1136,79 @@ $$ LANGUAGE plpgsql;''')
     )
 
 
+
+async def _m41_remove_auto_capture(conn) -> None:
+    """Remove memory auto-capture (Riyo, 14 Nov 2026). Idempotent.
+
+    The owner's own words stay in the message history and are reached via
+    history_search / history_expand; the small-model paraphrases in the
+    quarantine category added noise to every recall.
+
+      * memory_auto_archive: same columns as memory + archived_at. Rows of
+        the quarantine category (memory.auto_capture_category, default
+        'auto') are MOVED here, kept for a later analysis of why
+        auto-capture was removed. Not recalled, not decayed.
+      * Only non-permanent rows without a memory_blobs attachment move;
+        anything else is left in memory untouched.
+      * config memory.auto_capture / auto_evaluate / auto_capture_category
+        deleted. memory.evaluator_* stay: the rule checker uses them.
+    """
+    await conn.execute('''CREATE TABLE IF NOT EXISTS memory_auto_archive (
+    id INT PRIMARY KEY,
+    content TEXT NOT NULL,
+    category VARCHAR(50),
+    embedding vector,
+    source VARCHAR(30),
+    user_id INT,
+    importance FLOAT,
+    access_count INT,
+    created_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ,
+    accessed_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    permanent BOOLEAN,
+    recall_count INTEGER,
+    kg_processed BOOLEAN,
+    archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)''')
+    raw = await conn.fetchval(
+        "SELECT value FROM config WHERE key = 'memory.auto_capture_category'"
+    )
+    category = "auto"
+    if raw is not None:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, str) and parsed.strip():
+                category = parsed.strip()
+        except (TypeError, ValueError):
+            pass
+    await conn.execute(
+        """
+        WITH moved AS (
+            DELETE FROM memory m
+             WHERE m.category = $1
+               AND COALESCE(m.permanent, false) = false
+               AND NOT EXISTS (SELECT 1 FROM memory_blobs b WHERE b.memory_id = m.id)
+            RETURNING m.*
+        )
+        INSERT INTO memory_auto_archive (
+            id, content, category, embedding, source, user_id, importance,
+            access_count, created_at, updated_at, accessed_at, expires_at,
+            permanent, recall_count, kg_processed
+        )
+        SELECT id, content, category, embedding, source, user_id, importance,
+               access_count, created_at, updated_at, accessed_at, expires_at,
+               permanent, recall_count, kg_processed
+          FROM moved
+        ON CONFLICT (id) DO NOTHING
+        """,
+        category,
+    )
+    await conn.execute(
+        "DELETE FROM config WHERE key IN "
+        "('memory.auto_capture', 'memory.auto_evaluate', 'memory.auto_capture_category')"
+    )
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1176,6 +1250,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (38, _m38_history_search_levels, "transactional"),
     (39, _m39_history_search_judgement, "transactional"),
     (40, _m40_kg_semantic_recall, "transactional"),
+    (41, _m41_remove_auto_capture, "transactional"),
 ]
 
 
