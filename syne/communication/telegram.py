@@ -291,7 +291,6 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("models", self._cmd_models))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("evaluator", self._cmd_evaluator))
-        self.app.add_handler(CommandHandler("graph", self._cmd_graph))
         self.app.add_handler(CommandHandler("browse", self._cmd_browse))
         self.app.add_handler(CommandHandler("wamembers", self._cmd_wamembers))
         self.app.add_handler(CommandHandler("dcmembers", self._cmd_discordmembers))
@@ -398,7 +397,6 @@ class TelegramChannel:
             BotCommand("dcmembers", "Manage Discord members (owner only)"),
             BotCommand("embedding", "Manage embedding models (owner only)"),
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
-            BotCommand("graph", "Manage knowledge graph extractor (owner only)"),
             BotCommand("help", "Available commands"),
             BotCommand("identity", "Show agent identity"),
             BotCommand("imagegen", "Switch image generation provider (owner only)"),
@@ -2515,7 +2513,6 @@ class TelegramChannel:
 
 *Memory & Context*
 /memory — Memory stats
-/graph — Manage knowledge-graph extractor model
 
 *AI Models*
 /models — Manage LLM (chat) models
@@ -2743,14 +2740,6 @@ Or just send me a message!"""
             session_count = await conn.fetchrow("SELECT COUNT(*) as c FROM sessions")
             message_count = await conn.fetchrow("SELECT COUNT(*) as c FROM messages")
 
-            # KG pending count
-            try:
-                kg_pending = await conn.fetchval(
-                    "SELECT COUNT(*) FROM memory WHERE permanent = true AND (kg_processed IS NOT TRUE)"
-                )
-            except Exception:
-                kg_pending = None
-
         cat_parts = " • ".join(f"{row['category']}: {row['c']}" for row in by_cat)
         lines = [
             f"🧠 Memory: {total['c']} items",
@@ -2771,10 +2760,6 @@ Or just send me a message!"""
                 lines.append(type_parts)
         except Exception:
             pass
-
-        # KG pending — show independently of graph stats (show even if 0)
-        if kg_pending is not None:
-            lines.append(f"⏳ KG pending: {kg_pending}")
 
         await update.message.reply_text("\n".join(lines))
 
@@ -3173,349 +3158,6 @@ Or just send me a message!"""
         if data.startswith("vision:set:"):
             model_key = data.split(":", 2)[2]
             await self._media_model_set(query, model_key, "image_analysis", "Vision", enable=False)
-
-    # ── Knowledge Graph extractor management ──
-
-    async def _cmd_graph(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /graph command — manage graph extractor model."""
-        user = update.effective_user
-        existing_user = await get_user("telegram", str(user.id))
-        access_level = existing_user.get("access_level", "public") if existing_user else "public"
-        if access_level != "owner":
-            await update.message.reply_text("Only the owner can manage the knowledge graph.")
-            return
-        await self._graph_menu_main(update)
-
-    async def _graph_menu_main(self, update_or_query):
-        """Render graph extractor list + enable/disable toggle."""
-        graph_models = await get_config("graph.extractor_models", [])
-        active_key = await get_config("graph.active_extractor", "")
-        enabled = await get_config("graph.enabled", True)
-        driver = await get_config("graph.extractor_driver", "provider")
-        en_label = "ON" if enabled else "OFF"
-
-        buttons = []
-        for m in graph_models:
-            key = m.get("key", "")
-            label = m.get("label", key)
-            prefix = "✅ " if key == active_key else ""
-            buttons.append([InlineKeyboardButton(
-                f"{prefix}{label}", callback_data=f"graph:detail:{key}"
-            )])
-        buttons.append([InlineKeyboardButton("➕ Add Graph", callback_data="graph:add_menu")])
-        buttons.append([InlineKeyboardButton("🔄 Reprocess Memories", callback_data="graph:reprocess_force")])
-        buttons.append([InlineKeyboardButton(
-            f"{'✅ ' if enabled else '⬜ '}Knowledge Graph: {en_label}",
-            callback_data="graph:toggle",
-        )])
-
-        driver_label = "Main LLM" if driver == "provider" else f"Ollama"
-        count = len(graph_models)
-        text = (
-            f"🕸 <b>Knowledge Graph</b> — {count} registered | {en_label}\n"
-            f"Graph: <b>{driver_label}</b>"
-        )
-        markup = InlineKeyboardMarkup(buttons)
-
-        if hasattr(update_or_query, 'message') and update_or_query.message:
-            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
-
-    async def _graph_menu_detail(self, query, graph_key: str):
-        """Show graph extractor detail submenu."""
-        graph_models = await get_config("graph.extractor_models", [])
-        active_key = await get_config("graph.active_extractor", "")
-        entry = next((m for m in graph_models if m.get("key") == graph_key), None)
-        if not entry:
-            await query.edit_message_text("Graph not found.")
-            return
-
-        label = entry.get("label", graph_key)
-        driver = entry.get("driver", "?")
-        model_id = entry.get("model_id", "?")
-        is_active = graph_key == active_key
-
-        text = (
-            f"🕸 <b>{label}</b>\n\n"
-            f"Driver: <code>{driver}</code> | Model: <code>{model_id}</code>"
-        )
-        if is_active:
-            text += "\n✅ <b>Active</b>"
-
-        buttons = []
-        if not is_active:
-            buttons.append([InlineKeyboardButton("✅ Set Active", callback_data=f"graph:set_active:{graph_key}")])
-        buttons.append([InlineKeyboardButton("🗑 Delete", callback_data=f"graph:delete_confirm:{graph_key}")])
-        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="graph:main")])
-
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
-
-    async def _handle_graph_callback(self, query, data: str):
-        """Handle all graph:* callback routing."""
-        user = query.from_user
-
-        if data == "graph:main":
-            await self._graph_menu_main(query)
-
-        elif data.startswith("graph:detail:"):
-            graph_key = data.split(":", 2)[2]
-            await self._graph_menu_detail(query, graph_key)
-
-        elif data.startswith("graph:set_active:"):
-            graph_key = data.split(":", 2)[2]
-            graph_models = await get_config("graph.extractor_models", [])
-            entry = next((m for m in graph_models if m.get("key") == graph_key), None)
-            if not entry:
-                await query.answer("Graph not found", show_alert=True)
-                return
-            await set_config("graph.active_extractor", graph_key)
-            await set_config("graph.extractor_driver", entry.get("driver", "provider"))
-            await set_config("graph.extractor_model", entry.get("model_id", ""))
-            await query.answer(f"Active → {entry.get('label', graph_key)}")
-            await self._graph_menu_main(query)
-
-        elif data == "graph:toggle":
-            enabled = await get_config("graph.enabled", True)
-            await set_config("graph.enabled", not enabled)
-            await query.answer(f"Knowledge Graph {'OFF' if enabled else 'ON'}")
-            await self._graph_menu_main(query)
-
-        elif data.startswith("graph:delete_confirm:"):
-            graph_key = data.split(":", 2)[2]
-            graph_models = await get_config("graph.extractor_models", [])
-            entry = next((m for m in graph_models if m.get("key") == graph_key), None)
-            if not entry:
-                await query.answer("Graph not found", show_alert=True)
-                return
-            await query.edit_message_text(
-                f"🗑 <b>Delete {entry.get('label', graph_key)}?</b>",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup([
-                    [
-                        InlineKeyboardButton("🗑 Yes, Delete", callback_data=f"graph:delete:{graph_key}"),
-                        InlineKeyboardButton("❌ Cancel", callback_data=f"graph:detail:{graph_key}"),
-                    ],
-                ]),
-            )
-
-        elif data.startswith("graph:delete:"):
-            graph_key = data.split(":", 2)[2]
-            graph_models = await get_config("graph.extractor_models", [])
-            active_key = await get_config("graph.active_extractor", "")
-            graph_models = [m for m in graph_models if m.get("key") != graph_key]
-            await set_config("graph.extractor_models", graph_models)
-            if graph_key == active_key:
-                if graph_models:
-                    new_active = graph_models[0]
-                    await set_config("graph.active_extractor", new_active["key"])
-                    await set_config("graph.extractor_driver", new_active.get("driver", "provider"))
-                    await set_config("graph.extractor_model", new_active.get("model_id", ""))
-                else:
-                    await set_config("graph.active_extractor", "")
-                    await set_config("graph.extractor_driver", "provider")
-                    await set_config("graph.extractor_model", "")
-            await query.answer("Graph deleted")
-            await self._graph_menu_main(query)
-
-        elif data == "graph:reprocess_force":
-            await query.answer("Reprocessing started in background...")
-            from ..memory.graph import reprocess_permanent_memories
-            await query.edit_message_text(
-                "🔄 <b>KG Reprocess Started</b>\n\n"
-                "Running in background. Results will be sent when complete.",
-                parse_mode="HTML",
-            )
-
-            # The user's chosen model if set, else the default model. If the
-            # chosen model fails to load, report it — never run on another.
-            _reprocess_provider = self.agent.provider
-            _user_db = await get_user("telegram", str(query.from_user.id))
-            _user_model = ((_user_db or {}).get("preferences") or {}).get("model")
-            if _user_model and self.agent:
-                try:
-                    _reprocess_provider = await self.agent.create_provider_for_model(_user_model)
-                except Exception as e:
-                    logger.error(f"KG reprocess: model '{_user_model}' failed to load: {e}", exc_info=True)
-                    await self.app.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=_classify_error(
-                            e, model=_user_model,
-                            access_level=await _sender_access_level(query.from_user),
-                        ),
-                    )
-                    return
-
-            async def _bg_reprocess():
-                try:
-                    stats = await reprocess_permanent_memories(
-                        _reprocess_provider, force=True,
-                        conversations_mgr=self.agent.conversations,
-                    )
-                    lines = [f"🔄 <b>Reprocess Complete</b>\n"]
-                    if stats.get("reset"):
-                        lines.append(f"Reset flags: {stats['reset']}")
-                    lines.append(f"Processed: {stats['processed']}")
-                    lines.append(f"Succeeded: {stats['succeeded']}")
-                    lines.append(f"Failed: {stats['failed']}")
-                    await self.app.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text="\n".join(lines),
-                        parse_mode="HTML",
-                    )
-                except Exception as e:
-                    logger.error(f"Background KG reprocess failed: {e}")
-                    await self.app.bot.send_message(
-                        chat_id=query.message.chat_id,
-                        text=f"KG reprocess failed: {e}",
-                    )
-
-            import asyncio
-            asyncio.create_task(_bg_reprocess())
-
-        elif data == "graph:add_menu":
-            drivers = [
-                ("provider", "Use main chat LLM (recommended)"),
-                ("ollama", "Ollama (local, FREE)"),
-            ]
-            buttons = [
-                InlineKeyboardButton(label, callback_data=f"graph:add:{key}")
-                for key, label in drivers
-            ]
-            buttons.append(InlineKeyboardButton("⬅️ Back", callback_data="graph:main"))
-            keyboard = [[btn] for btn in buttons]
-            await query.edit_message_text(
-                "🕸 <b>Add Graph</b>\n\nChoose a driver:",
-                parse_mode="HTML",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-
-        elif data.startswith("graph:add:"):
-            driver = data.split(":", 2)[2]
-            if driver == "provider":
-                active_model_key = await get_config("provider.active_model", "gemini-pro")
-                models = await get_config("provider.models", [])
-                chat_entry = next((m for m in models if m.get("key") == active_model_key), None)
-                chat_label = chat_entry.get("label", active_model_key) if chat_entry else active_model_key
-                chat_model_id = chat_entry.get("model_id", active_model_key) if chat_entry else active_model_key
-
-                entry = {
-                    "key": f"provider-{active_model_key}",
-                    "label": f"{chat_label} (main LLM)",
-                    "driver": "provider",
-                    "model_id": chat_model_id,
-                }
-                graph_models = await get_config("graph.extractor_models", [])
-                existing = next((m for m in graph_models if m["key"] == entry["key"]), None)
-                if existing:
-                    await query.answer("Already registered", show_alert=True)
-                    return
-                graph_models.append(entry)
-                await set_config("graph.extractor_models", graph_models)
-                # Auto-set as active if first extractor
-                if len(graph_models) == 1:
-                    await set_config("graph.active_extractor", entry["key"])
-                    await set_config("graph.extractor_driver", "provider")
-                    await set_config("graph.extractor_model", chat_model_id)
-                await query.answer(f"Added: {entry['label']}")
-                await self._graph_menu_main(query)
-            else:
-                # Ollama — multi-step: ask for model_id
-                self._auth_state[user.id] = {
-                    "type": "graph_add",
-                    "driver": driver,
-                    "step": "model_id",
-                }
-                try:
-                    await query.answer()
-                except Exception:
-                    pass
-                await (query._bot or self.app.bot).send_message(
-                    chat_id=query.message.chat_id,
-                    text=(
-                        "🕸 <b>Add Graph — Ollama</b>\n\n"
-                        "Send the model ID (e.g. <code>qwen3:8b</code>).\n\n"
-                        "Send /cancel to abort."
-                    ),
-                    parse_mode="HTML",
-                )
-
-    async def _process_addgraph_input(self, user_id: int, chat_id: int, text: str, state: dict, context) -> bool:
-        """Multi-step graph extractor addition flow."""
-        bot = context.bot if context else self.app.bot
-        step = state.get("step", "")
-        text = text.strip()
-
-        if step == "model_id":
-            if not text or " " in text or "\n" in text:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text="\u274c Invalid model ID (no spaces or newlines). Resend it, or /cancel to abort.",
-                )
-                return True
-            state["model_id"] = text
-            state["step"] = "label"
-            await bot.send_message(
-                chat_id=chat_id,
-                text=f"Model ID: <code>{text}</code>\n\n"
-                     f"Send a <b>display label</b> (e.g. <code>qwen3:8b (Ollama)</code>).\n"
-                     f"Or send <code>.</code> to auto-generate.",
-                parse_mode="HTML",
-            )
-            return True
-
-        elif step == "label":
-            model_id = state.get("model_id", "")
-            driver = state.get("driver", "ollama")
-            if text == ".":
-                label = f"{model_id} (Ollama)"
-            else:
-                label = text
-
-            entry = {
-                "key": _make_model_key(model_id, driver),
-                "label": label,
-                "driver": driver,
-                "model_id": model_id,
-            }
-            if driver == "ollama":
-                entry["base_url"] = "http://localhost:11434"
-
-            graph_models = await get_config("graph.extractor_models", [])
-            existing = next((m for m in graph_models if m["key"] == entry["key"]), None)
-            if existing:
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Graph <code>{entry['key']}</code> already exists.",
-                    parse_mode="HTML",
-                )
-                self._auth_state.pop(user_id, None)
-                return True
-
-            graph_models.append(entry)
-            await set_config("graph.extractor_models", graph_models)
-            # Auto-set as active if first
-            if len(graph_models) == 1:
-                await set_config("graph.active_extractor", entry["key"])
-                await set_config("graph.extractor_driver", driver)
-                await set_config("graph.extractor_model", model_id)
-
-            await bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"✅ <b>Graph extractor added:</b>\n\n"
-                    f"Key: <code>{entry['key']}</code>\n"
-                    f"Label: {entry['label']}\n"
-                    f"Driver: {driver}\n\n"
-                    f"Use /graph to manage."
-                ),
-                parse_mode="HTML",
-            )
-            logger.info(f"Graph extractor added: {entry}")
-            self._auth_state.pop(user_id, None)
-            return True
-
-        return False
 
     async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Manage the shell_guard runtime allowlist (owner only).
@@ -8917,8 +8559,6 @@ Or just send me a message!"""
             return await self._process_embed_edit_label(user_id, chat_id, text, state, context)
         elif auth_type == "eval_add":
             return await self._process_addeval_input(user_id, chat_id, text, state, context)
-        elif auth_type == "graph_add":
-            return await self._process_addgraph_input(user_id, chat_id, text, state, context)
         elif auth_type == "group_alias":
             return await self._process_group_alias_input(user_id, chat_id, text, state, context)
         elif auth_type == "group_add":
@@ -10377,9 +10017,6 @@ Or just send me a message!"""
 
         elif data.startswith("imggen:"):
             await self._handle_imggen_callback(query, data)
-
-        elif data.startswith("graph:"):
-            await self._handle_graph_callback(query, data)
 
         elif data.startswith("consent_toggle:"):
             toggle = data.split(":", 1)[1]

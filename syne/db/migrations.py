@@ -1209,6 +1209,48 @@ async def _m41_remove_auto_capture(conn) -> None:
         "('memory.auto_capture', 'memory.auto_evaluate', 'memory.auto_capture_category')"
     )
 
+async def _m42_kg_relation_sources(conn) -> None:
+    """KG links keep every source (Riyo, 14 Nov 2026). Idempotent.
+
+      * kg_relation_sources: one row per (relation, source). source_type is
+        'memory' or 'message'; origin is 'llm' (extracted by a model) or
+        'rule' (built from written references, no AI). A relation found in
+        many chunks keeps all of them instead of only the last one.
+      * Backfill: every kg_relations.source_memory_id becomes one
+        'memory' / 'llm' row. Earlier sources were already overwritten and
+        cannot be recovered.
+      * ensure_kg_entities_hnsw_index() and its index dropped: entity
+        embeddings are no longer used. kg_entities.embedding is kept.
+      * AI extraction removed: config graph.enabled / extractor_driver /
+        extractor_model / extractor_models / active_extractor deleted.
+        memory.kg_processed is kept (unused).
+    """
+    await conn.execute(
+        "CREATE TABLE IF NOT EXISTS kg_relation_sources ("
+        " relation_id INT NOT NULL REFERENCES kg_relations(id) ON DELETE CASCADE,"
+        " source_type VARCHAR(20) NOT NULL CHECK (source_type IN ('memory', 'message')),"
+        " source_id INT NOT NULL,"
+        " origin VARCHAR(20) NOT NULL DEFAULT 'llm' CHECK (origin IN ('llm', 'rule')),"
+        " created_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+        " PRIMARY KEY (relation_id, source_type, source_id))"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kg_relation_sources_source "
+        "ON kg_relation_sources (source_type, source_id)"
+    )
+    await conn.execute(
+        "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin) "
+        "SELECT id, 'memory', source_memory_id, 'llm' FROM kg_relations "
+        "WHERE source_memory_id IS NOT NULL ON CONFLICT DO NOTHING"
+    )
+    await conn.execute("DROP INDEX IF EXISTS idx_kg_entities_embedding_hnsw")
+    await conn.execute("DROP FUNCTION IF EXISTS ensure_kg_entities_hnsw_index()")
+    await conn.execute(
+        "DELETE FROM config WHERE key IN ('graph.enabled', 'graph.extractor_driver', "
+        "'graph.extractor_model', 'graph.extractor_models', 'graph.active_extractor')"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1251,6 +1293,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (39, _m39_history_search_judgement, "transactional"),
     (40, _m40_kg_semantic_recall, "transactional"),
     (41, _m41_remove_auto_capture, "transactional"),
+    (42, _m42_kg_relation_sources, "transactional"),
 ]
 
 

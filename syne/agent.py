@@ -2165,13 +2165,6 @@ class SyneAgent:
             permanent=True,
         )
         if mem_id:
-            # Permanent memory → trigger KG extraction
-            try:
-                import asyncio
-                from .memory.graph import extract_and_store as graph_extract
-                asyncio.create_task(graph_extract(self.provider, content, mem_id))
-            except Exception as e:
-                logger.debug(f"KG extraction skipped: {e}")
             if action == "updated":
                 return (
                     f"⚠️ OVERWROTE existing memory id {mem_id} — this was NOT "
@@ -2348,13 +2341,6 @@ class SyneAgent:
                 pass
             return f"Error attaching file: {e}"
 
-        # Trigger KG extraction (same as memory_store)
-        try:
-            import asyncio
-            from .memory.graph import extract_and_store as graph_extract
-            asyncio.create_task(graph_extract(self.provider, content, mem_id))
-        except Exception as e:
-            logger.debug(f"KG extraction skipped: {e}")
 
         size_kb = size / 1024
         size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"

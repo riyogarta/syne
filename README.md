@@ -190,7 +190,7 @@ Syne:  Stored.
 
 > **Switching embedding providers.** Different models produce incompatible vector spaces, so you must re-embed after switching. With the **same vector dimension** no data is lost: `syne memory reembed-memory --force` re-embeds every memory row (resumable, HNSW auto-rebuilt), and `syne memory reembed-history` re-embeds the messages table. A **different dimension** cannot be re-embedded in place — `/embedding` deletes all memories after a confirmation. Use the `/embedding` command in Telegram to change providers. See [Server Tiers](#server-tiers) for the same guidance.
 
-Graph extraction uses the main chat LLM by default, switchable to Ollama via `/graph` in Telegram. Manage extractors, toggle on/off, reprocess existing memories, and view stats from the same command.
+The knowledge graph is not filled by AI extraction. Links are built from written references (verse numbers, hadith numbers, chunk order) without a model; every source of a link is kept.
 
 #### 3. Decay Engine — "What should I forget?"
 
@@ -880,7 +880,6 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/restore` | Restore database from backup | Owner |
 | `/backupconf` | Back up config only (models, credentials, per-user model overrides) | Owner |
 | `/restoreconf` | Restore a config backup — shows the changes first, memories untouched | Owner |
-| `/graph` | Manage knowledge graph extractors | Owner |
 | `/nodes` | Manage remote nodes | Owner |
 | `/update` | Update Syne to latest version | Owner |
 | `/quit` | End conversation | Owner |

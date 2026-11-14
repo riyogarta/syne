@@ -1059,18 +1059,9 @@ class Conversation:
                 # private knowledge as memory recall, so it needs the same
                 # Rule 760/765 gate. Omitting it defaulted every requester to
                 # owner-level visibility.
-                # Semantic graph recall reuses the vector memory recall
-                # embeds (same text, same 2-word floor, shared under one
-                # lock), so it costs no extra embed call.
-                _gw = [
-                    w for w in (recall_query or user_message).strip().split()
-                    if len(w) > 1
-                ]
-                _gv = await _shared_query_vector() if len(_gw) >= 2 else None
                 return await _recall_graph(
                     recall_query or user_message,
                     requester_access_level=access_level,
-                    query_vector=_gv,
                     log_scope={
                         "session_id": self.session_id,
                         "platform": getattr(self.inbound, "platform", None),

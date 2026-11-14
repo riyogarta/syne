@@ -10,9 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_migration_41_registered():
-    assert M.MIGRATIONS[-1][0] == 41
-    assert M.MIGRATIONS[-1][1] is M._m41_remove_auto_capture
-    assert M.CURRENT_SCHEMA_VERSION == 41
+    entry = next(m for m in M.MIGRATIONS if m[0] == 41)
+    assert entry[1] is M._m41_remove_auto_capture
+    assert M.CURRENT_SCHEMA_VERSION >= 41
 
 
 async def _run(raw_category):

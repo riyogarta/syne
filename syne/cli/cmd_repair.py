@@ -312,7 +312,6 @@ def repair(fix):
             for table, index_name, ensure_fn in (
                 ("memory",   "idx_memory_embedding_hnsw",   "ensure_memory_hnsw_index"),
                 ("messages", "idx_messages_embedding_hnsw", "ensure_messages_hnsw_index"),
-                ("kg_entities", "idx_kg_entities_embedding_hnsw", "ensure_kg_entities_hnsw_index"),
             ):
                 async with get_connection() as conn:
                     idx = await conn.fetchval(
