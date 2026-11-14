@@ -51,8 +51,9 @@ def test_aliases_come_from_reference_entry():
 
 async def test_migration_43_seeds_without_overwrite():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 43 and M.MIGRATIONS[-1][1] is M._m43_seed_kg_rule_config
-    assert M.CURRENT_SCHEMA_VERSION == 43
+    entry = next(m for m in M.MIGRATIONS if m[0] == 43)
+    assert entry[1] is M._m43_seed_kg_rule_config
+    assert M.CURRENT_SCHEMA_VERSION >= 43
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m43_seed_kg_rule_config(conn)
@@ -108,7 +109,8 @@ HOP2 = [
 
 
 async def _links(ctx, ids, **kw):
-    with patch("syne.memory.graph.get_connection", return_value=ctx):
+    with patch("syne.memory.graph.get_connection", return_value=ctx), \
+         patch("syne.memory.graph.get_config", AsyncMock(return_value=None)):
         return await G.recall_chunk_links(ids, **kw)
 
 
@@ -150,3 +152,52 @@ async def test_chunk_links_public_filter():
 def test_conversation_wires_chunk_links():
     src = (pathlib.Path(__file__).parent.parent / "syne/conversation.py").read_text()
     assert "recall_chunk_links" in src and "kg.chunk_link_limit" in src
+
+
+# ── v1.22.66 ─────────────────────────────────────────────────────────────
+
+async def test_chunk_links_skip_other_parts_of_same_document():
+    hop2 = [
+        _rel(9, 101, "Tafsir 2:27 (bagian 2/2) [#11]", "chunk", "explains", 900, "QS 2:27", "ayah"),
+    ] + HOP2
+    ctx, _ = _ctx(SEEDS, HOP1, hop2)
+    out = await _links(ctx, [10], limit=10)
+    assert not any("bagian 2/2) [#11] [chunk] --explains" in l for l in out)
+    assert any("Shahih Bukhari" in l for l in out) and len(out) == 4
+
+
+def test_chunk_base():
+    import re as _re
+    pr = _re.compile(R.DEFAULT_PART_PATTERN)
+    assert G._chunk_base("Tafsir X Ayat 1 (bagian 3/7) [#42512]", pr) == "tafsir x ayat 1"
+    assert G._chunk_base("Al-Quran - Al-Baqarah [#655]", pr) == "al-quran - al-baqarah"
+
+
+QROWS2 = QROWS + [_q(7, 5, "Al-Ma'idah", 1, 120), _q(8, 27, "An-Naml", 1, 93),
+                  _q(9, 64, "At-Taghabun", 1, 18), _q(10, 81, "At-Takwir", 1, 29)]
+
+
+def test_qs_pattern_surat_and_ayat_punct():
+    i = R.build_surah_index((r["content"] for r in QROWS2), R.DEFAULT_SURAH_ALIASES)
+    text = ("QS an-Nisaa' ayat; 6, QS surat an-Naml ayat 39, QS Al Ma'idah ayat: 3, "
+            "QS at Taqwir 29, QS At Thaghobun 11, QS. Al-Hujurat: 13")
+    refs, rejects = R.parse_mentions(text, i)
+    assert refs == [R.Ref(4, 6, 6), R.Ref(27, 39, 39), R.Ref(5, 3, 3),
+                    R.Ref(81, 29, 29), R.Ref(64, 11, 11), R.Ref(49, 13, 13)]
+    assert rejects == []
+
+
+async def test_migration_44():
+    from syne.db import migrations as M
+    assert M.MIGRATIONS[-1][0] == 44 and M.MIGRATIONS[-1][1] is M._m44_kg_qs_pattern_and_aliases
+    assert M.CURRENT_SCHEMA_VERSION == 44
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    await M._m44_kg_qs_pattern_and_aliases(conn)
+    calls = conn.execute.call_args_list
+    assert len(calls) == 3
+    assert "value = $2::jsonb" in calls[0].args[0]
+    assert json.loads(calls[0].args[1]) == R.DEFAULT_QS_PATTERN
+    assert json.loads(calls[0].args[2]) == M._KG_QS_PATTERN_V43 != R.DEFAULT_QS_PATTERN
+    assert [c.args[1:] for c in calls[1:]] == [("At Taqwir", 81), ("At Thaghobun", 64)]
+    assert all("NOT (value->'alquran'->'aliases' ?" in c.args[0] for c in calls[1:])

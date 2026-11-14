@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Optional, TYPE_CHECKING
 
 from ..db.connection import get_connection
 from ..db.models import get_config
+from .kg_refs import DEFAULT_PART_PATTERN
 
 if TYPE_CHECKING:
     from ..llm.provider import LLMProvider
@@ -380,8 +382,17 @@ async def recall_graph(
 
 # Links of recalled reference chunks (rule-built KG, v1.22.65).
 _KG_LINK_HOP1 = 200        # hop-1 relations fetched for the recalled chunks
-_KG_LINK_PER_AYAH = 5      # hop-2 relations fetched per ayah reached
+_KG_LINK_PER_AYAH = 20     # hop-2 relations fetched per ayah reached
 _KG_LINK_FIRST = ("explains", "asbab_of", "cites")
+_KG_LINK_ID_SUFFIX = re.compile(r"\s*\[#\d+\]\s*$")
+
+
+def _chunk_base(name: str, part_re) -> str:
+    """Chunk entity name without '[#id]' and '(bagian i/n)': one per document."""
+    s = _KG_LINK_ID_SUFFIX.sub("", name or "")
+    if part_re is not None:
+        s = part_re.sub("", s)
+    return s.strip().lower()
 
 
 async def recall_chunk_links(
@@ -397,8 +408,11 @@ async def recall_chunk_links(
              chunk -> its ayahs, part -> next part);
       hop 2: for every ayah reached, other chunks linked to that ayah (the
              Qur'an chunk holding it first, then tafsir, hadith citing it).
-    Order: hop-1 explains/asbab_of/cites, then hop 2, then the rest of hop 1;
-    within hop 1 by the recall rank of the seed chunk. Rule 760/765: for a
+    Order: hop-1 explains/asbab_of/cites, then hop 2 (contains, asbab_of,
+    cites, explains), then the rest of hop 1; within hop 1 by the recall
+    rank of the seed chunk. Parts of one document count once: a line whose
+    (document, predicate, document) is already shown is skipped, so other
+    parts of the same tafsir do not crowd out hadith or other references. Rule 760/765: for a
     non-owner/family requester every relation must come from a public
     category, same gate as recall_graph. Returns [] on no-match/failure.
     """
@@ -425,6 +439,20 @@ async def recall_chunk_links(
             return []
     cat_join = "JOIN memory m ON m.id = r.source_memory_id" if public_cats is not None else ""
     extra = [public_cats] if public_cats is not None else []
+
+    try:
+        _pp = await get_config("kg.part_pattern", None)
+    except Exception:
+        _pp = None
+    try:
+        part_re = re.compile(_pp or DEFAULT_PART_PATTERN)
+    except re.error:
+        part_re = re.compile(DEFAULT_PART_PATTERN)
+
+    def _key(r) -> tuple:
+        s = _chunk_base(r["subject"], part_re) if r["s_type"] == "chunk" else r["subject"]
+        o = _chunk_base(r["object"], part_re) if r["o_type"] == "chunk" else r["object"]
+        return (s, r["predicate"], o)
 
     def _line(r) -> str:
         return (f"- {r['subject']} [{r['s_type']}] --{r['predicate']}--> "
@@ -489,12 +517,12 @@ async def recall_chunk_links(
                         {cat_join}
                         WHERE r.object_id = a.eid AND r.subject_id <> ALL($3::int[])
                         {cond2}
-                        ORDER BY (r.predicate = 'contains') DESC, r.id
+                        ORDER BY CASE r.predicate WHEN 'contains' THEN 0 WHEN 'asbab_of' THEN 1 WHEN 'cites' THEN 2 ELSE 3 END, r.id
                         LIMIT $2
                     ) x
                     JOIN kg_entities s ON s.id = x.subject_id
                     JOIN kg_entities o ON o.id = x.object_id
-                    ORDER BY x.ord, (x.predicate = 'contains') DESC, x.rid
+                    ORDER BY x.ord, CASE x.predicate WHEN 'contains' THEN 0 WHEN 'asbab_of' THEN 1 WHEN 'cites' THEN 2 ELSE 3 END, x.rid
                     """,
                     ayah_ids, _KG_LINK_PER_AYAH, seed_ids, *extra,
                 )
@@ -506,11 +534,14 @@ async def recall_chunk_links(
     rest = [r for r in hop1 if r["predicate"] not in _KG_LINK_FIRST]
     out: list[str] = []
     seen: set = set()
+    seen_keys: set = set()
     for r in first + list(hop2) + rest:
         rid = int(r["rid"])
-        if rid in seen:
+        k = _key(r)
+        if rid in seen or k in seen_keys:
             continue
         seen.add(rid)
+        seen_keys.add(k)
         out.append(_line(r))
         if len(out) >= limit:
             break

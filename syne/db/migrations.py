@@ -1268,6 +1268,35 @@ async def _m43_seed_kg_rule_config(conn) -> None:
         )
 
 
+# kg.qs_pattern as seeded by migration 43 (v1.22.65).
+_KG_QS_PATTERN_V43 = "\\bQ\\.?\\s?S\\.?\\s*(?P<name>[A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF][A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF'\\u2019\\u2018\\u02bf\\u02be`\\- ]{0,38}?)?\\s*(?:[(\\[]\\s*(?P<snum>\\d{1,3})\\s*[)\\]])?\\s*(?:(?P<snum2>\\d{1,3})\\s*:\\s*)?\\s*(?:[:;,.]|(?i:ayat|ayah))?\\s*(?P<a1>\\d{1,3})(?:\\s*[-\\u2013\\u2014]\\s*(?P<a2>\\d{1,3}))?(?!\\d)"
+
+
+async def _m44_kg_qs_pattern_and_aliases(conn) -> None:
+    """QS pattern reads 'surat X' and 'ayat; N'; two more aliases (Riyo, 14 Nov 2026).
+
+    kg.qs_pattern is replaced only while it still holds the v43 default (an
+    owner edit is kept). The aliases are added to the Qur'an entry of
+    kg.ref_sources only when that entry has an 'aliases' object without
+    them. Idempotent.
+    """
+    from ..memory import kg_refs as R
+    await conn.execute(
+        "UPDATE config SET value = $1::jsonb, updated_at = NOW() "
+        "WHERE key = 'kg.qs_pattern' AND value = $2::jsonb",
+        json.dumps(R.DEFAULT_QS_PATTERN), json.dumps(_KG_QS_PATTERN_V43),
+    )
+    for name, surah in (("At Taqwir", 81), ("At Thaghobun", 64)):
+        await conn.execute(
+            "UPDATE config SET value = jsonb_set(value, ARRAY['alquran', 'aliases', $1::text], "
+            "to_jsonb($2::int)), updated_at = NOW() "
+            "WHERE key = 'kg.ref_sources' "
+            "AND jsonb_typeof(value->'alquran'->'aliases') = 'object' "
+            "AND NOT (value->'alquran'->'aliases' ? $1::text)",
+            name, surah,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1312,6 +1341,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (41, _m41_remove_auto_capture, "transactional"),
     (42, _m42_kg_relation_sources, "transactional"),
     (43, _m43_seed_kg_rule_config, "transactional"),
+    (44, _m44_kg_qs_pattern_and_aliases, "transactional"),
 ]
 
 
