@@ -210,7 +210,7 @@ class ToolRegistry:
         _t_handler = time.monotonic()
         try:
             call_args = {**arguments}
-            if name in ("history_search", "history_expand"):
+            if name in ("history_search", "history_expand", "history_judge"):
                 # Visibility comes from the live chat, never from the model:
                 # anything it put under _scope is overwritten here. Sub-agents
                 # pass the scope captured from their parent chat.

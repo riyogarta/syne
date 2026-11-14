@@ -14,8 +14,13 @@ Two levels, every hit expanded (Riyo, 13 Nov 2026):
   * ``history_expand`` stays, only to widen one block.
   * Every search is written to history_search_log (query, level, hit ids,
     similarities) for choosing a similarity threshold later. A level-2
-    search with the same query in the same session marks the newest
-    level-1 search as escalated: the model judged level 1 not found.
+    search in the same session within _ESCALATE_WINDOW_MIN minutes of a
+    level-1 search marks that level-1 row as escalated, whatever the
+    wording of either query: the model judged level 1 not found.
+  * ``history_judge`` (Riyo, 14 Nov 2026): after a similarity search the
+    model records its verdict on that log row - found or not, and which
+    anchor_ids hold the answer. Threshold research data only; analysis
+    uses sort_by=similarity rows.
 
 Visibility (Riyo, 7 Nov 2026): both tools are open to everyone (0o444), but
 every query is scoped in SQL by who is asking - see scope_sql():
@@ -196,12 +201,18 @@ def _iso_or_none(raw: Optional[str]) -> Optional[datetime]:
 _LEVEL_ROLE = {1: "user", 2: "assistant"}
 
 
-async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: list) -> None:
+# A level-2 search this many minutes after a level-1 search in the same
+# session counts as escalation from it, whatever the wording of either query.
+_ESCALATE_WINDOW_MIN = 10
+
+
+async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: list) -> Optional[int]:
     """One history_search_log row per search, for threshold research.
 
-    A level-2 search whose query equals (case- and edge-whitespace-
-    insensitive) the newest level-1 search of the same session marks that
-    level-1 row as escalated: the model judged level 1 not found.
+    A level-2 search marks the newest level-1 search of the same session
+    within _ESCALATE_WINDOW_MIN minutes as escalated (the model judged
+    level 1 not found). The query wording is not compared: a level-2
+    search is usually reworded. Returns the new row id (None on failure).
     Fail-quiet: logging never breaks a search.
     """
     sid = scope.get("session_id")
@@ -211,14 +222,15 @@ async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: l
                 await conn.execute(
                     "UPDATE history_search_log SET escalated = true WHERE id = ("
                     "SELECT id FROM history_search_log WHERE session_id = $1 "
-                    "AND level = 1 AND lower(btrim(query)) = lower(btrim($2)) "
+                    "AND level = 1 AND created_at > now() - make_interval(mins => $2) "
                     "ORDER BY id DESC LIMIT 1)",
-                    int(sid), query,
+                    int(sid), _ESCALATE_WINDOW_MIN,
                 )
-            await conn.execute(
+            log_id = await conn.fetchval(
                 "INSERT INTO history_search_log (session_id, platform, chat_id, "
                 "query, level, sort_by, hit_ids, similarities) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7::int[], $8::float8[])",
+                "VALUES ($1, $2, $3, $4, $5, $6, $7::int[], $8::float8[]) "
+                "RETURNING id",
                 int(sid) if sid is not None else None,
                 str(scope.get("platform") or ""),
                 str(scope.get("chat_id") or ""),
@@ -226,8 +238,10 @@ async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: l
                 [int(r["id"]) for r in rows],
                 [float(r["similarity"] or 0.0) for r in rows],
             )
+            return int(log_id) if log_id is not None else None
     except Exception as e:
         logger.warning(f"history_search_log write failed: {e}")
+        return None
 
 
 async def history_search_handler(
@@ -381,7 +395,7 @@ async def history_search_handler(
         logger.exception("history_search DB error")
         return f"Error: database query failed: {e}"
 
-    await _log_search(_scope, query, level, sort_by, rows)
+    log_id = await _log_search(_scope, query, level, sort_by, rows)
 
     if not rows:
         msg = "No matches. Try a broader query, a different keyword, or wider since/until range."
@@ -409,6 +423,7 @@ async def history_search_handler(
         "returned": len(hits),
         "hits": hits,
         "next_offset": offset + len(hits),
+        "log_id": log_id,
     }
     expanded = await _expand([r["id"] for r in rows], None, None, _scope)
     if isinstance(expanded, str):
@@ -424,6 +439,12 @@ async def history_search_handler(
         payload["hint"] = (
             "Level-2 hits are your own earlier replies: claims, not verified "
             "facts. Say so when you rely on one."
+        )
+    if sort_by == "similarity" and log_id is not None:
+        payload["judge"] = (
+            f"After reading the blocks, call history_judge once: log_id={log_id}, "
+            "found=true with relevant_ids = the anchor_id(s) whose block holds "
+            "the answer, or found=false if none does."
         )
     return json.dumps(payload, ensure_ascii=False)
 
@@ -454,7 +475,9 @@ HISTORY_SEARCH_TOOL = {
         "owner/family = this chat plus their own DMs on this platform. Only the "
         "owner in a direct message may widen it with platform / chat_id / "
         "all_chats (or session_id) - use them when the owner asks about another "
-        "chat or platform; anywhere else they are refused."
+        "chat or platform; anywhere else they are refused. After a "
+        "sort_by=similarity search, call history_judge once with its log_id "
+        "(found or not, and which anchor_ids hold the answer)."
     ),
     "parameters": {
         "type": "object",
@@ -1046,4 +1069,118 @@ HISTORY_EXPAND_TOOL = {
     },
     "handler": history_expand_handler,
     "permission": 0o444,  # everyone; anchors outside the scope are withheld
+}
+
+
+
+# ---------------------------------------------------------------------------
+# history_judge — threshold research (Riyo, 14 Nov 2026)
+# ---------------------------------------------------------------------------
+
+
+def _as_bool(value) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("true", "yes", "1"):
+            return True
+        if s in ("false", "no", "0"):
+            return False
+    return None
+
+
+async def history_judge_handler(
+    log_id=None,
+    found=None,
+    relevant_ids: Optional[list] = None,
+    _scope: Optional[dict] = None,
+) -> str:
+    """Record the model's verdict on one history_search log row."""
+    if not _scope:
+        return _NO_SCOPE_ERROR
+    try:
+        lid = int(log_id)
+    except (TypeError, ValueError):
+        return f"Error: log_id must be the integer log_id of a history_search result, got {log_id!r}."
+    verdict = _as_bool(found)
+    if verdict is None:
+        return f"Error: found must be true or false, got {found!r}."
+    try:
+        rel = list(dict.fromkeys(int(x) for x in (relevant_ids or [])))
+    except (TypeError, ValueError):
+        return "Error: relevant_ids must be a list of anchor_id integers."
+    if not verdict and rel:
+        return "Error: found=false cannot come with relevant_ids. Use found=true if one of them holds the answer."
+    if verdict and not rel:
+        return "Error: found=true needs relevant_ids: the anchor_id(s) whose block holds the answer."
+
+    sid = _scope.get("session_id")
+    try:
+        async with get_connection() as conn:
+            row = await conn.fetchrow(
+                "SELECT session_id, hit_ids FROM history_search_log WHERE id = $1", lid,
+            )
+            if row is None:
+                return f"Error: no history_search log row with log_id {lid}."
+            if sid is None or row["session_id"] is None or int(row["session_id"]) != int(sid):
+                return f"Error: log_id {lid} belongs to a search made in another chat."
+            hits = [int(h) for h in (row["hit_ids"] or [])]
+            kept = [i for i in rel if i in hits]
+            ignored = [i for i in rel if i not in hits]
+            if verdict and not kept:
+                return (
+                    f"Error: none of relevant_ids {rel} is a hit of log_id {lid}. "
+                    f"Its hits: {hits}."
+                )
+            await conn.execute(
+                "UPDATE history_search_log SET judged_found = $2, "
+                "relevant_ids = $3::int[], judged_at = now() WHERE id = $1",
+                lid, verdict, kept,
+            )
+    except Exception as e:
+        logger.warning(f"history_judge failed: {e}")
+        return f"Error: could not record the judgement: {e}"
+
+    out = {"ok": True, "log_id": lid, "found": verdict, "relevant_ids": kept}
+    if ignored:
+        out["ignored_ids"] = ignored
+        out["note"] = "ignored_ids are not hits of that search and were not recorded."
+    return json.dumps(out, ensure_ascii=False)
+
+
+HISTORY_JUDGE_TOOL = {
+    "name": "history_judge",
+    "description": (
+        "Record whether one history_search (sort_by=similarity) found what you "
+        "were looking for. Call it once, after reading that result's blocks, "
+        "with its log_id: found=true plus relevant_ids = the anchor_id(s) whose "
+        "block actually holds the answer, or found=false when none of the hits "
+        "answers it. Judge honestly: this is research data for a similarity "
+        "threshold and does not change your answer. Calling again for the same "
+        "log_id replaces the earlier judgement."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "log_id": {
+                "type": "integer",
+                "description": "log_id from the history_search result.",
+            },
+            "found": {
+                "type": "boolean",
+                "description": "true = a hit holds what you were looking for; false = none does.",
+            },
+            "relevant_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "anchor_id(s) whose block holds the answer. Required when found=true, empty when false.",
+            },
+        },
+        "required": ["log_id", "found"],
+    },
+    "handler": history_judge_handler,
+    "permission": 0o666,  # everyone, no gate; only rows of the asker's own session
 }

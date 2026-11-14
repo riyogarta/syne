@@ -1064,6 +1064,24 @@ async def _m38_history_search_levels(conn) -> None:
     """)
 
 
+async def _m39_history_search_judgement(conn) -> None:
+    """history_search_log verdict columns (Riyo, 14 Nov 2026). Idempotent.
+
+      * judged_found / relevant_ids / judged_at: written by history_judge,
+        the model's verdict on one search (found or not, which hits hold
+        the answer) - data for choosing a similarity threshold
+    """
+    await conn.execute(
+        "ALTER TABLE history_search_log ADD COLUMN IF NOT EXISTS judged_found BOOLEAN"
+    )
+    await conn.execute(
+        "ALTER TABLE history_search_log ADD COLUMN IF NOT EXISTS relevant_ids INT[]"
+    )
+    await conn.execute(
+        "ALTER TABLE history_search_log ADD COLUMN IF NOT EXISTS judged_at TIMESTAMPTZ"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1103,6 +1121,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (36, _m36_auto_recall_as_history_tools, "transactional"),
     (37, _m37_remove_auto_recall, "transactional"),
     (38, _m38_history_search_levels, "transactional"),
+    (39, _m39_history_search_judgement, "transactional"),
 ]
 
 

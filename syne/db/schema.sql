@@ -172,7 +172,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_embedding_pending
 -- HISTORY_SEARCH_LOG: one row per history_search call (Riyo, 13 Nov 2026).
 -- Research data for a similarity threshold: query, level (1 = user rows,
 -- 2 = assistant rows), hit ids + similarities. escalated = a level-2 search
--- with the same query followed in the same session (level 1 judged not found).
+-- followed in the same session within 10 minutes (level 1 judged not found).
+-- judged_found / relevant_ids / judged_at: the model's verdict written by
+-- history_judge (Riyo, 14 Nov 2026).
 CREATE TABLE IF NOT EXISTS history_search_log (
     id           BIGSERIAL PRIMARY KEY,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -184,7 +186,10 @@ CREATE TABLE IF NOT EXISTS history_search_log (
     sort_by      TEXT,
     hit_ids      INT[] NOT NULL DEFAULT '{}',
     similarities FLOAT8[] NOT NULL DEFAULT '{}',
-    escalated    BOOLEAN NOT NULL DEFAULT false
+    escalated    BOOLEAN NOT NULL DEFAULT false,
+    judged_found BOOLEAN,
+    relevant_ids INT[],
+    judged_at    TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_history_search_log_session
     ON history_search_log (session_id, id);

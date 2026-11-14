@@ -44,6 +44,7 @@ TOOL_PERMISSIONS: dict[str, int] = {
     "read_source":        0o400,
     "history_search":     0o444,  # everyone; rows scoped per requester (tools/history.py)
     "history_expand":     0o444,  # everyone; anchors outside the scope withheld
+    "history_judge":      0o666,  # everyone; writes a verdict on its own session's search log only
     "subagent_status":    0o440,  # owner + family
     "memory_search":      0o444,  # public via Rule 765
     "memory_get_file":    0o444,

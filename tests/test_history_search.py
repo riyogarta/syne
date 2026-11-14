@@ -200,9 +200,14 @@ class TestHistorySearchLevels:
         async def execute(sql, *params):
             cap["execute"].append((sql, params))
 
+        async def fetchval(sql, *params):
+            cap["execute"].append((sql, params))
+            return 42
+
         conn = AsyncMock()
         conn.fetch = AsyncMock(side_effect=fetch)
         conn.execute = AsyncMock(side_effect=execute)
+        conn.fetchval = AsyncMock(side_effect=fetchval)
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=conn)
         ctx.__aexit__ = AsyncMock(return_value=False)
@@ -245,6 +250,12 @@ class TestHistorySearchLevels:
         assert any("INSERT INTO history_search_log" in s for s in sqls)
         # The escalation update runs before this search's own row is inserted.
         assert "escalated = true" in sqls[0]
+        # Reworded level-2 queries still escalate: wording is not compared,
+        # only session + time window.
+        esc_sql, esc_params = cap["execute"][0]
+        assert "btrim(query)" not in esc_sql
+        assert "make_interval" in esc_sql
+        assert esc_params == (1, H._ESCALATE_WINDOW_MIN)
 
     async def test_log_failure_does_not_break_search(self):
         prov = MagicMock()
@@ -253,6 +264,7 @@ class TestHistorySearchLevels:
         conn = AsyncMock()
         conn.fetch = AsyncMock(return_value=[])
         conn.execute = AsyncMock(side_effect=RuntimeError("no table"))
+        conn.fetchval = AsyncMock(side_effect=RuntimeError("no table"))
         ctx = AsyncMock()
         ctx.__aenter__ = AsyncMock(return_value=conn)
         ctx.__aexit__ = AsyncMock(return_value=False)

@@ -637,7 +637,8 @@ class SyneAgent:
         # messages carry tool outputs, cross-chat context, and other family
         # members' turns — Rule 760 (family privacy) applies here.
         from .tools.history import (
-            HISTORY_SEARCH_TOOL, HISTORY_EXPAND_TOOL, set_embedding_provider,
+            HISTORY_SEARCH_TOOL, HISTORY_EXPAND_TOOL, HISTORY_JUDGE_TOOL,
+            set_embedding_provider,
         )
         # Wire the embedding provider so history_search can vectorise queries.
         # None-safe: if the provider isn't ready yet, the handler returns a
@@ -661,6 +662,13 @@ class SyneAgent:
             handler=HISTORY_EXPAND_TOOL["handler"],
             permission=HISTORY_EXPAND_TOOL["permission"],
             scrub_level="safe",
+        )
+        self.tools.register(
+            name=HISTORY_JUDGE_TOOL["name"],
+            description=HISTORY_JUDGE_TOOL["description"],
+            parameters=HISTORY_JUDGE_TOOL["parameters"],
+            handler=HISTORY_JUDGE_TOOL["handler"],
+            permission=HISTORY_JUDGE_TOOL["permission"],
         )
 
         # ── File Operations (Core) ──
