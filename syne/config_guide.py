@@ -61,7 +61,7 @@ Controls how fast non-permanent memories fade and when they get promoted.
 - `recall_limit` — max memories injected into context per message.
 - `max_importance` — ceiling for importance scores (0.0–1.0).
 - `similarity_threshold` — cosine similarity >= this = duplicate, skip storage. Lower = more aggressive dedup.
-- `conflict_threshold` — cosine similarity >= this = same topic, resolve conflict (update existing). Lower = wider conflict detection.
+- `conflict_threshold` — cosine similarity between two memories >= this = same topic. At recall, same-category memories this close but with different content are flagged AUTHORITATIVE / CONFLICTED (nothing is overwritten). Lower = wider conflict detection.
 - **Increase recall_limit when**: Bot lacks context, forgets things mentioned recently.
 - **Decrease when**: Context window is tight, or too many irrelevant memories appear.
 - **Tune similarity thresholds when**: Too many duplicates stored (lower similarity_threshold) or valid updates being skipped (raise conflict_threshold).

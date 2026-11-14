@@ -116,7 +116,7 @@ class TestDetectConflicts:
             2, "Alice's favorite color is red",
             category="preference", source="system", similarity=0.85,
         )
-        result = engine._detect_conflicts([mem_a, mem_b])
+        result = engine._detect_conflicts([mem_a, mem_b], {(1, 2): 0.9})
         statuses = {r["id"]: r.get("_conflict_status") for r in result}
         assert "authoritative" in statuses.values()
         assert "conflicted" in statuses.values()
@@ -133,7 +133,7 @@ class TestDetectConflicts:
             category="preference", source="auto_captured", similarity=0.85,
             created_at=datetime(2025, 6, 1, tzinfo=timezone.utc),  # newer but lower priority
         )
-        result = engine._detect_conflicts([mem_user, mem_auto])
+        result = engine._detect_conflicts([mem_user, mem_auto], {(1, 2): 0.9})
         by_id = {r["id"]: r for r in result}
         assert by_id[1]["_conflict_status"] == "authoritative"
         assert by_id[2]["_conflict_status"] == "conflicted"
@@ -153,7 +153,7 @@ class TestDetectConflicts:
             category="fact", source="observed", similarity=0.85,
             created_at=newer,
         )
-        result = engine._detect_conflicts([mem_old, mem_new])
+        result = engine._detect_conflicts([mem_old, mem_new], {(1, 2): 0.9})
         by_id = {r["id"]: r for r in result}
         assert by_id[2]["_conflict_status"] == "authoritative"
         assert by_id[1]["_conflict_status"] == "conflicted"
@@ -169,7 +169,7 @@ class TestDetectConflicts:
             20, "Temperature is 30C",
             category="fact", source="auto_captured", similarity=0.8,
         )
-        result = engine._detect_conflicts([mem_a, mem_b])
+        result = engine._detect_conflicts([mem_a, mem_b], {(10, 20): 0.9})
         by_id = {r["id"]: r for r in result}
         assert by_id[20]["_conflicts_with"] == 10
 
@@ -189,3 +189,58 @@ class TestDetectConflicts:
         result = engine._detect_conflicts([mem_a, mem_b])
         assert "_conflict_status" not in result[0]
         assert "_conflict_status" not in result[1]
+
+
+class TestDetectConflictsMutualSimilarity:
+    """Conflict requires the two memories to be about the same topic."""
+
+    @pytest.fixture
+    def engine(self, mock_provider):
+        return MemoryEngine(mock_provider)
+
+    def test_unrelated_same_category_not_flagged(self, engine):
+        """Both match the query, but are far from each other -> no conflict.
+
+        Real case: a naming preference and a work-style preference
+        (mutual 0.576) were flagged as superseding each other.
+        """
+        mem_a = _make_memory(131, "Call the owner 'Pak Riyo' by default",
+                             category="preference", similarity=0.8)
+        mem_b = _make_memory(54529, "When the owner says 'I will do X', let him do it",
+                             category="preference", similarity=0.7)
+        result = engine._detect_conflicts([mem_a, mem_b], {(131, 54529): 0.576})
+        assert "_conflict_status" not in result[0]
+        assert "_conflict_status" not in result[1]
+
+    def test_no_mutual_data_not_flagged(self, engine):
+        """Without pairwise similarity the topic cannot be confirmed -> no flag."""
+        mem_a = _make_memory(1, "Alice works at Google", similarity=0.9)
+        mem_b = _make_memory(2, "Alice works at Meta", similarity=0.9)
+        result = engine._detect_conflicts([mem_a, mem_b])
+        assert "_conflict_status" not in result[0]
+        assert "_conflict_status" not in result[1]
+
+    def test_threshold_is_respected(self, engine):
+        mem_a = _make_memory(1, "Alice works at Google", similarity=0.9)
+        mem_b = _make_memory(2, "Alice works at Meta", similarity=0.9)
+        result = engine._detect_conflicts([mem_a, mem_b], {(1, 2): 0.75}, threshold=0.8)
+        assert "_conflict_status" not in result[0]
+        result = engine._detect_conflicts([mem_a, mem_b], {(1, 2): 0.85}, threshold=0.8)
+        assert {r.get("_conflict_status") for r in result} == {"authoritative", "conflicted"}
+
+    def test_recency_uses_updated_at(self, engine):
+        """An older row edited later is the newer statement."""
+        mem_edited = _make_memory(
+            1, "Alice works at Meta", source="observed", similarity=0.9,
+            created_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+        mem_edited["updated_at"] = datetime(2025, 12, 1, tzinfo=timezone.utc)
+        mem_other = _make_memory(
+            2, "Alice works at Google", source="observed", similarity=0.9,
+            created_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
+        )
+        result = engine._detect_conflicts([mem_edited, mem_other], {(1, 2): 0.9})
+        by_id = {r["id"]: r for r in result}
+        assert by_id[1]["_conflict_status"] == "authoritative"
+        assert by_id[2]["_conflict_status"] == "conflicted"
+        assert by_id[2]["_conflicts_with"] == 1

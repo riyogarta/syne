@@ -236,7 +236,7 @@ class MemoryEngine:
             rows = await conn.fetch(f"""
                 SELECT
                     m.id, m.content, m.category, m.source, m.importance,
-                    m.access_count, m.created_at,
+                    m.access_count, m.created_at, m.updated_at,
                     COALESCE(m.permanent, false) as permanent,
                     COALESCE(m.recall_count, 1) as recall_count,
                     1 - (m.embedding <=> $1::vector) as similarity,
@@ -312,28 +312,77 @@ class MemoryEngine:
             # This is CODE-ENFORCED so the LLM gets structured metadata
             # instead of relying on prompt instructions to detect conflicts.
             # ═══════════════════════════════════════════════════════════
-            results = self._detect_conflicts(results)
+            # Two results only conflict when they are about the SAME topic,
+            # i.e. their own embeddings are close to each other — not merely
+            # both close to the query. Pairwise similarity is computed in SQL
+            # for same-category result pairs only (a handful of rows).
+            from ..db.models import get_config
+            mutual = await self._mutual_similarity(conn, results)
+            conflict_threshold = float(
+                await get_config("memory.conflict_threshold", "0.70")
+            )
+            results = self._detect_conflicts(results, mutual, conflict_threshold)
 
             return results
 
-    def _detect_conflicts(self, results: list[dict]) -> list[dict]:
+    async def _mutual_similarity(self, conn, results: list[dict]) -> dict:
+        """Cosine similarity between recalled memories of the same category.
+
+        Returns {(low_id, high_id): similarity}. Empty when no category has
+        two or more results, so the common case costs no query.
+        """
+        by_cat: dict = {}
+        for r in results:
+            by_cat.setdefault(r.get("category", "fact"), []).append(r["id"])
+        ids = [i for group in by_cat.values() if len(group) > 1 for i in group]
+        if len(ids) < 2:
+            return {}
+        rows = await conn.fetch("""
+            SELECT a.id AS a_id, b.id AS b_id,
+                   1 - (a.embedding <=> b.embedding) AS sim
+            FROM memory a
+            JOIN memory b
+              ON a.id < b.id
+             AND a.category IS NOT DISTINCT FROM b.category
+            WHERE a.id = ANY($1::int[]) AND b.id = ANY($1::int[])
+              AND a.embedding IS NOT NULL AND b.embedding IS NOT NULL
+        """, ids)
+        return {
+            (row["a_id"], row["b_id"]): float(row["sim"])
+            for row in rows if row["sim"] is not None
+        }
+
+    def _detect_conflicts(
+        self,
+        results: list[dict],
+        mutual: Optional[dict] = None,
+        threshold: float = 0.70,
+    ) -> list[dict]:
         """Detect and flag conflicting memories in recall results.
 
         Two memories conflict when they:
         1. Are in the same category
-        2. Have high mutual similarity (same topic)
+        2. Have high mutual similarity (same topic): the cosine similarity
+           between the two memories themselves, from `mutual`
+           ({(low_id, high_id): sim}), must be >= `threshold`
+           (memory.conflict_threshold). Both being close to the QUERY is
+           not enough — that flagged unrelated memories of one category.
+           A pair missing from `mutual` is never flagged.
         3. But different content (different values)
 
         When conflicts are found:
         - Higher authority (user_confirmed > auto_captured) gets "authoritative" flag
         - Lower authority gets "conflicted" flag with reference to the authoritative one
-        - Same authority: newer gets "authoritative", older gets "conflicted"
+        - Same authority: newer gets "authoritative", older gets "conflicted".
+          "Newer" = updated_at (falls back to created_at), so a memory
+          edited via memory_update counts as the latest statement.
 
         This gives the LLM structured metadata to work with, instead of
         relying on prompt instructions to detect contradictions.
         """
         if len(results) < 2:
             return results
+        mutual = mutual or {}
 
         # Group by category
         by_category: dict[str, list[dict]] = {}
@@ -357,6 +406,10 @@ class MemoryEngine:
                         continue
                     if a["content"].strip() == b["content"].strip():
                         continue  # Same content, not a conflict
+                    pair = (min(a["id"], b["id"]), max(a["id"], b["id"]))
+                    pair_sim = mutual.get(pair)
+                    if pair_sim is None or pair_sim < threshold:
+                        continue  # Different topics, not a conflict
 
                     # Determine winner
                     a_pri = self._source_priority(a.get("source", "system"))
@@ -368,8 +421,8 @@ class MemoryEngine:
                         winner, loser = b, a
                     else:
                         # Same priority → newer wins
-                        a_time = a.get("created_at")
-                        b_time = b.get("created_at")
+                        a_time = a.get("updated_at") or a.get("created_at")
+                        b_time = b.get("updated_at") or b.get("created_at")
                         if a_time and b_time and a_time > b_time:
                             winner, loser = a, b
                         else:
