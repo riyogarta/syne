@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Optional, TYPE_CHECKING
 
 import httpx
@@ -222,7 +223,7 @@ async def _run_extraction(
             await _mark_kg_processed(memory_id)
             return False
 
-        await _store_graph(extracted, memory_id)
+        await _store_graph(extracted, memory_id, provider=provider)
         await _mark_kg_processed(memory_id)
         logger.info(
             f"Graph: stored {len(extracted.get('entities', []))} entities, "
@@ -441,7 +442,59 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
         return row["id"]
 
 
-async def _store_graph(extracted: dict, memory_id: int) -> None:
+def _entity_embed_text(name: str, entity_type: str = "", description: str = "") -> str:
+    """Text embedded for one entity: "name (type): description".
+
+    Used both at extraction time and by `syne memory reembed-kg`, so every
+    entity embedding is built from the same shape of text.
+    """
+    head = (name or "").strip()
+    et = (entity_type or "").strip()
+    if et:
+        head = f"{head} ({et})"
+    desc = (description or "").strip()
+    return f"{head}: {desc}" if desc else head
+
+
+async def _embed_entities(provider: "LLMProvider", entity_ids: list[int]) -> int:
+    """Embed the given entities that have no embedding yet. Fail-quiet.
+
+    Returns how many were embedded. A failure on one entity (provider error,
+    dimension mismatch) skips that entity only; extraction never breaks.
+    """
+    if not entity_ids:
+        return 0
+    try:
+        async with get_connection() as conn:
+            rows = await conn.fetch(
+                "SELECT id, name, entity_type, description FROM kg_entities "
+                "WHERE id = ANY($1::int[]) AND embedding IS NULL",
+                list(entity_ids),
+            )
+    except Exception as e:
+        logger.debug(f"Entity embed lookup failed: {e}")
+        return 0
+    done = 0
+    for r in rows:
+        try:
+            resp = await provider.embed(
+                _entity_embed_text(r["name"], r["entity_type"], r["description"])
+            )
+            vec = getattr(resp, "vector", None)
+            if not vec:
+                continue
+            async with get_connection() as conn:
+                await conn.execute(
+                    "UPDATE kg_entities SET embedding = $1::vector WHERE id = $2",
+                    str(list(vec)), r["id"],
+                )
+            done += 1
+        except Exception as e:
+            logger.debug(f"Entity #{r['id']} embed failed: {e}")
+    return done
+
+
+async def _store_graph(extracted: dict, memory_id: int, provider: "Optional[LLMProvider]" = None) -> None:
     """Store extracted entities and relations into the graph tables.
 
     Only creates entities that are referenced in relations — no orphans.
@@ -473,6 +526,15 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
             entity_id = await _resolve_entity(info["name"], info["type"], info["desc"])
             entity_map[name] = entity_id
 
+    # Entities this memory touched that have no embedding yet get one now,
+    # so semantic graph recall can find them (old entities are filled by
+    # `syne memory reembed-kg`). Fail-quiet: never blocks the relations.
+    if provider is not None and entity_map:
+        try:
+            await _embed_entities(provider, sorted(set(entity_map.values())))
+        except Exception as e:
+            logger.debug(f"Entity embedding skipped: {e}")
+
     # Store relations
     for r in relations:
         subj_name = r["subject"].strip().lower()
@@ -496,22 +558,159 @@ async def _store_graph(extracted: dict, memory_id: int) -> None:
             )
 
 
+# ── Graph recall: keyword + semantic, ranked (Riyo, 14 Nov 2026) ──────────
+# Entities are found two ways and every candidate keeps both scores:
+#   kw  = how many query words occur in the entity name (substring match,
+#         words >= 4 chars; no stop-word filter - that needs research first)
+#   sem = cosine similarity between the query vector and the entity
+#         embedding ("name (type): description"); None when the entity is
+#         not among the nearest _KG_SEM_CANDIDATES, has no embedding yet,
+#         or the turn has no query vector
+# score = max(sem, kw / number_of_words). A relation scores by its best
+# end, ties broken by its other end, then oldest first. No threshold: the
+# top `limit` relations are injected. Every call with a log_scope is
+# written to kg_recall_log (candidates with both raw scores, the injected
+# relations, how many entities were embedded at the time) so the ranking
+# formula and any threshold can be chosen from data. The max() formula is
+# interim; analysis should use the raw kw/sem values.
+_KG_KW_CANDIDATES = 100     # keyword candidates (same cap as before)
+_KG_SEM_CANDIDATES = 50     # nearest entities by embedding
+_KG_REL_ENTITIES = 40       # top-scored entities whose relations are fetched
+_KG_REL_PER_ENTITY = 20     # relations fetched per entity (hubs have 20k+)
+_KG_LOG_CANDIDATES = 30     # candidates kept in one log row
+_KG_COUNT_TTL = 300.0       # seconds the embedded-entity count is cached
+_kg_count_cache: dict = {"t": 0.0, "embedded": None, "total": None}
+
+
+def _query_words(query: str) -> list[str]:
+    """Words matched against entity names: >= 4 chars, else > 2 chars."""
+    words = [w for w in query.lower().split() if len(w) >= 4]
+    if not words:
+        words = [w for w in query.lower().split() if len(w) > 2]
+    return words
+
+
+def _combine_entity_scores(kw_rows, sem_rows, n_words: int) -> dict:
+    """{entity_id: {"kw": int, "sem": float|None, "score": float}}."""
+    scores: dict = {}
+    for r in kw_rows:
+        scores[int(r["id"])] = {"kw": int(r["kw"] or 0), "sem": None}
+    for r in sem_rows:
+        d = scores.setdefault(int(r["id"]), {"kw": 0, "sem": None})
+        d["sem"] = float(r["sim"]) if r["sim"] is not None else None
+    n = max(1, int(n_words))
+    for d in scores.values():
+        d["score"] = max(d["sem"] or 0.0, d["kw"] / n)
+    return scores
+
+
+def _rank_relations(rows, scores: dict, limit: int) -> list:
+    """Top `limit` relations as [(row, score)], best end first.
+
+    Order: best-end score DESC, other-end score DESC, relation id ASC.
+    A relation reached from both of its ends is counted once.
+    """
+    best: dict = {}
+    for r in rows:
+        rid = int(r["rid"])
+        if rid in best:
+            continue
+        s = scores.get(int(r["subject_id"]), {}).get("score", 0.0)
+        o = scores.get(int(r["object_id"]), {}).get("score", 0.0)
+        best[rid] = (max(s, o), min(s, o), -rid, r)
+    ranked = sorted(best.values(), key=lambda x: (x[0], x[1], x[2]), reverse=True)
+    return [(x[3], x[0]) for x in ranked[:max(0, int(limit))]]
+
+
+async def _entity_embed_counts(conn) -> tuple:
+    """(entities with an embedding, all entities), cached _KG_COUNT_TTL s."""
+    now = time.monotonic()
+    c = _kg_count_cache
+    if c["embedded"] is not None and now - c["t"] < _KG_COUNT_TTL:
+        return c["embedded"], c["total"]
+    row = await conn.fetchrow(
+        "SELECT count(embedding) AS embedded, count(*) AS total FROM kg_entities"
+    )
+    c.update(t=now, embedded=int(row["embedded"] or 0), total=int(row["total"] or 0))
+    return c["embedded"], c["total"]
+
+
+async def _log_graph_recall(log_scope: dict, query: str, access_level: str,
+                            words: list, query_embedded: bool,
+                            embedded, total, kw_rows, sem_rows,
+                            scores: dict, ranked: list, latency_ms: int) -> None:
+    """One kg_recall_log row per graph recall. Fail-quiet."""
+    try:
+        names: dict = {}
+        for r in kw_rows:
+            names[int(r["id"])] = r["name"]
+        for r in sem_rows:
+            names[int(r["id"])] = r["name"]
+        top = sorted(scores.items(), key=lambda kv: (-kv[1]["score"], kv[0]))
+        candidates = [
+            {
+                "id": eid, "name": names.get(eid), "kw": d["kw"],
+                "sem": round(d["sem"], 4) if d["sem"] is not None else None,
+                "score": round(d["score"], 4),
+            }
+            for eid, d in top[:_KG_LOG_CANDIDATES]
+        ]
+        relations = []
+        for row, sc in ranked:
+            s = scores.get(int(row["subject_id"]), {})
+            o = scores.get(int(row["object_id"]), {})
+            relations.append({
+                "rid": int(row["rid"]),
+                "subject_id": int(row["subject_id"]),
+                "object_id": int(row["object_id"]),
+                "predicate": row["predicate"],
+                "score": round(sc, 4),
+                "s_kw": s.get("kw", 0),
+                "s_sem": round(s["sem"], 4) if s.get("sem") is not None else None,
+                "o_kw": o.get("kw", 0),
+                "o_sem": round(o["sem"], 4) if o.get("sem") is not None else None,
+            })
+        sid = log_scope.get("session_id")
+        async with get_connection() as conn:
+            await conn.execute(
+                "INSERT INTO kg_recall_log (session_id, platform, chat_id, "
+                "access_level, query, words, query_embedded, entities_embedded, "
+                "entities_total, kw_candidates, sem_candidates, candidates, "
+                "relations, latency_ms) VALUES ($1, $2, $3, $4, $5, $6::text[], "
+                "$7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14)",
+                int(sid) if sid is not None else None,
+                str(log_scope.get("platform") or ""),
+                str(log_scope.get("chat_id") or ""),
+                access_level, query, list(words), bool(query_embedded),
+                embedded, total, len(kw_rows), len(sem_rows),
+                json.dumps(candidates, ensure_ascii=False),
+                json.dumps(relations, ensure_ascii=False),
+                int(latency_ms),
+            )
+    except Exception as e:
+        logger.warning(f"kg_recall_log write failed: {e}")
+
+
 async def recall_graph(
     query: str,
     limit: int = 10,
     requester_access_level: str = "owner",
-) -> tuple[list[str], bool]:
+    query_vector: Optional[list] = None,
+    log_scope: Optional[dict] = None,
+) -> list[str]:
     """Query the knowledge graph for relevant entity-relation context.
 
-    Two-step approach for performance:
-    1. Find matching entities by keyword (uses GIN trigram index if available)
-    2. Fetch relations via btree indexes on subject_id/object_id
+    1. Keyword candidates: query words (>= 4 chars) as substrings of entity
+       names, scored by how many words match (GIN trigram index).
+    2. Semantic candidates: nearest entities to ``query_vector`` by
+       embedding, only when a vector is given and some entity is embedded.
+       A failure here (no index, dimension mismatch) falls back to keyword
+       candidates only.
+    3. Relations of the top-scored entities are fetched (btree indexes on
+       subject_id/object_id) and ranked by _rank_relations.
 
-    Words shorter than 4 chars are excluded to avoid noisy matches
-    (e.g. "sah" matches thousands of entities). Entities are ranked by
-    number of matching keywords so multi-word matches surface first.
-
-    Returns a list of formatted lines (empty on no-match / failure).
+    ``log_scope`` ({session_id, platform, chat_id}) writes one
+    kg_recall_log row. Returns formatted lines (empty on no-match/failure).
     """
     if not query or not query.strip():
         return []
@@ -524,8 +723,8 @@ async def recall_graph(
     # source memory is absent -- never recorded, or the memory row was deleted
     # (the FK is ON DELETE SET NULL) -- cannot be proven public and are
     # withheld. Without this, graph recall bypassed memory privacy entirely:
-    # a keyword could drag a private relation into a public requester's context
-    # through a substring match on an unrelated entity name.
+    # a keyword (or a semantic match) could drag a private relation into a
+    # public requester's context through an unrelated entity.
     public_cats: list[str] | None = None
     if requester_access_level not in ("owner", "family"):
         from ..security import _load_public_categories
@@ -536,6 +735,16 @@ async def recall_graph(
             )
             return []
 
+    words = _query_words(query)
+    if not words:
+        return []
+
+    t0 = time.monotonic()
+    kw_rows: list = []
+    sem_rows: list = []
+    scores: dict = {}
+    ranked: list = []
+    embedded = total = None
     try:
         async with get_connection() as conn:
             # Check if tables exist
@@ -546,14 +755,7 @@ async def recall_graph(
             if not exists:
                 return []
 
-            # Filter words: prefer >= 4 chars, fall back to > 2 if none remain
-            words = [w for w in query.lower().split() if len(w) >= 4]
-            if not words:
-                words = [w for w in query.lower().split() if len(w) > 2]
-            if not words:
-                return []
-
-            # Build LIKE conditions + relevance score (more keyword matches = higher)
+            # Step 1: keyword candidates, ranked by keyword overlap
             conditions = []
             score_parts = []
             params: list = []
@@ -562,81 +764,95 @@ async def recall_graph(
                 conditions.append(f"LOWER(name) LIKE ${idx}")
                 score_parts.append(f"CASE WHEN LOWER(name) LIKE ${idx} THEN 1 ELSE 0 END")
                 params.append(f"%{word}%")
-
             where_clause = " OR ".join(conditions)
             score_expr = " + ".join(score_parts)
-
-            # Step 1: find top entity IDs ranked by keyword overlap
-            entity_rows = await conn.fetch(
-                f"SELECT id FROM kg_entities "
+            kw_rows = await conn.fetch(
+                f"SELECT id, name, ({score_expr}) AS kw FROM kg_entities "
                 f"WHERE {where_clause} "
-                f"ORDER BY ({score_expr}) DESC "
-                f"LIMIT 100",
+                f"ORDER BY kw DESC, id "
+                f"LIMIT {_KG_KW_CANDIDATES}",
                 *params,
             )
-            if not entity_rows:
-                return []
 
-            entity_ids = [r["id"] for r in entity_rows]
+            # Step 2: semantic candidates (skipped while nothing is embedded)
+            try:
+                embedded, total = await _entity_embed_counts(conn)
+            except Exception as e:
+                logger.debug(f"Graph embed count failed: {e}")
+            if query_vector and embedded:
+                try:
+                    sem_rows = await conn.fetch(
+                        "SELECT id, name, 1 - (embedding <=> $1::vector) AS sim "
+                        "FROM kg_entities WHERE embedding IS NOT NULL "
+                        "ORDER BY embedding <=> $1::vector LIMIT $2",
+                        str(list(query_vector)), _KG_SEM_CANDIDATES,
+                    )
+                except Exception as e:
+                    logger.warning(f"Graph semantic recall skipped: {e}")
+                    sem_rows = []
 
-            # Step 2: fetch relations via UNION (subject + object separately)
-            # Each branch uses btree index on subject_id / object_id
-            #
-            # For a non-owner/family requester the category filter is pushed
-            # down into the SQL, before LIMIT -- same reasoning as the Rule 765
-            # filter in memory/engine.py: a Python post-filter would let
-            # withheld rows occupy the limit slots and then discard them, which
-            # can empty a result set that did have permitted rows available.
-            # The INNER JOIN to memory also drops relations with no traceable
-            # source, since those cannot be proven public.
-            _cat_join = ""
-            _cat_cond = ""
-            rel_params: list = [entity_ids, limit]
-            if public_cats is not None:
-                _cat_join = "JOIN memory m ON m.id = r.source_memory_id"
-                _cat_cond = "AND LOWER(TRIM(m.category)) = ANY($3)"
-                rel_params.append(public_cats)
+            scores = _combine_entity_scores(kw_rows, sem_rows, len(words))
+            if scores:
+                top_ids = [
+                    eid for eid, _ in sorted(
+                        scores.items(), key=lambda kv: (-kv[1]["score"], kv[0])
+                    )[:_KG_REL_ENTITIES]
+                ]
 
-            rows = await conn.fetch(
-                f"""
-                (SELECT s.name AS subject, s.entity_type AS s_type,
-                        r.predicate, o.name AS object, o.entity_type AS o_type
-                 FROM kg_relations r
-                 JOIN kg_entities s ON r.subject_id = s.id
-                 JOIN kg_entities o ON r.object_id = o.id
-                 {_cat_join}
-                 WHERE r.subject_id = ANY($1)
-                 {_cat_cond}
-                 LIMIT $2)
-                UNION
-                (SELECT s.name AS subject, s.entity_type AS s_type,
-                        r.predicate, o.name AS object, o.entity_type AS o_type
-                 FROM kg_relations r
-                 JOIN kg_entities s ON r.subject_id = s.id
-                 JOIN kg_entities o ON r.object_id = o.id
-                 {_cat_join}
-                 WHERE r.object_id = ANY($1)
-                 {_cat_cond}
-                 LIMIT $2)
-                LIMIT $2
-                """,
-                *rel_params,
-            )
-
-            if not rows:
-                return []
-
-            lines = []
-            for row in rows:
-                lines.append(
-                    f"- {row['subject']} [{row['s_type']}] --{row['predicate']}--> "
-                    f"{row['object']} [{row['o_type']}]"
+                # Step 3: relations of the top entities. Per entity, relations
+                # whose other end is also a top entity come first, so a hub
+                # entity (20k+ relations) still yields its relevant ones.
+                # For a non-owner/family requester the category filter is
+                # pushed down before LIMIT (same reasoning as Rule 765 in
+                # memory/engine.py); the INNER JOIN to memory also drops
+                # relations with no traceable source.
+                _cat_join = ""
+                _cat_cond = ""
+                rel_params: list = [top_ids, _KG_REL_PER_ENTITY]
+                if public_cats is not None:
+                    _cat_join = "JOIN memory m ON m.id = r.source_memory_id"
+                    _cat_cond = "AND LOWER(TRIM(m.category)) = ANY($3)"
+                    rel_params.append(public_cats)
+                rows = await conn.fetch(
+                    f"""
+                    SELECT x.rid, x.subject_id, x.object_id, x.predicate,
+                           s.name AS subject, s.entity_type AS s_type,
+                           o.name AS object, o.entity_type AS o_type
+                    FROM unnest($1::int[]) AS c(eid)
+                    CROSS JOIN LATERAL (
+                        SELECT r.id AS rid, r.subject_id, r.object_id, r.predicate
+                        FROM kg_relations r
+                        {_cat_join}
+                        WHERE (r.subject_id = c.eid OR r.object_id = c.eid)
+                        {_cat_cond}
+                        ORDER BY ((CASE WHEN r.subject_id = c.eid
+                                        THEN r.object_id ELSE r.subject_id END)
+                                  = ANY($1::int[])) DESC, r.id
+                        LIMIT $2
+                    ) x
+                    JOIN kg_entities s ON s.id = x.subject_id
+                    JOIN kg_entities o ON o.id = x.object_id
+                    """,
+                    *rel_params,
                 )
-            return lines
-
+                ranked = _rank_relations(rows, scores, limit)
     except Exception as e:
         logger.error(f"Graph recall failed: {e}")
-        return []
+        ranked = []
+
+    lines = [
+        f"- {row['subject']} [{row['s_type']}] --{row['predicate']}--> "
+        f"{row['object']} [{row['o_type']}]"
+        for row, _score in ranked
+    ]
+
+    if log_scope is not None:
+        await _log_graph_recall(
+            log_scope, query, requester_access_level, words,
+            bool(query_vector), embedded, total, kw_rows, sem_rows,
+            scores, ranked, int((time.monotonic() - t0) * 1000),
+        )
+    return lines
 
 
 async def get_graph_stats() -> dict:
@@ -769,7 +985,7 @@ async def reprocess_permanent_memories(provider: "LLMProvider", force: bool = Fa
                     stats["succeeded"] += 1
                     continue
 
-                await _store_graph(extracted, row["id"])
+                await _store_graph(extracted, row["id"], provider=provider)
                 await _mark_kg_processed(row["id"])
                 stats["succeeded"] += 1
                 logger.info(

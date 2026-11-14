@@ -902,6 +902,52 @@ ALTER TABLE kg_entities SET (
     autovacuum_analyze_scale_factor = 0.02
 );
 
+-- HNSW builder for kg_entities.embedding (semantic graph recall), same shape
+-- as ensure_memory_hnsw_index. Run after entities are embedded
+-- (`syne memory reembed-kg`); no-op while no entity has an embedding.
+CREATE OR REPLACE FUNCTION ensure_kg_entities_hnsw_index() RETURNS void AS $$
+DECLARE
+    dim INT;
+    cur_typmod INT;
+    idx_exists BOOL;
+BEGIN
+    SELECT vector_dims(embedding) INTO dim FROM kg_entities WHERE embedding IS NOT NULL LIMIT 1;
+    IF dim IS NULL THEN RETURN; END IF;
+    SELECT a.atttypmod INTO cur_typmod
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'kg_entities' AND a.attname = 'embedding';
+    SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_kg_entities_embedding_hnsw') INTO idx_exists;
+    IF cur_typmod = dim AND idx_exists THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE kg_entities ALTER COLUMN embedding TYPE vector(%s)', dim);
+    DROP INDEX IF EXISTS idx_kg_entities_embedding_hnsw;
+    EXECUTE 'CREATE INDEX idx_kg_entities_embedding_hnsw '
+            'ON kg_entities USING hnsw (embedding vector_cosine_ops) '
+            'WITH (m = 24, ef_construction = 200)';
+END;
+$$ LANGUAGE plpgsql;
+
+-- KG RECALL LOG: one row per graph recall (candidates with keyword and
+-- semantic scores, injected relations) for ranking/threshold research.
+CREATE TABLE IF NOT EXISTS kg_recall_log (
+    id                BIGSERIAL PRIMARY KEY,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    session_id        INT,
+    platform          TEXT,
+    chat_id           TEXT,
+    access_level      TEXT,
+    query             TEXT NOT NULL,
+    words             TEXT[] NOT NULL DEFAULT '{}',
+    query_embedded    BOOLEAN NOT NULL DEFAULT false,
+    entities_embedded INT,
+    entities_total    INT,
+    kw_candidates     INT NOT NULL DEFAULT 0,
+    sem_candidates    INT NOT NULL DEFAULT 0,
+    candidates        JSONB NOT NULL DEFAULT '[]',
+    relations         JSONB NOT NULL DEFAULT '[]',
+    latency_ms        INT
+);
+CREATE INDEX IF NOT EXISTS idx_kg_recall_log_created ON kg_recall_log (created_at);
+
 -- ============================================================
 -- MEMORY BLOBS: Binary attachments stored in DB
 -- ============================================================

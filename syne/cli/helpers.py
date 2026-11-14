@@ -1006,7 +1006,8 @@ def _ensure_vector_index(syne_dir: str | None = None):
         try:
             # Each SELECT is wrapped in its own try so a missing function on
             # a partially-migrated DB doesn't abort the other.
-            for fn in ("ensure_memory_hnsw_index", "ensure_messages_hnsw_index"):
+            for fn in ("ensure_memory_hnsw_index", "ensure_messages_hnsw_index",
+                       "ensure_kg_entities_hnsw_index"):
                 try:
                     await conn.execute(f"SELECT {fn}()")
                 except Exception as e:
