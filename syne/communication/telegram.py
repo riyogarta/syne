@@ -5272,7 +5272,7 @@ Or just send me a message!"""
         from ..cli.cmd_backup import run_backup
 
         await update.message.reply_text("Backing up database...")
-        success, message, _ = run_backup()
+        success, message, _ = await asyncio.to_thread(run_backup)
         if success:
             await update.message.reply_text(f"Backup saved: {message}")
         else:
@@ -5359,7 +5359,7 @@ Or just send me a message!"""
 
         await query.edit_message_text(f"Restoring from {actual_filename}...")
 
-        success, message = run_restore(filepath)
+        success, message = await asyncio.to_thread(run_restore, filepath)
         if success:
             await query.edit_message_text(f"Restored {actual_filename}. Restarting...")
             import os, threading; threading.Timer(1, os._exit, args=[1]).start()
