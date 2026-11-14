@@ -30,7 +30,7 @@ _ARTICLES = frozenset({
 # (digraphs before y->i so "sy"/"sh" are seen first).
 _FOLDS = (
     ("sy", "s"), ("sh", "s"), ("ts", "s"), ("th", "s"),
-    ("dz", "z"), ("dh", "z"), ("gh", "g"), ("w", "u"), ("y", "i"),
+    ("dz", "z"), ("dh", "z"), ("gh", "g"), ("w", "u"), ("y", "i"), ("o", "a"),
 )
 
 # Names that folding cannot join (a different name, or a vowel change).
@@ -43,6 +43,10 @@ DEFAULT_SURAH_ALIASES: dict[str, int] = {
     "Alam Nasyrah": 94,
     "Bani Israil": 17,
     "Ad-Dahr": 76,
+    "Al-Lahab": 111,
+    "Ath-Thur": 52,
+    "Adhdhuha": 93,
+    "Adh-Dhuha": 93,
     "Al-Mu'min": 40,
 }
 

@@ -308,7 +308,7 @@ async def recall_graph(
             score_expr = " + ".join(score_parts)
             kw_rows = await conn.fetch(
                 f"SELECT id, name, ({score_expr}) AS kw FROM kg_entities "
-                f"WHERE {where_clause} "
+                f"WHERE ({where_clause}) AND entity_type NOT IN ('chunk', 'ayah') "
                 f"ORDER BY kw DESC, id "
                 f"LIMIT {_KG_KW_CANDIDATES}",
                 *params,

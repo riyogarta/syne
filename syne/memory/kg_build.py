@@ -157,6 +157,8 @@ def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
             if nxt:
                 ck, mid = group[i]
                 plan.relate(ck, "next_part", nxt[0], mid)
+    used = {k for rel in plan.relations for k in (rel[0], rel[2])}
+    plan.entities = {k: v for k, v in plan.entities.items() if k in used}
     return plan
 
 

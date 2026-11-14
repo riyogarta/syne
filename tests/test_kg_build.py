@@ -105,3 +105,12 @@ async def test_write_plan_sql():
     assert "INSERT INTO kg_relations" in sqls[1]
     assert "'rule'" in sqls[2] and "kg_relation_sources" in sqls[2]
     assert len(conn.execute.call_args_list[0].args[1]) == 30
+
+
+def test_unlinked_chunks_get_no_entity():
+    rows = ROWS[:1] + [{"id": 50, "category": "bukhari", "content": "Hadits tanpa rujukan\n\nisi"}]
+    plan = B.plan_links(rows, SOURCES)
+    assert not any("[#50]" in k[0] for k in plan.entities)
+    assert plan.chunks == 2
+    used = {k for rel in plan.relations for k in (rel[0], rel[2])}
+    assert set(plan.entities) == used

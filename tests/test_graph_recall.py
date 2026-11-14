@@ -246,3 +246,10 @@ async def test_migration_42_deletes_graph_config():
     sqls = " ".join(c.args[0] for c in conn.execute.call_args_list)
     assert "DELETE FROM config" in sqls and "'graph.enabled'" in sqls
     assert "graph.enabled" not in (ROOT / "syne/db/schema.sql").read_text()
+
+
+async def test_keyword_step_skips_chunk_and_ayah_entities():
+    ctx, cap, _ = _db(kw_rows=[])
+    await _recall(ctx, query="tafsir baqarah ayat")
+    kw_sql = next(sql for sql, _p in cap["fetch"] if "FROM kg_entities" in sql)
+    assert "entity_type NOT IN ('chunk', 'ayah')" in kw_sql

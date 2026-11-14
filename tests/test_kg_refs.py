@@ -140,3 +140,25 @@ def test_part():
 def test_ref_helpers():
     assert list(R.Ref(2, 5, 7).ayahs()) == [5, 6, 7]
     assert R.ayah_entity_name(2, 255) == "QS 2:255"
+
+
+@pytest.mark.parametrize("name,surah", [
+    ("Al Baqoroh", 2), ("Al-Ahzab", 33), ("Ash Shaffat", 37),
+    ("Ath-Thur", 52), ("Adhdhuha", 93), ("Adh-Dhuha", 93), ("Al-Lahab", 111),
+])
+def test_resolve_o_and_new_aliases(name, surah):
+    rows = QURAN + [_q(52, "At-Tur", 1, 49), _q(111, "Al-Masad", 1, 5)]
+    i = R.build_surah_index(rows, R.DEFAULT_SURAH_ALIASES)
+    assert i.resolve(name) == surah
+
+
+def test_o_fold_spellings():
+    rows = [_q(20, "Taha", 1, 135), _q(25, "Al-Furqan", 1, 77),
+            _q(28, "Al-Qasas", 1, 88), _q(46, "Al-Ahqaf", 1, 35)]
+    i = R.build_surah_index(rows, R.DEFAULT_SURAH_ALIASES)
+    assert i.resolve("Toha") == 20
+    assert i.resolve("Al Furqon") == 25
+    assert i.resolve("Al Qosos") == 28
+    assert i.resolve("Al Ahqof") == 46
+    refs, _ = R.parse_mentions("QS.Toha 130 dan QS Al Qosos 56", i)
+    assert refs == [R.Ref(20, 130, 130), R.Ref(28, 56, 56)]
