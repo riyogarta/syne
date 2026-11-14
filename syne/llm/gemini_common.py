@@ -492,6 +492,29 @@ def _clean_schema_for_gemini(schema: dict, defs: Optional[dict] = None) -> dict:
 # Tool schema conversion (parametersJsonSchema / parameters)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _stringify_enums(schema):
+    """Return a copy of a tool schema whose enum values are all strings.
+
+    The legacy `parameters` field (OpenAPI Schema, used by the Vertex and
+    Google drivers) accepts only string enum values; an integer enum such as
+    [1, 2] makes the whole request fail with 400 INVALID_ARGUMENT
+    "Invalid value at ...enum[0] (TYPE_STRING)". A non-string enum becomes
+    strings and its type becomes "string"; the tool handler then receives
+    "1" instead of 1 and must coerce. The input is never mutated.
+    """
+    if isinstance(schema, list):
+        return [_stringify_enums(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: _stringify_enums(v) for k, v in schema.items()}
+    enum_val = out.get("enum")
+    if isinstance(enum_val, list) and any(not isinstance(v, str) for v in enum_val):
+        out["enum"] = [v if isinstance(v, str) else str(v) for v in enum_val if v is not None]
+        if out.get("type") in ("integer", "number", "boolean"):
+            out["type"] = "string"
+    return out
+
+
 def _convert_tools_to_gemini(tools: list[dict], use_parameters: bool = False) -> list[dict]:
     """Convert OpenAI function calling format to Gemini functionDeclarations.
 
@@ -512,7 +535,7 @@ def _convert_tools_to_gemini(tools: list[dict], use_parameters: bool = False) ->
             if "parameters" in func:
                 params = func["parameters"]
                 if use_parameters:
-                    decl["parameters"] = params
+                    decl["parameters"] = _stringify_enums(params)
                 else:
                     decl["parametersJsonSchema"] = _clean_schema_for_gemini(params)
             declarations.append(decl)

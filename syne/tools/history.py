@@ -465,9 +465,8 @@ HISTORY_SEARCH_TOOL = {
             },
             "level": {
                 "type": "integer",
-                "enum": [1, 2],
                 "description": (
-                    "1 = user messages (default). 2 = your own earlier replies; "
+                    "1 or 2. 1 = user messages (default). 2 = your own earlier replies; "
                     "use only after level 1 did not find it, with the same query."
                 ),
             },

@@ -262,7 +262,9 @@ class TestHistorySearchLevels:
 
     def test_schema_exposes_level(self):
         props = H.HISTORY_SEARCH_TOOL["parameters"]["properties"]
-        assert props["level"]["enum"] == [1, 2]
+        assert props["level"]["type"] == "integer"
+        # No integer enum: Vertex rejects non-string enum values (400).
+        assert "enum" not in props["level"]
         assert "preview" not in H.HISTORY_SEARCH_TOOL["description"].lower()
 
 
