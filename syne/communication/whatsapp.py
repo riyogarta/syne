@@ -140,14 +140,20 @@ class _ChatPresenceIndicator:
     No Presence.AVAILABLE is broadcast — that would park the account as
     permanently "online" and rewrite its last-seen, which is the owner's
     call, not this channel's. whatsmeow may therefore refuse chat presence
-    outright; if the first send fails the loop exits rather than retrying
-    for the whole max_duration. The 👀 receipt does not depend on it.
+    outright; after _MAX_FAILS consecutive failed sends the loop exits
+    rather than retrying for as long as the turn runs, while a single
+    transient failure is retried. The 👀 receipt does not depend on it.
 
-    max_duration caps the loop so a hung LLM call cannot leave it running.
+    No time limit by default (Riyo, 14 Nov 2026): the indicator lives as
+    long as the turn and stops when it finishes, fails or is cancelled. A
+    typing indicator that never stops is the owner's signal that something
+    is stuck. max_duration (seconds) is optional.
     """
 
+    _MAX_FAILS = 3
+
     def __init__(self, channel, chat_jid: str, interval: float = 8.0,
-                 max_duration: float = 300.0):
+                 max_duration: Optional[float] = None):
         self._channel = channel
         self._chat_jid = chat_jid
         self._interval = interval
@@ -166,9 +172,11 @@ class _ChatPresenceIndicator:
 
     async def _loop(self) -> None:
         start = time.monotonic()
+        fails = 0
         try:
             while True:
-                if time.monotonic() - start > self._max_duration:
+                if (self._max_duration is not None
+                        and time.monotonic() - start > self._max_duration):
                     logger.warning(
                         "[whatsapp] typing indicator timeout (%ss) for %s",
                         self._max_duration, self._chat_jid,
@@ -176,9 +184,17 @@ class _ChatPresenceIndicator:
                     return
                 try:
                     await self._send(ChatPresence.CHAT_PRESENCE_COMPOSING)
+                    fails = 0
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
-                    logger.debug("[whatsapp] chat presence unavailable: %s", e)
-                    return
+                    fails += 1
+                    if fails >= self._MAX_FAILS:
+                        logger.debug(
+                            "[whatsapp] chat presence unavailable after %s tries: %s",
+                            fails, e,
+                        )
+                        return
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:
             pass

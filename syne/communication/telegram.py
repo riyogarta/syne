@@ -107,33 +107,53 @@ class _TypingIndicator:
         async with _TypingIndicator(bot, chat_id):
             await long_running_work()
 
-    Safety: auto-stops after max_duration seconds even if the wrapped
-    coroutine hangs (e.g. LLM API timeout).  Default = 5 minutes.
+    No time limit by default (Riyo, 14 Nov 2026): the indicator lives exactly
+    as long as the wrapped work, and stops when it finishes, fails or is
+    cancelled (/cancel). A typing indicator that never stops is the owner's
+    signal that something is stuck; one that stops on a timer while work is
+    still running hides that signal. max_duration (seconds) is optional.
     """
 
-    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0, max_duration: float = 300.0):
+    def __init__(self, bot: Bot, chat_id: int, interval: float = 4.0,
+                 max_duration: Optional[float] = None):
         self._bot = bot
         self._chat_id = chat_id
         self._interval = interval
         self._max_duration = max_duration
         self._task: Optional[asyncio.Task] = None
+        self._fail_streak = 0
 
     async def _loop(self):
         import time
         start = time.monotonic()
         try:
             while True:
-                if time.monotonic() - start > self._max_duration:
+                if (self._max_duration is not None
+                        and time.monotonic() - start > self._max_duration):
                     logging.getLogger("syne.telegram").warning(
                         f"Typing indicator timeout ({self._max_duration}s) for chat {self._chat_id}"
                     )
                     break
-                await self._bot.send_chat_action(self._chat_id, "typing")
+                # One failed send (network blip, flood control) must not end
+                # the indicator while work is still running: log the first
+                # failure of a streak, keep looping.
+                try:
+                    await self._bot.send_chat_action(self._chat_id, "typing")
+                    self._fail_streak = 0
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    if self._fail_streak == 0:
+                        logging.getLogger("syne.telegram").warning(
+                            f"Typing send failed for chat {self._chat_id}: "
+                            f"{type(e).__name__}: {e}"
+                        )
+                    self._fail_streak += 1
                 await asyncio.sleep(self._interval)
         except asyncio.CancelledError:
             pass
         except Exception:
-            pass  # silently ignore — typing is best-effort
+            pass  # typing is best-effort
 
     async def __aenter__(self):
         self._task = asyncio.create_task(self._loop())

@@ -65,6 +65,60 @@ from ..db.models import (
 logger = logging.getLogger("syne.discord")
 
 
+class _DiscordTyping:
+    """Keeps Discord's typing indicator alive while the agent works.
+
+    Replaces discord.py's channel.typing(), whose first send is unguarded
+    (a failure there raised before the message was processed) and whose
+    refresh task dies on the first failed send. Here every send is
+    best-effort: a failure is logged once per streak and the loop keeps
+    going. No time limit (Riyo, 14 Nov 2026): the indicator lives exactly
+    as long as the turn, so one that never stops signals a stuck turn.
+    """
+
+    def __init__(self, channel, interval: float = 5.0):
+        self._channel = channel
+        self._interval = interval
+        self._task: Optional[asyncio.Task] = None
+        self._fail_streak = 0
+
+    async def _send(self) -> None:
+        try:
+            await self._channel._state.http.send_typing(self._channel.id)
+            self._fail_streak = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if self._fail_streak == 0:
+                logger.warning(
+                    f"Discord typing send failed for channel "
+                    f"{getattr(self._channel, 'id', '?')}: {type(e).__name__}: {e}"
+                )
+            self._fail_streak += 1
+
+    async def _loop(self) -> None:
+        try:
+            while True:
+                await self._send()
+                await asyncio.sleep(self._interval)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass  # typing is best-effort
+
+    async def __aenter__(self):
+        self._task = asyncio.create_task(self._loop())
+        return self
+
+    async def __aexit__(self, *exc):
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+
 # Discord hard-caps a message's `content` field at 2000 characters (Message
 # Resource: "Message contents (up to 2000 characters)"). Telegram's limit is
 # 4096, so the shared split_message default is wrong here and must be passed
@@ -881,10 +935,10 @@ class DiscordChannel:
             **({"model_override": model_override} if model_override else {}),
         }
 
-        # typing() is an async context manager on Messageable (verified on
-        # discord.py 2.7.1) and keeps the indicator alive for the whole call.
+        # _DiscordTyping keeps the indicator alive for the whole call; a
+        # failed typing send never stops the message from being processed.
         try:
-            async with message.channel.typing():
+            async with _DiscordTyping(message.channel):
                 response = await self.agent.handle_message(
                     platform="discord",
                     chat_id=inbound.chat_id,
