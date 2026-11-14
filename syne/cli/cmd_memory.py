@@ -511,3 +511,57 @@ def memory_reembed_memory(batch, limit, sleep, force):
         await close_db()
 
     asyncio.run(_run())
+
+
+@memory.command("kg-build")
+@click.option("--category", "-c", "categories", multiple=True,
+              help="Only link this reference category (repeatable). Default: every kg.ref_sources entry.")
+@click.option("--dry-run", "-n", is_flag=True, help="Plan only: show counts and rejects, write nothing.")
+@click.option("--prune", is_flag=True, help="Also delete chunk entities whose memory row is gone.")
+def memory_kg_build(categories, dry_run, prune):
+    """Build KG links between reference chunks from written references (no AI).
+
+    One 'ayah' entity per Qur'an verse ("QS 2:27"), one 'chunk' entity per
+    reference chunk; links chunk->verse and part->next part. Rules come
+    from config kg.ref_sources / kg.surah_aliases / kg.qs_pattern /
+    kg.part_pattern / kg.max_mention_range. Idempotent: safe to re-run.
+    """
+    async def _run():
+        from syne.config import load_settings
+        from syne.db.connection import init_db, close_db
+        from syne.memory import kg_build as B
+
+        settings = load_settings()
+        pool = await init_db(settings.database_url)
+        try:
+            async with pool.acquire() as conn:
+                with console.status("Planning KG links..."):
+                    plan = await B.build(conn, list(categories) or None, dry_run=dry_run)
+                pruned = await B.prune_orphan_chunks(conn) if (prune and not dry_run) else 0
+        finally:
+            await close_db()
+
+        console.print(f"\n[bold]Chunks read:[/bold] {plan.chunks}  "
+                      f"[bold]Entities:[/bold] {len(plan.entities)}  "
+                      f"[bold]Relations:[/bold] {len(plan.relations)}")
+        t = Table(title="Relations by predicate")
+        t.add_column("Predicate")
+        t.add_column("Count", justify="right")
+        for p, n in plan.per_predicate.most_common():
+            t.add_row(p, str(n))
+        console.print(t)
+        if plan.rejects:
+            r = Table(title="Not linked (needs alias or pattern)")
+            r.add_column("Category")
+            r.add_column("Reason")
+            r.add_column("Count", justify="right")
+            r.add_column("Samples")
+            for (cat, why), n in plan.rejects.most_common():
+                r.add_row(cat, why, str(n), " | ".join(plan.reject_samples[(cat, why)][:3]))
+            console.print(r)
+        if prune and not dry_run:
+            console.print(f"Pruned orphan chunk entities: {pruned}")
+        console.print("[yellow]Dry run: nothing written.[/yellow]" if dry_run
+                      else "[green]✓ KG links written.[/green]")
+
+    asyncio.run(_run())
