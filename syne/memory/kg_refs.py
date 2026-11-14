@@ -204,13 +204,14 @@ _L = r"A-Za-z\u00C0-\u024F\u1E00-\u1EFF"
 
 # "QS. Al-Baqarah: 190-193", "QS Al Lail; 5", "QS. Ibrahim (14): 48",
 # "QS al-Kahfi ayat 71 - 73", "QS. An-Nisa' 4:43", "QS. 2:255",
-# "QS surat an-Naml ayat 39", "QS an-Nisaa' ayat; 6", "QS Al Ma'idah ayat: 3".
+# "QS surat an-Naml ayat 39", "QS an-Nisaa' ayat; 6", "QS Al Ma'idah ayat: 3",
+# "QS. As-Saff, 61:4" (name, surah:ayah).
 DEFAULT_QS_PATTERN = (
     r"\bQ\.?\s?S\.?\s*"
     r"(?:(?i:surat|surah)\s+)?"
     rf"(?P<name>[{_L}][{_L}'\u2019\u2018\u02bf\u02be`\- ]{{0,38}}?)?"
     r"\s*(?:[(\[]\s*(?P<snum>\d{1,3})\s*[)\]])?"
-    r"\s*(?:(?P<snum2>\d{1,3})\s*:\s*)?"
+    r"\s*(?:,?\s*(?P<snum2>\d{1,3})\s*:\s*)?"
     r"\s*(?:(?i:ayat|ayah)\s*[:;,.]?|[:;,.]\s*(?i:ayat|ayah)?)?"
     r"\s*(?P<a1>\d{1,3})(?:\s*[-\u2013\u2014]\s*(?P<a2>\d{1,3}))?(?!\d)"
 )

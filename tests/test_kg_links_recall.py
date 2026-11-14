@@ -189,8 +189,9 @@ def test_qs_pattern_surat_and_ayat_punct():
 
 async def test_migration_44():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 44 and M.MIGRATIONS[-1][1] is M._m44_kg_qs_pattern_and_aliases
-    assert M.CURRENT_SCHEMA_VERSION == 44
+    entry = next(m for m in M.MIGRATIONS if m[0] == 44)
+    assert entry[1] is M._m44_kg_qs_pattern_and_aliases
+    assert M.CURRENT_SCHEMA_VERSION >= 44
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m44_kg_qs_pattern_and_aliases(conn)
@@ -199,5 +200,32 @@ async def test_migration_44():
     assert "value = $2::jsonb" in calls[0].args[0]
     assert json.loads(calls[0].args[1]) == R.DEFAULT_QS_PATTERN
     assert json.loads(calls[0].args[2]) == M._KG_QS_PATTERN_V43 != R.DEFAULT_QS_PATTERN
+    assert M._KG_QS_PATTERN_V44 != M._KG_QS_PATTERN_V43
     assert [c.args[1:] for c in calls[1:]] == [("At Taqwir", 81), ("At Thaghobun", 64)]
     assert all("NOT (value->'alquran'->'aliases' ?" in c.args[0] for c in calls[1:])
+
+
+# ── v1.22.67 ─────────────────────────────────────────────────────────────
+
+QROWS3 = QROWS2 + [_q(11, 61, "As-Saff", 1, 14), _q(12, 46, "Al-Ahqaf", 1, 35)]
+
+
+def test_qs_pattern_name_comma_surah_colon_ayah():
+    i = R.build_surah_index((r["content"] for r in QROWS3), R.DEFAULT_SURAH_ALIASES)
+    refs, rejects = R.parse_mentions("(QS. As-Saff, 61:4) dan (QS. Al-Ahq\u0101f, 46:21)", i)
+    assert refs == [R.Ref(61, 4, 4), R.Ref(46, 21, 21)] and rejects == []
+    refs, rejects = R.parse_mentions("QS. As-Saff, 46:4", i)
+    assert refs == [] and rejects[0][1] == "surah_conflict"
+
+
+async def test_migration_45():
+    from syne.db import migrations as M
+    assert M.MIGRATIONS[-1][0] == 45 and M.MIGRATIONS[-1][1] is M._m45_kg_qs_pattern_surah_comma
+    assert M.CURRENT_SCHEMA_VERSION == 45
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    await M._m45_kg_qs_pattern_surah_comma(conn)
+    (call,) = conn.execute.call_args_list
+    assert "value = $2::jsonb" in call.args[0]
+    assert json.loads(call.args[1]) == R.DEFAULT_QS_PATTERN
+    assert json.loads(call.args[2]) == M._KG_QS_PATTERN_V44 != R.DEFAULT_QS_PATTERN

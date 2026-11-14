@@ -1297,6 +1297,24 @@ async def _m44_kg_qs_pattern_and_aliases(conn) -> None:
         )
 
 
+# kg.qs_pattern as left by migration 44 (v1.22.66).
+_KG_QS_PATTERN_V44 = "\\bQ\\.?\\s?S\\.?\\s*(?:(?i:surat|surah)\\s+)?(?P<name>[A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF][A-Za-z\\u00C0-\\u024F\\u1E00-\\u1EFF'\\u2019\\u2018\\u02bf\\u02be`\\- ]{0,38}?)?\\s*(?:[(\\[]\\s*(?P<snum>\\d{1,3})\\s*[)\\]])?\\s*(?:(?P<snum2>\\d{1,3})\\s*:\\s*)?\\s*(?:(?i:ayat|ayah)\\s*[:;,.]?|[:;,.]\\s*(?i:ayat|ayah)?)?\\s*(?P<a1>\\d{1,3})(?:\\s*[-\\u2013\\u2014]\\s*(?P<a2>\\d{1,3}))?(?!\\d)"
+
+
+async def _m45_kg_qs_pattern_surah_comma(conn) -> None:
+    """QS pattern reads "QS. As-Saff, 61:4" (Riyo, 14 Nov 2026).
+
+    kg.qs_pattern is replaced only while it still holds the v44 default (an
+    owner edit is kept). Idempotent.
+    """
+    from ..memory import kg_refs as R
+    await conn.execute(
+        "UPDATE config SET value = $1::jsonb, updated_at = NOW() "
+        "WHERE key = 'kg.qs_pattern' AND value = $2::jsonb",
+        json.dumps(R.DEFAULT_QS_PATTERN), json.dumps(_KG_QS_PATTERN_V44),
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1342,6 +1360,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (42, _m42_kg_relation_sources, "transactional"),
     (43, _m43_seed_kg_rule_config, "transactional"),
     (44, _m44_kg_qs_pattern_and_aliases, "transactional"),
+    (45, _m45_kg_qs_pattern_surah_comma, "transactional"),
 ]
 
 
