@@ -1329,6 +1329,26 @@ async def _m46_memory_guard_config(conn) -> None:
         )
 
 
+
+async def _m47_rule_checker_model(conn) -> None:
+    """Seed security.rule_checker_model (Riyo, 15 Nov 2026). Idempotent.
+
+    Adds the key only. The VALUE of security.rule_checker_driver is left
+    alone (only its description is refreshed), so an install running the
+    evaluator stays on it until the owner picks another checker in /checker.
+    """
+    from ..rule_checker import MODEL_CONFIG_KEY, MODEL_CONFIG_DESC, DRIVER_CONFIG_DESC
+    await conn.execute(
+        "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+        "ON CONFLICT (key) DO NOTHING",
+        MODEL_CONFIG_KEY, json.dumps(""), MODEL_CONFIG_DESC,
+    )
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'security.rule_checker_driver'",
+        DRIVER_CONFIG_DESC,
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1376,6 +1396,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (44, _m44_kg_qs_pattern_and_aliases, "transactional"),
     (45, _m45_kg_qs_pattern_surah_comma, "transactional"),
     (46, _m46_memory_guard_config, "transactional"),
+    (47, _m47_rule_checker_model, "transactional"),
 ]
 
 

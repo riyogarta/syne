@@ -155,7 +155,7 @@ Both results are injected into the conversation context — the LLM sees everyth
 
 #### 1. Evaluator model — rule checker
 
-A small, local LLM (default: Ollama qwen3:0.6b, **$0**) scores every final response against the hard rules (`security.rule_checker_*`); a violation triggers a rewrite. Manage it with `/evaluator`. It no longer decides what to store — memory is only written on explicit request.
+A small, local LLM (Ollama qwen3:0.6b, **$0**) can score every final response against the hard rules (`security.rule_checker_*`); a violation triggers a rewrite. Manage it with `/evaluator`. `/checker` picks who judges: the default model (fresh-install default), this evaluator, or any `/models` entry. It no longer decides what to store — memory is only written on explicit request.
 
 #### 2. Embedding & Knowledge Graph — "How do I find this later?"
 
@@ -872,6 +872,7 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/evaluator` | Manage evaluator model | Owner |
 | `/vision` | Manage vision provider (for OCR / image analysis) | Owner |
 | `/imagegen` | Manage image generation provider | Owner |
+| `/checker` | Rule checker: off, default model, evaluator, or any /models entry (incl. Ollama); `timeout <sec>` | Owner |
 | `/guard` | Memory guard: on/off and the model that judges drafts (any /models entry, incl. Ollama) | Owner |
 | `/browse` | Browse directories (share session with CLI) | Owner |
 | `/telemembers` | Manage Telegram users & groups (active members only) | Owner |

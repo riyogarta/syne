@@ -392,7 +392,7 @@ class TelegramChannel:
             BotCommand("denylist", "Manage shell command denylist (owner only)"),
             BotCommand("browse", "Browse directories (share session with CLI)"),
             BotCommand("cancel", "Cancel active operation"),
-            BotCommand("checker", "Rule checker: off / evaluator / default LLM / timeout <sec> (owner only)"),
+            BotCommand("checker", "Rule checker: off / default / evaluator / any /models entry (owner only)"),
             BotCommand("consent", "Toggle consent gate for destructive tools (on/off)"),
             BotCommand("createability", "Toggle ability-creation gate (owner only, on/off)"),
             BotCommand("dcmembers", "Manage Discord members (owner only)"),
@@ -2525,7 +2525,7 @@ class TelegramChannel:
 
 *Security* (owner)
 /consent — Toggle consent gate for destructive tools
-/checker — Rule checker: off, evaluator model, default LLM, or timeout <sec>
+/checker — Rule checker: off, default model, evaluator, any /models entry, or timeout <sec>
 /guard — Memory guard: on/off and judge model (from /models)
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
@@ -3494,8 +3494,10 @@ Or just send me a message!"""
           * evaluator — the model set under memory.evaluator_driver +
             memory.evaluator_model (default: qwen3:0.6b via Ollama, cheap
             and local).
-          * provider — the main chat model that runs Molt (higher per-turn
-            cost, but works when Ollama is not available).
+          * provider — the DEFAULT model (provider.active_model, never a
+            per-chat override), or the /models entry named in
+            security.rule_checker_model (Riyo, 15 Nov 2026). Fresh-install
+            default. The button menu lists every /models entry.
 
         Also accepts `timeout <seconds>` to retune how long a single check
         may take before it fails open (clamped 5-120, ships at 120). The
@@ -3556,7 +3558,7 @@ Or just send me a message!"""
         else:
             enabled = bool(enabled_raw)
 
-        current = await get_config("security.rule_checker_driver", "evaluator")
+        current = await get_config("security.rule_checker_driver", "provider")
         if isinstance(current, str):
             current = current.strip().lower()
         eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
@@ -3575,38 +3577,7 @@ Or just send me a message!"""
         active = current if enabled else "off"
 
         if choice is None:
-            buttons = [
-                InlineKeyboardButton(
-                    f"{'✅ ' if active == 'off' else ''}Off",
-                    callback_data="checker_set:off",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if active == 'evaluator' else ''}Evaluator ({eval_model})",
-                    callback_data="checker_set:evaluator",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if active == 'provider' else ''}Default LLM ({main_model})",
-                    callback_data="checker_set:provider",
-                ),
-            ]
-            await update.message.reply_text(
-                f"🛡 **Rule checker:** `{active}`  ·  timeout `{timeout_s}s`\n\n"
-                f"The rule checker judges every final response against the hard rules "
-                f"before it is sent. Pick who does the judging:\n\n"
-                f"• **Off** — no checking. Responses are sent unevaluated.\n"
-                f"• **Evaluator** — `{eval_model}` (via `memory.evaluator_driver`). "
-                f"Cheap, local when driver is Ollama, no per-turn API cost.\n"
-                f"• **Default LLM** — `{main_model}`. More accurate, but every "
-                f"response costs an extra API call. This is always the DEFAULT "
-                f"model (`provider.active_model`) — it does NOT follow a "
-                f"per-chat or per-group model override, so checker cost stays "
-                f"predictable no matter which model a chat is pinned to.\n\n"
-                f"Max wait per check is {timeout_s}s (both drivers), set via "
-                f"`/checker timeout <sec>`, range 5-120. On timeout the reply is "
-                f"sent with a warning rather than held.",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
+            await self._checker_menu_main(update)
             return
 
         if choice not in ("off", "evaluator", "provider"):
@@ -3628,12 +3599,142 @@ Or just send me a message!"""
 
         await set_config("security.rule_checker_enabled", True)
         await set_config("security.rule_checker_driver", choice)
+        if choice == "provider":
+            # "provider" by name = the default model; a /models pick is menu-only.
+            await set_config("security.rule_checker_model", "")
         picked_model = eval_model if choice == "evaluator" else main_model
         await update.message.reply_text(
             f"🛡 Rule checker **on** — driver **{choice}** (`{picked_model}`), "
             f"timeout {timeout_s}s.",
             parse_mode="Markdown",
         )
+
+    # ── Rule checker: off / default model / evaluator / any /models entry ──
+
+    async def _checker_menu_main(self, update_or_query, note: str = ""):
+        """Render the /checker menu (Riyo, 15 Nov 2026).
+
+        Off, Default (provider.active_model, never a per-chat override),
+        Evaluator (memory.evaluator_model), then every /models entry. A
+        /models pick writes security.rule_checker_model and sets the driver
+        to "provider"; Default clears the model key.
+        """
+        import html as _html
+
+        enabled_raw = await get_config("security.rule_checker_enabled", True)
+        if isinstance(enabled_raw, str):
+            enabled = enabled_raw.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            enabled = bool(enabled_raw)
+        driver = await get_config("security.rule_checker_driver", "provider")
+        driver = driver.strip().lower() if isinstance(driver, str) else "provider"
+        model_key = await get_config("security.rule_checker_model", "")
+        model_key = model_key.strip() if isinstance(model_key, str) else ""
+        eval_model = str(await get_config("memory.evaluator_model", "qwen3:0.6b"))
+        default_label = await _checker_default_model_label()
+        try:
+            timeout_s = int(float(await get_config("security.rule_checker_timeout", 120)))
+        except Exception:
+            timeout_s = 120
+        timeout_s = max(5, min(120, timeout_s))
+        models = await get_config("provider.models", []) or []
+        active_key = await get_config("provider.active_model", "")
+
+        # Same precedence as Conversation._rule_check_and_maybe_regenerate:
+        # disabled wins; any driver other than "provider" runs the evaluator.
+        if not enabled:
+            active = "off"
+            current_text = "<b>Off</b> — replies are sent unchecked"
+        elif driver != "provider":
+            active = "evaluator"
+            current_text = f"<b>Evaluator</b> (<code>{_html.escape(eval_model)}</code>)"
+        elif not model_key:
+            active = "provider"
+            current_text = f"<b>Default</b> ({_html.escape(default_label)})"
+        else:
+            active = f"m:{model_key}"
+            entry = next(
+                (m for m in models if isinstance(m, dict) and m.get("key") == model_key), None
+            )
+            if entry:
+                current_text = (
+                    f"<b>{_html.escape(entry.get('label', model_key))}</b>\n"
+                    f"Model ID: <code>{_html.escape(entry.get('model_id', ''))}</code>"
+                )
+            else:
+                current_text = (
+                    f"<code>{_html.escape(model_key)}</code> — not found in /models; "
+                    f"replies are sent with the \"Rule checker unavailable\" warning"
+                )
+
+        def _row(label, value):
+            mark = "✅ " if value == active else ""
+            return [InlineKeyboardButton(f"{mark}{label}", callback_data=f"checker_set:{value}")]
+
+        buttons = [
+            _row("Off", "off"),
+            _row(f"Default ({default_label})", "provider"),
+            _row(f"Evaluator ({eval_model})", "evaluator"),
+        ]
+        for m in self._sort_models_for_display(models, active_key):
+            key = m.get("key", "")
+            # Telegram caps callback_data at 64 bytes.
+            if not key or len(f"checker_set:m:{key}".encode()) > 64:
+                continue
+            buttons.append(_row(m.get("label", key), f"m:{key}"))
+
+        text = (
+            f"<b>Rule Checker</b>: {current_text}\n"
+            f"Timeout: <code>{timeout_s}s</code>\n\n"
+            "Every final reply is judged against the hard rules before it is "
+            "sent; a violation triggers a rewrite. <b>Default</b> is the default "
+            "model (provider.active_model) and never follows a per-chat model. "
+            "A picked model that is missing or cannot be built is not replaced "
+            "by another: the reply is sent with a warning.\n\n"
+            "Timeout: /checker timeout &lt;sec&gt; (5-120)."
+        )
+        if note:
+            text = f"{note}\n\n{text}"
+        markup = InlineKeyboardMarkup(buttons)
+        if hasattr(update_or_query, 'message') and update_or_query.message and not hasattr(update_or_query, 'data'):
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_checker_callback(self, query, data: str):
+        """Handle checker_set:* callbacks (owner gate is applied by _handle_callback)."""
+        import html as _html
+
+        choice = data.split(":", 1)[1]
+        if choice == "off":
+            await set_config("security.rule_checker_enabled", False)
+            note = "Rule checker turned <b>OFF</b>."
+        elif choice == "evaluator":
+            await set_config("security.rule_checker_enabled", True)
+            await set_config("security.rule_checker_driver", "evaluator")
+            note = "Rule checker set to <b>Evaluator</b>."
+        elif choice == "provider":
+            await set_config("security.rule_checker_enabled", True)
+            await set_config("security.rule_checker_driver", "provider")
+            await set_config("security.rule_checker_model", "")
+            note = "Rule checker set to <b>Default</b>."
+        elif choice.startswith("m:"):
+            model_key = choice[2:]
+            models = await get_config("provider.models", []) or []
+            entry = next(
+                (m for m in models if isinstance(m, dict) and m.get("key") == model_key), None
+            )
+            if not entry:
+                await query.edit_message_text("Model not found in /models.")
+                return
+            await set_config("security.rule_checker_enabled", True)
+            await set_config("security.rule_checker_driver", "provider")
+            await set_config("security.rule_checker_model", model_key)
+            note = f"Rule checker set to <b>{_html.escape(entry.get('label', model_key))}</b>."
+        else:
+            await query.edit_message_text("Unknown option.")
+            return
+        await self._checker_menu_main(query, note=note)
 
     async def _cmd_createability(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /createability on|off — toggle the self-modification gate.
@@ -10146,51 +10247,7 @@ Or just send me a message!"""
             )
 
         elif data.startswith("checker_set:"):
-            choice = data.split(":", 1)[1]
-            if choice not in ("off", "evaluator", "provider"):
-                await query.answer("Unknown option", show_alert=True)
-                return
-            if choice == "off":
-                await set_config("security.rule_checker_enabled", False)
-            else:
-                await set_config("security.rule_checker_enabled", True)
-                await set_config("security.rule_checker_driver", choice)
-            eval_model = await get_config("memory.evaluator_model", "qwen3:0.6b")
-            main_model = await _checker_default_model_label()
-            try:
-                timeout_s = int(float(
-                    await get_config("security.rule_checker_timeout", 120)
-                ))
-            except Exception:
-                timeout_s = 120
-            timeout_s = max(5, min(120, timeout_s))
-            buttons = [
-                InlineKeyboardButton(
-                    f"{'✅ ' if choice == 'off' else ''}Off",
-                    callback_data="checker_set:off",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if choice == 'evaluator' else ''}Evaluator ({eval_model})",
-                    callback_data="checker_set:evaluator",
-                ),
-                InlineKeyboardButton(
-                    f"{'✅ ' if choice == 'provider' else ''}Default LLM ({main_model})",
-                    callback_data="checker_set:provider",
-                ),
-            ]
-            if choice == "off":
-                headline = "🛡 **Rule checker:** `off` — responses sent unevaluated"
-            else:
-                picked_model = eval_model if choice == "evaluator" else main_model
-                headline = (
-                    f"🛡 **Rule checker:** `{choice}` (`{picked_model}`)  ·  "
-                    f"timeout `{timeout_s}s`"
-                )
-            await query.edit_message_text(
-                headline,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([buttons]),
-            )
+            await self._handle_checker_callback(query, data)
 
         elif data.startswith("createability_toggle:"):
             toggle = data.split(":", 1)[1]

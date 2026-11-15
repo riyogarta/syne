@@ -257,8 +257,7 @@ async def test_conversation_keeps_draft_when_rewrite_empty(monkeypatch):
 
 async def test_migration_46_seeds_defaults_idempotently():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 46 and M.MIGRATIONS[-1][1] is M._m46_memory_guard_config
-    assert M.CURRENT_SCHEMA_VERSION == 46
+    assert (46, M._m46_memory_guard_config, "transactional") in M.MIGRATIONS
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m46_memory_guard_config(conn)

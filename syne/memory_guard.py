@@ -18,11 +18,12 @@ memory ranked 3rd (0.60) behind an unrelated one (0.82), and half of the last
 that has candidates; the prompt carries only the draft, the user message and
 the candidates (about 1-2k tokens), never the full context.
 
-Judge model: memory.guard_model, picked via /guard on Telegram. Empty = the
-default model (provider.active_model). Any other value is a key from /models;
-an Ollama entry is called directly on its base_url (/api/chat), every other
-driver is built with llm.drivers.create_provider. A key that is missing or
-cannot be built skips the check — another model is never substituted.
+Judge model: memory.guard_model, picked via /guard on Telegram, built by
+syne.judge_model (shared with the rule checker). Empty = the default model
+(provider.active_model). Any other value is a key from /models; an Ollama
+entry is called directly on its base_url (/api/chat), every other driver is
+built with llm.drivers.create_provider. A key that is missing or cannot be
+built skips the check — another model is never substituted.
 
 Fail-open: any error returns None and is logged. The guard must never stop a
 reply from being sent.
@@ -30,7 +31,6 @@ reply from being sent.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -81,7 +81,6 @@ _MIN_WORDS = 3
 _DRAFT_CHARS = 4000
 _MEMORY_CHARS = 1500
 _USER_CHARS = 1500
-_OLLAMA_DEFAULT_URL = "http://localhost:11434"
 
 Judge = Callable[[str, float], Awaitable[str]]
 
@@ -153,67 +152,15 @@ async def build_judge(
     default_provider,
     get_config: Callable[..., Awaitable],
 ) -> Optional[Judge]:
-    """Judge callable for memory.guard_model, or None when it cannot be used.
+    """Judge callable for memory.guard_model, or None (check skipped).
 
-    "" -> default_provider. Ollama entry -> direct /api/chat on its base_url.
-    Any other /models entry -> llm.drivers.create_provider(entry). The
-    returned callable carries a `label` attribute for logging.
+    See syne.judge_model.build_judge.
     """
-    from . import rule_checker as RC
-
-    if not model_key:
-        if default_provider is None:
-            logger.warning("Memory guard: no default provider — check skipped")
-            return None
-
-        async def _default(prompt: str, timeout: float) -> str:
-            return await RC._check_via_provider(prompt, default_provider, timeout=timeout)
-
-        _default.label = f"default:{getattr(default_provider, 'chat_model', '?')}"
-        return _default
-
-    try:
-        models = await get_config("provider.models", []) or []
-    except Exception as e:
-        logger.warning(f"Memory guard: cannot read provider.models: {type(e).__name__}: {e}")
-        return None
-    entry = next(
-        (m for m in models if isinstance(m, dict) and m.get("key") == model_key), None
+    from .judge_model import build_judge as _build
+    return await _build(
+        model_key, default_provider=default_provider, get_config=get_config,
+        who="Memory guard",
     )
-    if entry is None:
-        logger.warning(f"Memory guard: model '{model_key}' not found in /models — check skipped")
-        return None
-
-    if entry.get("driver") == "ollama":
-        base_url = entry.get("base_url") or _OLLAMA_DEFAULT_URL
-        model_id = entry.get("model_id") or ""
-        if not model_id:
-            logger.warning(f"Memory guard: Ollama entry '{model_key}' has no model_id — check skipped")
-            return None
-
-        async def _ollama(prompt: str, timeout: float) -> str:
-            return await asyncio.wait_for(
-                RC._check_via_ollama(prompt, model=model_id, base_url=base_url, timeout=timeout),
-                timeout=timeout,
-            )
-
-        _ollama.label = f"ollama:{model_id}"
-        return _ollama
-
-    from .llm.drivers import create_provider
-    try:
-        provider = await create_provider(entry)
-    except Exception as e:
-        logger.warning(
-            f"Memory guard: cannot build model '{model_key}': {type(e).__name__}: {e} — check skipped"
-        )
-        return None
-
-    async def _picked(prompt: str, timeout: float) -> str:
-        return await RC._check_via_provider(prompt, provider, timeout=timeout)
-
-    _picked.label = f"{entry.get('driver')}:{entry.get('model_id')}"
-    return _picked
 
 
 async def find_candidates(

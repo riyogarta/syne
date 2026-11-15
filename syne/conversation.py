@@ -2341,7 +2341,7 @@ class Conversation:
         # higher per-turn cost, works without Ollama). "evaluator" is
         # the layered case: honour whatever memory.evaluator_driver
         # says (which itself may be "ollama" or "provider").
-        driver_pref = await get_config("security.rule_checker_driver", "evaluator")
+        driver_pref = await get_config("security.rule_checker_driver", "provider")
         if isinstance(driver_pref, str):
             driver_pref = driver_pref.strip().lower()
         if driver_pref == "provider":
@@ -2365,12 +2365,35 @@ class Conversation:
             # conversation provider rather than passing None, which the
             # checker would report as ERROR and fail-open on every turn.
             checker_provider = self.provider
+        # Model picked in /checker (security.rule_checker_model, Riyo 15 Nov
+        # 2026): a key from /models, used with the provider driver. Empty =
+        # the default model above. A key that is missing or cannot be built
+        # is NOT replaced by another model: the judge raises, the check
+        # returns ERROR and the reply goes out with the "unavailable" warning.
+        checker_judge = None
         if eval_driver == "provider":
-            logger.info(
-                "Rule checker driver=provider model="
-                f"{getattr(checker_provider, 'chat_model', '?')} "
-                f"(chat model={getattr(self.provider, 'chat_model', '?')})"
-            )
+            model_key = await get_config("security.rule_checker_model", "")
+            model_key = model_key.strip() if isinstance(model_key, str) else ""
+            if model_key:
+                from .judge_model import build_judge as _build_judge
+                checker_judge = await _build_judge(
+                    model_key, default_provider=checker_provider,
+                    get_config=get_config, who="Rule checker",
+                )
+                if checker_judge is None:
+                    async def checker_judge(prompt, timeout, _key=model_key):
+                        raise RuntimeError(f"model '{_key}' unavailable")
+                    checker_judge.label = f"unavailable:{model_key}"
+                logger.info(
+                    f"Rule checker driver=provider model={checker_judge.label} "
+                    f"(chat model={getattr(self.provider, 'chat_model', '?')})"
+                )
+            else:
+                logger.info(
+                    "Rule checker driver=provider model=default:"
+                    f"{getattr(checker_provider, 'chat_model', '?')} "
+                    f"(chat model={getattr(self.provider, 'chat_model', '?')})"
+                )
 
         current = response
         checker_warning = None
@@ -2383,6 +2406,7 @@ class Conversation:
                 evaluator_driver=eval_driver,
                 evaluator_model=eval_model,
                 provider=checker_provider,
+                judge=checker_judge,
                 tools_ran=tools_ran,
                 time_context=self._last_time_context,
                 timeout=checker_timeout,

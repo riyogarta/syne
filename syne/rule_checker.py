@@ -29,7 +29,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -37,6 +37,16 @@ from .llm.retry import retry_budget
 from .llm.provider import ChatMessage, LLMProvider
 
 logger = logging.getLogger("syne.rule_checker")
+
+# security.rule_checker_model (Riyo, 15 Nov 2026): the checker model picked in
+# /checker. Seeded by schema.sql and migration 47.
+MODEL_CONFIG_KEY = "security.rule_checker_model"
+MODEL_CONFIG_DESC = (
+    'Model the rule checker uses when security.rule_checker_driver is "provider": a key from /models (provider.models). Empty = the default model (provider.active_model), never a per-chat override. An Ollama entry is called directly on its base_url. A key that is missing or cannot be built is not replaced by another model: the check fails open and the reply carries the "Rule checker unavailable" warning. Set via /checker.'
+)
+DRIVER_CONFIG_DESC = (
+    'Which model powers the rule checker. "provider" (default) = a model from /models named in security.rule_checker_model; empty = the default model (provider.active_model), never a per-chat override. "evaluator" = the model under memory.evaluator_driver + memory.evaluator_model (e.g. qwen3:0.6b via Ollama). Owner switches this via /checker.'
+)
 
 
 class VerdictState(str, Enum):
@@ -255,6 +265,7 @@ async def check_response(
     tools_ran: bool = True,
     time_context: str = "",
     timeout: float = 120.0,
+    judge: Optional[Callable[[str, float], Awaitable[str]]] = None,
 ) -> CheckResult:
     """Judge a draft response against every hard rule.
 
@@ -278,6 +289,10 @@ async def check_response(
             it raises TimeoutError, caught below and returned as ERROR so the
             caller fails open. The caller clamps this (5-120) from
             security.rule_checker_timeout.
+        judge: Optional `(prompt, timeout) -> raw` callable for a model
+            picked in /checker (security.rule_checker_model, built by
+            syne.judge_model). When given it replaces both drivers; an
+            exception from it is returned as ERROR like any other.
 
     Returns:
         CheckResult with state CLEAN / VIOLATED / ERROR.
@@ -297,7 +312,9 @@ async def check_response(
     )
 
     try:
-        if evaluator_driver == "ollama":
+        if judge is not None:
+            raw = await asyncio.wait_for(judge(prompt, timeout), timeout=timeout)
+        elif evaluator_driver == "ollama":
             raw = await _check_via_ollama(
                 prompt, model=evaluator_model, timeout=timeout,
             )

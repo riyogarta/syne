@@ -25,7 +25,7 @@ Always inform the owner of **both positive and negative impacts** before changin
 | `memory.evaluator_models` | *(registry)* | JSON array |
 | `memory.active_evaluator` | `"qwen3-0-6b"` | string |
 
-Which model the rule checker uses (security.rule_checker_*). The `memory.` prefix is historical.
+The evaluator is one of the rule checker's options (see Security & Consent → Rule Checker). The `memory.` prefix is historical.
 - `evaluator_driver` / `evaluator_model` — legacy shorthand (still works).
 - `evaluator_models` — registry of available evaluator models (managed via `/evaluator` command).
 - `active_evaluator` — key of the currently active evaluator from the registry.
@@ -311,6 +311,20 @@ bound to the specific action (op+target+content) and reusable within the TTL.
 - `consent_ttl_seconds` — grant lifetime. Identical repeats within this window skip re-prompt.
 - `consent_mode` — `"sliding"` (reuse refreshes clock) or `"fixed"` (expires from grant time).
 - **Warning**: grants are same-actor + in-memory; a restart clears all (fail-safe).
+
+### Rule Checker
+| Key | Default | Type |
+|-----|---------|------|
+| `security.rule_checker_enabled` | `true` | boolean |
+| `security.rule_checker_driver` | `"provider"` | string (`provider` / `evaluator`) |
+| `security.rule_checker_model` | `""` | string (key from /models) |
+| `security.rule_checker_timeout` | `120` | integer (seconds, 5-120) |
+| `security.rule_checker_max_retries` | `2` | integer |
+
+Every final reply is judged against the hard rules before it is sent; a violation triggers a rewrite.
+- `rule_checker_driver` — `"provider"` = a model from `/models` (below); `"evaluator"` = `memory.evaluator_model` (e.g. qwen3:0.6b via Ollama).
+- `rule_checker_model` — used with `"provider"`. Empty = the default model (`provider.active_model`), never a per-chat override. Any key from `/models`; an Ollama entry is called directly on its `base_url`. A key that is missing or cannot be built is not replaced: the check fails open and the reply carries the "Rule checker unavailable" warning.
+- Owner picks Off / Default / Evaluator / any `/models` entry via `/checker`; `/checker timeout <sec>` sets the timeout.
 
 ## Sub-Agents
 

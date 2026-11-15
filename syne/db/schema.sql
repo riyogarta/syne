@@ -1070,7 +1070,7 @@ ON CONFLICT (key) DO NOTHING;
 INSERT INTO config (key, value, description) VALUES
     ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through a checker model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); checker errors fail-open with a warning tag prepended.'),
     ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.'),
-    ('security.rule_checker_driver', '"evaluator"', 'Which model powers the rule checker. "evaluator" = the model configured under memory.evaluator_driver + memory.evaluator_model (default: qwen3:0.6b via Ollama — cheap and local). "provider" = the main chat model (higher per-turn cost, but works without Ollama). Owner switches this via /checker.')
+    ('security.rule_checker_driver', '"provider"', 'Which model powers the rule checker. "provider" (default) = a model from /models named in security.rule_checker_model; empty = the default model (provider.active_model), never a per-chat override. "evaluator" = the model under memory.evaluator_driver + memory.evaluator_model (e.g. qwen3:0.6b via Ollama). Owner switches this via /checker.')
 ON CONFLICT (key) DO NOTHING;
 
 -- memory.guard_* — final draft checked against stored decisions/preferences/lessons
@@ -1090,7 +1090,7 @@ INSERT INTO config (key, value, description) VALUES
     ('security.consent_mode', '"sliding"', 'TTL mode: "sliding" refreshes the clock on every reuse (active work keeps its grant alive), "fixed" expires from the original grant time regardless of reuse.'),
     ('security.rule_checker_enabled', 'true', 'When true, every final assistant response is run through a checker model against the hard rules before being sent. Violations trigger a rewrite (up to security.rule_checker_max_retries); checker errors fail-open with a warning tag prepended.'),
     ('security.rule_checker_max_retries', '2', 'How many times the rule checker will ask the LLM to rewrite a violating draft. 0 = one-shot check only (no rewrite); default 2 = up to 3 total drafts before giving up and sending with a warning.'),
-    ('security.rule_checker_driver', '"evaluator"', 'Which model powers the rule checker. "evaluator" = the model configured under memory.evaluator_driver + memory.evaluator_model (default: qwen3:0.6b via Ollama — cheap and local). "provider" = the main chat model (higher per-turn cost, but works without Ollama). Owner switches this via /checker.')
+    ('security.rule_checker_driver', '"provider"', 'Which model powers the rule checker. "provider" (default) = a model from /models named in security.rule_checker_model; empty = the default model (provider.active_model), never a per-chat override. "evaluator" = the model under memory.evaluator_driver + memory.evaluator_model (e.g. qwen3:0.6b via Ollama). Owner switches this via /checker.')
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================
@@ -1133,4 +1133,10 @@ CREATE TABLE IF NOT EXISTS shell_denylist (
 -- under this ceiling. Exceeding it fails open with a warning tag.
 INSERT INTO config (key, value, description) VALUES
     ('security.rule_checker_timeout', '120', 'Max seconds the rule checker may spend judging one draft response, applied to both drivers (Ollama evaluator and main provider). Read at check time and clamped to 5-120. On timeout the checker returns ERROR and fails open — the reply is sent with a warning tag rather than held. Default 120; owner tunes it via /checker timeout <sec>.')
+ON CONFLICT (key) DO NOTHING;
+
+-- security.rule_checker_model — rule checker model picked from /models in /checker
+-- (Riyo, 15 Nov 2026). Empty = the default model. Mirrors migration 47.
+INSERT INTO config (key, value, description) VALUES
+    ('security.rule_checker_model', '""', 'Model the rule checker uses when security.rule_checker_driver is "provider": a key from /models (provider.models). Empty = the default model (provider.active_model), never a per-chat override. An Ollama entry is called directly on its base_url. A key that is missing or cannot be built is not replaced by another model: the check fails open and the reply carries the "Rule checker unavailable" warning. Set via /checker.')
 ON CONFLICT (key) DO NOTHING;
