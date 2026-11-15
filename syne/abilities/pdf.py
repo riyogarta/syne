@@ -27,7 +27,7 @@ from typing import Any
 import httpx
 
 from syne.abilities.base import Ability
-from syne.abilities import _media
+from syne.abilities import _inline_md, _media
 
 logger = logging.getLogger("syne.ability.pdf")
 
@@ -103,48 +103,35 @@ def _extract_readable_text_from_html(html_bytes: bytes) -> str:
     return "\n".join(lines).strip()
 
 
+def _rl_escape(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def _md_inline_to_rl(text: str) -> str:
-    """Convert markdown inline syntax to ReportLab Paragraph mini-HTML.
+    """Convert inline markup to ReportLab Paragraph mini-HTML.
 
-    Supports: `code`, **bold**, *italic*, _italic_, ~~strike~~, [text](url).
-    HTML-special chars are escaped so raw < > & in user text don't break
-    ReportLab's mini-HTML parser.
+    Parsing is shared with the Office ability (syne.abilities._inline_md):
+    nested **bold *italic***, links inside bold, `code`, ~~strike~~ and
+    backslash escapes. The syntax (markdown / whatsapp) comes from the active
+    _inline_md.syntax_scope(). HTML-special chars are escaped so raw < > & in
+    user text don't break ReportLab's mini-HTML parser.
     """
-    # Stash code spans BEFORE escaping so their content stays verbatim
-    # and they're not re-interpreted by the bold/italic regexes.
-    code_spans: list[str] = []
-
-    def _stash_code(m: re.Match) -> str:
-        code_spans.append(m.group(1))
-        return f"\x00C{len(code_spans) - 1}\x00"
-
-    text = re.sub(r"`([^`\n]+)`", _stash_code, text)
-
-    # Escape HTML special chars on the non-code text
-    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    # Links — [text](url). URL is already escaped by the step above.
-    text = re.sub(
-        r"\[([^\]\n]+)\]\(([^)\n\s]+)\)",
-        lambda m: f'<link href="{m.group(2)}" color="#1a73e8"><u>{m.group(1)}</u></link>',
-        text,
-    )
-    # Bold **text** — apply before single-asterisk italic
-    text = re.sub(r"\*\*([^*\n]+)\*\*", r"<b>\1</b>", text)
-    # Strikethrough ~~text~~
-    text = re.sub(r"~~([^~\n]+)~~", r"<strike>\1</strike>", text)
-    # Italic *text* and _text_ — guard against word-internal _ or *
-    text = re.sub(r"(?<![\*\w])\*([^*\n]+?)\*(?![\*\w])", r"<i>\1</i>", text)
-    text = re.sub(r"(?<![_\w])_([^_\n]+?)_(?![_\w])", r"<i>\1</i>", text)
-
-    # Restore code spans (escape their content too, but no markdown parsing)
-    def _restore_code(m: re.Match) -> str:
-        idx = int(m.group(1))
-        raw = code_spans[idx].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f'<font face="Courier" backColor="#f3f3f3">&nbsp;{raw}&nbsp;</font>'
-
-    text = re.sub(r"\x00C(\d+)\x00", _restore_code, text)
-    return text
+    out: list[str] = []
+    for seg in _inline_md.parse_inline(text):
+        piece = _rl_escape(seg.text)
+        if seg.code:
+            piece = f'<font face="Courier" backColor="#f3f3f3">&nbsp;{piece}&nbsp;</font>'
+        if seg.strike:
+            piece = f"<strike>{piece}</strike>"
+        if seg.italic:
+            piece = f"<i>{piece}</i>"
+        if seg.bold:
+            piece = f"<b>{piece}</b>"
+        if seg.link:
+            href = _rl_escape(seg.link).replace('"', "&quot;")
+            piece = f'<link href="{href}" color="#1a73e8"><u>{piece}</u></link>'
+        out.append(piece)
+    return "".join(out)
 
 
 def _md_is_table_row(line: str) -> bool:
@@ -1035,6 +1022,16 @@ class PdfAbility(Ability):
                             "![Caption](photo.jpg){width=60%}."
                         ),
                     },
+                    "syntax": {
+                        "type": "string",
+                        "enum": ["markdown", "whatsapp"],
+                        "description": (
+                            "Inline markup of `text` for make_from_text. 'markdown' "
+                            "(default): **bold**, *italic* or _italic_, ~~strike~~, "
+                            "nesting allowed. 'whatsapp': *bold*, _italic_, ~strike~ "
+                            "- use when the text was copied from a WhatsApp chat."
+                        ),
+                    },
                     "url": {"type": "string"},
                     "pdf_base64": {"type": "string", "description": "Base64-encoded PDF (for read_from_base64)"},
                     "out_name": {"type": "string"},
@@ -1073,6 +1070,7 @@ class PdfAbility(Ability):
             "- Status: **ready**\n"
             "- Auto-extracts text from PDFs uploaded by users (priority pre-process)\n"
             "- Make from text: `pdf(action='make_from_text', title='...', text='...')`\n"
+            "- Text copied from WhatsApp (*bold* _italic_ ~strike~): add `syntax='whatsapp'`\n"
             "- Embed image (own line): `![Caption](photo.jpg)` — file in workspace/, "
             "https:// URL, or data: URI. Size: `{width=60%}`\n"
             "- Make from URL: `pdf(action='make_from_url', url='https://...', out_name='file.pdf')`\n"
@@ -1102,11 +1100,13 @@ class PdfAbility(Ability):
                 name = _ensure_pdf_ext(_safe_filename(out_name or title or f"text_{_now_ts()}"))
                 out_path = os.path.join(out_dir, name)
                 body = text or ""
+                syntax = _inline_md.normalize_syntax(params.get("syntax"))
                 # Resolve embedded ![alt](src) images before the (sync) build.
                 images = await _media.resolve_image_map(_media.collect_image_srcs(body))
-                _make_pdf_from_text_platypus(
-                    out_path, title, body, pagesize=A4, images=images
-                )
+                with _inline_md.syntax_scope(syntax):
+                    _make_pdf_from_text_platypus(
+                        out_path, title, body, pagesize=A4, images=images
+                    )
                 result = {"file_path": out_path}
                 embedded = sum(1 for pth, _ in images.values() if pth)
                 if images:

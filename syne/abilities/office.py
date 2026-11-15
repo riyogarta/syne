@@ -31,7 +31,7 @@ import time
 from copy import deepcopy
 
 from syne.abilities.base import Ability
-from syne.abilities import _media
+from syne.abilities import _inline_md, _media
 
 logger = logging.getLogger("syne.ability.office")
 
@@ -286,6 +286,17 @@ class OfficeAbility(Ability):
                                 "Pass as JSON string."
                             ),
                         },
+                        "syntax": {
+                            "type": "string",
+                            "enum": ["markdown", "whatsapp"],
+                            "description": (
+                                "Inline markup of content/slides text for create_docx and "
+                                "create_pptx. 'markdown' (default): **bold**, *italic* or "
+                                "_italic_, ~~strike~~, nesting allowed. 'whatsapp': *bold*, "
+                                "_italic_, ~strike~ - use when the text was copied from a "
+                                "WhatsApp chat."
+                            ),
+                        },
                         "out_name": {"type": "string", "description": "Optional output filename."},
                         "file_base64": {
                             "type": "string",
@@ -320,6 +331,7 @@ class OfficeAbility(Ability):
         return (
             "- Status: **ready**\n"
             "- Auto-extracts content from uploaded .docx/.xlsx/.pptx (priority pre-process)\n"
+            "- Text copied from WhatsApp (*bold* _italic_ ~strike~): add `syntax='whatsapp'` to create_docx/create_pptx\n"
             "- Create Word: `office(action='create_docx', title='...', content='# Heading\\nText')`\n"
             "- Create Excel: `office(action='create_xlsx', title='...', sheets='[{\"name\":\"S1\",\"headers\":[\"A\"],\"rows\":[[1]]}]')`\n"
             "- Create PPT: `office(action='create_pptx', title='...', slides='[{\"title\":\"S1\",\"bullets\":[\"p1\"]}]')`\n"
@@ -340,12 +352,14 @@ class OfficeAbility(Ability):
         os.makedirs(out_dir, exist_ok=True)
 
         try:
+            syntax = _inline_md.normalize_syntax(params.get("syntax"))
             if action == "create_docx":
                 content = params.get("content") or ""
                 name = _ensure_ext(_safe_filename(out_name or title or f"document_{_now_ts()}"), ".docx")
                 out_path = os.path.join(out_dir, name)
                 images = await _media.resolve_image_map(_media.collect_image_srcs(content))
-                _make_docx(out_path, title, content, images=images)
+                with _inline_md.syntax_scope(syntax):
+                    _make_docx(out_path, title, content, images=images)
                 return {
                     "success": True,
                     "result": _with_image_stats({"file_path": out_path}, images),
@@ -381,7 +395,8 @@ class OfficeAbility(Ability):
                 out_path = os.path.join(out_dir, name)
                 srcs = [s for s in (_slide_image_src(sd) for sd in slides if isinstance(sd, dict)) if s]
                 images = await _media.resolve_image_map(srcs)
-                _make_pptx(out_path, title, slides, images=images)
+                with _inline_md.syntax_scope(syntax):
+                    _make_pptx(out_path, title, slides, images=images)
                 return {
                     "success": True,
                     "result": _with_image_stats({"file_path": out_path}, images),
@@ -569,8 +584,20 @@ def _set_paragraph_bidi(paragraph) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _add_hyperlink(paragraph, label: str, url: str) -> None:
-    """Append a clickable hyperlink run to a python-docx paragraph."""
+def _add_hyperlink(
+    paragraph,
+    label: str,
+    url: str,
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    strike: bool = False,
+    code: bool = False,
+) -> None:
+    """Append a clickable hyperlink run to a python-docx paragraph.
+
+    The bold/italic/strike/code flags style the link label (e.g. a link
+    inside **bold** text stays bold)."""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
@@ -585,6 +612,18 @@ def _add_hyperlink(paragraph, label: str, url: str) -> None:
 
     new_run = OxmlElement("w:r")
     rPr = OxmlElement("w:rPr")
+    # Child order follows the CT_RPr schema: rFonts, b, i, strike, color, u.
+    if code:
+        fonts = OxmlElement("w:rFonts")
+        fonts.set(qn("w:ascii"), "Consolas")
+        fonts.set(qn("w:hAnsi"), "Consolas")
+        rPr.append(fonts)
+    if bold:
+        rPr.append(OxmlElement("w:b"))
+    if italic:
+        rPr.append(OxmlElement("w:i"))
+    if strike:
+        rPr.append(OxmlElement("w:strike"))
     color = OxmlElement("w:color")
     color.set(qn("w:val"), "1A73E8")
     rPr.append(color)
@@ -600,79 +639,44 @@ def _add_hyperlink(paragraph, label: str, url: str) -> None:
     paragraph._p.append(hyperlink)
 
 
-# Regex patterns reused across the inline tokenizer.
-_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
-_INLINE_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(([^)\n\s]+)\)")
-_INLINE_BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
-_INLINE_STRIKE_RE = re.compile(r"~~([^~\n]+)~~")
-_INLINE_ITALIC_RE = re.compile(r"(?<![\*\w])\*([^*\n]+?)\*(?![\*\w])")
-_INLINE_ITALIC_UNDER_RE = re.compile(r"(?<![_\w])_([^_\n]+?)_(?![_\w])")
-
-
-def _tokenize_inline_md(text: str) -> list[tuple[str, object]]:
-    """Tokenize a string into a flat list of styled segments.
-
-    Returns: list of (kind, payload) where kind is one of
-    'text', 'bold', 'italic', 'code', 'strike', 'link'.
-    For 'link' payload is (label, url); for others it is a string.
-    """
-    tokens: list[tuple[str, object]] = [("text", text)]
-
-    def _split(kind: str, pattern: re.Pattern, extract):
-        out: list[tuple[str, object]] = []
-        for tk, payload in tokens:
-            if tk != "text":
-                out.append((tk, payload))
-                continue
-            assert isinstance(payload, str)
-            last = 0
-            for m in pattern.finditer(payload):
-                if m.start() > last:
-                    out.append(("text", payload[last:m.start()]))
-                out.append((kind, extract(m)))
-                last = m.end()
-            if last < len(payload):
-                out.append(("text", payload[last:]))
-        tokens[:] = out
-
-    _split("code", _INLINE_CODE_RE, lambda m: m.group(1))
-    _split("link", _INLINE_LINK_RE, lambda m: (m.group(1), m.group(2)))
-    _split("bold", _INLINE_BOLD_RE, lambda m: m.group(1))
-    _split("strike", _INLINE_STRIKE_RE, lambda m: m.group(1))
-    _split("italic", _INLINE_ITALIC_RE, lambda m: m.group(1))
-    _split("italic", _INLINE_ITALIC_UNDER_RE, lambda m: m.group(1))
-    return [t for t in tokens if t[1] != ""]
+def _apply_docx_run_style(run, seg) -> None:
+    """Apply one parsed inline segment's styling to a python-docx run."""
+    if seg.bold:
+        run.bold = True
+    if seg.italic:
+        run.italic = True
+    if seg.strike:
+        run.font.strike = True
+    if seg.code:
+        run.font.name = "Consolas"
 
 
 def _add_inline_runs(paragraph, text: str) -> None:
-    """Add text to a docx paragraph honoring markdown inline markers.
+    """Add text to a docx paragraph honoring inline markup.
 
-    Supports **bold**, *italic*, _italic_, `code`, ~~strike~~, [text](url).
+    Parsing is shared with the PDF ability (syne.abilities._inline_md), so
+    nested **bold *italic***, links inside bold, `code`, ~~strike~~ and the
+    WhatsApp syntax (via _inline_md.syntax_scope) render the same in both.
     Arabic text gets Arial font + RTL direction automatically.
     """
     has_any_arabic = _has_arabic(text)
-    for kind, payload in _tokenize_inline_md(text):
-        if kind == "link":
-            label, url = payload  # type: ignore[misc]
+    for seg in _inline_md.parse_inline(text):
+        if seg.link:
             try:
-                _add_hyperlink(paragraph, label, url)
+                _add_hyperlink(
+                    paragraph, seg.text, seg.link,
+                    bold=seg.bold, italic=seg.italic, strike=seg.strike, code=seg.code,
+                )
             except Exception:
                 # Fallback: render as plain "label (url)"
-                run = paragraph.add_run(f"{label} ({url})")
-                if _has_arabic(label):
+                run = paragraph.add_run(f"{seg.text} ({seg.link})")
+                _apply_docx_run_style(run, seg)
+                if _has_arabic(seg.text):
                     _set_run_arabic(run)
             continue
-        assert isinstance(payload, str)
-        run = paragraph.add_run(payload)
-        if kind == "bold":
-            run.bold = True
-        elif kind == "italic":
-            run.italic = True
-        elif kind == "strike":
-            run.font.strike = True
-        elif kind == "code":
-            run.font.name = "Consolas"
-        if _has_arabic(payload):
+        run = paragraph.add_run(seg.text)
+        _apply_docx_run_style(run, seg)
+        if _has_arabic(seg.text):
             _set_run_arabic(run)
 
     # If any Arabic was found, set bidi on the paragraph
@@ -763,6 +767,27 @@ def _parse_table_alignments(separator_line: str) -> list[str]:
     return out
 
 
+def _md_line_kind(s: str, idx: int) -> str:
+    """Classify one stripped line for block splitting in _normalize_md_blocks.
+
+    Headings and horizontal rules get a unique kind (one block per line);
+    list items, numbered items and quotes group with their neighbours.
+    """
+    if not s:
+        return "blank"
+    if re.match(r"^#{1,6}\s+", s):
+        return f"heading{idx}"
+    if re.fullmatch(r"[-_*]{3,}", s):
+        return f"rule{idx}"
+    if re.match(r"^[-*]\s+", s):
+        return "bullet"
+    if re.match(r"^\d+\.\s+", s):
+        return "number"
+    if s.startswith(">"):
+        return "quote"
+    return "text"
+
+
 def _normalize_md_blocks(content: str) -> str:
     """Pre-pass that protects multi-line constructs from a naive split('\\n\\n').
 
@@ -772,6 +797,9 @@ def _normalize_md_blocks(content: str) -> str:
     2. Pipe tables: insert blank lines before/after a table run so the block
        boundary aligns with the table boundary, even when the LLM forgets to
        leave a blank line around the table.
+    3. Headings, rules, bullet/numbered lists and quotes: insert a blank line
+       where the line kind changes, so "Intro:\\n- a\\n- b" renders as a
+       paragraph plus a real list (same as the PDF renderer).
     """
     lines = content.splitlines()
 
@@ -825,15 +853,19 @@ def _normalize_md_blocks(content: str) -> str:
         i += 1
 
     out: list[str] = []
-    prev_special = False
+    prev_kind: str | None = None
     for idx, ln in enumerate(collapsed):
-        cur = in_special[idx]
-        # Insert a blank line on any transition (in→out or out→in) to break
-        # the block boundary, so split('\n\n') isolates fences and tables.
-        if cur != prev_special and out and out[-1].strip():
+        kind = "special" if in_special[idx] else _md_line_kind(ln.strip(), idx)
+        if kind == "blank":
+            out.append(ln)
+            prev_kind = None
+            continue
+        # Insert a blank line on any kind transition to break the block
+        # boundary, so split('\n\n') isolates fences, tables, lists, headings.
+        if prev_kind is not None and kind != prev_kind and out and out[-1].strip():
             out.append("")
         out.append(ln)
-        prev_special = cur
+        prev_kind = kind
     return "\n".join(out)
 
 
@@ -1484,15 +1516,21 @@ def _remove_slide(prs, index: int) -> None:
     sld_id_lst.remove(sld_id)
 
 
-_MD_MARKER_RE = re.compile(r"\*\*|`[^`\n]+`|~~|\[[^\]\n]+\]\([^)\n]+\)|(?<![\w*])\*[^*\n]+\*(?![\w*])|(?<![\w_])_[^_\n]+_(?![\w_])")
+def _pptx_set_strike(run) -> None:
+    """python-pptx has no strike property; set it on the run's a:rPr."""
+    try:
+        run.font._rPr.set("strike", "sngStrike")
+    except Exception:
+        pass
 
 
 def _set_shape_text(shape, text: str) -> None:
     """Replace a shape's text while preserving font formatting from its first run.
 
     Removes additional paragraphs/runs, keeps the first one as the style anchor.
-    Inline markdown (**bold**, *italic*, `code`, ~~strike~~, [label](url)) is
-    rendered as multiple runs so it doesn't leak literal markers into the slide.
+    Inline markup (**bold**, *italic*, `code`, ~~strike~~, [label](url), nested,
+    or WhatsApp syntax via _inline_md.syntax_scope) is rendered as multiple runs
+    so it doesn't leak literal markers into the slide.
     Arabic text gets Arial font automatically.
     """
     if not shape.has_text_frame:
@@ -1510,7 +1548,7 @@ def _set_shape_text(shape, text: str) -> None:
         p._p.getparent().remove(p._p)
 
     # Fast path: no markdown markers — preserve original behavior exactly
-    if not _MD_MARKER_RE.search(text):
+    if not _inline_md.has_markup(text):
         if first_p.runs:
             first_run = first_p.runs[0]
             for r in list(first_p.runs[1:]):
@@ -1522,8 +1560,8 @@ def _set_shape_text(shape, text: str) -> None:
             first_p.text = text
         return
 
-    # Markdown path: tokenize and emit one run per styled segment.
-    tokens = _tokenize_inline_md(text)
+    # Markup path: parse and emit one run per styled segment.
+    segments = _inline_md.parse_inline(text)
 
     # Capture anchor font from the first existing run (if any) so we can copy
     # its font name/size onto each new run. Then clear all existing runs.
@@ -1542,30 +1580,27 @@ def _set_shape_text(shape, text: str) -> None:
         for r in list(first_p.runs):
             r._r.getparent().remove(r._r)
 
-    for kind, payload in tokens:
-        if kind == "link":
-            label, url = payload  # type: ignore[misc]
-            run = first_p.add_run()
-            run.text = str(label)
+    for seg in segments:
+        seg_text = seg.text
+        run = first_p.add_run()
+        run.text = seg_text
+        if seg.link:
             try:
-                run.hyperlink.address = str(url)
+                run.hyperlink.address = str(seg.link)
             except Exception:
                 # Fallback: append URL in parentheses so the link is visible
-                run.text = f"{label} ({url})"
-            seg_text = str(label)
-        else:
-            seg_text = str(payload)
-            run = first_p.add_run()
-            run.text = seg_text
-            if kind == "bold":
-                run.font.bold = True
-            elif kind == "italic":
-                run.font.italic = True
-            elif kind == "code":
-                run.font.name = "Consolas"
+                run.text = f"{seg_text} ({seg.link})"
+        if seg.bold:
+            run.font.bold = True
+        if seg.italic:
+            run.font.italic = True
+        if seg.strike:
+            _pptx_set_strike(run)
+        if seg.code:
+            run.font.name = "Consolas"
 
         # Apply anchor font/size unless this run set its own (code uses Consolas)
-        if kind != "code" and anchor_name:
+        if not seg.code and anchor_name:
             try:
                 run.font.name = anchor_name
             except Exception:
