@@ -220,8 +220,8 @@ def test_qs_pattern_name_comma_surah_colon_ayah():
 
 async def test_migration_45():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 45 and M.MIGRATIONS[-1][1] is M._m45_kg_qs_pattern_surah_comma
-    assert M.CURRENT_SCHEMA_VERSION == 45
+    assert (45, M._m45_kg_qs_pattern_surah_comma, "transactional") in M.MIGRATIONS
+    assert M.CURRENT_SCHEMA_VERSION >= 45
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m45_kg_qs_pattern_surah_comma(conn)

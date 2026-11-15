@@ -1073,6 +1073,15 @@ INSERT INTO config (key, value, description) VALUES
     ('security.rule_checker_driver', '"evaluator"', 'Which model powers the rule checker. "evaluator" = the model configured under memory.evaluator_driver + memory.evaluator_model (default: qwen3:0.6b via Ollama — cheap and local). "provider" = the main chat model (higher per-turn cost, but works without Ollama). Owner switches this via /checker.')
 ON CONFLICT (key) DO NOTHING;
 
+-- memory.guard_* — final draft checked against stored decisions/preferences/lessons
+INSERT INTO config (key, value, description) VALUES
+    ('memory.guard_enabled', 'true', 'Memory guard on/off. When true, every final draft is embedded and checked against the closest stored memories in memory.guard_categories that were not already recalled this turn; the default model judges whether the draft conflicts with them, and a conflict triggers one rewrite. Fail-open.'),
+    ('memory.guard_categories', '["decision", "preference", "lesson"]', 'Memory categories the memory guard checks a draft against.'),
+    ('memory.guard_limit', '5', 'Max memories the memory guard sends to the judge per draft.'),
+    ('memory.guard_min_similarity', '0.5', 'Minimum cosine similarity between the draft and a memory for that memory to be judged. Lower = more memories judged.'),
+    ('memory.guard_timeout', '30', 'Max seconds for one memory-guard judge call (clamped 5-120). On timeout the draft is sent unchanged.')
+ON CONFLICT (key) DO NOTHING;
+
 -- security.consent_* — ya/yes confirmation gate for destructive (op=x) tool calls
 INSERT INTO config (key, value, description) VALUES
     ('security.consent_enabled', 'true', 'Master switch for the consent gate on op=x tool calls. When true, destructive tools (exec, file_write, memory_delete, update_*, etc.) prompt "balas ya" before running. Set false to disable the whole gate.'),

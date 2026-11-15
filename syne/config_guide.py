@@ -67,6 +67,17 @@ Controls how fast non-permanent memories fade and when they get promoted.
 - **Tune similarity thresholds when**: Too many duplicates stored (lower similarity_threshold) or valid updates being skipped (raise conflict_threshold).
 - **Warning**: Each recalled memory uses tokens. Setting too high wastes context window.
 
+### Memory Guard
+| Key | Default | Type |
+|-----|---------|------|
+| `memory.guard_enabled` | `true` | boolean |
+| `memory.guard_categories` | `["decision", "preference", "lesson"]` | JSON array |
+| `memory.guard_limit` | `5` | integer |
+| `memory.guard_min_similarity` | `0.5` | float |
+| `memory.guard_timeout` | `30` | integer |
+
+Every final draft is embedded and checked against the closest memories in `guard_categories` that were not already recalled this turn. The default model judges whether the draft conflicts with them (states the opposite, re-opens a settled decision, proposes a rejected action); a conflict triggers one rewrite. Fail-open on any error.
+
 ### Category Routing
 | Key | Default | Type |
 |-----|---------|------|

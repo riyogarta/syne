@@ -1315,6 +1315,20 @@ async def _m45_kg_qs_pattern_surah_comma(conn) -> None:
     )
 
 
+async def _m46_memory_guard_config(conn) -> None:
+    """Seed memory.guard_* (Riyo, 15 Nov 2026). Idempotent.
+
+    Defaults come from syne.memory_guard.DEFAULTS; existing keys are kept.
+    """
+    from ..memory_guard import DEFAULTS
+    for key, (value, desc) in DEFAULTS.items():
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+            "ON CONFLICT (key) DO NOTHING",
+            key, json.dumps(value), desc,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1361,6 +1375,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (43, _m43_seed_kg_rule_config, "transactional"),
     (44, _m44_kg_qs_pattern_and_aliases, "transactional"),
     (45, _m45_kg_qs_pattern_surah_comma, "transactional"),
+    (46, _m46_memory_guard_config, "transactional"),
 ]
 
 

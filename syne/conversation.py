@@ -224,6 +224,10 @@ class Conversation:
         # see the block the rule tells it to read, so a CORRECT date reads
         # as unverified and every retry re-fails on a compliant draft.
         self._last_time_context: str = ""
+        # Memory ids recalled into this turn's context by _build_context.
+        # The memory guard skips them: they were already in front of the
+        # model, so judging the draft against them again adds nothing.
+        self._last_recalled_memory_ids: list = []
         # Consent-system pending state — populated by consent.check_and_hold
         # when a tool/ability call is held pending confirmation. The
         # deterministic bypass at the top of chat() checks these on every turn
@@ -1076,6 +1080,9 @@ class Conversation:
         memories, graph_lines = await asyncio.gather(
             _do_memory_recall(), _do_graph_recall()
         )
+        self._last_recalled_memory_ids = [
+            m.get("id") for m in (memories or []) if m.get("id") is not None
+        ]
         # 2c. Rule-built KG links of the recalled reference chunks: memory
         #     id -> its 'chunk' entity -> ayahs -> other chunks. Appended after
         #     the keyword lines; config kg.chunk_link_limit = 0 turns it off.
@@ -1960,6 +1967,26 @@ class Conversation:
                 # continue with the LLM's original response untouched.
                 logger.exception("Rule checker crashed — sending original response as-is")
 
+        # ─── Memory guard: draft vs stored decisions (Riyo, 15 Nov 2026) ───
+        # Recall above is driven by the user's message only, so a topic the
+        # assistant raises itself never pulls in the memories about it. The
+        # guard embeds the DRAFT, judges it against the closest guarded
+        # memories (decision / preference / lesson) and rewrites once on a
+        # conflict. Code-enforced: it runs whether or not the model "means"
+        # to check. Fail-open, same contract as the rule checker.
+        if (response.content or "").strip() and not getattr(self, "_pending_consent_hash", ""):
+            try:
+                response = await self._memory_guard_and_maybe_rewrite(
+                    response=response,
+                    context=context,
+                    tool_schemas=tool_schemas,
+                    access_level=access_level,
+                    chat_kwargs=chat_kwargs,
+                    user_message=user_message,
+                )
+            except Exception:
+                logger.exception("Memory guard crashed — sending response as-is")
+
         # Save assistant response, with this turn's instrumentation
         _turn_stats = self._ts_finish()
         await self.save_message(
@@ -2445,6 +2472,64 @@ class Conversation:
                 cache_write_tokens=current.cache_write_tokens,
             )
         return current
+
+    async def _memory_guard_and_maybe_rewrite(
+        self,
+        response: ChatResponse,
+        context: list,
+        tool_schemas: Optional[list],
+        access_level: str,
+        chat_kwargs: dict,
+        user_message: str,
+    ) -> ChatResponse:
+        """Check the draft against stored memories; rewrite once on conflict.
+
+        Judged on the DEFAULT model (manager provider), not this chat's
+        override, like the rule checker. Returns the draft unchanged when the
+        guard is off, finds nothing, cannot decide, or the rewrite is empty.
+        """
+        from . import memory_guard as _mg
+        from .db.models import get_config as _gc_mg
+
+        cfg = await _mg.load_config(_gc_mg)
+        if not cfg["enabled"]:
+            return response
+
+        judge = getattr(self._mgr, "provider", None) if self._mgr else None
+        if judge is None:
+            judge = self.provider
+
+        result = await _mg.check_draft(
+            draft=response.content or "",
+            user_message=user_message,
+            embed=self.memory.provider.embed,
+            provider=judge,
+            exclude_ids=list(getattr(self, "_last_recalled_memory_ids", []) or []),
+            access_level=access_level,
+            cfg=cfg,
+        )
+        if result is None or not result.conflict:
+            return response
+
+        retry_ctx = list(context)
+        retry_ctx.append(ChatMessage(role="assistant", content=response.content or ""))
+        retry_ctx.append(ChatMessage(role="user", content=_mg.build_nudge(result)))
+        new_resp = await self._llm_call(
+            "memory_guard_retry",
+            messages=retry_ctx,
+            tools=tool_schemas if tool_schemas else None,
+            stream_callbacks=None,
+            **chat_kwargs,
+        )
+        if new_resp.tool_calls:
+            new_resp = await self._handle_tool_calls(
+                new_resp, retry_ctx, access_level, tool_schemas,
+            )
+        if not (new_resp.content or "").strip():
+            logger.warning("Memory guard: rewrite came back empty — keeping draft")
+            return response
+        logger.info(f"Memory guard: draft rewritten for memories {result.memory_ids}")
+        return new_resp
 
     async def _handle_tool_calls(
         self,
