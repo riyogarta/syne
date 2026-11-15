@@ -17,7 +17,7 @@ CANDS = [
      "similarity": 0.82,
      "content": "history_expand default 10 sebelum + 10 sesudah pesan acuan."},
 ]
-CFG = {"enabled": True, "categories": ["decision"], "limit": 5,
+CFG = {"enabled": True, "model": "", "categories": ["decision"], "limit": 5,
        "min_similarity": 0.5, "timeout": 30.0}
 DRAFT = ("Batas context window di config sekarang session.history_limit = 100, "
          "padahal dulu 1000. Mau kutelusuri?")
@@ -27,9 +27,13 @@ def _embed():
     return AsyncMock(return_value=SimpleNamespace(vector=[0.1, 0.2]))
 
 
+def _judge(reply="CLEAN", exc=None):
+    return AsyncMock(return_value=reply, side_effect=exc)
+
+
 async def _check(**kw):
     args = dict(draft=DRAFT, user_message="History search digabung context window?",
-                embed=_embed(), provider=object(), exclude_ids=[1, 2],
+                embed=_embed(), judge=_judge(), exclude_ids=[1, 2],
                 access_level="owner", cfg=CFG)
     args.update(kw)
     return await G.check_draft(**args)
@@ -72,9 +76,8 @@ async def test_short_draft_is_not_checked():
 
 async def test_no_candidates_means_no_judge_call(monkeypatch):
     monkeypatch.setattr(G, "find_candidates", AsyncMock(return_value=[]))
-    judge = AsyncMock()
-    monkeypatch.setattr(RC, "_check_via_provider", judge)
-    r = await _check()
+    judge = _judge()
+    r = await _check(judge=judge)
     assert r.conflict is False
     judge.assert_not_called()
 
@@ -82,10 +85,11 @@ async def test_no_candidates_means_no_judge_call(monkeypatch):
 async def test_conflict_returns_only_named_memories(monkeypatch):
     fc = AsyncMock(return_value=CANDS)
     monkeypatch.setattr(G, "find_candidates", fc)
-    monkeypatch.setattr(RC, "_check_via_provider",
-                        AsyncMock(return_value="CONFLICT|57566|re-opens a final decision"))
-    r = await _check()
+    judge = _judge("CONFLICT|57566|re-opens a final decision")
+    r = await _check(judge=judge)
     assert r.conflict and [m["id"] for m in r.memories] == [57566]
+    prompt, timeout = judge.call_args.args
+    assert "#57566" in prompt and timeout == 30.0
     assert fc.call_args.kwargs["exclude_ids"] == [1, 2]
     nudge = G.build_nudge(r)
     assert "#57566" in nudge and "#57442" not in nudge
@@ -93,8 +97,7 @@ async def test_conflict_returns_only_named_memories(monkeypatch):
 
 async def test_judge_error_fails_open(monkeypatch):
     monkeypatch.setattr(G, "find_candidates", AsyncMock(return_value=CANDS))
-    monkeypatch.setattr(RC, "_check_via_provider", AsyncMock(side_effect=TimeoutError()))
-    assert await _check() is None
+    assert await _check(judge=_judge(exc=TimeoutError())) is None
 
 
 async def test_embed_error_fails_open():
@@ -103,6 +106,7 @@ async def test_embed_error_fails_open():
 
 async def test_load_config_parses_strings_and_clamps():
     vals = {"memory.guard_enabled": "false",
+            "memory.guard_model": "  ollama-qwen  ",
             "memory.guard_categories": '["decision"]',
             "memory.guard_limit": "99",
             "memory.guard_timeout": "1"}
@@ -112,7 +116,63 @@ async def test_load_config_parses_strings_and_clamps():
 
     c = await G.load_config(gc)
     assert c["enabled"] is False and c["categories"] == ["decision"]
+    assert c["model"] == "ollama-qwen"
     assert c["limit"] == 20 and c["timeout"] == 5.0 and c["min_similarity"] == 0.5
+
+
+# ── judge selection (memory.guard_model) ────────────────────────────────
+
+MODELS = [
+    {"key": "ollama-qwen", "driver": "ollama", "model_id": "qwen3:4b",
+     "base_url": "http://10.0.0.5:11434"},
+    {"key": "flash", "driver": "google_cca", "model_id": "gemini-3.8-flash"},
+]
+
+
+def _gc(models=MODELS):
+    async def gc(key, default=None):
+        return models if key == "provider.models" else default
+    return gc
+
+
+async def test_judge_default_uses_default_provider(monkeypatch):
+    cvp = AsyncMock(return_value="CLEAN")
+    monkeypatch.setattr(RC, "_check_via_provider", cvp)
+    j = await G.build_judge("", default_provider="DEF", get_config=_gc())
+    assert await j("p", 12.0) == "CLEAN"
+    assert cvp.call_args.args == ("p", "DEF") and cvp.call_args.kwargs["timeout"] == 12.0
+
+
+async def test_judge_ollama_entry_calls_ollama_directly(monkeypatch):
+    cvo = AsyncMock(return_value="CLEAN")
+    monkeypatch.setattr(RC, "_check_via_ollama", cvo)
+    j = await G.build_judge("ollama-qwen", default_provider="DEF", get_config=_gc())
+    assert j.label == "ollama:qwen3:4b"
+    await j("p", 9.0)
+    kw = cvo.call_args.kwargs
+    assert kw["model"] == "qwen3:4b" and kw["base_url"] == "http://10.0.0.5:11434"
+
+
+async def test_judge_other_entry_builds_provider(monkeypatch):
+    import syne.llm.drivers as D
+    built = AsyncMock(return_value="PROV")
+    monkeypatch.setattr(D, "create_provider", built)
+    cvp = AsyncMock(return_value="CLEAN")
+    monkeypatch.setattr(RC, "_check_via_provider", cvp)
+    j = await G.build_judge("flash", default_provider="DEF", get_config=_gc())
+    await j("p", 5.0)
+    assert built.call_args.args[0]["key"] == "flash"
+    assert cvp.call_args.args[1] == "PROV"
+
+
+async def test_judge_missing_key_skips_without_substitute():
+    assert await G.build_judge("gone", default_provider="DEF", get_config=_gc()) is None
+
+
+async def test_judge_unbuildable_entry_skips(monkeypatch):
+    import syne.llm.drivers as D
+    monkeypatch.setattr(D, "create_provider", AsyncMock(side_effect=RuntimeError("no key")))
+    assert await G.build_judge("flash", default_provider="DEF", get_config=_gc()) is None
 
 
 # ── conversation wiring ─────────────────────────────────────────────────
@@ -143,18 +203,32 @@ async def test_conversation_rewrites_once_on_conflict(monkeypatch):
     cd = AsyncMock(return_value=G.GuardResult(
         conflict=True, memory_ids=[57566], reason="re-opens", memories=[CANDS[0]]))
     monkeypatch.setattr(G, "check_draft", cd)
+    bj = AsyncMock(return_value="JUDGE")
+    monkeypatch.setattr(G, "build_judge", bj)
     fake, draft = _fake_conv()
     out = await _run_guard(fake, draft)
     assert out.content.startswith("Jawaban baru")
     assert cd.call_args.kwargs["exclude_ids"] == [11, 12]
-    assert cd.call_args.kwargs["provider"] == "default-provider"
+    assert cd.call_args.kwargs["judge"] == "JUDGE"
+    assert bj.call_args.args[0] == "" and bj.call_args.kwargs["default_provider"] == "default-provider"
     fake._llm_call.assert_awaited_once()
     msgs = fake._llm_call.call_args.kwargs["messages"]
     assert msgs[-2].content == DRAFT and "#57566" in msgs[-1].content
 
 
+async def test_conversation_keeps_draft_when_judge_unavailable(monkeypatch):
+    monkeypatch.setattr(G, "load_config", AsyncMock(return_value=dict(CFG, model="gone")))
+    monkeypatch.setattr(G, "build_judge", AsyncMock(return_value=None))
+    cd = AsyncMock()
+    monkeypatch.setattr(G, "check_draft", cd)
+    fake, draft = _fake_conv()
+    assert await _run_guard(fake, draft) is draft
+    cd.assert_not_called()
+
+
 async def test_conversation_keeps_draft_when_clean(monkeypatch):
     monkeypatch.setattr(G, "load_config", AsyncMock(return_value=CFG))
+    monkeypatch.setattr(G, "build_judge", AsyncMock(return_value="JUDGE"))
     monkeypatch.setattr(G, "check_draft", AsyncMock(return_value=G.GuardResult(conflict=False)))
     fake, draft = _fake_conv()
     assert await _run_guard(fake, draft) is draft
@@ -172,6 +246,7 @@ async def test_conversation_keeps_draft_when_disabled(monkeypatch):
 
 async def test_conversation_keeps_draft_when_rewrite_empty(monkeypatch):
     monkeypatch.setattr(G, "load_config", AsyncMock(return_value=CFG))
+    monkeypatch.setattr(G, "build_judge", AsyncMock(return_value="JUDGE"))
     monkeypatch.setattr(G, "check_draft", AsyncMock(return_value=G.GuardResult(
         conflict=True, memory_ids=[57566], memories=[CANDS[0]])))
     fake, draft = _fake_conv(new_content="  ")
@@ -196,3 +271,14 @@ def test_schema_sql_seeds_every_key():
     sql = (Path(G.__file__).parent / "db" / "schema.sql").read_text()
     for key in G.DEFAULTS:
         assert f"('{key}'," in sql
+
+
+# ── /guard command wiring ───────────────────────────────────────────────
+
+def test_guard_command_registered():
+    src = (Path(G.__file__).parent / "communication" / "telegram.py").read_text()
+    assert 'CommandHandler("guard", self._cmd_guard)' in src
+    assert 'BotCommand("guard",' in src
+    assert 'data.startswith("guard:")' in src
+    assert 'set_config("memory.guard_model"' in src
+    assert 'set_config("memory.guard_enabled"' in src

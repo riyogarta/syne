@@ -71,12 +71,15 @@ Controls how fast non-permanent memories fade and when they get promoted.
 | Key | Default | Type |
 |-----|---------|------|
 | `memory.guard_enabled` | `true` | boolean |
+| `memory.guard_model` | `""` | string (key from /models) |
 | `memory.guard_categories` | `["decision", "preference", "lesson"]` | JSON array |
 | `memory.guard_limit` | `5` | integer |
 | `memory.guard_min_similarity` | `0.5` | float |
 | `memory.guard_timeout` | `30` | integer |
 
 Every final draft is embedded and checked against the closest memories in `guard_categories` that were not already recalled this turn. The default model judges whether the draft conflicts with them (states the opposite, re-opens a settled decision, proposes a rejected action); a conflict triggers one rewrite. Fail-open on any error.
+- `guard_model` — who judges. Empty = the default model (`provider.active_model`), never a per-chat override. Any key from `/models`; an Ollama entry is called directly on its `base_url`. A key that is missing or cannot be built skips the check (no substitute model).
+- Owner switches on/off and picks the judge via `/guard` on Telegram.
 
 ### Category Routing
 | Key | Default | Type |

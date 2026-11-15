@@ -2484,9 +2484,11 @@ class Conversation:
     ) -> ChatResponse:
         """Check the draft against stored memories; rewrite once on conflict.
 
-        Judged on the DEFAULT model (manager provider), not this chat's
-        override, like the rule checker. Returns the draft unchanged when the
-        guard is off, finds nothing, cannot decide, or the rewrite is empty.
+        Judged by memory.guard_model (picked in /guard). Empty = the DEFAULT
+        model (manager provider), not this chat's override, like the rule
+        checker. Returns the draft unchanged when the guard is off, the judge
+        cannot be built, nothing is found, the judge cannot decide, or the
+        rewrite is empty.
         """
         from . import memory_guard as _mg
         from .db.models import get_config as _gc_mg
@@ -2495,15 +2497,20 @@ class Conversation:
         if not cfg["enabled"]:
             return response
 
-        judge = getattr(self._mgr, "provider", None) if self._mgr else None
+        default_provider = getattr(self._mgr, "provider", None) if self._mgr else None
+        if default_provider is None:
+            default_provider = self.provider
+        judge = await _mg.build_judge(
+            cfg["model"], default_provider=default_provider, get_config=_gc_mg,
+        )
         if judge is None:
-            judge = self.provider
+            return response
 
         result = await _mg.check_draft(
             draft=response.content or "",
             user_message=user_message,
             embed=self.memory.provider.embed,
-            provider=judge,
+            judge=judge,
             exclude_ids=list(getattr(self, "_last_recalled_memory_ids", []) or []),
             access_level=access_level,
             cfg=cfg,

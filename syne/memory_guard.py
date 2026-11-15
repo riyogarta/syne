@@ -9,7 +9,7 @@ else, so #57566 was never recalled.
 
 This guard embeds the DRAFT, fetches the closest memories in the guarded
 categories (decision / preference / lesson by default) that were not already
-in the turn's context, and asks the default model whether the draft conflicts
+in the turn's context, and asks a judge model whether the draft conflicts
 with them. On a conflict the caller rewrites the draft once.
 
 Similarity alone cannot decide this: in a test on real data the decisive
@@ -18,12 +18,19 @@ memory ranked 3rd (0.60) behind an unrelated one (0.82), and half of the last
 that has candidates; the prompt carries only the draft, the user message and
 the candidates (about 1-2k tokens), never the full context.
 
+Judge model: memory.guard_model, picked via /guard on Telegram. Empty = the
+default model (provider.active_model). Any other value is a key from /models;
+an Ollama entry is called directly on its base_url (/api/chat), every other
+driver is built with llm.drivers.create_provider. A key that is missing or
+cannot be built skips the check — another model is never substituted.
+
 Fail-open: any error returns None and is logged. The guard must never stop a
 reply from being sent.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -38,9 +45,16 @@ DEFAULTS: dict = {
         True,
         "Memory guard on/off. When true, every final draft is embedded and "
         "checked against the closest stored memories in memory.guard_categories "
-        "that were not already recalled this turn; the default model judges "
+        "that were not already recalled this turn; the judge model decides "
         "whether the draft conflicts with them, and a conflict triggers one "
-        "rewrite. Fail-open.",
+        "rewrite. Fail-open. Set via /guard.",
+    ),
+    "memory.guard_model": (
+        "",
+        "Model that judges drafts for the memory guard: a key from /models "
+        "(provider.models). Empty = the default model (provider.active_model). "
+        "An Ollama entry is called directly on its base_url. A key that is "
+        "missing or cannot be built skips the check. Set via /guard.",
     ),
     "memory.guard_categories": (
         ["decision", "preference", "lesson"],
@@ -67,6 +81,9 @@ _MIN_WORDS = 3
 _DRAFT_CHARS = 4000
 _MEMORY_CHARS = 1500
 _USER_CHARS = 1500
+_OLLAMA_DEFAULT_URL = "http://localhost:11434"
+
+Judge = Callable[[str, float], Awaitable[str]]
 
 
 @dataclass
@@ -110,6 +127,8 @@ async def load_config(get_config: Callable[..., Awaitable]) -> dict:
             return DEFAULTS[key][0]
 
     enabled = _as_bool(await _get("memory.guard_enabled"))
+    model = await _get("memory.guard_model")
+    model = model.strip() if isinstance(model, str) else ""
     categories = _as_list(await _get("memory.guard_categories"))
     limit = max(1, min(20, _num(await _get("memory.guard_limit"), "memory.guard_limit", int)))
     min_sim = _num(
@@ -120,11 +139,81 @@ async def load_config(get_config: Callable[..., Awaitable]) -> dict:
     )))
     return {
         "enabled": enabled,
+        "model": model,
         "categories": categories,
         "limit": limit,
         "min_similarity": min_sim,
         "timeout": timeout,
     }
+
+
+async def build_judge(
+    model_key: str,
+    *,
+    default_provider,
+    get_config: Callable[..., Awaitable],
+) -> Optional[Judge]:
+    """Judge callable for memory.guard_model, or None when it cannot be used.
+
+    "" -> default_provider. Ollama entry -> direct /api/chat on its base_url.
+    Any other /models entry -> llm.drivers.create_provider(entry). The
+    returned callable carries a `label` attribute for logging.
+    """
+    from . import rule_checker as RC
+
+    if not model_key:
+        if default_provider is None:
+            logger.warning("Memory guard: no default provider — check skipped")
+            return None
+
+        async def _default(prompt: str, timeout: float) -> str:
+            return await RC._check_via_provider(prompt, default_provider, timeout=timeout)
+
+        _default.label = f"default:{getattr(default_provider, 'chat_model', '?')}"
+        return _default
+
+    try:
+        models = await get_config("provider.models", []) or []
+    except Exception as e:
+        logger.warning(f"Memory guard: cannot read provider.models: {type(e).__name__}: {e}")
+        return None
+    entry = next(
+        (m for m in models if isinstance(m, dict) and m.get("key") == model_key), None
+    )
+    if entry is None:
+        logger.warning(f"Memory guard: model '{model_key}' not found in /models — check skipped")
+        return None
+
+    if entry.get("driver") == "ollama":
+        base_url = entry.get("base_url") or _OLLAMA_DEFAULT_URL
+        model_id = entry.get("model_id") or ""
+        if not model_id:
+            logger.warning(f"Memory guard: Ollama entry '{model_key}' has no model_id — check skipped")
+            return None
+
+        async def _ollama(prompt: str, timeout: float) -> str:
+            return await asyncio.wait_for(
+                RC._check_via_ollama(prompt, model=model_id, base_url=base_url, timeout=timeout),
+                timeout=timeout,
+            )
+
+        _ollama.label = f"ollama:{model_id}"
+        return _ollama
+
+    from .llm.drivers import create_provider
+    try:
+        provider = await create_provider(entry)
+    except Exception as e:
+        logger.warning(
+            f"Memory guard: cannot build model '{model_key}': {type(e).__name__}: {e} — check skipped"
+        )
+        return None
+
+    async def _picked(prompt: str, timeout: float) -> str:
+        return await RC._check_via_provider(prompt, provider, timeout=timeout)
+
+    _picked.label = f"{entry.get('driver')}:{entry.get('model_id')}"
+    return _picked
 
 
 async def find_candidates(
@@ -249,14 +338,12 @@ async def check_draft(
     draft: str,
     user_message: str,
     embed: Callable[[str], Awaitable],
-    provider,
+    judge: Judge,
     exclude_ids,
     access_level: str,
     cfg: dict,
 ) -> Optional[GuardResult]:
     """Run the guard on one draft. None = guard could not decide (fail-open)."""
-    from .rule_checker import _check_via_provider
-
     text = (draft or "").strip()
     if len([w for w in text.split() if len(w) > 1]) < _MIN_WORDS:
         return GuardResult(conflict=False)
@@ -286,21 +373,19 @@ async def check_draft(
         logger.info("Memory guard: no candidates")
         return GuardResult(conflict=False)
     logger.info(
-        "Memory guard: judging against "
+        f"Memory guard [{getattr(judge, 'label', '?')}]: judging against "
         + ", ".join(f"#{c['id']}({c['similarity']:.3f})" for c in candidates)
     )
 
     try:
-        raw = await _check_via_provider(
-            build_prompt(text, user_message, candidates), provider, timeout=cfg["timeout"],
-        )
+        raw = await judge(build_prompt(text, user_message, candidates), cfg["timeout"])
     except Exception as e:
         logger.warning(f"Memory guard: judge failed: {type(e).__name__}: {e}")
         return None
 
     result = parse_verdict(raw, [c["id"] for c in candidates])
     if result is None:
-        logger.warning(f"Memory guard: unparseable verdict: {raw[:200]!r}")
+        logger.warning(f"Memory guard: unparseable verdict: {(raw or '')[:200]!r}")
         return None
     result.memories = [c for c in candidates if c["id"] in result.memory_ids]
     logger.info(

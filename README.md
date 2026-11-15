@@ -872,6 +872,7 @@ Config snapshots (`syne config backup` or `/backupconf` on Telegram) live in `~/
 | `/evaluator` | Manage evaluator model | Owner |
 | `/vision` | Manage vision provider (for OCR / image analysis) | Owner |
 | `/imagegen` | Manage image generation provider | Owner |
+| `/guard` | Memory guard: on/off and the model that judges drafts (any /models entry, incl. Ollama) | Owner |
 | `/browse` | Browse directories (share session with CLI) | Owner |
 | `/telemembers` | Manage Telegram users & groups (active members only) | Owner |
 | `/wamembers` | Manage WhatsApp members, groups & model overrides | Owner |
