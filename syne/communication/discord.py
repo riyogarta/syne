@@ -34,7 +34,10 @@ then an unapproved sender is logged and ignored (fail-closed), never admitted.
 """
 
 import asyncio
+import base64
 import logging
+import os
+import re
 from typing import Any, Optional
 
 import discord
@@ -124,6 +127,21 @@ class _DiscordTyping:
 # 4096, so the shared split_message default is wrong here and must be passed
 # explicitly on every send.
 DISCORD_MAX_MESSAGE = 2000
+
+# Inbound attachments. Same ceiling as the PDF ability (_MAX_PDF_BYTES), so
+# nothing is downloaded only to be refused. Mirrors whatsapp.py.
+_ATT_MAX_BYTES = 25 * 1024 * 1024
+_DOC_B64_MIMES = frozenset({
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+})
+_DOC_B64_EXT = (".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt")
+_IMAGE_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 
 
 def dc_chat_key(channel: Any) -> str:
@@ -308,7 +326,10 @@ class DiscordChannel:
         # Without MESSAGE_CONTENT, Discord sends empty content for anything the
         # bot was not addressed in. Empty text is therefore the normal case for
         # ambient server chatter, not an error.
-        if not text:
+        # An attachment-only DM (a PDF or photo with no text) is still
+        # addressed to us: without MESSAGE_CONTENT, attachments arrive only
+        # for DMs, mentions and replies to the bot, like the text does.
+        if not text and not message.attachments:
             logger.debug(
                 "Discord message %s has empty content (expected without the "
                 "MESSAGE_CONTENT intent unless addressed) — ignoring",
@@ -351,7 +372,7 @@ class DiscordChannel:
         # Strip the bot mention so the LLM sees a clean prompt.
         if not is_dm:
             text = self._strip_mention(text)
-            if not text:
+            if not text and not message.attachments:
                 return
 
         guild_name = message.guild.name if message.guild else "DM"
@@ -368,7 +389,15 @@ class DiscordChannel:
         except Exception as e:
             logger.debug("Discord 👀 receipt failed: %s", e)
 
-        await self._dispatch(message, text, is_dm)
+        # Attachments of this message, or else of the replied-to message,
+        # downloaded to workspace/uploads and passed in Telegram's metadata
+        # shape so the PDF / Office / vision abilities read them unchanged.
+        media, notes = await self._collect_media(message)
+        if notes:
+            joined = "\n".join(notes)
+            text = f"{joined}\n\n{text}" if text else joined
+
+        await self._dispatch(message, text, is_dm, media=media)
 
     async def _handle_reaction(self, payload: Any, added: bool) -> None:
         """A reaction on one of Syne's replies is routed to the agent
@@ -839,6 +868,139 @@ class DiscordChannel:
         self._pending_notified.discard("guild:%s" % guild_id)
         return left, name
 
+    # ── Inbound attachments ──────────────────────────────────
+
+    @staticmethod
+    def _is_image(att: Any) -> bool:
+        ctype = (getattr(att, "content_type", None) or "").lower()
+        name = (getattr(att, "filename", None) or "").lower()
+        return ctype.startswith("image/") or name.endswith(_IMAGE_EXT)
+
+    async def _replied_message(self, message: Any) -> Optional[Any]:
+        """The replied-to message: the resolved copy, else one fetch, else None."""
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return None
+        resolved = getattr(ref, "resolved", None)
+        if isinstance(resolved, discord.Message):
+            return resolved
+        if resolved is not None:   # DeletedReferencedMessage
+            return None
+        mid = getattr(ref, "message_id", None)
+        if not mid:
+            return None
+        try:
+            return await message.channel.fetch_message(mid)
+        except Exception as e:
+            logger.debug("Discord replied message fetch failed: %s", e)
+            return None
+
+    async def _fetch_attachment(self, att: Any, msg_id: Any,
+                                from_reply: bool) -> tuple[Optional[dict], str]:
+        """Download one attachment into workspace/uploads.
+
+        Returns (metadata dict or None, note for the message text). The dict
+        has Telegram's shape (path/filename/mime_type/size[/base64]); on
+        failure the note says so, so the model never guesses at a file it did
+        not receive.
+        """
+        filename = (getattr(att, "filename", None) or "file").strip() or "file"
+        mime = (getattr(att, "content_type", None) or "application/octet-stream")
+        mime = mime.split(";")[0].strip().lower()
+        where = " from replied message" if from_reply else ""
+        size = int(getattr(att, "size", 0) or 0)
+        if size > _ATT_MAX_BYTES:
+            return None, (f"[File{where} not downloaded: {filename} is {size} "
+                          f"bytes, max {_ATT_MAX_BYTES} bytes]")
+        try:
+            raw = await att.read()
+        except Exception as e:
+            logger.error("Discord attachment download failed: %s", e)
+            raw = None
+        if not raw:
+            return None, f"[File{where} could not be downloaded: {filename}]"
+        if len(raw) > _ATT_MAX_BYTES:
+            return None, (f"[File{where} not processed: {filename} is {len(raw)} "
+                          f"bytes, max {_ATT_MAX_BYTES} bytes]")
+
+        uploads = self.agent.workspace_uploads
+        os.makedirs(uploads, exist_ok=True)
+        safe = filename.replace("/", "_").replace("\\", "_").replace("..", "_")
+        sid = re.sub(r"[^A-Za-z0-9]", "", str(getattr(att, "id", "") or msg_id))[:40] or "att"
+        tag = "reply_" if from_reply else ""
+        path = os.path.join(uploads, f"dc_{sid}_{tag}{safe}")
+        with open(path, "wb") as f:
+            f.write(raw)
+
+        meta: dict = {"path": path, "filename": filename,
+                      "mime_type": mime, "size": len(raw)}
+        if from_reply:
+            meta["from_reply"] = True
+        is_img = self._is_image(att)
+        if (is_img or mime in _DOC_B64_MIMES
+                or filename.lower().endswith(_DOC_B64_EXT)):
+            meta["base64"] = base64.b64encode(raw).decode("utf-8")
+        if is_img and not mime.startswith("image/"):
+            meta["mime_type"] = "image/jpeg"
+        logger.info("Discord attachment downloaded: %s (%d bytes)", path, len(raw))
+        kind = "photo" if is_img else "file"
+        if from_reply:
+            note = f"[Attached: {kind} {filename} from replied message, saved at: {path}]"
+        else:
+            note = (f"[User sent a {kind}: {filename} ({mime}, {len(raw)} bytes), "
+                    f"saved at: {path}]")
+        return meta, note
+
+    async def _collect_media(self, message: Any) -> tuple[dict, list]:
+        """(metadata keys, notes) for this message's attachments.
+
+        Own attachments win; with none, a reply carries the replied-to
+        message's attachments. Images go to metadata image/images (vision);
+        the first document goes to metadata document (PDF / Office abilities);
+        any further document is saved and listed by path only.
+        """
+        atts = list(getattr(message, "attachments", None) or [])
+        from_reply = False
+        notes: list = []
+        if not atts:
+            replied = await self._replied_message(message)
+            if replied is not None:
+                atts = list(getattr(replied, "attachments", None) or [])
+                from_reply = bool(atts)
+                if (not atts and not (replied.content or "").strip()
+                        and not getattr(replied, "embeds", None)):
+                    # Discord withholds content and attachments of messages
+                    # the bot was not addressed in (no MESSAGE_CONTENT
+                    # intent), so an empty replied message may still hold a
+                    # file. Say so instead of answering as if it had none.
+                    notes.append("[Replied message arrived empty: Discord may "
+                                 "withhold its text and attachments from this "
+                                 "bot. Ask the user to send the file directly "
+                                 "with a mention, or in a DM.]")
+        images: list = []
+        document = None
+        paths: list = []
+        for att in atts:
+            meta, note = await self._fetch_attachment(att, message.id, from_reply)
+            notes.append(note)
+            if meta is None:
+                continue
+            paths.append(meta["path"])
+            if self._is_image(att):
+                images.append(meta)
+            elif document is None:
+                document = meta
+        media: dict = {}
+        if len(images) == 1:
+            media["image"] = images[0]
+        elif images:
+            media["images"] = images
+        if document is not None:
+            media["document"] = document
+        if paths:
+            media["_temp_upload_paths"] = paths
+        return media, notes
+
     # ── Inbound context ──────────────────────────────────────
 
     async def _build_inbound(self, message: discord.Message, is_dm: bool) -> Any:
@@ -912,7 +1074,8 @@ class DiscordChannel:
 
     # ── Dispatch ─────────────────────────────────────────────
 
-    async def _dispatch(self, message: discord.Message, text: str, is_dm: bool) -> None:
+    async def _dispatch(self, message: discord.Message, text: str, is_dm: bool,
+                        media: Optional[dict] = None) -> None:
         """Hand the message to the agent and deliver the reply."""
         from .inbound import build_user_context_prefix
 
@@ -933,6 +1096,7 @@ class DiscordChannel:
             "inbound": inbound,
             "original_text": original_text,
             **({"model_override": model_override} if model_override else {}),
+            **(media or {}),
         }
 
         # _DiscordTyping keeps the indicator alive for the whole call; a
