@@ -92,6 +92,7 @@ from neonize.events import (
 )
 from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 from neonize.utils.jid import build_jid
+from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import Message as WAMessage
 
 from ..agent import SyneAgent
 from ..db.models import (
@@ -235,6 +236,22 @@ _QUOTE_CARRIERS = (
     "extendedTextMessage", "imageMessage", "videoMessage",
     "documentMessage", "audioMessage", "stickerMessage",
 )
+
+# Inbound documents (PDF / Office / other files). Same ceiling as the PDF
+# ability (_MAX_PDF_BYTES), so nothing is downloaded only to be refused.
+_DOC_MAX_BYTES = 25 * 1024 * 1024
+# Documents whose bytes ride along as base64 for ability pre-processing,
+# matched by MIME type or by extension (WhatsApp often says octet-stream).
+_DOC_B64_MIMES = frozenset({
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+})
+_DOC_B64_EXT = (".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt")
 
 # Rate brake for from_me triggers in groups: at most this many per chat per
 # window. The id dedup and echo hash should already stop Syne answering its
@@ -900,9 +917,14 @@ class WhatsAppChannel:
                 caption = msg.videoMessage.caption or ""
             elif msg.HasField("audioMessage"):
                 kind = "audio"
-            elif msg.HasField("documentMessage"):
-                kind = "document"
-                caption = msg.documentMessage.caption or ""
+            else:
+                # A document sent WITH a caption arrives wrapped in
+                # documentWithCaptionMessage; reading only documentMessage
+                # made it look like an empty protocol payload and dropped it.
+                doc = WhatsAppChannel._document_of(msg)
+                if doc is not None:
+                    kind = "document"
+                    caption = doc.caption or ""
         except Exception:
             pass
 
@@ -1022,9 +1044,26 @@ class WhatsAppChannel:
                          exc_info=True)
 
     @staticmethod
-    def _extract_quote(ev: MessageEv) -> tuple[str, str]:
-        """(quoted message id, quoted text) if this message is a reply, else ("", "")."""
-        msg = ev.Message
+    def _document_of(msg: Any) -> Optional[Any]:
+        """The DocumentMessage a message carries, plain or caption-wrapped.
+
+        WhatsApp sends a document without a caption as documentMessage and one
+        with a caption as documentWithCaptionMessage.message.documentMessage.
+        """
+        try:
+            if msg.HasField("documentMessage"):
+                return msg.documentMessage
+            if msg.HasField("documentWithCaptionMessage"):
+                inner = msg.documentWithCaptionMessage.message
+                if inner.HasField("documentMessage"):
+                    return inner.documentMessage
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    @staticmethod
+    def _context_info(msg: Any) -> Optional[Any]:
+        """The ContextInfo of a reply (one with a stanza id), or None."""
         for field in _QUOTE_CARRIERS:
             try:
                 if not msg.HasField(field):
@@ -1032,25 +1071,117 @@ class WhatsAppChannel:
                 inner = getattr(msg, field)
                 if not inner.HasField("contextInfo"):
                     continue
-                ctx = inner.contextInfo
             except (ValueError, AttributeError):
                 continue
-            stanza_id = ctx.stanzaID or ""
-            if not stanza_id:
-                continue
-            quoted = ""
-            if ctx.HasField("quotedMessage"):
-                q = ctx.quotedMessage
-                quoted = (
-                    q.conversation
-                    or q.extendedTextMessage.text
-                    or q.imageMessage.caption
-                    or q.videoMessage.caption
-                    or q.documentMessage.caption
-                    or ""
-                )
-            return stanza_id, quoted.strip()
-        return "", ""
+            if inner.contextInfo.stanzaID:
+                return inner.contextInfo
+        doc = WhatsAppChannel._document_of(msg)
+        try:
+            if (doc is not None and doc.HasField("contextInfo")
+                    and doc.contextInfo.stanzaID):
+                return doc.contextInfo
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    @staticmethod
+    def _extract_quote(ev: MessageEv) -> tuple[str, str]:
+        """(quoted message id, quoted text) if this message is a reply, else ("", "")."""
+        ctx = WhatsAppChannel._context_info(ev.Message)
+        if ctx is None:
+            return "", ""
+        quoted = ""
+        if ctx.HasField("quotedMessage"):
+            q = ctx.quotedMessage
+            qdoc = WhatsAppChannel._document_of(q)
+            quoted = (
+                q.conversation
+                or q.extendedTextMessage.text
+                or q.imageMessage.caption
+                or q.videoMessage.caption
+                or (qdoc.caption if qdoc is not None else "")
+                or ""
+            )
+        return ctx.stanzaID, quoted.strip()
+
+    @staticmethod
+    def _quoted_message(ev: MessageEv) -> Optional[Any]:
+        """The quoted Message protobuf of a reply (carries media keys), or None."""
+        ctx = WhatsAppChannel._context_info(ev.Message)
+        try:
+            if ctx is not None and ctx.HasField("quotedMessage"):
+                return ctx.quotedMessage
+        except (ValueError, AttributeError):
+            pass
+        return None
+
+    async def _fetch_document(self, doc: Any, msg_id: str,
+                              from_reply: bool) -> tuple[Optional[dict], str]:
+        """Download one DocumentMessage into workspace/uploads.
+
+        Returns (metadata['document'] or None, note for the message text). The
+        dict has Telegram's shape, so the PDF / Office abilities pre-process it
+        unchanged. On failure the note says so, so the model can tell the user
+        instead of guessing at a file it never received.
+        """
+        filename = (doc.fileName or doc.title or "file").strip() or "file"
+        mime = (doc.mimetype or "application/octet-stream").strip().lower()
+        where = " from replied message" if from_reply else ""
+        declared = int(doc.fileLength or 0)
+        if declared > _DOC_MAX_BYTES:
+            logger.info("[whatsapp] document too large: %s (%d bytes)", filename, declared)
+            return None, (f"[File{where} not downloaded: {filename} is {declared} "
+                          f"bytes, max {_DOC_MAX_BYTES} bytes]")
+        try:
+            raw = await self.client.download_any(WAMessage(documentMessage=doc))
+        except Exception as e:
+            logger.error("[whatsapp] document download failed: %s", e)
+            raw = None
+        if not raw:
+            return None, f"[File{where} could not be downloaded: {filename}]"
+        if len(raw) > _DOC_MAX_BYTES:
+            return None, (f"[File{where} not processed: {filename} is {len(raw)} "
+                          f"bytes, max {_DOC_MAX_BYTES} bytes]")
+
+        uploads = self.agent.workspace_uploads
+        os.makedirs(uploads, exist_ok=True)
+        safe = filename.replace("/", "_").replace("\\", "_").replace("..", "_")
+        sid = re.sub(r"[^A-Za-z0-9]", "", str(msg_id or ""))[:40] or "doc"
+        tag = "reply_" if from_reply else ""
+        path = os.path.join(uploads, f"wa_{sid}_{tag}{safe}")
+        with open(path, "wb") as f:
+            f.write(raw)
+
+        meta: dict = {"path": path, "filename": filename,
+                      "mime_type": mime, "size": len(raw)}
+        if from_reply:
+            meta["from_reply"] = True
+        if (mime in _DOC_B64_MIMES or mime.startswith("image/")
+                or filename.lower().endswith(_DOC_B64_EXT)):
+            meta["base64"] = base64.b64encode(raw).decode("utf-8")
+        logger.info("[whatsapp] document downloaded: %s (%d bytes)", path, len(raw))
+        if from_reply:
+            note = f"[Attached: {filename} from replied message, saved at: {path}]"
+        else:
+            note = (f"[User sent a file: {filename} ({mime}, {len(raw)} bytes), "
+                    f"saved at: {path}]")
+        return meta, note
+
+    async def _fetch_quoted_image(self, q: Any) -> Optional[dict]:
+        """Download the image of a replied-to message, or None."""
+        try:
+            raw = await self.client.download_any(WAMessage(imageMessage=q.imageMessage))
+        except Exception as e:
+            logger.error("[whatsapp] replied image download failed: %s", e)
+            return None
+        if not raw:
+            return None
+        logger.info("[whatsapp] replied image downloaded: %d bytes", len(raw))
+        return {
+            "mime_type": q.imageMessage.mimetype or "image/jpeg",
+            "base64": base64.b64encode(raw).decode("utf-8"),
+            "from_reply": True,
+        }
 
     async def _is_reply_to_bot(self, quoted_id: str, quoted_text: str) -> bool:
         """True if the quoted message is one Syne sent.
@@ -1379,6 +1510,39 @@ class WhatsAppChannel:
             if not text:
                 text = "What's in this image?"
 
+        # Documents: a file sent with the trigger, or a text message that
+        # replies to a file or photo -- the usual case in a DM with a friend:
+        # they send the PDF, the owner replies "Molt baca ini". Saved to
+        # workspace/uploads and passed as metadata['document'] in Telegram's
+        # shape, so the PDF / Office abilities read it the same way.
+        document_metadata = None
+        if media_kind == "document":
+            doc = self._document_of(ev.Message)
+            if doc is not None:
+                document_metadata, note = await self._fetch_document(
+                    doc, msg_id, from_reply=False)
+                text = f"{note}\n\n{text}" if text else note
+        elif not media_kind:
+            q = self._quoted_message(ev)
+            if q is not None:
+                qdoc = self._document_of(q)
+                if qdoc is not None:
+                    document_metadata, note = await self._fetch_document(
+                        qdoc, msg_id, from_reply=True)
+                    text = f"{text}\n\n{note}"
+                elif q.HasField("imageMessage"):
+                    image_metadata = await self._fetch_quoted_image(q)
+                    if image_metadata:
+                        text = f"{text}\n\n[Attached: photo from replied message]"
+        if (document_metadata and image_metadata is None
+                and document_metadata["mime_type"].startswith("image/")
+                and document_metadata.get("base64")):
+            # An image sent as a file (uncompressed): vision reads it too.
+            image_metadata = {
+                "mime_type": document_metadata["mime_type"],
+                "base64": document_metadata["base64"],
+            }
+
         logger.info("[whatsapp] %s: %s", sender_name, text[:100])
 
         inbound = InboundContext(
@@ -1443,6 +1607,9 @@ class WhatsAppChannel:
         }
         if image_metadata:
             metadata["image"] = image_metadata
+        if document_metadata:
+            metadata["document"] = document_metadata
+            metadata["_temp_upload_paths"] = [document_metadata["path"]]
 
         # 👀 receipt + typing indicator. The trigger word is mandatory
         # everywhere on WhatsApp (DM included), so anything reaching this
