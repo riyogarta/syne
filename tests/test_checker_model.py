@@ -81,6 +81,7 @@ def _fake_conv():
         _pending_consent_hash="",
         _llm_call=AsyncMock(),
         _handle_tool_calls=AsyncMock(),
+        _ts_note_judge=lambda *a, **k: None,
     )
     return fake, ChatResponse(content="Draf jawaban yang cukup panjang.", model="m")
 

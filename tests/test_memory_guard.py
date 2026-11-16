@@ -188,6 +188,7 @@ def _fake_conv(new_content="Jawaban baru tanpa mengungkit history_limit."):
         _last_recalled_memory_ids=[11, 12],
         _llm_call=AsyncMock(return_value=ChatResponse(content=new_content, model="m")),
         _handle_tool_calls=AsyncMock(),
+        _ts_note_judge=lambda *a, **k: None,
     )
     return fake, ChatResponse(content=DRAFT, model="m")
 

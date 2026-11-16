@@ -132,6 +132,9 @@ Maps trigger keywords to target categories. Empty object = disabled (original be
 Every turn stores `metadata.turn_stats` on the final assistant row and logs one
 `TURN-STATS` line: estimated S/X/R/M/W sizes, provider usage per model call
 (input, cache read/write, output), tool rounds, latency, and budget violations.
+Judge calls of the rule checker and memory guard are recorded apart (turn_stats v2):
+`judge_calls` (phase rule_check / memory_guard_judge, attempt, tokens, latency),
+`judge_usage` totals and `latency.judge`. `usage` stays the main model only.
 - **X** = session window, **R** = memories + cross-session history + knowledge graph,
   **M** = `history_search` / `history_expand` results of the turn. S (system) and W
   (other working messages) are measured but not budgeted.

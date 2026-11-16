@@ -25,8 +25,11 @@ Design notes
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import re
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Awaitable, Callable, Optional
@@ -202,11 +205,57 @@ def _build_prompt(
     )
 
 
+# ── Judge token usage (Riyo, 16 Nov 2026) ──────────────────────────────────
+# The judge calls below (rule checker and memory guard, both drivers) are made
+# outside Conversation._llm_call, so their usage never reached turn_stats: the
+# provider's token counts were dropped once the verdict text was read. A caller
+# that wants the numbers opens record_judge_usage(sink); every judge call that
+# RETURNS inside the block appends one dict to the sink. A failed or timed-out
+# call returns nothing and records nothing. Recording never raises and never
+# changes what the judge returns.
+_judge_usage_sink: contextvars.ContextVar = contextvars.ContextVar(
+    "syne_judge_usage_sink", default=None,
+)
+
+
+@contextmanager
+def record_judge_usage(sink: list):
+    """Collect the usage of every judge call made inside this block into `sink`."""
+    token = _judge_usage_sink.set(sink)
+    try:
+        yield sink
+    finally:
+        _judge_usage_sink.reset(token)
+
+
+def _record_judge_usage(
+    source: str, *, model: str = "", input_tokens=0, output_tokens=0,
+    cache_read=0, cache_write=0, latency: float = 0.0,
+) -> None:
+    sink = _judge_usage_sink.get()
+    if sink is None:
+        return
+    try:
+        sink.append({
+            "source": source,
+            "model": str(model or ""),
+            "in": int(input_tokens or 0),
+            "out": int(output_tokens or 0),
+            "cache_read": int(cache_read or 0),
+            "cache_write": int(cache_write or 0),
+            "lat": round(float(latency), 3),
+        })
+    except Exception as e:
+        logger.debug(f"judge usage not recorded: {type(e).__name__}: {e}")
+
+
 async def _check_via_ollama(
     prompt: str, model: str, base_url: str = "http://localhost:11434",
     timeout: float = 120.0,
 ) -> str:
-    """Direct HTTP to Ollama /api/chat."""
+    """Direct HTTP to Ollama /api/chat. Token counts come from the reply:
+    prompt_eval_count = input, eval_count = output."""
+    _t = time.monotonic()
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
             f"{base_url.rstrip('/')}/api/chat",
@@ -219,6 +268,13 @@ async def _check_via_ollama(
         )
         resp.raise_for_status()
         data = resp.json()
+    if isinstance(data, dict):
+        _record_judge_usage(
+            "ollama", model=model,
+            input_tokens=data.get("prompt_eval_count") or 0,
+            output_tokens=data.get("eval_count") or 0,
+            latency=time.monotonic() - _t,
+        )
     return data.get("message", {}).get("content", "").strip()
 
 
@@ -244,12 +300,22 @@ async def _check_via_provider(
     reply for no added safety.
     """
     async def _call() -> str:
+        _t = time.monotonic()
         with retry_budget(_CHECKER_MAX_RETRIES):
             response = await provider.chat(
                 messages=[ChatMessage(role="user", content=prompt)],
                 temperature=0.0,
                 thinking_budget=0,
             )
+        _record_judge_usage(
+            "provider",
+            model=getattr(response, "model", "") or getattr(provider, "chat_model", ""),
+            input_tokens=getattr(response, "input_tokens", 0),
+            output_tokens=getattr(response, "output_tokens", 0),
+            cache_read=getattr(response, "cache_read_tokens", 0),
+            cache_write=getattr(response, "cache_write_tokens", 0),
+            latency=time.monotonic() - _t,
+        )
         return (response.content or "").strip()
 
     return await asyncio.wait_for(_call(), timeout=timeout)

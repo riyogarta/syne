@@ -604,6 +604,9 @@ class Conversation:
     #   M = history_search / history_expand results produced in this turn
     #   W = the turn's other working messages: tool_use turns, other tool
     #       results, nudges                                  (not budgeted)
+    # Judge calls (rule checker, memory guard) are recorded apart from the
+    # main model's `calls`, in `judge_calls` / `judge_usage` / latency.judge
+    # (turn_stats v2, Riyo 16 Nov 2026), so `usage` stays comparable with v1.
     # Budgets: memory_budget.x_tokens / r_tokens / m_tokens (0 = no limit),
     # checked on EVERY model call, tool rounds included. memory_budget.mode:
     #   "log"     - record violations only, change nothing
@@ -645,7 +648,8 @@ class Conversation:
             "m_results": 0,
             "m_skipped": 0,
             "calls": [],
-            "lat": {"recall": 0.0, "llm": 0.0, "tool": 0.0},
+            "judge_calls": [],
+            "lat": {"recall": 0.0, "llm": 0.0, "tool": 0.0, "judge": 0.0},
             "trimmed": {"x_messages": 0, "r_items": 0},
             "violations": [],
         }
@@ -736,6 +740,23 @@ class Conversation:
         except Exception as e:
             logger.debug(f"turn_stats: note_call failed: {e}")
         return resp
+
+    def _ts_note_judge(self, phase: str, attempt: int, sink: list) -> None:
+        """Record judge calls (rule_check / memory_guard_judge) of one attempt.
+
+        Kept apart from `calls`, so the main model's usage stays comparable
+        with turns recorded before judges were measured. Never raises.
+        """
+        ts = getattr(self, "_ts", None)
+        if ts is None or not sink:
+            return
+        try:
+            jc = ts.setdefault("judge_calls", [])
+            for u in sink:
+                jc.append({"phase": phase, "attempt": int(attempt), **u})
+                ts["lat"]["judge"] = ts["lat"].get("judge", 0.0) + float(u.get("lat", 0.0) or 0.0)
+        except Exception as e:
+            logger.debug(f"turn_stats: note_judge failed: {e}")
 
     def _ts_fit_x(self) -> None:
         """Enforce X: drop the oldest cached messages in ONE chunk.
@@ -869,6 +890,7 @@ class Conversation:
         self._ts = None
         try:
             calls = ts["calls"]
+            jcalls = ts.get("judge_calls") or []
             first = calls[0]["est"] if calls else {}
 
             def _max(k):
@@ -878,7 +900,7 @@ class Conversation:
                 return sum(c[k] for c in calls)
 
             stats = {
-                "v": 1,
+                "v": 2,
                 "mode": ts["mode"],
                 "budget": ts["budget"],
                 "tokens_est": {
@@ -899,25 +921,38 @@ class Conversation:
                 },
                 "rounds": sum(1 for c in calls if c["phase"] == "tool_loop"),
                 "calls": calls,
+                "judge_calls": jcalls,
+                "judge_usage": {
+                    "calls": len(jcalls),
+                    "in": sum(int(c.get("in", 0) or 0) for c in jcalls),
+                    "out": sum(int(c.get("out", 0) or 0) for c in jcalls),
+                    "cache_read": sum(int(c.get("cache_read", 0) or 0) for c in jcalls),
+                    "cache_write": sum(int(c.get("cache_write", 0) or 0) for c in jcalls),
+                },
                 "latency": {
                     "total": round(_ts_time.monotonic() - ts["t0"], 3),
                     "recall": round(ts["lat"]["recall"], 3),
                     "llm": round(ts["lat"]["llm"], 3),
                     "tool": round(ts["lat"]["tool"], 3),
+                    "judge": round(ts["lat"].get("judge", 0.0), 3),
                 },
                 "trimmed": ts["trimmed"],
                 "violations": ts["violations"],
             }
             te, us, la = stats["tokens_est"], stats["usage"], stats["latency"]
+            ju = stats["judge_usage"]
             logger.info(
                 "TURN-STATS session=%s mode=%s calls=%d rounds=%d "
                 "S=%d X=%d R=%d Mmax=%d Wmax=%d in=%d cache_r=%d cache_w=%d out=%d "
-                "lat=%.2fs recall=%.2fs llm=%.2fs tool=%.2fs viol=%d",
+                "lat=%.2fs recall=%.2fs llm=%.2fs tool=%.2fs viol=%d "
+                "judge_calls=%d j_in=%d j_cache_r=%d j_cache_w=%d j_out=%d judge=%.2fs",
                 self.session_id, stats["mode"], len(calls), stats["rounds"],
                 te["s"], te["x"], te["r"], te["m_max"], te["w_max"],
                 us["in"], us["cache_read"], us["cache_write"], us["out"],
                 la["total"], la["recall"], la["llm"], la["tool"],
                 len(stats["violations"]),
+                ju["calls"], ju["in"], ju["cache_read"], ju["cache_write"], ju["out"],
+                la["judge"],
             )
             return stats
         except Exception as e:
@@ -2305,6 +2340,7 @@ class Conversation:
         unexpected exception with a logged traceback.
         """
         from .rule_checker import check_response as _rc, VerdictState as _RCState
+        from .rule_checker import record_judge_usage as _judge_usage
         from .db.models import get_rules as _get_rules, get_config
 
         try:
@@ -2399,18 +2435,21 @@ class Conversation:
         checker_warning = None
 
         for attempt in range(max_retries + 1):
-            verdict = await _rc(
-                draft=current.content or "",
-                user_message=user_message,
-                hard_rules=hard_rules,
-                evaluator_driver=eval_driver,
-                evaluator_model=eval_model,
-                provider=checker_provider,
-                judge=checker_judge,
-                tools_ran=tools_ran,
-                time_context=self._last_time_context,
-                timeout=checker_timeout,
-            )
+            _jsink: list = []
+            with _judge_usage(_jsink):
+                verdict = await _rc(
+                    draft=current.content or "",
+                    user_message=user_message,
+                    hard_rules=hard_rules,
+                    evaluator_driver=eval_driver,
+                    evaluator_model=eval_model,
+                    provider=checker_provider,
+                    judge=checker_judge,
+                    tools_ran=tools_ran,
+                    time_context=self._last_time_context,
+                    timeout=checker_timeout,
+                )
+            self._ts_note_judge("rule_check", attempt + 1, _jsink)
             if verdict.state == _RCState.CLEAN:
                 logger.info(
                     f"Rule checker: CLEAN (attempt {attempt + 1}/{max_retries + 1})"
@@ -2520,6 +2559,7 @@ class Conversation:
         """
         from . import memory_guard as _mg
         from .db.models import get_config as _gc_mg
+        from .rule_checker import record_judge_usage as _judge_usage
 
         cfg = await _mg.load_config(_gc_mg)
         if not cfg["enabled"]:
@@ -2538,15 +2578,18 @@ class Conversation:
         exclude_ids = list(getattr(self, "_last_recalled_memory_ids", []) or [])
         current = response
         for attempt in range(max_retries + 1):
-            result = await _mg.check_draft(
-                draft=current.content or "",
-                user_message=user_message,
-                embed=self.memory.provider.embed,
-                judge=judge,
-                exclude_ids=exclude_ids,
-                access_level=access_level,
-                cfg=cfg,
-            )
+            _jsink: list = []
+            with _judge_usage(_jsink):
+                result = await _mg.check_draft(
+                    draft=current.content or "",
+                    user_message=user_message,
+                    embed=self.memory.provider.embed,
+                    judge=judge,
+                    exclude_ids=exclude_ids,
+                    access_level=access_level,
+                    cfg=cfg,
+                )
+            self._ts_note_judge("memory_guard_judge", attempt + 1, _jsink)
             if result is None or not result.conflict:
                 if attempt:
                     logger.info(
