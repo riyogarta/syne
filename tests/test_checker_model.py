@@ -147,8 +147,7 @@ async def test_evaluator_driver_ignores_model_key(monkeypatch):
 
 async def test_migration_47_adds_key_and_keeps_driver_value():
     from syne.db import migrations as M
-    assert M.MIGRATIONS[-1][0] == 47 and M.MIGRATIONS[-1][1] is M._m47_rule_checker_model
-    assert M.CURRENT_SCHEMA_VERSION == 47
+    assert (47, M._m47_rule_checker_model, "transactional") in M.MIGRATIONS
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m47_rule_checker_model(conn)

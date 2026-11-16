@@ -10,7 +10,8 @@ else, so #57566 was never recalled.
 This guard embeds the DRAFT, fetches the closest memories in the guarded
 categories (decision / preference / lesson by default) that were not already
 in the turn's context, and asks a judge model whether the draft conflicts
-with them. On a conflict the caller rewrites the draft once.
+with them. On a conflict the caller rewrites the draft and judges the
+rewrite again, up to memory.guard_max_retries rewrites (default 2).
 
 Similarity alone cannot decide this: in a test on real data the decisive
 memory ranked 3rd (0.60) behind an unrelated one (0.82), and half of the last
@@ -46,8 +47,9 @@ DEFAULTS: dict = {
         "Memory guard on/off. When true, every final draft is embedded and "
         "checked against the closest stored memories in memory.guard_categories "
         "that were not already recalled this turn; the judge model decides "
-        "whether the draft conflicts with them, and a conflict triggers one "
-        "rewrite. Fail-open. Set via /guard.",
+        "whether the draft conflicts with them. A conflict triggers a rewrite, "
+        "and every rewrite is judged again, up to memory.guard_max_retries "
+        "rewrites. Fail-open. Set via /guard.",
     ),
     "memory.guard_model": (
         "",
@@ -73,6 +75,13 @@ DEFAULTS: dict = {
         30,
         "Max seconds for one memory-guard judge call (clamped 5-120). On "
         "timeout the draft is sent unchanged.",
+    ),
+    "memory.guard_max_retries": (
+        2,
+        "How many times the memory guard asks the main model to rewrite a draft "
+        "that conflicts with stored memories. Every rewrite is judged again. "
+        "0 = check only, no rewrite; default 2 = up to 3 drafts in total. "
+        "Clamped 0-5. If the last draft still conflicts it is sent as is and logged.",
     ),
 }
 
@@ -136,6 +145,9 @@ async def load_config(get_config: Callable[..., Awaitable]) -> dict:
     timeout = max(5.0, min(120.0, _num(
         await _get("memory.guard_timeout"), "memory.guard_timeout", float
     )))
+    max_retries = max(0, min(5, _num(
+        await _get("memory.guard_max_retries"), "memory.guard_max_retries", int
+    )))
     return {
         "enabled": enabled,
         "model": model,
@@ -143,6 +155,7 @@ async def load_config(get_config: Callable[..., Awaitable]) -> dict:
         "limit": limit,
         "min_similarity": min_sim,
         "timeout": timeout,
+        "max_retries": max_retries,
     }
 
 

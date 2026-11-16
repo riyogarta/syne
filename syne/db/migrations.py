@@ -1349,6 +1349,27 @@ async def _m47_rule_checker_model(conn) -> None:
     )
 
 
+async def _m48_memory_guard_max_retries(conn) -> None:
+    """Seed memory.guard_max_retries (Riyo, 16 Nov 2026). Idempotent.
+
+    The memory guard used to rewrite a conflicting draft once and send the
+    rewrite unchecked. It now judges every rewrite again, up to this many
+    rewrites (default 2, like security.rule_checker_max_retries). Also
+    refreshes the memory.guard_enabled description.
+    """
+    from ..memory_guard import DEFAULTS
+    value, desc = DEFAULTS["memory.guard_max_retries"]
+    await conn.execute(
+        "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+        "ON CONFLICT (key) DO NOTHING",
+        "memory.guard_max_retries", json.dumps(value), desc,
+    )
+    await conn.execute(
+        "UPDATE config SET description = $1 WHERE key = 'memory.guard_enabled'",
+        DEFAULTS["memory.guard_enabled"][1],
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1397,6 +1418,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (45, _m45_kg_qs_pattern_surah_comma, "transactional"),
     (46, _m46_memory_guard_config, "transactional"),
     (47, _m47_rule_checker_model, "transactional"),
+    (48, _m48_memory_guard_max_retries, "transactional"),
 ]
 
 

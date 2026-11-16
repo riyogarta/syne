@@ -1075,12 +1075,13 @@ ON CONFLICT (key) DO NOTHING;
 
 -- memory.guard_* — final draft checked against stored decisions/preferences/lessons
 INSERT INTO config (key, value, description) VALUES
-    ('memory.guard_enabled', 'true', 'Memory guard on/off. When true, every final draft is embedded and checked against the closest stored memories in memory.guard_categories that were not already recalled this turn; the judge model decides whether the draft conflicts with them, and a conflict triggers one rewrite. Fail-open. Set via /guard.'),
+    ('memory.guard_enabled', 'true', 'Memory guard on/off. When true, every final draft is embedded and checked against the closest stored memories in memory.guard_categories that were not already recalled this turn; the judge model decides whether the draft conflicts with them. A conflict triggers a rewrite, and every rewrite is judged again, up to memory.guard_max_retries rewrites. Fail-open. Set via /guard.'),
     ('memory.guard_model', '""', 'Model that judges drafts for the memory guard: a key from /models (provider.models). Empty = the default model (provider.active_model). An Ollama entry is called directly on its base_url. A key that is missing or cannot be built skips the check. Set via /guard.'),
     ('memory.guard_categories', '["decision", "preference", "lesson"]', 'Memory categories the memory guard checks a draft against.'),
     ('memory.guard_limit', '5', 'Max memories the memory guard sends to the judge per draft.'),
     ('memory.guard_min_similarity', '0.5', 'Minimum cosine similarity between the draft and a memory for that memory to be judged. Lower = more memories judged.'),
-    ('memory.guard_timeout', '30', 'Max seconds for one memory-guard judge call (clamped 5-120). On timeout the draft is sent unchanged.')
+    ('memory.guard_timeout', '30', 'Max seconds for one memory-guard judge call (clamped 5-120). On timeout the draft is sent unchanged.'),
+    ('memory.guard_max_retries', '2', 'How many times the memory guard asks the main model to rewrite a draft that conflicts with stored memories. Every rewrite is judged again. 0 = check only, no rewrite; default 2 = up to 3 drafts in total. Clamped 0-5. If the last draft still conflicts it is sent as is and logged.')
 ON CONFLICT (key) DO NOTHING;
 
 -- security.consent_* — ya/yes confirmation gate for destructive (op=x) tool calls

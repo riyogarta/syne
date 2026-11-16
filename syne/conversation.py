@@ -2506,7 +2506,11 @@ class Conversation:
         chat_kwargs: dict,
         user_message: str,
     ) -> ChatResponse:
-        """Check the draft against stored memories; rewrite once on conflict.
+        """Check the draft against stored memories; rewrite on conflict.
+
+        Every rewrite is judged again, up to memory.guard_max_retries
+        rewrites (default 2, clamped 0-5), like the rule checker. If the
+        last draft still conflicts it is sent as is and logged.
 
         Judged by memory.guard_model (picked in /guard). Empty = the DEFAULT
         model (manager provider), not this chat's override, like the rule
@@ -2530,37 +2534,61 @@ class Conversation:
         if judge is None:
             return response
 
-        result = await _mg.check_draft(
-            draft=response.content or "",
-            user_message=user_message,
-            embed=self.memory.provider.embed,
-            judge=judge,
-            exclude_ids=list(getattr(self, "_last_recalled_memory_ids", []) or []),
-            access_level=access_level,
-            cfg=cfg,
-        )
-        if result is None or not result.conflict:
-            return response
-
-        retry_ctx = list(context)
-        retry_ctx.append(ChatMessage(role="assistant", content=response.content or ""))
-        retry_ctx.append(ChatMessage(role="user", content=_mg.build_nudge(result)))
-        new_resp = await self._llm_call(
-            "memory_guard_retry",
-            messages=retry_ctx,
-            tools=tool_schemas if tool_schemas else None,
-            stream_callbacks=None,
-            **chat_kwargs,
-        )
-        if new_resp.tool_calls:
-            new_resp = await self._handle_tool_calls(
-                new_resp, retry_ctx, access_level, tool_schemas,
+        max_retries = cfg.get("max_retries", 2)
+        exclude_ids = list(getattr(self, "_last_recalled_memory_ids", []) or [])
+        current = response
+        for attempt in range(max_retries + 1):
+            result = await _mg.check_draft(
+                draft=current.content or "",
+                user_message=user_message,
+                embed=self.memory.provider.embed,
+                judge=judge,
+                exclude_ids=exclude_ids,
+                access_level=access_level,
+                cfg=cfg,
             )
-        if not (new_resp.content or "").strip():
-            logger.warning("Memory guard: rewrite came back empty — keeping draft")
-            return response
-        logger.info(f"Memory guard: draft rewritten for memories {result.memory_ids}")
-        return new_resp
+            if result is None or not result.conflict:
+                if attempt:
+                    logger.info(
+                        f"Memory guard: rewrite accepted (attempt {attempt + 1}/{max_retries + 1})"
+                    )
+                return current
+            logger.warning(
+                f"Memory guard: CONFLICT {result.memory_ids} "
+                f"(attempt {attempt + 1}/{max_retries + 1})"
+            )
+            if attempt >= max_retries:
+                logger.warning(
+                    f"Memory guard: retries exhausted — sending last draft, "
+                    f"still conflicts with {result.memory_ids}"
+                )
+                return current
+
+            # Rebuild from the base context each round so retries do not
+            # accumulate stale drafts (same as the rule checker).
+            retry_ctx = list(context)
+            retry_ctx.append(ChatMessage(role="assistant", content=current.content or ""))
+            retry_ctx.append(ChatMessage(role="user", content=_mg.build_nudge(result)))
+            new_resp = await self._llm_call(
+                "memory_guard_retry",
+                messages=retry_ctx,
+                tools=tool_schemas if tool_schemas else None,
+                stream_callbacks=None,
+                **chat_kwargs,
+            )
+            if new_resp.tool_calls:
+                new_resp = await self._handle_tool_calls(
+                    new_resp, retry_ctx, access_level, tool_schemas,
+                )
+            if not (new_resp.content or "").strip():
+                logger.warning("Memory guard: rewrite came back empty — keeping previous draft")
+                return current
+            logger.info(
+                f"Memory guard: draft rewritten for memories {result.memory_ids} "
+                f"(rewrite {attempt + 1}/{max_retries})"
+            )
+            current = new_resp
+        return current
 
     async def _handle_tool_calls(
         self,

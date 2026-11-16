@@ -18,7 +18,7 @@ CANDS = [
      "content": "history_expand default 10 sebelum + 10 sesudah pesan acuan."},
 ]
 CFG = {"enabled": True, "model": "", "categories": ["decision"], "limit": 5,
-       "min_similarity": 0.5, "timeout": 30.0}
+       "min_similarity": 0.5, "timeout": 30.0, "max_retries": 2}
 DRAFT = ("Batas context window di config sekarang session.history_limit = 100, "
          "padahal dulu 1000. Mau kutelusuri?")
 
@@ -109,7 +109,8 @@ async def test_load_config_parses_strings_and_clamps():
             "memory.guard_model": "  ollama-qwen  ",
             "memory.guard_categories": '["decision"]',
             "memory.guard_limit": "99",
-            "memory.guard_timeout": "1"}
+            "memory.guard_timeout": "1",
+            "memory.guard_max_retries": "9"}
 
     async def gc(key, default=None):
         return vals.get(key, default)
@@ -118,6 +119,7 @@ async def test_load_config_parses_strings_and_clamps():
     assert c["enabled"] is False and c["categories"] == ["decision"]
     assert c["model"] == "ollama-qwen"
     assert c["limit"] == 20 and c["timeout"] == 5.0 and c["min_similarity"] == 0.5
+    assert c["max_retries"] == 5
 
 
 # ── judge selection (memory.guard_model) ────────────────────────────────
@@ -198,16 +200,20 @@ async def _run_guard(fake, draft_resp):
     )
 
 
-async def test_conversation_rewrites_once_on_conflict(monkeypatch):
+async def test_conversation_rewrites_and_rejudges_until_clean(monkeypatch):
     monkeypatch.setattr(G, "load_config", AsyncMock(return_value=CFG))
-    cd = AsyncMock(return_value=G.GuardResult(
-        conflict=True, memory_ids=[57566], reason="re-opens", memories=[CANDS[0]]))
+    conflict = G.GuardResult(
+        conflict=True, memory_ids=[57566], reason="re-opens", memories=[CANDS[0]])
+    cd = AsyncMock(side_effect=[conflict, G.GuardResult(conflict=False)])
     monkeypatch.setattr(G, "check_draft", cd)
     bj = AsyncMock(return_value="JUDGE")
     monkeypatch.setattr(G, "build_judge", bj)
     fake, draft = _fake_conv()
     out = await _run_guard(fake, draft)
     assert out.content.startswith("Jawaban baru")
+    assert cd.await_count == 2
+    assert cd.call_args_list[0].kwargs["draft"] == DRAFT
+    assert cd.call_args_list[1].kwargs["draft"].startswith("Jawaban baru")
     assert cd.call_args.kwargs["exclude_ids"] == [11, 12]
     assert cd.call_args.kwargs["judge"] == "JUDGE"
     assert bj.call_args.args[0] == "" and bj.call_args.kwargs["default_provider"] == "default-provider"
@@ -251,6 +257,45 @@ async def test_conversation_keeps_draft_when_rewrite_empty(monkeypatch):
         conflict=True, memory_ids=[57566], memories=[CANDS[0]])))
     fake, draft = _fake_conv(new_content="  ")
     assert await _run_guard(fake, draft) is draft
+
+
+
+async def test_conversation_stops_after_max_retries(monkeypatch):
+    monkeypatch.setattr(G, "load_config", AsyncMock(return_value=dict(CFG, max_retries=2)))
+    monkeypatch.setattr(G, "build_judge", AsyncMock(return_value="JUDGE"))
+    cd = AsyncMock(return_value=G.GuardResult(
+        conflict=True, memory_ids=[57566], memories=[CANDS[0]]))
+    monkeypatch.setattr(G, "check_draft", cd)
+    fake, draft = _fake_conv()
+    out = await _run_guard(fake, draft)
+    assert cd.await_count == 3
+    assert fake._llm_call.await_count == 2
+    assert out.content.startswith("Jawaban baru")
+
+
+async def test_conversation_max_retries_zero_checks_only(monkeypatch):
+    monkeypatch.setattr(G, "load_config", AsyncMock(return_value=dict(CFG, max_retries=0)))
+    monkeypatch.setattr(G, "build_judge", AsyncMock(return_value="JUDGE"))
+    cd = AsyncMock(return_value=G.GuardResult(
+        conflict=True, memory_ids=[57566], memories=[CANDS[0]]))
+    monkeypatch.setattr(G, "check_draft", cd)
+    fake, draft = _fake_conv()
+    assert await _run_guard(fake, draft) is draft
+    assert cd.await_count == 1
+    fake._llm_call.assert_not_called()
+
+
+async def test_migration_48_seeds_max_retries():
+    from syne.db import migrations as M
+    assert (48, M._m48_memory_guard_max_retries, "transactional") in M.MIGRATIONS
+    assert M.CURRENT_SCHEMA_VERSION == 48
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    await M._m48_memory_guard_max_retries(conn)
+    calls = conn.execute.call_args_list
+    assert "ON CONFLICT (key) DO NOTHING" in calls[0].args[0]
+    assert calls[0].args[1] == "memory.guard_max_retries" and calls[0].args[2] == "2"
+    assert "memory.guard_enabled" in calls[1].args[0]
 
 
 # ── config seeding ──────────────────────────────────────────────────────

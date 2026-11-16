@@ -76,8 +76,9 @@ Controls how fast non-permanent memories fade and when they get promoted.
 | `memory.guard_limit` | `5` | integer |
 | `memory.guard_min_similarity` | `0.5` | float |
 | `memory.guard_timeout` | `30` | integer |
+| `memory.guard_max_retries` | `2` | integer (0-5) |
 
-Every final draft is embedded and checked against the closest memories in `guard_categories` that were not already recalled this turn. The default model judges whether the draft conflicts with them (states the opposite, re-opens a settled decision, proposes a rejected action); a conflict triggers one rewrite. Fail-open on any error.
+Every final draft is embedded and checked against the closest memories in `guard_categories` that were not already recalled this turn. The default model judges whether the draft conflicts with them (states the opposite, re-opens a settled decision, proposes a rejected action); a conflict triggers a rewrite, and every rewrite is judged again, up to `guard_max_retries` rewrites (0-5, default 2, same as the rule checker). If the last draft still conflicts it is sent as is and logged. Fail-open on any error.
 - `guard_model` — who judges. Empty = the default model (`provider.active_model`), never a per-chat override. Any key from `/models`; an Ollama entry is called directly on its `base_url`. A key that is missing or cannot be built skips the check (no substitute model).
 - Owner switches on/off and picks the judge via `/guard` on Telegram.
 
@@ -319,7 +320,7 @@ bound to the specific action (op+target+content) and reusable within the TTL.
 | `security.rule_checker_driver` | `"provider"` | string (`provider` / `evaluator`) |
 | `security.rule_checker_model` | `""` | string (key from /models) |
 | `security.rule_checker_timeout` | `120` | integer (seconds, 5-120) |
-| `security.rule_checker_max_retries` | `2` | integer |
+| `security.rule_checker_max_retries` | `2` | integer (0-5) |
 
 Every final reply is judged against the hard rules before it is sent; a violation triggers a rewrite.
 - `rule_checker_driver` — `"provider"` = a model from `/models` (below); `"evaluator"` = `memory.evaluator_model` (e.g. qwen3:0.6b via Ollama).
