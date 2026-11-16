@@ -24,8 +24,8 @@ logging.basicConfig(
         logging.StreamHandler(),                          # stderr (console)
         RotatingFileHandler(                              # ~/.log-syne/syne.log (rotated)
             _log_file, encoding="utf-8",
-            maxBytes=5 * 1024 * 1024,                     # 5 MB per file
-            backupCount=3,                                # keep syne.log.1, .2, .3
+            maxBytes=10 * 1024 * 1024,                    # 10 MB per file
+            backupCount=10,                               # keep syne.log.1 .. .10 (~110 MB total)
         ),
     ],
 )
