@@ -876,24 +876,44 @@ class DiscordChannel:
         name = (getattr(att, "filename", None) or "").lower()
         return ctype.startswith("image/") or name.endswith(_IMAGE_EXT)
 
+    @staticmethod
+    def _is_empty(msg: Any) -> bool:
+        return (not (getattr(msg, "content", None) or "").strip()
+                and not getattr(msg, "attachments", None)
+                and not getattr(msg, "embeds", None))
+
     async def _replied_message(self, message: Any) -> Optional[Any]:
-        """The replied-to message: the resolved copy, else one fetch, else None."""
+        """The replied-to message: the resolved copy, else one fetch, else None.
+
+        The gateway delivers the resolved copy with content and attachments
+        blanked when the bot did not request MESSAGE_CONTENT at IDENTIFY
+        (_build_intents keeps it off so the bot only receives messages it is
+        addressed in). Message Content access is an app setting that applies
+        across the REST API too, so with the toggle on in the Developer Portal
+        a REST fetch of the same message returns it in full. An empty resolved
+        copy is therefore fetched once over REST; if that is still empty, the
+        resolved copy is kept and _collect_media notes it.
+        """
         ref = getattr(message, "reference", None)
         if ref is None:
             return None
         resolved = getattr(ref, "resolved", None)
-        if isinstance(resolved, discord.Message):
+        if resolved is not None and not isinstance(resolved, discord.Message):
+            return None   # DeletedReferencedMessage
+        if isinstance(resolved, discord.Message) and not self._is_empty(resolved):
             return resolved
-        if resolved is not None:   # DeletedReferencedMessage
-            return None
-        mid = getattr(ref, "message_id", None)
+        mid = getattr(ref, "message_id", None) or getattr(resolved, "id", None)
         if not mid:
-            return None
+            return resolved
         try:
-            return await message.channel.fetch_message(mid)
+            fetched = await message.channel.fetch_message(mid)
         except Exception as e:
-            logger.debug("Discord replied message fetch failed: %s", e)
-            return None
+            logger.info("Discord replied message fetch failed: %s", e)
+            return resolved
+        if resolved is not None:
+            logger.info("Discord replied message %s refetched over REST: %s",
+                        mid, "empty" if self._is_empty(fetched) else "has content")
+        return fetched
 
     async def _fetch_attachment(self, att: Any, msg_id: Any,
                                 from_reply: bool) -> tuple[Optional[dict], str]:
@@ -973,10 +993,11 @@ class DiscordChannel:
                     # the bot was not addressed in (no MESSAGE_CONTENT
                     # intent), so an empty replied message may still hold a
                     # file. Say so instead of answering as if it had none.
-                    notes.append("[Replied message arrived empty: Discord may "
-                                 "withhold its text and attachments from this "
-                                 "bot. Ask the user to send the file directly "
-                                 "with a mention, or in a DM.]")
+                    notes.append("[Replied message arrived empty, also when "
+                                 "fetched again: Discord withheld its text and "
+                                 "attachments (Message Content Intent not active "
+                                 "for this bot). Ask the user to send the file "
+                                 "directly with a mention, or in a DM.]")
         images: list = []
         document = None
         paths: list = []

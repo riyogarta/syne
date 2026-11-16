@@ -167,3 +167,58 @@ def test_deleted_reference_ignored(tmp_path):
 
 def test_no_attachments_no_reply(tmp_path):
     assert run(_ch(tmp_path)._collect_media(_msg())) == ({}, [])
+
+
+# ── empty resolved copy is refetched over REST (Riyo, 16 Nov 2026) ──────
+
+def _resolved_id(content="", attachments=(), mid=77):
+    m = _resolved(content, attachments)
+    m.id = mid
+    return m
+
+
+def test_empty_resolved_is_refetched(tmp_path):
+    full = _resolved_id("", [Att("p.pdf", "application/pdf")])
+    calls = []
+
+    async def fetch_message(mid):
+        calls.append(mid)
+        return full
+
+    ref = SimpleNamespace(resolved=_resolved_id(""), message_id=77)
+    chan = SimpleNamespace(fetch_message=fetch_message)
+    media, notes = run(_ch(tmp_path)._collect_media(_msg(reference=ref, channel=chan)))
+    assert calls == [77]
+    assert media["document"]["from_reply"] is True
+    assert notes[0].startswith("[Attached: file p.pdf from replied message")
+
+
+def test_empty_after_refetch_keeps_note(tmp_path):
+    async def fetch_message(mid):
+        return _resolved_id("")
+
+    ref = SimpleNamespace(resolved=_resolved_id(""), message_id=77)
+    chan = SimpleNamespace(fetch_message=fetch_message)
+    media, notes = run(_ch(tmp_path)._collect_media(_msg(reference=ref, channel=chan)))
+    assert media == {} and notes[0].startswith("[Replied message arrived empty, also when")
+
+
+def test_refetch_failure_falls_back_to_note(tmp_path):
+    async def fetch_message(mid):
+        raise RuntimeError("403")
+
+    ref = SimpleNamespace(resolved=_resolved_id(""), message_id=77)
+    chan = SimpleNamespace(fetch_message=fetch_message)
+    media, notes = run(_ch(tmp_path)._collect_media(_msg(reference=ref, channel=chan)))
+    assert media == {} and notes[0].startswith("[Replied message arrived empty")
+
+
+def test_nonempty_resolved_not_refetched(tmp_path):
+    async def fetch_message(mid):
+        raise AssertionError("must not fetch")
+
+    ref = SimpleNamespace(resolved=_resolved_id("", [Att("a.png", "image/png", b"i")]),
+                          message_id=77)
+    chan = SimpleNamespace(fetch_message=fetch_message)
+    media, _ = run(_ch(tmp_path)._collect_media(_msg(reference=ref, channel=chan)))
+    assert media["image"]["from_reply"] is True
