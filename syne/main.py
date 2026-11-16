@@ -15,18 +15,14 @@ _log_dir = os.path.expanduser("~/.log-syne")
 os.makedirs(_log_dir, exist_ok=True)
 _log_file = os.path.join(_log_dir, "syne.log")
 
-from logging.handlers import RotatingFileHandler
+from .log_rotation import build_file_handler
 
 logging.basicConfig(
     level=logging.INFO,
     format=_log_format,
     handlers=[
         logging.StreamHandler(),                          # stderr (console)
-        RotatingFileHandler(                              # ~/.log-syne/syne.log (rotated)
-            _log_file, encoding="utf-8",
-            maxBytes=10 * 1024 * 1024,                    # 10 MB per file
-            backupCount=10,                               # keep syne.log.1 .. .10 (~110 MB total)
-        ),
+        build_file_handler(_log_file),                   # ~/.log-syne/syne.log: 50 MB, backups syne.log.1.gz .. .5.gz
     ],
 )
 logger = logging.getLogger("syne")

@@ -148,7 +148,8 @@ syne/
 ```
 shell(command="tail -100 ~/.log-syne/syne.log")           — last 100 log lines
 shell(command="grep ERROR ~/.log-syne/syne.log | tail -20") — recent errors
-shell(command="ls -la ~/.log-syne/")                       — list all log files (10 MB each, rotated: .1 .. .10, .10 = oldest)
+shell(command="ls -la ~/.log-syne/")                       — list all log files (syne.log up to 50 MB; backups syne.log.1.gz .. .5.gz, .5 = oldest)
+shell(command="zgrep -h ERROR ~/.log-syne/syne.log.*.gz | tail -20") — search the compressed backups
 ```
 
 ### Common issues and diagnosis
