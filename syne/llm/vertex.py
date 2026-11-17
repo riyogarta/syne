@@ -107,7 +107,7 @@ async def detect_vertex_region(
                 resp = await client.post(
                     url,
                     json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
-                    params={"key": api_key},
+                    headers={"x-goog-api-key": api_key},
                 )
                 if resp.status_code == 200:
                     return region
@@ -259,8 +259,8 @@ class VertexProvider(LLMProvider):
                 body["tools"] = gemini_tools
 
         url = f"{_vertex_endpoint(self.region, model, self.project_id)}:streamGenerateContent"
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
-        params = {"alt": "sse", "key": self.api_key}
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream", "x-goog-api-key": self.api_key}
+        params = {"alt": "sse"}
 
         body_json = json.dumps(body)
 
@@ -468,7 +468,7 @@ class VertexProvider(LLMProvider):
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
                     resp = await client.post(
-                        url, json=body, params={"key": self.api_key},
+                        url, json=body, headers={"x-goog-api-key": self.api_key},
                     )
                     resp.raise_for_status()
                     data = resp.json()
@@ -526,7 +526,7 @@ class VertexProvider(LLMProvider):
             try:
                 async with httpx.AsyncClient(timeout=60) as client:
                     resp = await client.post(
-                        url, json=body, params={"key": self.api_key},
+                        url, json=body, headers={"x-goog-api-key": self.api_key},
                     )
                     resp.raise_for_status()
                     data = resp.json()

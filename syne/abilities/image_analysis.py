@@ -209,8 +209,7 @@ class ImageAnalysisAbility(Ability):
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
                     url,
-                    params={"key": api_key},
-                    headers={"Content-Type": "application/json"},
+                    headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
                     json={
                         "contents": [{"role": "user", "parts": [
                             {"text": prompt},
