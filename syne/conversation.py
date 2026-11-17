@@ -1062,8 +1062,7 @@ class Conversation:
         except Exception as e:
             logger.debug(f"Memory routing skipped: {e}")
 
-        # 2b. Run memory recall + graph recall IN PARALLEL (saves ~400ms)
-        from .memory.graph import recall_graph as _recall_graph
+        # 2b. Memory recall
 
         # Query vector for memory recall, embedded lazily: the caller checks
         # recall()'s 2-word floor BEFORE asking, so a bare acknowledgement
@@ -1104,29 +1103,12 @@ class Conversation:
                 requester_access_level=access_level,
             )
 
-        async def _do_graph_recall():
-            try:
-                # access_level must be forwarded: graph recall reaches the same
-                # private knowledge as memory recall, so it needs the same
-                # Rule 760/765 gate. Omitting it defaulted every requester to
-                # owner-level visibility.
-                return await _recall_graph(
-                    recall_query or user_message,
-                    requester_access_level=access_level,
-                    log_scope={
-                        "session_id": self.session_id,
-                        "platform": getattr(self.inbound, "platform", None),
-                        "chat_id": self.chat_id,
-                    },
-                )
-            except Exception as e:
-                logger.debug(f"Graph recall skipped: {e}")
-                return []
-
+        # The keyword KG lookup is no longer injected: its
+        # relations are old LLM guesses (Riyo, 17 Nov 2026). Only the
+        # rule-built chunk links below reach the prompt.
         _t_recall = _ts_time.monotonic()
-        memories, graph_lines = await asyncio.gather(
-            _do_memory_recall(), _do_graph_recall()
-        )
+        memories = await _do_memory_recall()
+        graph_lines: list = []
         self._last_recalled_memory_ids = [
             m.get("id") for m in (memories or []) if m.get("id") is not None
         ]
