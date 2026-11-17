@@ -1392,6 +1392,17 @@ async def _m49_remove_memory_decay(conn) -> None:
     )
 
 
+
+async def _m50_drop_memory_auto_archive(conn) -> None:
+    """Drop memory_auto_archive (Riyo, 17 Nov 2026). Idempotent.
+
+    Migration 41 moved the auto-capture rows here for a later analysis.
+    That analysis will not be done, and nothing reads the table (no
+    foreign key, no trigger, no code path), so it is dropped with its rows.
+    """
+    await conn.execute("DROP TABLE IF EXISTS memory_auto_archive")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1442,6 +1453,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (47, _m47_rule_checker_model, "transactional"),
     (48, _m48_memory_guard_max_retries, "transactional"),
     (49, _m49_remove_memory_decay, "transactional"),
+    (50, _m50_drop_memory_auto_archive, "transactional"),
 ]
 
 

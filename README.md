@@ -135,7 +135,7 @@ Chat ──→ "Ingat/Remember"?
                    (searchable via history_search / history_expand)
 ```
 
-Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") store a memory. Memory auto-capture — a small model paraphrasing every message into memory — was removed in v1.22.59: the paraphrases were lossy, added noise to every recall, and duplicated words that were already in the history. Rows it created were moved to `memory_auto_archive` for later analysis.
+Only explicit commands ("ingat ini", "remember this", "catat", "jangan lupa") store a memory. Memory auto-capture — a small model paraphrasing every message into memory — was removed in v1.22.59: the paraphrases were lossy, added noise to every recall, and duplicated words that were already in the history. The rows it created were archived in v1.22.59 and dropped in v1.22.80.
 
 #### Memory Recall
 

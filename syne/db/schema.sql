@@ -85,28 +85,6 @@ CREATE TABLE IF NOT EXISTS memory (
     kg_processed BOOLEAN DEFAULT false    -- true = KG extraction has been attempted
 );
 
--- Archive of removed memory auto-capture rows (migration 41, v1.22.59).
--- Columns memory had at v1.22.59 + archived_at. Not recalled; kept
--- for analysing why auto-capture was removed. Empty on fresh installs.
-CREATE TABLE IF NOT EXISTS memory_auto_archive (
-    id INT PRIMARY KEY,
-    content TEXT NOT NULL,
-    category VARCHAR(50),
-    embedding vector,
-    source VARCHAR(30),
-    user_id INT,
-    importance FLOAT,
-    access_count INT,
-    created_at TIMESTAMPTZ,
-    updated_at TIMESTAMPTZ,
-    accessed_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ,
-    permanent BOOLEAN,
-    recall_count INTEGER,
-    kg_processed BOOLEAN,
-    archived_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
 -- HNSW vector index — created dynamically because embedding dimensions vary per provider.
 -- Call SELECT ensure_memory_hnsw_index() after embeddings exist to create/rebuild.
 CREATE OR REPLACE FUNCTION ensure_memory_hnsw_index() RETURNS void AS $$
