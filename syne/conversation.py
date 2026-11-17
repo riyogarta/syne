@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover
 from .db.connection import get_connection
 from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError, EmbeddingUnavailableError
 from .memory.engine import MemoryEngine
+from . import maintenance as _maint
 from .context import (
     ContextManager, estimate_messages_tokens, estimate_tokens,
     DEFAULT_CHARS_PER_TOKEN, NO_SOFT_TRIM_TOOLS,
@@ -3913,6 +3914,14 @@ class ConversationManager:
         Returns:
             Agent response string
         """
+        # Maintenance gate (/restore): no channel, node or task may start a
+        # turn while the database is being replaced. DM: notice; group: None.
+        if _maint.active():
+            _inb = (message_metadata or {}).get("inbound")
+            if _inb is not None and getattr(_inb, "is_group", False):
+                return None
+            return _maint.NOTICE
+
         # Extract extra context from metadata (e.g., CLI working directory)
         extra_context = None
         if message_metadata and message_metadata.get("cwd"):
@@ -3983,6 +3992,8 @@ class ConversationManager:
         # get a short notice; a group gets it once per incident, then None
         # (= silent drop in every channel).
         from . import embed_health as _eh
+        _me = asyncio.current_task()
+        _maint.track(_me)
         try:
             await _eh.gate(getattr(conv.memory, "provider", None) or conv.provider)
             response = await conv.chat(message, message_metadata=message_metadata)
@@ -3991,6 +4002,8 @@ class ConversationManager:
             if _eh.should_reply(_is_group, platform, chat_id):
                 return _eh.user_notice()
             return None
+        finally:
+            _maint.untrack(_me)
 
         if response is None:
             return None  # Silent drop (lock timeout)

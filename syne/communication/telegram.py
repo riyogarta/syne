@@ -5346,13 +5346,23 @@ Or just send me a message!"""
         # Set before the first await below, so a second "Yes, restore" (or any
         # other update) is stopped by _restore_gate from here on.
         self._restore_running = True
+        from .. import maintenance as _maint
         try:
+            await query.edit_message_text("Stopping running chats before the restore...")
+            # Global gate: WhatsApp, Discord, nodes and the scheduler stop
+            # too, and turns already running are cancelled and awaited so
+            # nothing writes into the database while it is replaced.
+            await _maint.begin("restore")
+            for _t in list(getattr(self, "_active_tasks", {}).values()):
+                if _t is not asyncio.current_task() and not _t.done():
+                    _t.cancel()
             await query.edit_message_text(f"Restoring from {actual_filename}...")
             success, message = await asyncio.to_thread(run_restore, filepath)
         except Exception as e:
             success, message = False, str(e)
         if not success:
             self._restore_running = False
+            _maint.end()
         if success:
             await query.edit_message_text(f"Restored {actual_filename}. Restarting...")
             import os, threading; threading.Timer(1, os._exit, args=[1]).start()

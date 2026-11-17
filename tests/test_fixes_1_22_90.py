@@ -342,3 +342,95 @@ def test_guard_recheck_counts_guard_tools():
     g = inspect.getsource(Conversation._memory_guard_and_maybe_rewrite)
     i = g.index("if new_resp.tool_calls:")
     assert "self._guard_ran_tools = True" in g[i:i + 120]
+
+
+# ── #15: global maintenance gate during /restore ────────────────────────
+
+@pytest.fixture
+def maint():
+    from syne import maintenance as M
+    M.end()
+    M._turns.clear()
+    yield M
+    M.end()
+    M._turns.clear()
+
+
+async def test_maintenance_refuses_new_turns(maint):
+    from syne.conversation import ConversationManager
+    mgr = ConversationManager.__new__(ConversationManager)
+    mgr.get_or_create_session = _AM()
+    await maint.begin("restore")
+    out = await mgr.handle_message("whatsapp", "1", {"id": 1}, "halo",
+                                   message_metadata={"inbound": _NS(is_group=False)})
+    assert out == maint.NOTICE
+    assert await mgr.handle_message("discord", "-1", {"id": 1}, "halo",
+                                    message_metadata={"inbound": _NS(is_group=True)}) is None
+    mgr.get_or_create_session.assert_not_called()
+
+
+async def test_maintenance_cancels_running_turns(maint):
+    started = _asyncio.Event()
+
+    async def turn():
+        maint.track(_asyncio.current_task())
+        try:
+            started.set()
+            await _asyncio.sleep(30)
+        finally:
+            maint.untrack(_asyncio.current_task())
+
+    t = _asyncio.create_task(turn())
+    await started.wait()
+    assert await maint.begin("restore", timeout=2) == 1
+    assert t.cancelled()
+    assert maint.active()
+    maint.end()
+    assert not maint.active()
+
+
+async def test_handle_message_tracks_turn(maint, monkeypatch):
+    from syne import embed_health as E
+    from syne.conversation import ConversationManager
+    monkeypatch.setattr(E, "_since", None)
+    seen = {}
+
+    async def _chat(msg, message_metadata=None):
+        seen["tracked"] = _asyncio.current_task() in maint._turns
+        return "ok"
+
+    conv = _NS(memory=_NS(provider=None), provider=None, chat=_AM(side_effect=_chat),
+               load_history=_AM(), stream_callbacks=None)
+    mgr = ConversationManager.__new__(ConversationManager)
+    mgr._stream_callbacks = None
+    mgr.get_or_create_session = _AM(return_value=conv)
+    assert await mgr.handle_message("telegram", "1", {"id": 1}, "hi",
+                                    message_metadata={"inbound": _NS(is_group=False)}) == "ok"
+    assert seen["tracked"] is True
+    assert not maint._turns
+
+
+def test_scheduler_skips_during_maintenance():
+    import inspect
+    from syne.scheduler import Scheduler
+    src = inspect.getsource(Scheduler._run_loop)
+    assert src.index("_maint.active()") < src.index("await self._check_and_execute()")
+
+
+async def test_restore_raises_and_releases_global_gate(maint, monkeypatch, tmp_path):
+    import syne.cli.cmd_backup as CB
+    from unittest.mock import MagicMock
+    from syne.communication.telegram import TelegramChannel
+    (tmp_path / "b.sql").write_text("x")
+    monkeypatch.setattr(CB, "_get_backup_dir", lambda: str(tmp_path))
+    seen = {}
+
+    def fake_restore(path):
+        seen["active"] = maint.active()
+        return False, "bad dump"
+    monkeypatch.setattr(CB, "run_restore", MagicMock(side_effect=fake_restore))
+    me = _NS(_restore_running=False, _active_tasks={})
+    q = _NS(answer=_AM(), edit_message_text=_AM())
+    await TelegramChannel._handle_restore_callback(me, q, "confirmed:b.sql")
+    assert seen["active"] is True      # gate was up while restoring
+    assert not maint.active()          # a failed restore releases it

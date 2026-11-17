@@ -181,6 +181,11 @@ class Scheduler:
         # after startup (files may already be long overdue), then daily.
         cleanup_counter = 2878
         while self._running:
+            from . import maintenance as _maint
+            if _maint.active():
+                # /restore is replacing the database: run nothing, try later.
+                await asyncio.sleep(_CHECK_INTERVAL)
+                continue
             try:
                 await self._check_and_execute()
             except Exception as e:
