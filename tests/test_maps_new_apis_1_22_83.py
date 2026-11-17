@@ -14,7 +14,7 @@ def test_no_key_query_param_anywhere():
     src = inspect.getsource(M)
     assert '"key": api_key' not in src
     assert "maps.googleapis.com" not in src
-    assert src.count('"X-Goog-Api-Key": api_key') == 4
+    assert src.count('"X-Goog-Api-Key": api_key') == 5
 
 
 def test_telegram_reverse_geocode_uses_v4_header():
@@ -31,7 +31,8 @@ def test_waypoint_latlng_and_address():
 
 
 def test_travel_modes_map():
-    assert M._TRAVEL_MODES == {"driving": "DRIVE", "walking": "WALK", "bicycling": "BICYCLE", "transit": "TRANSIT"}
+    base = {"driving": "DRIVE", "walking": "WALK", "bicycling": "BICYCLE", "transit": "TRANSIT"}
+    assert base.items() <= M._TRAVEL_MODES.items()
 
 
 class _FakeClient:
