@@ -148,6 +148,25 @@ def _toll_text(route: dict) -> str | None:
     return " / ".join(prices) if prices else "ada tol, tarif tidak diketahui"
 
 
+def _join_instruction(raw: str) -> str:
+    """Join Google's multi-line step text on one line.
+
+    Google relies on the line break to end a parenthesis, e.g.
+    'Teruskan ke Jl. Tomang Raya (rambu Harmoni/Kota<newline>Sebagian jalan ...',
+    so close any parenthesis a line leaves open before joining.
+    """
+    parts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        missing = line.count("(") - line.count(")")
+        if missing > 0:
+            line += ")" * missing
+        parts.append(line)
+    return " · ".join(parts)
+
+
 _MIN_RE = re.compile(r"\bmin\b")
 
 
@@ -510,10 +529,8 @@ class MapsAbility(Ability):
                         n += 1
                         steps_out.append(f"{n}. {transit}")
                         continue
-                    instruction = " · ".join(
-                        part.strip()
-                        for part in ((step.get("navigationInstruction") or {}).get("instructions") or "").splitlines()
-                        if part.strip()
+                    instruction = _join_instruction(
+                        (step.get("navigationInstruction") or {}).get("instructions") or ""
                     )
                     if not instruction:
                         continue
