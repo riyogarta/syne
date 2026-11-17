@@ -95,6 +95,11 @@ def classify_error(e: Exception, model: str = "", access_level: str = "public") 
     Owner/family get the raw error (type + message, model-tagged), with API
     keys redacted; all other access levels get GENERIC_ERROR_MESSAGE.
     """
+    from ..llm.provider import EmbeddingUnavailableError
+    if isinstance(e, EmbeddingUnavailableError):
+        from ..embed_health import user_notice
+        return user_notice()
+
     if (access_level or "").lower() not in _PRIVILEGED_LEVELS:
         return GENERIC_ERROR_MESSAGE
 

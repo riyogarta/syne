@@ -105,6 +105,34 @@ class OllamaProvider(LLMProvider):
             raise last_exc
         raise RuntimeError("Ollama embed failed without exception")
 
+    async def embed_fast(self, text: str, timeout: float = 10.0) -> EmbeddingResponse:
+        """Single attempt, no retry; the whole call, queue wait included,
+        is bounded by ``timeout``. Used by the recall path of a chat turn
+        (syne.embed_health.quick_embed) so a dead Ollama is noticed in
+        seconds instead of after ~6 minutes of retries. An HTTP error keeps
+        Ollama's own message (e.g. model not found).
+        """
+        model = self.embedding_model
+
+        async def _one() -> EmbeddingResponse:
+            async with _EMBED_SEMAPHORE:
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    resp = await client.post(
+                        f"{self.base_url}/api/embed",
+                        json={"model": model, "input": text},
+                    )
+                    if resp.status_code >= 400:
+                        raise RuntimeError(
+                            f"Ollama HTTP {resp.status_code}: {resp.text[:300]}"
+                        )
+                    data = resp.json()
+            vector = data["embeddings"][0]
+            return EmbeddingResponse(
+                vector=vector, model=model, dimensions=len(vector), input_tokens=0,
+            )
+
+        return await asyncio.wait_for(_one(), timeout)
+
     async def embed_batch(
         self,
         texts: list[str],

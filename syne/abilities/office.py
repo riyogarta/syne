@@ -153,7 +153,13 @@ class OfficeAbility(Ability):
         legacy_ext = next(
             (e for e in self._LEGACY_EXTS if filename.endswith(e)), None,
         )
-        if legacy_ext or mime in self._LEGACY_MIMES:
+        # The mime only decides when the name has no extension at all:
+        # browsers (notably on Windows) send .csv as application/vnd.ms-excel,
+        # and a .csv is never an Office 97-2003 file.
+        import os as _os
+        _has_ext = bool(_os.path.splitext(filename)[1])
+        legacy_mime = mime in self._LEGACY_MIMES and not _has_ext
+        if legacy_ext or legacy_mime:
             new_ext = self._LEGACY_EXTS.get(legacy_ext) or self._LEGACY_MIMES.get(mime)
             raise ValueError(
                 f"'{filename or 'document'}' is an old Office 97-2003 file, which "

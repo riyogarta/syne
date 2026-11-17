@@ -34,6 +34,14 @@ class LLMEmptyResponseError(LLMError):
     """LLM returned empty content after retries."""
     pass
 
+class EmbeddingUnavailableError(LLMError):
+    """The embedding service did not answer the recall embed of a turn.
+
+    Raised by syne.embed_health.quick_embed. The turn is refused (not run
+    without memory) and the sender gets a short notice instead.
+    """
+    pass
+
 
 @dataclass
 class ChatMessage:
@@ -162,6 +170,16 @@ class LLMProvider(ABC):
     ) -> list[EmbeddingResponse]:
         """Generate embedding vectors for multiple texts."""
         ...
+
+    async def embed_fast(self, text: str, timeout: float = 10.0) -> EmbeddingResponse:
+        """One embed bounded by ``timeout`` seconds, for the live recall path.
+
+        embed() may retry for minutes (local Ollama: 120s x 3); a chat turn
+        must not hang that long when the service is down. Providers that can
+        do better (single attempt, no retry) override this.
+        """
+        import asyncio
+        return await asyncio.wait_for(self.embed(text), timeout)
 
     @property
     @abstractmethod

@@ -72,3 +72,6 @@ class HybridProvider(LLMProvider):
         model: Optional[str] = None,
     ) -> list[EmbeddingResponse]:
         return await self._embed.embed_batch(texts, model)
+
+    async def embed_fast(self, text: str, timeout: float = 10.0) -> EmbeddingResponse:
+        return await self._embed.embed_fast(text, timeout)

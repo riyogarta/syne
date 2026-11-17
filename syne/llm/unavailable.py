@@ -65,3 +65,6 @@ class UnavailableProvider(LLMProvider):
 
     async def embed_batch(self, texts: list[str], model: Optional[str] = None) -> list[EmbeddingResponse]:
         return await self._embedder().embed_batch(texts, model)
+
+    async def embed_fast(self, text: str, timeout: float = 10.0) -> EmbeddingResponse:
+        return await self._embedder().embed_fast(text, timeout)

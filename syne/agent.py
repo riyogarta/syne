@@ -327,6 +327,38 @@ class SyneAgent:
         if raise_on_unavailable and isinstance(new_provider, UnavailableProvider):
             raise new_provider.error
 
+    async def refresh_oauth_overrides(self, drivers: set) -> int:
+        """Rebuild per-conversation override providers after an OAuth login.
+
+        reload_provider() only swaps conversations that follow the default.
+        A group / user / entry / node override built on an OAuth driver keeps
+        its own provider instance, which still holds the old token. Rebuild
+        those whose model entry uses one of ``drivers`` with auth=oauth.
+        Returns how many were rebuilt.
+        """
+        from .llm.drivers import get_model_from_list
+
+        if not self.conversations:
+            return 0
+        models = await get_config("provider.models", None) or []
+        default = self.conversations.provider
+        rebuilt = 0
+        for conv in list(self.conversations._active.values()):
+            key = getattr(conv, "_model_key", None)
+            if not key or conv.provider is default:
+                continue
+            entry = get_model_from_list(models, key) or {}
+            if entry.get("driver") not in drivers or entry.get("auth") != "oauth":
+                continue
+            try:
+                conv.provider = await self.create_provider_for_model(key)
+                rebuilt += 1
+            except Exception as e:
+                logger.error(f"OAuth refresh: could not rebuild '{key}': {e}")
+        if rebuilt:
+            logger.info(f"OAuth refresh: rebuilt {rebuilt} override provider(s) for {sorted(drivers)}")
+        return rebuilt
+
     async def create_provider_for_model(self, model_key: str):
         """Create a provider for a specific model key from the registry.
 

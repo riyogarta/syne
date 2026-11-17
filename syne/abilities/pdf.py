@@ -788,6 +788,12 @@ class PdfAbility(Ability):
                 import base64
                 content = base64.b64decode(b64)
             else:
+                # Check the size on disk first: a huge file must not be read
+                # into memory just to be refused afterwards.
+                import os as _os
+                _size = _os.path.getsize(path)
+                if _size > self._MAX_PDF_BYTES:
+                    return f"[PDF too large: {_size / 1024 / 1024:.1f} MB, max {self._MAX_PDF_BYTES // 1024 // 1024} MB]"
                 with open(path, "rb") as f:
                     content = f.read()
         except Exception as e:

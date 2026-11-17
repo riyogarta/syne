@@ -295,6 +295,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("guard", self._cmd_guard))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
+        self.app.add_handler(CommandHandler("restartollama", self._cmd_restartollama))
         self.app.add_handler(CommandHandler("models", self._cmd_models))
         self.app.add_handler(CommandHandler("embedding", self._cmd_embedding))
         self.app.add_handler(CommandHandler("evaluator", self._cmd_evaluator))
@@ -414,6 +415,7 @@ class TelegramChannel:
             BotCommand("quit", "Exit remote node mode"),
             BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("restart", "Restart Syne (owner only)"),
+            BotCommand("restartollama", "Restart Ollama, pull the embedding model if missing (owner only)"),
             BotCommand("restore", "Restore database from backup (owner only)"),
             BotCommand("restoreconf", "Restore config from a config backup (owner only)"),
             BotCommand("reset", "Clear consent grants (owner only)"),
@@ -564,6 +566,57 @@ class TelegramChannel:
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
         return False
+
+    async def notify_embedding_down(self, text: str, with_restart_button: bool) -> bool:
+        """Embedding-down notice to the owner (syne.embed_health), with a
+        "Restart Ollama" button when the embedding driver is Ollama."""
+        if not with_restart_button:
+            return await self.notify_owner(text)
+        if not self.app or not self.app.bot:
+            return False
+        owner_id = await self._owner_chat_id()
+        if owner_id is None:
+            return False
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔄 Restart Ollama", callback_data="ollama:restart")]]
+        )
+        for attempt in range(3):
+            try:
+                await self.app.bot.send_message(chat_id=owner_id, text=text, reply_markup=markup)
+                return True
+            except Exception as e:
+                logger.error(f"notify_embedding_down failed (attempt {attempt + 1}/3): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2 ** attempt)
+        return False
+
+    async def _run_restart_ollama(self, chat_id: int) -> None:
+        """Shared by /restartollama and the "Restart Ollama" button; one
+        message is edited with the progress and the final result."""
+        from .. import embed_health
+        if getattr(self, "_ollama_restart_running", False):
+            await self.app.bot.send_message(chat_id=chat_id, text="⏳ An Ollama restart is already running.")
+            return
+        self._ollama_restart_running = True
+        try:
+            msg = await self.app.bot.send_message(chat_id=chat_id, text="🔄 Restarting Ollama...")
+
+            async def progress(t: str) -> None:
+                try:
+                    await msg.edit_text(t)
+                except Exception:
+                    pass
+
+            result = await embed_health.restart_ollama(progress)
+            try:
+                await msg.edit_text(result)
+            except Exception:
+                await self.app.bot.send_message(chat_id=chat_id, text=result)
+        except Exception as e:
+            logger.error(f"/restartollama failed: {e}", exc_info=True)
+            await self.app.bot.send_message(chat_id=chat_id, text=f"❌ {type(e).__name__}: {e}")
+        finally:
+            self._ollama_restart_running = False
 
     async def send_owner_photo(
         self,
@@ -2599,6 +2652,7 @@ class TelegramChannel:
 /update — Update to the latest release
 /updatedev — Pull dev + reinstall + restart
 /restart — Restart the Syne process
+/restartollama — Restart Ollama (pulls the embedding model only if missing)
 /backup — Back up the database
 /restore — List & restore a backup
 /backupconf — Back up config only (models, credentials)
@@ -5460,6 +5514,20 @@ Or just send me a message!"""
         # Exit with non-zero code so systemd (Restart=on-failure) will restart us
         # os._exit bypasses exception handlers that might catch SystemExit
         import os, threading; threading.Timer(1, os._exit, args=[1]).start()
+
+    async def _cmd_restartollama(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """/restartollama — owner, DM only. Restart the ollama service, pull
+        the active embedding model only if it is missing, test one embed."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("⚠️ Only the owner can restart Ollama.")
+            return
+        if update.effective_chat.type != "private":
+            await update.message.reply_text("⚠️ Use /restartollama in a private chat.")
+            return
+        await self._run_restart_ollama(update.effective_chat.id)
 
     async def _cmd_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /update — owner only, update to latest release (skip if same version)."""
@@ -8942,11 +9010,11 @@ Or just send me a message!"""
         try:
             if provider == "codex":
                 await self._exchange_codex_oauth(code, state)
-                await self._reload_after_oauth()
+                await self._reload_after_oauth({"codex"})
                 await bot.send_message(chat_id=chat_id, text="✅ OpenAI/Codex OAuth configured successfully!")
             elif provider == "claude":
                 await self._exchange_claude_oauth(code, state)
-                await self._reload_after_oauth()
+                await self._reload_after_oauth({"anthropic", "claude"})
                 await bot.send_message(chat_id=chat_id, text="✅ Claude OAuth configured successfully!")
             else:
                 await bot.send_message(chat_id=chat_id, text=f"❌ Unknown provider: {provider}")
@@ -9895,7 +9963,7 @@ Or just send me a message!"""
             data = await poll_device_token(dev["device_code"], dev["interval"], dev["expires_in"])
             await save_tokens(data)
             logger.info("xAI OAuth credentials saved to DB")
-            await self._reload_after_oauth()
+            await self._reload_after_oauth({"xai"})
             await bot.send_message(chat_id=chat_id, text=f"✅ {label} OAuth configured successfully!")
         except asyncio.CancelledError:
             logger.info(f"xAI device flow cancelled by user {user_id}")
@@ -9963,13 +10031,14 @@ Or just send me a message!"""
         url = f"{_AUTHORIZE_URL}?{params}"
         return url, {"verifier": verifier, "challenge": challenge, "state": verifier}
 
-    async def _reload_after_oauth(self):
+    async def _reload_after_oauth(self, drivers: Optional[set] = None):
         """Apply freshly saved OAuth tokens to the running providers.
 
         The login only wrote the tokens to the DB; the live provider kept the
-        old (often expired) ones until a restart. Reload picks them up. A
-        default model that is still unavailable must not turn a successful
-        login into an error, so it never raises here.
+        old (often expired) ones until a restart. Reload picks them up for
+        the default; per-conversation overrides on the same driver are
+        rebuilt too. A default model that is still unavailable must not turn
+        a successful login into an error, so it never raises here.
         """
         if not self.agent:
             return
@@ -9977,6 +10046,11 @@ Or just send me a message!"""
             await self.agent.reload_provider(raise_on_unavailable=False)
         except Exception as e:
             logger.error(f"Provider reload after OAuth login failed: {e}", exc_info=True)
+        if drivers and hasattr(self.agent, "refresh_oauth_overrides"):
+            try:
+                await self.agent.refresh_oauth_overrides(drivers)
+            except Exception as e:
+                logger.error(f"Override refresh after OAuth login failed: {e}", exc_info=True)
 
     async def _exchange_codex_oauth(self, code: str, state: dict):
         """Exchange Codex auth code for tokens and save to DB."""
@@ -10334,6 +10408,10 @@ Or just send me a message!"""
         access_level = existing_user.get("access_level", "public") if existing_user else "public"
         if access_level != "owner":
             await query.edit_message_text("⚠️ Owner only.")
+            return
+
+        if data == "ollama:restart":
+            await self._run_restart_ollama(query.message.chat_id)
             return
 
         if data.startswith("models:"):

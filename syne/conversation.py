@@ -16,7 +16,7 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 from .db.connection import get_connection
-from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError
+from .llm.provider import LLMProvider, ChatMessage, ChatResponse, UsageAccumulator, StreamCallbacks, LLMContextWindowError, LLMBadRequestError, EmbeddingUnavailableError
 from .memory.engine import MemoryEngine
 from .context import (
     ContextManager, estimate_messages_tokens, estimate_tokens,
@@ -225,6 +225,10 @@ class Conversation:
         self._sys_epoch: int = 0
         self._ctx_sys_epoch: int = -1
         self._mgr: Optional["ConversationManager"] = None  # Back-reference, set by manager
+        # provider.models key of a per-group/user/entry/node override; None
+        # = follows the default. Lets an OAuth login rebuild overrides that
+        # use the refreshed driver (SyneAgent.refresh_oauth_overrides).
+        self._model_key: Optional[str] = None
         # Last authoritative "Current Time" block injected into context by
         # _build_context. Handed to the rule checker so time-related hard
         # rules (DATE_VERIFY) are judgeable: without it the checker cannot
@@ -1067,16 +1071,16 @@ class Conversation:
         _qvec_lock = asyncio.Lock()
 
         async def _shared_query_vector():
+            # One bounded attempt (embedding.recall_timeout, no retry). A
+            # failure raises EmbeddingUnavailableError and the whole turn is
+            # refused (syne.embed_health): a turn must never run silently
+            # without memory, and must not hang in minutes of retries.
             async with _qvec_lock:
                 if "v" not in _qvec:
-                    try:
-                        _r = await self.memory.provider.embed(
-                            recall_query or user_message
-                        )
-                        _qvec["v"] = getattr(_r, "vector", None)
-                    except Exception as e:
-                        logger.debug(f"Query embed failed: {e}")
-                        _qvec["v"] = None
+                    from . import embed_health as _eh
+                    _qvec["v"] = await _eh.quick_embed(
+                        self.memory.provider, recall_query or user_message
+                    )
             return _qvec["v"]
 
         async def _do_memory_recall():
@@ -1732,6 +1736,12 @@ class Conversation:
                     return _bypass_response
                 try:
                     return await self._chat_inner(user_message, message_metadata)
+                except EmbeddingUnavailableError:
+                    # The turn was refused (embedding down): drop the user
+                    # message saved before recall so history matches what
+                    # was actually processed. ConversationManager answers.
+                    await self._delete_last_user_message()
+                    raise
                 except LLMBadRequestError as e:
                     # Provider rejected the request — most likely a safety
                     # refusal triggered by the just-saved user message.
@@ -2022,6 +2032,7 @@ class Conversation:
         # conflict. Code-enforced: it runs whether or not the model "means"
         # to check. Fail-open, same contract as the rule checker.
         _pre_guard_response = response
+        self._guard_ran_tools = False
         if (response.content or "").strip() and not getattr(self, "_pending_consent_hash", ""):
             try:
                 response = await self._memory_guard_and_maybe_rewrite(
@@ -2041,6 +2052,10 @@ class Conversation:
         # "⚠️ [Rule checker …]" tag on the old draft is gone. Judge the
         # rewrite again so what is sent is always the checked text, with
         # its own tag when the check did not pass.
+        # tools_ran also counts tools the guard rewrite itself ran, so a
+        # rewrite that summarises its own tool call is not judged a phantom
+        # action. A regeneration by THIS re-check is not guarded again, on
+        # purpose: guard -> checker -> guard could loop.
         if (
             response is not _pre_guard_response
             and _rule_check_enabled
@@ -2055,7 +2070,7 @@ class Conversation:
                     access_level=access_level,
                     chat_kwargs=chat_kwargs,
                     user_message=user_message,
-                    tools_ran=tools_ran_this_turn,
+                    tools_ran=tools_ran_this_turn or self._guard_ran_tools,
                 )
             except Exception:
                 logger.exception("Rule checker crashed on guard rewrite — tagging response")
@@ -2680,6 +2695,7 @@ class Conversation:
                 **chat_kwargs,
             )
             if new_resp.tool_calls:
+                self._guard_ran_tools = True
                 new_resp = await self._handle_tool_calls(
                     new_resp, retry_ctx, access_level, tool_schemas,
                 )
@@ -3763,6 +3779,7 @@ class ConversationManager:
         # Per-group/per-user model override
         # ═══════════════════════════════════════════════════════════════
         conv_provider = self.provider  # default
+        conv_model_key: Optional[str] = None
         if inbound and inbound.is_group and inbound.chat_id:
             from .db.models import get_group
             group = await get_group(platform, str(inbound.chat_id))
@@ -3772,6 +3789,7 @@ class ConversationManager:
                     override = await self._agent.create_provider_for_model(group_model)
                     if override:
                         conv_provider = override
+                        conv_model_key = group_model
                         logger.info(f"Group {inbound.chat_id} using model override: {group_model}")
 
         # Per-user model override (DM only — group model takes precedence)
@@ -3781,6 +3799,7 @@ class ConversationManager:
                 override = await self._agent.create_provider_for_model(user_model)
                 if override:
                     conv_provider = override
+                    conv_model_key = user_model
                     logger.info(f"User {user.get('platform_id')} using model override: {user_model}")
 
         conv = Conversation(
@@ -3796,6 +3815,7 @@ class ConversationManager:
         )
 
         conv._mgr = self  # Back-reference for status callbacks
+        conv._model_key = conv_model_key
 
         # Load history EAGERLY — before any chat() call can save a message
         # and make _message_cache non-empty (which would skip load_history
@@ -3922,6 +3942,7 @@ class ConversationManager:
             override_provider = await self._agent.create_provider_for_model(wa_override)
             if override_provider:
                 conv.provider = override_provider
+                conv._model_key = wa_override
                 # Load matching model_params + reasoning_visible
                 from .db.models import get_config as _gc_wa
                 _wa_models = await _gc_wa("provider.models", [])
@@ -3941,6 +3962,7 @@ class ConversationManager:
             override_provider = await self._agent.create_provider_for_model(node_override)
             if override_provider:
                 conv.provider = override_provider
+                conv._model_key = node_override
                 from .db.models import get_config as _gc_node
                 _node_models = await _gc_node("provider.models", [])
                 _node_entry = next((m for m in _node_models if m.get("key") == node_override), {})
@@ -3956,7 +3978,19 @@ class ConversationManager:
         # Apply streaming callbacks (CLI only — None for Telegram/WA)
         conv.stream_callbacks = self._stream_callbacks
 
-        response = await conv.chat(message, message_metadata=message_metadata)
+        # Embedding gate (syne.embed_health): while the embedding service is
+        # down no turn is processed, for every sender on every channel. DMs
+        # get a short notice; a group gets it once per incident, then None
+        # (= silent drop in every channel).
+        from . import embed_health as _eh
+        try:
+            await _eh.gate(getattr(conv.memory, "provider", None) or conv.provider)
+            response = await conv.chat(message, message_metadata=message_metadata)
+        except EmbeddingUnavailableError:
+            _is_group = bool(inbound and getattr(inbound, "is_group", False))
+            if _eh.should_reply(_is_group, platform, chat_id):
+                return _eh.user_notice()
+            return None
 
         if response is None:
             return None  # Silent drop (lock timeout)
