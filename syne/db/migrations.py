@@ -1370,6 +1370,28 @@ async def _m48_memory_guard_max_retries(conn) -> None:
     )
 
 
+
+async def _m49_remove_memory_decay(conn) -> None:
+    """Remove memory decay (Riyo, 17 Nov 2026). Idempotent.
+
+    Since auto-capture was removed (migration 41) every memory row is
+    permanent, so decay had nothing left to act on. Dropped:
+      * memory.permanent and memory.recall_count. memory_auto_archive keeps
+        its own copies of both, untouched.
+      * config memory.decay_interval / initial_recall_count /
+        promotion_threshold / max_records / conversation_counter.
+    """
+    await conn.execute(
+        "ALTER TABLE memory DROP COLUMN IF EXISTS permanent, "
+        "DROP COLUMN IF EXISTS recall_count"
+    )
+    await conn.execute(
+        "DELETE FROM config WHERE key IN ('memory.decay_interval', "
+        "'memory.initial_recall_count', 'memory.promotion_threshold', "
+        "'memory.max_records', 'memory.conversation_counter')"
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1419,6 +1441,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (46, _m46_memory_guard_config, "transactional"),
     (47, _m47_rule_checker_model, "transactional"),
     (48, _m48_memory_guard_max_retries, "transactional"),
+    (49, _m49_remove_memory_decay, "transactional"),
 ]
 
 

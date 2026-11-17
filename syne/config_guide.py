@@ -4,8 +4,8 @@ Provides a comprehensive reference of all user-facing configuration keys,
 organized by use case. Injected into the system prompt so the bot can
 advise the owner on config changes with full awareness of impacts.
 
-NOTE: Credential keys (credential.*) and internal counters (memory.conversation_counter,
-update_check.*) are excluded — they are not user-facing operational configs.
+NOTE: Credential keys (credential.*) and internal counters (update_check.*)
+are excluded — they are not user-facing operational configs.
 """
 
 CONFIG_GUIDE = """\
@@ -32,23 +32,6 @@ The evaluator is one of the rule checker's options (see Security & Consent → R
 - `"ollama"` driver — local model, free, fast, no API cost. Recommended.
 - `"provider"` driver — uses the main chat model. More accurate but costs tokens.
 - **Warning**: Evaluator models must be pre-pulled in Ollama. Use `/evaluator` to manage.
-
-### Memory Decay
-| Key | Default | Type |
-|-----|---------|------|
-| `memory.decay_interval` | `50` | integer |
-| `memory.initial_recall_count` | `5` | integer |
-| `memory.promotion_threshold` | `10` | integer |
-
-Controls how fast non-permanent memories fade and when they get promoted.
-- `decay_interval` — every N conversations, decay triggers. Lower = memories fade faster.
-- `initial_recall_count` — starting durability of new memories. Higher = lasts more cycles.
-- `promotion_threshold` — when recall_count exceeds this, memory is promoted to permanent + KG extraction.
-- **Increase interval when**: Memories disappear too fast, bot forgets useful context.
-- **Decrease interval when**: Too many stale memories accumulate, bot recalls irrelevant things.
-- **Note**: Decay v2 does not delete on `recall_count` reaching zero. Every decay cycle
-  lowers the count of untouched rows, but life or death is decided by `memory.max_records`:
-  when non-permanent rows exceed that cap, the lowest-recall / oldest ones are evicted.
 
 ### Recall & Importance
 | Key | Default | Type |
@@ -494,8 +477,6 @@ For quick reference when deciding permission level:
 
 | Change | Risk | Reversible |
 |--------|------|------------|
-| Increase decay_interval | Low — memories last longer | Yes |
-| Decrease decay_interval | Medium — memories deleted faster | Partially — deleted memories gone |
 | Change chat model | Medium — different response quality | Yes — switch back anytime |
 | Change embedding model | High — requires full re-embedding | Yes but slow |
 | Change timezone | Low — affects new cron calculations | Yes — switch back anytime |

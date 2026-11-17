@@ -2,7 +2,7 @@
 
 **The assistant that remembers what matters, and never leaves your server.**
 
-Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; casual mentions decay if unused. Memory embedding and evaluation run locally on Ollama; the chat model uses your own API key or a ChatGPT sign-in.
+Self-hosted personal AI on Telegram. Runs on your own server, stores everything in your own PostgreSQL. Explicit facts you ask it to remember are kept forever; everything else stays searchable in chat history. Memory embedding and evaluation run locally on Ollama; the chat model uses your own API key or a ChatGPT sign-in.
 
 *"I remember, therefore I am"* — named after [Mnemosyne](https://en.wikipedia.org/wiki/Mnemosyne), Greek goddess of memory.
 
@@ -12,7 +12,7 @@ Self-hosted personal AI on Telegram. Runs on your own server, stores everything 
 
 A Telegram bot you self-host — also reachable on WhatsApp and Discord, sharing the same memory. You chat with it. It remembers what you tell it to remember, across days, weeks, restarts. Built around:
 
-- **Persistent long-term memory** — semantic search via pgvector + a small knowledge graph for entity-relation queries. Subject to decay (non-permanent memories fade with disuse) and conflict resolution (newer, higher-source-priority entries win).
+- **Persistent long-term memory** — semantic search via pgvector + a small knowledge graph for entity-relation queries. Subject to conflict resolution (newer, higher-source-priority entries win).
 - **User-confirmed memory filtering** — a 3-layer filter (quick rules → small local LLM evaluator → similarity dedup) decides what's worth storing **at write time**. This reduces what enters memory; it is not a guard against the chat model hallucinating at read time.
 - **Multi-tier permissions** — owner / family / public with Linux-style 3-digit octal per tool. Public users by default get nothing from memory unless you explicitly open specific categories (Rule 765).
 - **Runtime configuration in PostgreSQL** — no `SOUL.md` or `CONFIG.yaml`. Identity, behavior, rules, and config all live in tables, changeable through conversation.
@@ -119,17 +119,17 @@ Fresh install comes with sensible defaults. Override anything through conversati
 
 Syne's memory has one guarantee and one design consequence, stated up front so nothing surprises you later:
 
-- **Explicit facts never fade.** Anything you tell Syne to *remember* becomes a permanent memory and stays forever — no cap, no decay, no eviction.
+- **Explicit facts never fade.** Anything you tell Syne to *remember* becomes a memory and stays forever — no cap, no eviction.
 - **Everything else stays in chat history.** What you mention in passing is not copied into memory; Syne finds it again with `history_search` / `history_expand`, reading your own words instead of a paraphrase.
 
-Three components work together: **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, the **decay engine** manages non-permanent memories, and the **evaluator model** powers the rule checker.
+Two components work together: **embedding + knowledge graph** make memories retrievable through both semantic search and entity-relation traversal, and the **evaluator model** powers the rule checker.
 
 ### Memory Flow
 
 ```
 Chat ──→ "Ingat/Remember"?
           │
-          ├─ Yes → memory_store tool → permanent=true → Embed + KG
+          ├─ Yes → memory_store tool → Embed + KG
           │
           └─ No  → nothing copied to memory; the message stays in chat history
                    (searchable via history_search / history_expand)
@@ -151,7 +151,7 @@ User message (2+ words)
 
 Both results are injected into the conversation context — the LLM sees everything and decides the best answer. Single-word messages ("ok", "ya", "thanks") skip recall entirely.
 
-### The Three Engines
+### The Two Engines
 
 #### 1. Evaluator model — rule checker
 
@@ -163,7 +163,7 @@ Two retrieval systems work together to find relevant memories:
 
 **Semantic Search (Embedding)** — Every memory is converted to a high-dimensional vector. When the user asks a question, pgvector finds the most similar memories using cosine distance with an HNSW index. Millisecond lookup by meaning as the store grows.
 
-**Knowledge Graph** — Permanent memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts. KG extraction only runs for **permanent** memories — transient memories are too short-lived to justify the cost.
+**Knowledge Graph** — Memories are automatically parsed into entities (people, places, organizations) and their relationships. When a question mentions a known entity, Syne traverses 1-hop relations to find connected facts.
 
 | Source | How it works | Best for |
 |--------|-------------|----------|
@@ -192,30 +192,12 @@ Syne:  Stored.
 
 The knowledge graph is not filled by AI extraction. Links are built from written references (verse numbers, hadith numbers, chunk order) without a model; every source of a link is kept.
 
-#### 3. Decay Engine — "What should I forget?"
-
-Non-permanent memories fade naturally, mimicking human forgetting. The current model (decay v2) is event-driven and cap-based, not fixed-schedule:
-
-- **New non-permanent memories** start with `recall_count = 1` (config: `memory.initial_recall_count`)
-- **Every store event** decrements `recall_count` on every *other* non-permanent memory by 1 (permanent memories are immune)
-- **Every recall event** boosts the recalled memories by +1 and decrements every *other* non-permanent memory by 1 (permanent memories are immune)
-- **Cap-based eviction** — every `memory.decay_interval` conversations (default 50), if the number of non-permanent memories exceeds `memory.max_records` (default 1000), the lowest-recall / oldest rows are pruned in an LRU/LFU hybrid pass
-- **Auto-promotion** — a non-permanent memory whose `recall_count` crosses `memory.promotion_threshold` (default 1000, effectively dormant until tuned) is promoted to permanent
-- **Permanent memories** (explicit "remember this") are never touched by any of the above
-
-**No zero-deletion** — a memory whose `recall_count` drops to 0 or negative is *not* deleted on that basis. It just becomes a bottom-ranked candidate for the next cap-based eviction pass. Life/death is decided by the cap, not by hitting 0.
-
-**Zero-sum dynamic (worth understanding)** — because every store and every recall decrements every *other* non-permanent memory by 1, rank is relative, not absolute. A heavy day of stores and recalls accelerates the decay of unused memories globally. That's intentional: memories that keep getting used rise faster than the ambient decrement, while unused ones sink. Combined with cap-based eviction, only what actually gets used survives at cap. If you're seeing older memories disappear faster than you expect on busy days, this is why — not a bug, but a design consequence worth knowing.
-
-Permanent memories are outside all of this. If a fact matters, tell Syne to *remember* it explicitly — that flips `permanent = true` and the memory is never touched by decay again.
-
 ### Memory Types
 
-| Type | Decay | KG | Created by | Example |
-|------|-------|-----|------------|---------|
-| **Permanent** | Never | Yes | Explicit "remember this" command | "Remember: I'm allergic to shellfish" |
-| **Transient** | Fades over time | No | Auto-capture evaluation | Casual mentions, observations |
-| **Conversation history** | Never — full log retained | No | Every message automatically | Full chat logs in `messages` table, reachable via `history_search` |
+| Type | Kept | KG | Created by | Example |
+|------|------|-----|------------|---------|
+| **Memory** | Forever | Yes | Explicit "remember this" command | "Remember: I'm allergic to shellfish" |
+| **Conversation history** | Forever — full log retained | No | Every message automatically | Full chat logs in `messages` table, reachable via `history_search` |
 
 ### Memory File Attachments
 
@@ -228,7 +210,7 @@ A memory can have a **binary file attached** — image, PDF, document, anything 
 **Behavior:**
 - **Storage is explicit** — same as `memory_store`. Syne won't auto-attach files. User has to ask: *"simpan beserta filenya"* / *"save with the file"*.
 - **Retrieval is explicit** — `memory_search` results show a 📎 marker when attachment exists, but the file is NOT auto-sent. LLM tells the user "this memory has an attachment, want me to show it?". User confirms → Syne fetches the blob and sends.
-- **CASCADE on eviction** — when a transient memory is evicted by the cap-based sweep (see [Decay Engine](#3-decay-engine--what-should-i-forget)), its attached blob is deleted at the same time via `ON DELETE CASCADE`. Note: decay v2 does NOT delete on `recall_count = 0` — life/death is decided by the cap, not by hitting zero.
+- **CASCADE on delete** — when a memory is deleted, its attached blob is deleted at the same time via `ON DELETE CASCADE`.
 
 **Tools:**
 
@@ -740,10 +722,6 @@ All configuration lives in the `config` table. Change via conversation or `updat
 | Key | Default | Description |
 |-----|---------|-------------|
 | `memory.recall_limit` | `5` | Max memories per query |
-| `memory.max_records` | `1000` | Decay v2 cap: max non-permanent memories. Above this, LRU/LFU eviction runs during the next `decay_interval` sweep. Permanent memories are never counted or evicted. |
-| `memory.decay_interval` | `50` | Every N conversations, run the eviction sweep against `memory.max_records`. Decay itself is event-driven (per store + per recall) — this knob paces the CAP CHECK, not the decrement. |
-| `memory.initial_recall_count` | `1` | Starting `recall_count` for new non-permanent memories. |
-| `memory.promotion_threshold` | `1000` | Auto-promote a non-permanent memory to permanent when its `recall_count` crosses this. Default high = effectively dormant until tuned against real recall data. |
 | `memory.evaluator_driver` | `"ollama"` | Evaluator: "ollama" (local) or "provider" (main LLM) |
 | `memory.evaluator_model` | `"qwen3:0.6b"` | Ollama model for evaluation |
 
@@ -1034,7 +1012,7 @@ syne/
 │   │   ├── ollama.py        # Local Ollama models
 │   │   └── hybrid.py        # Multi-provider with failover
 │   ├── memory/
-│   │   ├── engine.py        # Store, recall, decay, dedup, conflict resolution
+│   │   ├── engine.py        # Store, recall, dedup, conflict resolution
 │   │   ├── evaluator.py     # Auto-evaluate (3-layer filter)
 │   │   └── graph.py         # Knowledge graph extraction, storage, recall
 │   ├── tools/               # 28 core tools

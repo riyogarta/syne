@@ -82,7 +82,7 @@ syne/
 │   └── custom/          — User-created abilities (ONLY writable directory)
 │
 ├── memory/              — Semantic memory engine
-│   ├── engine.py        — Store, recall, decay, dedup, conflict detection
+│   ├── engine.py        — Store, recall, dedup, conflict detection
 │   └── evaluator.py     — Evaluator model helper (check_model_available, used by rule checker)
 │
 ├── db/                  — Database layer
@@ -120,8 +120,6 @@ syne/
 9. If tool calls → execute each → append results → loop back to step 8
        ↓
 10. Final text response → format → send back via channel
-       ↓
-11. Memory decay check (every N conversations)
 ```
 
 ## Database Tables
@@ -131,7 +129,7 @@ syne/
 | `users` | User accounts (platform_id, access_level, preferences) |
 | `sessions` | Conversation sessions (one per user/group chat) |
 | `messages` | Full message history (role, content, metadata, tokens) |
-| `memory` | Semantic memories (content, embedding, category, recall_count) |
+| `memory` | Semantic memories (content, embedding, category, access_count) |
 | `config` | Key-value configuration store |
 | `identity` | Bot identity (name, personality, backstory) |
 | `soul` | Behavioral directives by category |

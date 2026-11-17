@@ -289,7 +289,7 @@ async def test_conversation_max_retries_zero_checks_only(monkeypatch):
 async def test_migration_48_seeds_max_retries():
     from syne.db import migrations as M
     assert (48, M._m48_memory_guard_max_retries, "transactional") in M.MIGRATIONS
-    assert M.CURRENT_SCHEMA_VERSION == 48
+    assert M.CURRENT_SCHEMA_VERSION >= 48
     conn = MagicMock()
     conn.execute = AsyncMock()
     await M._m48_memory_guard_max_retries(conn)

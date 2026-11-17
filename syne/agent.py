@@ -2162,7 +2162,6 @@ class SyneAgent:
             content=content,
             category=category,
             source="user_confirmed",
-            permanent=True,
         )
         if mem_id:
             if action == "updated":
@@ -2206,7 +2205,7 @@ class SyneAgent:
         # Load the target memory.
         async with get_connection() as conn:
             row = await conn.fetchrow(
-                "SELECT id, content, category, importance, source, permanent "
+                "SELECT id, content, category, importance, source "
                 "FROM memory WHERE id = $1",
                 memory_id,
             )
@@ -2315,12 +2314,11 @@ class SyneAgent:
                 f"Tip: store only the description without attaching the file (use memory_store instead)."
             )
 
-        # Store memory (text + embedding) as permanent.
+        # Store memory (text + embedding).
         mem_id = await self.memory.store_if_new(
             content=content,
             category=category,
             source="user_confirmed",
-            permanent=True,
         )
         if not mem_id:
             return "Similar memory already exists. Use memory_search + memory_delete first to replace."

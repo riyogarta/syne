@@ -82,13 +82,11 @@ CREATE TABLE IF NOT EXISTS memory (
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     accessed_at TIMESTAMPTZ,
     expires_at TIMESTAMPTZ,               -- NULL = never expires
-    permanent BOOLEAN DEFAULT false,      -- true = never decays (explicit "remember this")
-    recall_count INTEGER DEFAULT 1,       -- conversation-based decay counter
     kg_processed BOOLEAN DEFAULT false    -- true = KG extraction has been attempted
 );
 
 -- Archive of removed memory auto-capture rows (migration 41, v1.22.59).
--- Same columns as memory + archived_at. Not recalled, not decayed; kept
+-- Columns memory had at v1.22.59 + archived_at. Not recalled; kept
 -- for analysing why auto-capture was removed. Empty on fresh installs.
 CREATE TABLE IF NOT EXISTS memory_auto_archive (
     id INT PRIMARY KEY,
@@ -139,7 +137,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_category ON memory (category);
 CREATE INDEX IF NOT EXISTS idx_memory_user ON memory (user_id);
 CREATE INDEX IF NOT EXISTS idx_memory_importance ON memory (importance DESC);
 
--- Aggressive autovacuum for high-churn memory table: decay updates rewrite
+-- Aggressive autovacuum for the memory table: access-stat updates rewrite
 -- rows + embeddings frequently. The global scale_factor=0.2 default is too lax
 -- here (dead tuples + stale planner stats accumulate). Keeps stats fresh and
 -- reclaims dead tuples on a much tighter threshold.
@@ -480,10 +478,6 @@ INSERT INTO config (key, value, description) VALUES
     ('provider.embedding_dimensions', '768', 'Embedding vector dimensions'),
     ('memory.max_importance', '1.0', 'Maximum importance score'),
     ('memory.recall_limit', '5', 'Max memories to recall per query'),
-    ('memory.decay_interval', '50', 'Decay every N conversations'),
-    ('memory.initial_recall_count', '1', 'Starting recall_count for new memories (decay v2)'),
-    ('memory.promotion_threshold', '1000', 'Promote non-permanent to permanent when recall_count reaches this (decay v2; high = effectively dormant)'),
-    ('memory.max_records', '1000', 'Decay v2 cap: max non-permanent memories; LRU/LFU eviction above this (raised to 1000 for evaluation window — no eviction until tuned)'),
     ('memory.similarity_threshold', '0.85', 'Cosine similarity >= this = duplicate, skip storage'),
     ('memory.conflict_threshold', '0.70', 'Cosine similarity >= this = same topic, resolve conflict'),
     ('memory.public_categories', '[]', 'Memory categories accessible by public users (Rule 765). JSON array, e.g. ["fact","lesson"]'),
@@ -555,24 +549,6 @@ INSERT INTO config (key, value, description) VALUES
     -- System timezone
     ('system.timezone', '"UTC"', 'System timezone (IANA format, e.g. Asia/Jakarta, America/New_York)')
 ON CONFLICT (key) DO NOTHING;
-
--- Add memory decay columns (permanent flag + recall_count for conversation-based decay)
-DO $$
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'memory' AND column_name = 'permanent'
-    ) THEN
-        ALTER TABLE memory ADD COLUMN permanent BOOLEAN DEFAULT false;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'memory' AND column_name = 'recall_count'
-    ) THEN
-        ALTER TABLE memory ADD COLUMN recall_count INTEGER DEFAULT 1;
-    END IF;
-END $$;
 
 -- ============================================================
 -- CONFIG MIGRATIONS: Update defaults for existing installs
@@ -972,7 +948,7 @@ CREATE INDEX IF NOT EXISTS idx_kg_recall_log_created ON kg_recall_log (created_a
 -- MEMORY BLOBS: Binary attachments stored in DB
 -- ============================================================
 -- One blob per memory row. Lazy-loaded — never SELECTed during recall.
--- CASCADE on memory delete (including transient decay → 0).
+-- CASCADE on memory delete.
 CREATE TABLE IF NOT EXISTS memory_blobs (
     memory_id INT PRIMARY KEY REFERENCES memory(id) ON DELETE CASCADE,
     mime_type VARCHAR(100),

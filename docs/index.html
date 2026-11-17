@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Syne — I remember, therefore I am</title>
-<meta name="description" content="Syne is a self-hosted personal AI assistant on Telegram that remembers what matters: explicit facts you save are kept forever, casual mentions decay if unused. Runs on your own server, hardened against prompt injection.">
+<meta name="description" content="Syne is a self-hosted personal AI assistant on Telegram that remembers what matters: explicit facts you save are kept forever, everything else stays searchable in chat history. Runs on your own server, hardened against prompt injection.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500;1,9..144,600&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -265,7 +265,7 @@
   <div class="wrap">
     <div class="sec-head"><span class="eyebrow">Why people keep it running</span><h2>Three reasons, not twenty features.</h2></div>
     <div class="proofs">
-      <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Anything you explicitly ask it to remember is kept forever. Stop repeating yourself to your tools.</p><div class="detail">explicit facts never fade · casual mentions decay if unused</div></div>
+      <div class="proof"><div class="n">01</div><h3>It remembers.</h3><p>Semantic recall across sessions, people, and years. Anything you explicitly ask it to remember is kept forever. Stop repeating yourself to your tools.</p><div class="detail">explicit facts never fade · chat history stays searchable</div></div>
       <div class="proof"><div class="n">02</div><h3>It's yours.</h3><p>Runs entirely on your own server, stored in your own PostgreSQL. Your memories never touch a third party unless you choose them to.</p><div class="detail">Telegram · WhatsApp · Discord · terminal · same agent, same memory</div></div>
     </div>
   </div>
@@ -302,10 +302,10 @@
         <div class="card"><span class="tag">relational</span><h3>Knowledge graph</h3><p>Facts are parsed into entities and relationships you can traverse, so "who is Agha's mother?" resolves a structured answer, not a fuzzy guess. Two systems, one memory.</p></div>
       </div>
 
-      <div class="flow" aria-label="Write-time memory filter and decay">
+      <div class="flow" aria-label="Write-time memory filter">
         <div class="step"><span class="num">01</span><span>A <b>3-layer filter</b> decides what's worth storing <b>at write time</b>: quick rules, a small local evaluator, then similarity dedup. Only user-confirmed facts, never the model's own guesses.</span></div>
         <div class="step"><span class="num">02</span><span>Similarity picks <b>insert · update · skip</b>, so memory never fills with near-duplicates.</span></div>
-        <div class="step"><span class="num">03</span><span>Non-permanent memories <b>decay</b> with disuse and gain durability each time they're recalled. <span class="note">Explicit "remember this" facts never decay.</span></span></div>
+        <div class="step"><span class="num">03</span><span>Saved memories are <b>kept forever</b>: nothing fades or gets evicted. <span class="note">Everything else stays in chat history, searchable.</span></span></div>
       </div>
       <p style="color:var(--muted);font-size:14.5px;margin-top:18px;max-width:62ch;border-left:2px solid var(--gold-line);padding-left:16px;font-family:var(--mono);font-size:12.5px;line-height:1.8">This filter guards <b style="color:var(--text);font-weight:500">what enters your memory</b>, not what Syne says while chatting. It keeps stray guesses out of long-term storage, so your memory stays trustworthy over years. Answers in conversation are still the model's, review them like you would any assistant's.</p>
 

@@ -187,8 +187,8 @@ async def find_candidates(
 ) -> list:
     """Closest guarded memories to the draft vector, read-only.
 
-    Deliberately does NOT touch access_count / recall_count: the guard is a
-    check, not a recall, and must not shift memory decay.
+    Deliberately does NOT touch access_count: the guard is a check, not a
+    recall, and must not count as one.
     """
     from .db.connection import get_connection
     from .security import check_rule_760

@@ -68,21 +68,14 @@ class MemoryEngine:
         source: str = "user_confirmed",
         user_id: Optional[int] = None,
         importance: float = 0.5,
-        permanent: bool = False,
     ) -> int:
         """Store a memory with its embedding vector.
-
-        Args:
-            permanent: If True, memory never decays (explicit "remember this").
-                      If False (default), memory has recall_count that decays over conversations.
 
         Raises:
             RuntimeError: if embedding generation returns an empty vector. We refuse
                 to insert zombie memory rows (memories without embedding can't be
                 recalled and crash similarity comparisons).
         """
-        from ..db.models import get_config
-
         # Generate embedding
         embedding_resp = await self.provider.embed(content)
         vector = embedding_resp.vector
@@ -92,27 +85,12 @@ class MemoryEngine:
                 "Check Ollama/provider status."
             )
 
-        initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
-
         async with get_connection() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                INSERT INTO memory (content, category, embedding, source, user_id, importance)
+                VALUES ($1, $2, $3::vector, $4, $5, $6)
                 RETURNING id
-            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
-
-            # Decay v2: store-event tick — a brand-new non-permanent memory
-            # nudges all OTHER non-permanent memories down by 1 (permanent
-            # immune). New row keeps its initial recall_count. Life/death is
-            # decided by the cap in run_decay(), not by hitting 0.
-            if not permanent:
-                await conn.execute("""
-                    UPDATE memory
-                    SET recall_count = recall_count - 1
-                    WHERE COALESCE(permanent, false) = false
-                      AND id <> $1
-                """, row["id"])
-
+            """, content, category, str(vector), source, user_id, importance)
             return row["id"]
 
     async def recall(
@@ -237,8 +215,6 @@ class MemoryEngine:
                 SELECT
                     m.id, m.content, m.category, m.source, m.importance,
                     m.access_count, m.created_at, m.updated_at,
-                    COALESCE(m.permanent, false) as permanent,
-                    COALESCE(m.recall_count, 1) as recall_count,
                     1 - (m.embedding <=> $1::vector) as similarity,
                     (b.memory_id IS NOT NULL) AS has_attachment,
                     b.filename AS attachment_filename,
@@ -273,36 +249,13 @@ class MemoryEngine:
                     results.append(dict(row))
                     ids_to_update.append(row["id"])
 
-            # Sort by combined score: similarity (primary) + recall_count boost
-            # Higher recall_count = more frequently relevant = slight priority boost
-            if results:
-                for r in results:
-                    rc = r.get("recall_count", 1)
-                    # Boost: log2(recall_count+1) * 0.02 — subtle but meaningful
-                    # rc=1 → +0.02, rc=5 → +0.05, rc=20 → +0.09, rc=100 → +0.13
-                    import math
-                    r["_score"] = r["similarity"] + math.log2(max(rc, 1) + 1) * 0.02
-                results.sort(key=lambda r: r["_score"], reverse=True)
-
-            # Update access stats + recall_count (for non-permanent memories)
+            # Update access stats
             if ids_to_update:
                 await conn.execute("""
                     UPDATE memory
                     SET access_count = access_count + 1,
-                        accessed_at = NOW(),
-                        recall_count = CASE WHEN permanent = true THEN recall_count ELSE recall_count + 1 END
+                        accessed_at = NOW()
                     WHERE id = ANY($1)
-                """, ids_to_update)
-
-                # Decay v2: event-driven tick — every recall nudges all
-                # OTHER non-permanent memories down by 1 (permanent immune).
-                # recall_count may go 0/negative; that's just ordering score.
-                # Life/death is decided by the cap in run_decay(), not by 0.
-                await conn.execute("""
-                    UPDATE memory
-                    SET recall_count = recall_count - 1
-                    WHERE COALESCE(permanent, false) = false
-                      AND NOT (id = ANY($1))
                 """, ids_to_update)
 
             # ═══════════════════════════════════════════════════════════
@@ -493,7 +446,6 @@ class MemoryEngine:
         importance: float = 0.5,
         similarity_threshold: float = None,
         conflict_threshold: float = None,
-        permanent: bool = False,
     ) -> Optional[int]:
         """Store a memory. APPEND-ONLY — never overwrites an existing row.
 
@@ -537,7 +489,6 @@ class MemoryEngine:
         async with get_connection() as conn:
             rows = await conn.fetch("""
                 SELECT id, content, category, source, importance,
-                       COALESCE(permanent, false) as permanent,
                        1 - (embedding <=> $1::vector) as similarity
                 FROM memory
                 WHERE 1 - (embedding <=> $1::vector) >= $2
@@ -568,7 +519,7 @@ class MemoryEngine:
                     f"'{existing.get('category')}'. Inserting as new."
                 )
                 return await self._store_with_vector(
-                    content, vector, category, source, user_id, importance, permanent
+                    content, vector, category, source, user_id, importance
                 )
 
             # Exact duplicate → skip. This check must come BEFORE the
@@ -600,7 +551,7 @@ class MemoryEngine:
                     f"intact, new content inserted as a separate row."
                 )
                 return await self._store_with_vector(
-                    content, vector, category, source, user_id, importance, permanent
+                    content, vector, category, source, user_id, importance
                 )
 
             # ═══════════════════════════════════════════════════════════
@@ -630,12 +581,12 @@ class MemoryEngine:
                 f"overwriting. Conflict, if any, is resolved at recall."
             )
             return await self._store_with_vector(
-                content, vector, category, source, user_id, importance, permanent
+                content, vector, category, source, user_id, importance
             )
 
         # No similar memory at all — insert new (reuse vector)
         return await self._store_with_vector(
-            content, vector, category, source, user_id, importance, permanent
+            content, vector, category, source, user_id, importance
         )
 
     async def store_if_new_verbose(
@@ -671,33 +622,16 @@ class MemoryEngine:
         source: str = "user_confirmed",
         user_id: Optional[int] = None,
         importance: float = 0.5,
-        permanent: bool = False,
     ) -> int:
         """Store a memory with a pre-computed embedding vector."""
-        from ..db.models import get_config
         if not vector:
             raise RuntimeError("Refusing to store memory with empty vector.")
-        initial_count = int(await get_config("memory.initial_recall_count", "5")) if not permanent else 0
-
         async with get_connection() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO memory (content, category, embedding, source, user_id, importance, permanent, recall_count)
-                VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                INSERT INTO memory (content, category, embedding, source, user_id, importance)
+                VALUES ($1, $2, $3::vector, $4, $5, $6)
                 RETURNING id
-            """, content, category, str(vector), source, user_id, importance, permanent, initial_count)
-
-            # Decay v2: store-event tick — a brand-new non-permanent memory
-            # nudges all OTHER non-permanent memories down by 1 (permanent
-            # immune). New row keeps its initial recall_count. Life/death is
-            # decided by the cap in run_decay(), not by hitting 0.
-            if not permanent:
-                await conn.execute("""
-                    UPDATE memory
-                    SET recall_count = recall_count - 1
-                    WHERE COALESCE(permanent, false) = false
-                      AND id <> $1
-                """, row["id"])
-
+            """, content, category, str(vector), source, user_id, importance)
             return row["id"]
 
     async def _update_memory(
@@ -895,90 +829,3 @@ class MemoryEngine:
             "kept_ids": [d["keep_id"] for d in duplicates_found],
             "details": duplicates_found,
         }
-
-    async def run_decay(self):
-        """Run memory decay based on conversation count.
-
-        Called periodically (e.g. after every conversation).
-        Increments global conversation counter. Every N conversations,
-        checks whether to promote high-recall rows to permanent and whether
-        the non-permanent count is over cap; if so, evicts the lowest-recall
-        / oldest rows until back at cap. Nothing is deleted on the basis of
-        recall_count alone — life/death is decided by the cap here.
-
-        ── Decay v2 design notes ──────────────────────────────────────────
-        Two per-event UPDATEs (in store() and recall()) also nudge every
-        OTHER non-permanent row's recall_count down by 1. That's what gives
-        the "busy day = faster global decay" property (see README's
-        Zero-sum dynamic note). Simple, no timestamps to maintain, ordering
-        stays correct across restarts.
-
-        Cost: each store or recall is an O(N) UPDATE across all
-        non-permanent rows. At the current cap of 1000 and realistic
-        traffic (~50-100 store+recall events / day for a single owner),
-        Postgres handles this comfortably — ~50-100K narrow UPDATEs per
-        day is well inside its comfort zone. If the cap is raised, or if
-        family/group traffic pushes events into the low thousands per day,
-        this is where the model starts to hurt.
-
-        Decay v3 (not implemented, worth noting for future work): store an
-        `updated_at` timestamp per row and compute effective decay lazily
-        on read — `effective_recall = recall_count - hours_since_touch * α`.
-        Zero per-event writes to other rows; the ORDER BY in eviction sorts
-        on `effective_recall` instead of `recall_count`. Same qualitative
-        behaviour (busy days still push unused rows down faster, because
-        events tick the clock forward), but the write path stays O(1). The
-        promotion + cap-eviction shape from v2 carries over — only the
-        per-event decrement is what changes.
-        ─────────────────────────────────────────────────────────────────
-        """
-        from ..db.models import get_config, set_config
-        
-        # Increment global conversation counter
-        current = int(await get_config("memory.conversation_counter", "0"))
-        current += 1
-        await set_config("memory.conversation_counter", str(current))
-        
-        # Check if it's time to decay
-        interval = int(await get_config("memory.decay_interval", "50"))
-        if current % interval != 0:
-            return  # Not time yet
-        
-        cap = int(await get_config("memory.max_records", "50"))
-        promo = int(await get_config("memory.promotion_threshold", "1000"))
-
-        async with get_connection() as conn:
-            # Decay v2 — Fase 2 (dormant): auto-promote a non-permanent
-            # memory to permanent once its recall_count crosses the (high)
-            # promotion threshold. Threshold defaults very high so this is
-            # effectively inert until tuned against real recall data.
-            await conn.execute("""
-                UPDATE memory
-                SET permanent = true, updated_at = NOW()
-                WHERE COALESCE(permanent, false) = false
-                  AND recall_count >= $1
-            """, promo)
-
-            # Decay v2 — cap-based eviction (LRU/LFU hybrid). Life/death is
-            # decided HERE, not by recall_count<=0. When non-permanent count
-            # exceeds the cap, evict the lowest-recall (LFU), oldest-id (LRU)
-            # rows until back at cap. Permanent memories are never touched.
-            n = await conn.fetchval("""
-                SELECT COUNT(*) FROM memory WHERE COALESCE(permanent, false) = false
-            """)
-            over = int(n) - cap
-            if over > 0:
-                deleted = await conn.fetch("""
-                    DELETE FROM memory
-                    WHERE id IN (
-                        SELECT id FROM memory
-                        WHERE COALESCE(permanent, false) = false
-                        ORDER BY recall_count ASC, id ASC
-                        LIMIT $1
-                    )
-                    RETURNING id, content
-                """, over)
-                if deleted:
-                    logger.info(f"Memory decay v2: evicted {len(deleted)} over-cap memories (cap={cap})")
-                    for row in deleted:
-                        logger.debug(f"  Evicted: [{row['id']}] {row['content'][:60]}...")
