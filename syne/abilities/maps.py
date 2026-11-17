@@ -47,6 +47,7 @@ _ROUTES_FIELDS = ",".join([
     "routes.legs.steps.navigationInstruction",
     "routes.legs.steps.localizedValues",
     "routes.legs.steps.transitDetails",
+    "routes.travelAdvisory.tollInfo",
 ])
 _DESTINATION_FIELDS = ",".join([
     "destinations.primary.displayName",
@@ -119,6 +120,32 @@ def _as_list(value) -> list:
 
 def _text(obj) -> str:
     return (obj or {}).get("text", "")
+
+
+# Indonesian toll roads require an e-toll card; without a toll pass the Routes
+# API returns no price. ID_E_TOLL covers all bank e-money cards (same tariff).
+_TOLL_PASSES = ["ID_E_TOLL"]
+_TOLL_MODES = {"DRIVE"}
+
+
+def _money_text(m: dict) -> str:
+    cur = m.get("currencyCode", "")
+    try:
+        amount = int(m.get("units", 0) or 0) + int(m.get("nanos", 0) or 0) / 1e9
+    except (TypeError, ValueError):
+        return ""
+    if cur == "IDR":
+        return "Rp " + f"{round(amount):,}".replace(",", ".")
+    return f"{amount:,.2f} {cur}".strip()
+
+
+def _toll_text(route: dict) -> str | None:
+    """None = route has no toll; '' never returned."""
+    advisory = route.get("travelAdvisory") or {}
+    if "tollInfo" not in advisory:
+        return None
+    prices = [t for t in (_money_text(m) for m in advisory["tollInfo"].get("estimatedPrice") or []) if t]
+    return " / ".join(prices) if prices else "ada tol, tarif tidak diketahui"
 
 
 _MIN_RE = re.compile(r"\bmin\b")
@@ -372,6 +399,10 @@ class MapsAbility(Ability):
         if travel_mode in _TRAFFIC_MODES and params.get("traffic", True):
             body["routingPreference"] = "TRAFFIC_AWARE"
 
+        if travel_mode in _TOLL_MODES and "tolls" not in avoid:
+            body["extraComputations"] = ["TOLLS"]
+            body.setdefault("routeModifiers", {})["tollPasses"] = list(_TOLL_PASSES)
+
         if travel_mode == "TRANSIT":
             prefs: dict = {}
             tp = params.get("transit_preference")
@@ -426,7 +457,7 @@ class MapsAbility(Ability):
                 header += f"\n🕐 Berangkat: {body['departureTime']}"
             if body.get("arrivalTime"):
                 header += f"\n🕐 Tiba: {body['arrivalTime']}"
-            if body.get("routeModifiers"):
+            if _as_list(params.get("avoid")):
                 header += "\n⛔ Hindari: " + ", ".join(_as_list(params.get("avoid")))
 
             blocks = [header]
@@ -457,6 +488,9 @@ class MapsAbility(Ability):
         lines.append(dur)
         if fare:
             lines.append(f"💵 Tarif: {fare}")
+        toll = _toll_text(route)
+        if toll:
+            lines.append(f"💳 Tol (e-toll): {toll}")
         order = route.get("optimizedIntermediateWaypointIndex")
         if order and waypoints and order != list(range(len(waypoints))):
             lines.append("🔀 Urutan singgah optimal: " + " → ".join(waypoints[i] for i in order if 0 <= i < len(waypoints)))
