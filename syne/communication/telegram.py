@@ -2282,6 +2282,50 @@ class TelegramChannel:
             logger.warning(f"Reverse geocode failed: {e}")
         return None
 
+    async def _reaction_sender_allowed(self, chat, user) -> bool:
+        """Gate a reaction exactly like a message from the same sender.
+
+        DM: the sender must already exist (a reaction never creates a user),
+        must not be blocked, and must not be pending approval while
+        telegram.dm_policy is not "open". Group: same registration, enabled
+        and allow_from checks as _process_group_message.
+        """
+        if user is None:
+            return False
+        if chat.type == "private":
+            db_user = await get_user("telegram", str(user.id))
+            if not db_user:
+                logger.debug(f"Ignoring reaction from unknown user {user.id}")
+                return False
+            level = db_user.get("access_level")
+            if level == "blocked":
+                logger.debug(f"Ignoring reaction from blocked user {user.id}")
+                return False
+            prefs = db_user.get("preferences") or {}
+            if prefs.get("pending_approval") and level == "public":
+                dm_policy = await get_config("telegram.dm_policy", "approval")
+                if str(dm_policy) != "open":
+                    logger.debug(f"Ignoring reaction from pending user {user.id}")
+                    return False
+            return True
+
+        group_id = str(chat.id)
+        group = await get_group("telegram", group_id)
+        group_policy = await get_config("telegram.group_policy", "allowlist")
+        if group_policy == "allowlist" and not group:
+            logger.debug(f"Ignoring reaction from unregistered group {group_id}")
+            return False
+        if group and not group.get("enabled", True):
+            logger.debug(f"Ignoring reaction from disabled group {group_id}")
+            return False
+        if group and group.get("allow_from") == "registered":
+            if not await get_user("telegram", str(user.id)):
+                logger.debug(
+                    f"Ignoring reaction from unregistered user {user.id} in group {group_id}"
+                )
+                return False
+        return True
+
     async def _handle_reaction_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle reaction updates on messages."""
         reaction = update.message_reaction
@@ -2310,6 +2354,12 @@ class TelegramChannel:
         removed_emojis = list(old_emoji_set - new_emoji_set)
 
         if not added_emojis and not removed_emojis:
+            return
+
+        # Reactions must pass the same gates as a normal message, otherwise a
+        # blocked user, a user still pending approval, or a member of an
+        # unregistered/disabled group reaches the agent just by reacting.
+        if not await self._reaction_sender_allowed(chat, user):
             return
 
         # Build reaction event message
@@ -7432,6 +7482,13 @@ Or just send me a message!"""
         elif action == "delete_yes" and len(parts) >= 3:
             jid = ":".join(parts[2:])
             by_jid = await self._wa_load_allowlist()
+            if (by_jid.get(jid) or {}).get("blocked"):
+                # An unknown WhatsApp sender is auto-registered as a fresh,
+                # unblocked member, so dropping a blocked entry would silently
+                # unblock it. Keep the block.
+                await query.answer("⛔ Blocked — unblock first to delete", show_alert=True)
+                await self._wamembers_menu_main(query=query)
+                return
             removed = by_jid.pop(jid, None)
             await self._wa_save_allowlist(by_jid)
             name = (removed.get('name') if removed else jid) or jid
@@ -8215,6 +8272,12 @@ Or just send me a message!"""
                 await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
                 await self._discordmembers_menu_detail(query, eid)
                 return
+            if entry.get("access_level") == "blocked":
+                # Delete resets access to public + pending approval, which
+                # would silently unblock a blocked user. Keep the block.
+                await query.answer("⛔ User is blocked — unblock first to delete", show_alert=True)
+                await self._discordmembers_menu_detail(query, eid)
+                return
             revoked = await self._revoke_member("discord", eid)
             if not revoked:
                 await query.answer("No database row to change", show_alert=True)
@@ -8672,6 +8735,11 @@ Or just send me a message!"""
             target = await get_user("telegram", platform_id)
             if target and target.get("access_level") == "owner":
                 await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
+                return
+            if target and target.get("access_level") == "blocked":
+                # Delete resets access to public + pending approval, which
+                # would silently unblock a blocked user. Keep the block.
+                await query.answer("⛔ User is blocked — unblock first to delete", show_alert=True)
                 return
 
             # Same as /wamembers Delete: access is revoked (they must be

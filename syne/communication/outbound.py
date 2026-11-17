@@ -200,6 +200,24 @@ def extract_all_media(text: str) -> tuple[str, list[str]]:
     return remaining, paths
 
 
+def strip_media_lines(text: str) -> str:
+    """Remove EVERY whole-line "MEDIA: ..." trailer, whatever the path.
+
+    Model-written text must never carry a delivery directive: only files
+    collected from trusted tools (send_file, memory_get_file, ability
+    `media`) are attached, and they are appended AFTER this runs. Same
+    line pattern the channels use to pick attachments up, so anything the
+    channel would treat as an attachment is removed here; a "MEDIA:" in the
+    middle of a sentence is left alone.
+    """
+    if not text:
+        return text
+    cleaned = _MEDIA_LINE_RE.sub('', text)
+    if cleaned == text:
+        return text
+    return re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+
 # ============================================================
 # MESSAGE SPLITTING
 # ============================================================

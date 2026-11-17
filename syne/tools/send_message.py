@@ -218,6 +218,14 @@ async def send_message_handler(
             "Use manage_schedule to create a scheduled task instead."
         )
 
+    # The message text is model-written: any MEDIA: line in it is untrusted
+    # (a prompt injection could name any file on the server). Strip them all;
+    # files go out only through `attachments`, resolved and checked below.
+    from ..communication.outbound import strip_media_lines
+    message = strip_media_lines(message)
+    if not message.strip() and not items:
+        return "Error: message cannot be empty"
+
     # Attachments become MEDIA: trailers on the message itself. Resolved only
     # after the group guard, so a refused send never writes files.
     media_paths: list[str] = []

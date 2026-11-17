@@ -37,6 +37,13 @@ _UNTRUSTED_TOOLS = frozenset({
     "file_read", "pdf", "office",
 })
 
+# Tools whose result may carry a "MEDIA: <path>" trailer that the channel
+# uploads. Only these are trusted to name a file to send; a MEDIA: line in
+# any other tool result (fetch_url page, file_read content, shell output) is
+# untrusted text and must never become an attachment. Abilities attach via
+# their structured `media` key, not text, and are handled separately.
+_MEDIA_TOOLS = frozenset({"send_file", "memory_get_file"})
+
 
 _NON_ANTHROPIC_GUARDRAILS = """
 
@@ -1558,6 +1565,11 @@ class Conversation:
         # Fallback: LLM turn crashed or returned nothing — at least surface
         # the raw tool output so the owner still sees what actually ran.
         head = f"✅ Consent granted (`{pending_hash}`). Ran: `{pending_tool}`"
+        # Same MEDIA: trust rule as the normal path: only _MEDIA_TOOLS may hand
+        # the channel a file to upload; any other output is plain text.
+        if pending_tool not in _MEDIA_TOOLS:
+            from .communication.outbound import strip_media_lines
+            result_str = strip_media_lines(result_str)
         return f"{head}\n\n{result_str}"
 
     async def _patch_held_tool_result(
@@ -2086,10 +2098,17 @@ class Conversation:
                 final_response = _fresh_prompt
                 logger.info("Consent marker: discarded LLM narration, using canonical prompt only")
 
+        # MEDIA: lines written by the model are never trusted. A prompt
+        # injection (web page, file, shell output) can make the model emit
+        # "MEDIA: /any/path", and the channel would then upload that file.
+        # Strip every whole-line MEDIA: directive ALWAYS, then append only the
+        # files collected this turn from trusted sources (_MEDIA_TOOLS and
+        # ability `media`).
+        from .communication.outbound import strip_media_lines
+        final_response = strip_media_lines(final_response)
+
         if self._pending_media:
-            # Strip any "MEDIA:" the LLM may have echoed (it has no valid path)
-            import re
-            final_response = re.sub(r'\n*MEDIA:\s*\S*', '', final_response).rstrip()
+            final_response = (final_response or "").rstrip()
             # Attach EVERY file collected this turn, in tool-call order.
             # Taking only [-1] here silently dropped the earlier attachments:
             # send_file still reported success, the channel sent one file, and
@@ -2588,6 +2607,7 @@ class Conversation:
                     exclude_ids=exclude_ids,
                     access_level=access_level,
                     cfg=cfg,
+                    user_id=(getattr(self, "user", None) or {}).get("id"),
                 )
             self._ts_note_judge("memory_guard_judge", attempt + 1, _jsink)
             if result is None or not result.conflict:
@@ -3045,9 +3065,13 @@ class Conversation:
                         result_str = redact_content_output(result_str)
                     else:
                         result_str = redact_secrets_in_text(result_str)
-
-                # Collect MEDIA: from tool results and strip from result
-                if "\n\nMEDIA: " in result_str or result_str.startswith("MEDIA: "):
+                # Collect MEDIA: only from tools trusted to send files
+                # (_MEDIA_TOOLS). Any other tool result keeps its text as-is:
+                # it only reaches the model's context, and model-written
+                # MEDIA: lines are stripped from the final reply.
+                if name in _MEDIA_TOOLS and (
+                    "\n\nMEDIA: " in result_str or result_str.startswith("MEDIA: ")
+                ):
                     if "\n\nMEDIA: " in result_str:
                         media_path = result_str.rsplit("\n\nMEDIA: ", 1)[1].strip()
                         result_str = result_str.rsplit("\n\nMEDIA: ", 1)[0]

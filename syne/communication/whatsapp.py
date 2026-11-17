@@ -240,6 +240,9 @@ _QUOTE_CARRIERS = (
 # Inbound documents (PDF / Office / other files). Same ceiling as the PDF
 # ability (_MAX_PDF_BYTES), so nothing is downloaded only to be refused.
 _DOC_MAX_BYTES = 25 * 1024 * 1024
+# Inbound photos (sent directly or replied to). Checked against fileLength
+# before download where WhatsApp declares it, and against the real size after.
+_IMAGE_MAX_BYTES = 25 * 1024 * 1024
 # Documents whose bytes ride along as base64 for ability pre-processing,
 # matched by MIME type or by extension (WhatsApp often says octet-stream).
 _DOC_B64_MIMES = frozenset({
@@ -1169,6 +1172,10 @@ class WhatsAppChannel:
 
     async def _fetch_quoted_image(self, q: Any) -> Optional[dict]:
         """Download the image of a replied-to message, or None."""
+        declared = int(q.imageMessage.fileLength or 0)
+        if declared > _IMAGE_MAX_BYTES:
+            logger.info("[whatsapp] replied image too large: %d bytes", declared)
+            return None
         try:
             raw = await self.client.download_any(WAMessage(imageMessage=q.imageMessage))
         except Exception as e:
@@ -1493,16 +1500,26 @@ class WhatsAppChannel:
         # Media: download images so vision can see them.
         image_metadata = None
         if media_kind == "image":
-            try:
-                raw = await self.client.download_any(ev.Message)
-                if raw:
-                    image_metadata = {
-                        "mime_type": ev.Message.imageMessage.mimetype or "image/jpeg",
-                        "base64": base64.b64encode(raw).decode("utf-8"),
-                    }
-                    logger.info("[whatsapp] image downloaded: %d bytes", len(raw))
-            except Exception as e:
-                logger.error("[whatsapp] image download failed: %s", e)
+            declared = int(ev.Message.imageMessage.fileLength or 0)
+            if declared > _IMAGE_MAX_BYTES:
+                logger.info("[whatsapp] image too large: %d bytes", declared)
+                text = (f"{text}\n\n" if text else "") + (
+                    f"[Photo not downloaded: {declared} bytes, max {_IMAGE_MAX_BYTES} bytes]")
+            else:
+                try:
+                    raw = await self.client.download_any(ev.Message)
+                    if raw and len(raw) > _IMAGE_MAX_BYTES:
+                        logger.info("[whatsapp] image too large after download: %d bytes", len(raw))
+                        text = (f"{text}\n\n" if text else "") + (
+                            f"[Photo not processed: {len(raw)} bytes, max {_IMAGE_MAX_BYTES} bytes]")
+                    elif raw:
+                        image_metadata = {
+                            "mime_type": ev.Message.imageMessage.mimetype or "image/jpeg",
+                            "base64": base64.b64encode(raw).decode("utf-8"),
+                        }
+                        logger.info("[whatsapp] image downloaded: %d bytes", len(raw))
+                except Exception as e:
+                    logger.error("[whatsapp] image download failed: %s", e)
 
             if not image_metadata and not text:
                 logger.info("[whatsapp] image unavailable and no caption, skipping")

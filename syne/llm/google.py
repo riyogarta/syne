@@ -153,7 +153,7 @@ class GoogleProvider(LLMProvider):
         max_retries = current_max_retries()
         for attempt in range(max_retries + 1):
             async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=body, params={"key": self.api_key})
+                resp = await client.post(url, json=body, headers={"x-goog-api-key": self.api_key})
                 if resp.status_code == 200:
                     data = resp.json()
                     break
@@ -258,12 +258,11 @@ class GoogleProvider(LLMProvider):
 
         current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
-            headers = {}
-            params = {"key": self.api_key}
+            headers = {"x-goog-api-key": self.api_key}
 
             try:
                 async with httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.post(url, json=body, headers=headers, params=params)
+                    resp = await client.post(url, json=body, headers=headers)
                     resp.raise_for_status()
                     data = resp.json()
 
@@ -316,13 +315,12 @@ class GoogleProvider(LLMProvider):
 
         current_delay = _BASE_DELAY_MS
         for attempt in range(_MAX_RETRIES + 1):
-            headers = {}
-            params = {"key": self.api_key}
+            headers = {"x-goog-api-key": self.api_key}
 
             try:
                 async with httpx.AsyncClient(timeout=60) as client:
                     resp = await client.post(
-                        url, json={"requests": requests}, headers=headers, params=params
+                        url, json={"requests": requests}, headers=headers
                     )
                     resp.raise_for_status()
                     data = resp.json()

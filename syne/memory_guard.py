@@ -184,6 +184,7 @@ async def find_candidates(
     limit: int,
     min_similarity: float,
     access_level: str,
+    user_id=None,
 ) -> list:
     """Closest guarded memories to the draft vector, read-only.
 
@@ -204,6 +205,7 @@ async def find_candidates(
             WHERE embedding IS NOT NULL
               AND LOWER(category) = ANY($2::text[])
               AND NOT (id = ANY($3::int[]))
+              AND ($5::int IS NULL OR user_id = $5::int OR user_id IS NULL)
             ORDER BY embedding <=> $1::vector
             LIMIT $4
             """,
@@ -211,6 +213,7 @@ async def find_candidates(
             [c.lower() for c in categories],
             [int(i) for i in (exclude_ids or [])],
             int(limit),
+            user_id,
         )
     out = []
     for r in rows:
@@ -302,6 +305,7 @@ async def check_draft(
     exclude_ids,
     access_level: str,
     cfg: dict,
+    user_id=None,
 ) -> Optional[GuardResult]:
     """Run the guard on one draft. None = guard could not decide (fail-open)."""
     text = (draft or "").strip()
@@ -325,6 +329,7 @@ async def check_draft(
             limit=cfg["limit"],
             min_similarity=cfg["min_similarity"],
             access_level=access_level,
+            user_id=user_id,
         )
     except Exception as e:
         logger.warning(f"Memory guard: candidate query failed: {type(e).__name__}: {e}")

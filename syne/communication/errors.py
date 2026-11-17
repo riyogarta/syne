@@ -25,6 +25,22 @@ _PRIVILEGED_LEVELS = ("owner", "family")
 _MSG_RE = re.compile(r'"message"\s*:\s*"((?:[^"\\]|\\.)*)"')
 _PARAM_RE = re.compile(r'"param"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
+# Secrets that can ride inside an error string. httpx puts the full request
+# URL into HTTPStatusError messages, so a provider that sends its key as a
+# query parameter (?key=...) leaks it into str(e). The raw error is shown to
+# owner/family and may land in a group chat, so redact before showing.
+_QUERY_SECRET_RE = re.compile(
+    r'(?i)([?&](?:key|api_key|apikey|access_token|token)=)[^&\s"\'<>]+'
+)
+# Google API keys have a fixed shape; catch them even outside a URL.
+_GOOGLE_KEY_RE = re.compile(r'AIza[0-9A-Za-z_\-]{35}')
+
+
+def redact_secrets(text: str) -> str:
+    """Mask API keys in URL query strings and bare Google API keys."""
+    text = _QUERY_SECRET_RE.sub(r'\1***', text)
+    return _GOOGLE_KEY_RE.sub('AIza***', text)
+
 
 def _humanize(text: str) -> str:
     """Collapse a provider error that embeds a raw JSON body into one line.
@@ -69,14 +85,14 @@ def _humanize(text: str) -> str:
 def classify_error(e: Exception, model: str = "", access_level: str = "public") -> str:
     """Build the user-facing error message for an exception.
 
-    Owner/family get the raw error (type + message, model-tagged);
-    all other access levels get GENERIC_ERROR_MESSAGE.
+    Owner/family get the raw error (type + message, model-tagged), with API
+    keys redacted; all other access levels get GENERIC_ERROR_MESSAGE.
     """
     if (access_level or "").lower() not in _PRIVILEGED_LEVELS:
         return GENERIC_ERROR_MESSAGE
 
     tag = f"[{model}] " if model else ""
-    text = f"⚠️ {tag}{type(e).__name__}: {_humanize(str(e))}"
+    text = f"⚠️ {tag}{type(e).__name__}: {_humanize(redact_secrets(str(e)))}"
     if len(text) > _MAX_RAW_LEN:
         text = text[:_MAX_RAW_LEN] + _TRUNC_SUFFIX
     return text
