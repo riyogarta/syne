@@ -1,11 +1,68 @@
-"""Maps & Places Ability — Google Maps Platform (Places, Directions, Geocoding)."""
+"""Maps & Places Ability — Google Maps Platform (Places API (New), Routes API, Geocoding API v4).
+
+The API key is sent in the X-Goog-Api-Key header, never as ?key= in the URL,
+so it cannot leak into httpx error messages or logs.
+"""
 
 import os
+import re
+from urllib.parse import quote
+
 import httpx
 
 from .base import Ability
 
-_MAPS_BASE = "https://maps.googleapis.com/maps/api"
+_PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+_ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
+_GEOCODE_V4 = "https://geocode.googleapis.com/v4/geocode"
+
+_PLACES_FIELDS = ",".join([
+    "places.displayName",
+    "places.formattedAddress",
+    "places.location",
+    "places.rating",
+    "places.userRatingCount",
+    "places.businessStatus",
+])
+_ROUTES_FIELDS = ",".join([
+    "routes.localizedValues",
+    "routes.legs.steps.navigationInstruction",
+    "routes.legs.steps.localizedValues",
+])
+
+# Old schema values (kept for the tool schema) -> Routes API travelMode
+_TRAVEL_MODES = {
+    "driving": "DRIVE",
+    "walking": "WALK",
+    "bicycling": "BICYCLE",
+    "transit": "TRANSIT",
+}
+
+_LATLNG_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _parse_latlng(value: str) -> tuple[float, float] | None:
+    m = _LATLNG_RE.match(value or "")
+    if not m:
+        return None
+    return float(m.group(1)), float(m.group(2))
+
+
+def _waypoint(value: str) -> dict:
+    """Routes API waypoint: coordinates when given 'lat,lng', else an address."""
+    ll = _parse_latlng(value)
+    if ll:
+        return {"location": {"latLng": {"latitude": ll[0], "longitude": ll[1]}}}
+    return {"address": value}
+
+
+def _api_error(resp: httpx.Response, label: str) -> dict:
+    try:
+        err = resp.json().get("error", {})
+        detail = f"{err.get('status', '')} - {err.get('message', '')}".strip(" -")
+    except Exception:
+        detail = ""
+    return {"success": False, "error": f"{label} error ({resp.status_code}){': ' + detail if detail else ''}"}
 
 
 class MapsAbility(Ability):
@@ -13,7 +70,7 @@ class MapsAbility(Ability):
 
     name = "maps"
     description = "Search for nearby places (restaurants, cafes, etc.), get driving/walking directions between locations, and convert addresses to coordinates or vice versa"
-    version = "1.0"
+    version = "2.0"
     # 0o444 — everyone may invoke; r-only (geocode/search). Was 0o555 which
     # had spurious x bit under the new gate rule.
     permission = 0o444
@@ -49,7 +106,7 @@ class MapsAbility(Ability):
             return {"success": False, "error": f"Unknown action: {action}. Use: search, directions, geocode, reverse_geocode"}
 
     async def _search_places(self, params: dict, api_key: str) -> dict:
-        """Search for nearby places using Google Places Text Search."""
+        """Search places with Places API (New) Text Search."""
         query = params.get("query", "")
         if not query:
             return {"success": False, "error": "Query is required for place search"}
@@ -58,55 +115,59 @@ class MapsAbility(Ability):
         radius = params.get("radius", 5000)  # meters
         language = params.get("language", "id")
 
+        body: dict = {"textQuery": query, "languageCode": language, "pageSize": 8}
+        ll = _parse_latlng(location)
+        if ll:
+            try:
+                radius = float(radius)
+            except (TypeError, ValueError):
+                radius = 5000.0
+            body["locationBias"] = {"circle": {
+                "center": {"latitude": ll[0], "longitude": ll[1]},
+                "radius": max(1.0, min(radius, 50000.0)),
+            }}
+
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                request_params = {
-                    "query": query,
-                    "key": api_key,
-                    "language": language,
-                }
-                if location:
-                    request_params["location"] = location
-                    request_params["radius"] = radius
-
-                resp = await client.get(
-                    f"{_MAPS_BASE}/place/textsearch/json",
-                    params=request_params,
+                resp = await client.post(
+                    _PLACES_SEARCH_URL,
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Goog-Api-Key": api_key,
+                        "X-Goog-FieldMask": _PLACES_FIELDS,
+                    },
                 )
 
-                if resp.status_code != 200:
-                    return {"success": False, "error": f"API error ({resp.status_code})"}
+            if resp.status_code != 200:
+                return _api_error(resp, "Places API")
 
-                data = resp.json()
-                if data.get("status") not in ("OK", "ZERO_RESULTS"):
-                    return {"success": False, "error": f"Places API error: {data.get('status')} - {data.get('error_message', '')}"}
+            places = resp.json().get("places", [])
+            if not places:
+                return {"success": True, "result": f"No places found for: {query}"}
 
-                results = data.get("results", [])
-                if not results:
-                    return {"success": True, "result": f"No places found for: {query}"}
+            formatted = []
+            for i, place in enumerate(places[:8], 1):
+                name = (place.get("displayName") or {}).get("text", "Unknown")
+                address = place.get("formattedAddress", "")
+                rating = place.get("rating", "N/A")
+                total_ratings = place.get("userRatingCount", 0)
+                status = place.get("businessStatus", "")
+                loc = place.get("location") or {}
+                lat = loc.get("latitude", "")
+                lng = loc.get("longitude", "")
 
-                formatted = []
-                for i, place in enumerate(results[:8], 1):
-                    name = place.get("name", "Unknown")
-                    address = place.get("formatted_address", "")
-                    rating = place.get("rating", "N/A")
-                    total_ratings = place.get("user_ratings_total", 0)
-                    status = place.get("business_status", "")
-                    location = place.get("geometry", {}).get("location", {})
-                    lat = location.get("lat", "")
-                    lng = location.get("lng", "")
+                line = f"{i}. **{name}** ⭐ {rating} ({total_ratings} reviews)\n   📍 {address}"
+                if lat != "" and lng != "":
+                    line += f"\n   🗺️ {lat},{lng}"
+                if status and status != "OPERATIONAL":
+                    line += f"\n   ⚠️ {status}"
+                formatted.append(line)
 
-                    line = f"{i}. **{name}** ⭐ {rating} ({total_ratings} reviews)\n   📍 {address}"
-                    if lat and lng:
-                        line += f"\n   🗺️ {lat},{lng}"
-                    if status and status != "OPERATIONAL":
-                        line += f"\n   ⚠️ {status}"
-                    formatted.append(line)
-
-                return {
-                    "success": True,
-                    "result": f"Places for \"{query}\":\n\n" + "\n\n".join(formatted),
-                }
+            return {
+                "success": True,
+                "result": f"Places for \"{query}\":\n\n" + "\n\n".join(formatted),
+            }
 
         except httpx.TimeoutException:
             return {"success": False, "error": "Request timed out"}
@@ -114,7 +175,7 @@ class MapsAbility(Ability):
             return {"success": False, "error": str(e)}
 
     async def _get_directions(self, params: dict, api_key: str) -> dict:
-        """Get directions between two points."""
+        """Get directions between two points with Routes API."""
         origin = params.get("origin", "")
         destination = params.get("destination", "")
 
@@ -122,58 +183,59 @@ class MapsAbility(Ability):
             return {"success": False, "error": "Both 'origin' and 'destination' are required"}
 
         mode = params.get("mode", "driving")  # driving, walking, bicycling, transit
+        travel_mode = _TRAVEL_MODES.get(mode)
+        if not travel_mode:
+            return {"success": False, "error": f"Unknown mode: {mode}. Use: {', '.join(_TRAVEL_MODES)}"}
         language = params.get("language", "id")
+
+        body = {
+            "origin": _waypoint(origin),
+            "destination": _waypoint(destination),
+            "travelMode": travel_mode,
+            "languageCode": language,
+        }
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(
-                    f"{_MAPS_BASE}/directions/json",
-                    params={
-                        "origin": origin,
-                        "destination": destination,
-                        "mode": mode,
-                        "key": api_key,
-                        "language": language,
+                resp = await client.post(
+                    _ROUTES_URL,
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Goog-Api-Key": api_key,
+                        "X-Goog-FieldMask": _ROUTES_FIELDS,
                     },
                 )
 
-                if resp.status_code != 200:
-                    return {"success": False, "error": f"API error ({resp.status_code})"}
+            if resp.status_code != 200:
+                return _api_error(resp, "Routes API")
 
-                data = resp.json()
-                if data.get("status") != "OK":
-                    return {"success": False, "error": f"Directions API: {data.get('status')} - {data.get('error_message', '')}"}
+            routes = resp.json().get("routes", [])
+            if not routes:
+                return {"success": True, "result": "No routes found."}
 
-                routes = data.get("routes", [])
-                if not routes:
-                    return {"success": True, "result": "No routes found."}
+            route = routes[0]
+            values = route.get("localizedValues") or {}
+            distance = (values.get("distance") or {}).get("text", "?")
+            duration = (values.get("duration") or {}).get("text", "?")
 
-                route = routes[0]
-                leg = route.get("legs", [{}])[0]
+            steps = []
+            legs = route.get("legs") or [{}]
+            for i, step in enumerate((legs[0].get("steps") or [])[:15], 1):
+                instruction = (step.get("navigationInstruction") or {}).get("instructions", "").strip()
+                step_dist = ((step.get("localizedValues") or {}).get("distance") or {}).get("text", "")
+                if instruction:
+                    steps.append(f"{i}. {instruction} ({step_dist})" if step_dist else f"{i}. {instruction}")
 
-                start = leg.get("start_address", origin)
-                end = leg.get("end_address", destination)
-                distance = leg.get("distance", {}).get("text", "?")
-                duration = leg.get("duration", {}).get("text", "?")
+            result = (
+                f"🚗 **{origin}** → **{destination}**\n"
+                f"📏 Distance: {distance}\n"
+                f"⏱️ Duration: {duration}\n"
+                f"🚦 Mode: {mode}\n\n"
+                f"**Steps:**\n" + "\n".join(steps)
+            )
 
-                steps = []
-                for i, step in enumerate(leg.get("steps", [])[:15], 1):
-                    instruction = step.get("html_instructions", "")
-                    # Strip HTML tags
-                    import re
-                    instruction = re.sub(r"<[^>]+>", " ", instruction).strip()
-                    step_dist = step.get("distance", {}).get("text", "")
-                    steps.append(f"{i}. {instruction} ({step_dist})")
-
-                result = (
-                    f"🚗 **{start}** → **{end}**\n"
-                    f"📏 Distance: {distance}\n"
-                    f"⏱️ Duration: {duration}\n"
-                    f"🚦 Mode: {mode}\n\n"
-                    f"**Steps:**\n" + "\n".join(steps)
-                )
-
-                return {"success": True, "result": result}
+            return {"success": True, "result": result}
 
         except httpx.TimeoutException:
             return {"success": False, "error": "Request timed out"}
@@ -181,7 +243,7 @@ class MapsAbility(Ability):
             return {"success": False, "error": str(e)}
 
     async def _geocode(self, params: dict, api_key: str) -> dict:
-        """Convert address to coordinates."""
+        """Convert address to coordinates with Geocoding API v4."""
         address = params.get("address", "")
         if not address:
             return {"success": False, "error": "Address is required"}
@@ -189,65 +251,68 @@ class MapsAbility(Ability):
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(
-                    f"{_MAPS_BASE}/geocode/json",
-                    params={
-                        "address": address,
-                        "key": api_key,
-                        "language": "id",
-                    },
+                    f"{_GEOCODE_V4}/address/{quote(address, safe='')}",
+                    params={"languageCode": "id"},
+                    headers={"X-Goog-Api-Key": api_key},
                 )
 
-                data = resp.json()
-                if data.get("status") != "OK":
-                    return {"success": False, "error": f"Geocode: {data.get('status')}"}
+            if resp.status_code != 200:
+                return _api_error(resp, "Geocode")
 
-                result = data["results"][0]
-                loc = result["geometry"]["location"]
-                formatted = result.get("formatted_address", address)
+            results = resp.json().get("results", [])
+            if not results:
+                return {"success": False, "error": f"Geocode: no results for {address}"}
 
-                return {
-                    "success": True,
-                    "result": f"📍 **{formatted}**\n🗺️ {loc['lat']},{loc['lng']}",
-                }
+            result = results[0]
+            loc = result.get("location") or {}
+            formatted = result.get("formattedAddress", address)
+
+            return {
+                "success": True,
+                "result": f"📍 **{formatted}**\n🗺️ {loc.get('latitude')},{loc.get('longitude')}",
+            }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def _reverse_geocode(self, params: dict, api_key: str) -> dict:
-        """Convert coordinates to address."""
+        """Convert coordinates to address with Geocoding API v4."""
         lat = params.get("lat")
         lng = params.get("lng")
         latlng = params.get("latlng", "")  # Accept "lat,lng" string too
 
         if latlng:
             pass
-        elif lat and lng:
+        elif lat is not None and lng is not None:
             latlng = f"{lat},{lng}"
         else:
             return {"success": False, "error": "Provide 'lat'+'lng' or 'latlng' (e.g. '-6.2,106.8')"}
 
+        ll = _parse_latlng(latlng)
+        if not ll:
+            return {"success": False, "error": f"Invalid coordinates: {latlng}"}
+
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(
-                    f"{_MAPS_BASE}/geocode/json",
-                    params={
-                        "latlng": latlng,
-                        "key": api_key,
-                        "language": "id",
-                    },
+                    f"{_GEOCODE_V4}/location/{ll[0]},{ll[1]}",
+                    params={"languageCode": "id"},
+                    headers={"X-Goog-Api-Key": api_key},
                 )
 
-                data = resp.json()
-                if data.get("status") != "OK":
-                    return {"success": False, "error": f"Reverse geocode: {data.get('status')}"}
+            if resp.status_code != 200:
+                return _api_error(resp, "Reverse geocode")
 
-                result = data["results"][0]
-                formatted = result.get("formatted_address", latlng)
+            results = resp.json().get("results", [])
+            if not results:
+                return {"success": False, "error": f"Reverse geocode: no results for {latlng}"}
 
-                return {
-                    "success": True,
-                    "result": f"📍 {latlng} → **{formatted}**",
-                }
+            formatted = results[0].get("formattedAddress", latlng)
+
+            return {
+                "success": True,
+                "result": f"📍 {latlng} → **{formatted}**",
+            }
 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -277,7 +342,7 @@ class MapsAbility(Ability):
                         },
                         "radius": {
                             "type": "integer",
-                            "description": "Search radius in meters (default 5000, action=search)",
+                            "description": "Search radius in meters (default 5000, max 50000, action=search)",
                         },
                         "origin": {
                             "type": "string",
@@ -338,7 +403,9 @@ class MapsAbility(Ability):
         return (
             f"- Status: **not ready** ({', '.join(reasons)})\n"
             "- Setup: `update_ability(action='config', name='maps', "
-            "config='{\"api_key\": \"GOOGLE_MAPS_KEY\"}')`"
+            "config='{\"api_key\": \"GOOGLE_MAPS_KEY\"}')`\n"
+            "- The key's Google Cloud project needs Places API (New), Routes API "
+            "and Geocoding API enabled"
         )
 
     def get_required_config(self) -> list[str]:

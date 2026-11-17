@@ -2271,13 +2271,14 @@ class TelegramChannel:
 
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    "https://maps.googleapis.com/maps/api/geocode/json",
-                    params={"latlng": f"{lat},{lng}", "key": api_key, "language": "id"},
+                    f"https://geocode.googleapis.com/v4/geocode/location/{float(lat)},{float(lng)}",
+                    params={"languageCode": "id"},
+                    headers={"X-Goog-Api-Key": api_key},
                 )
                 if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get("status") == "OK" and data.get("results"):
-                        return data["results"][0].get("formatted_address", None)
+                    results = resp.json().get("results") or []
+                    if results:
+                        return results[0].get("formattedAddress", None)
         except Exception as e:
             logger.warning(f"Reverse geocode failed: {e}")
         return None
