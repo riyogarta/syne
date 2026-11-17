@@ -106,26 +106,29 @@ class OllamaProvider(LLMProvider):
         raise RuntimeError("Ollama embed failed without exception")
 
     async def embed_fast(self, text: str, timeout: float = 10.0) -> EmbeddingResponse:
-        """Single attempt, no retry; the whole call, queue wait included,
-        is bounded by ``timeout``. Used by the recall path of a chat turn
-        (syne.embed_health.quick_embed) so a dead Ollama is noticed in
-        seconds instead of after ~6 minutes of retries. An HTTP error keeps
-        Ollama's own message (e.g. model not found).
+        """Single attempt, no retry, bounded by ``timeout``. Used by the
+        recall path of a chat turn (syne.embed_health.quick_embed) so a dead
+        Ollama is noticed in seconds instead of after ~6 minutes of retries.
+
+        Deliberately NOT behind _EMBED_SEMAPHORE: a slow background embed
+        (memory_store, history, guard: 120s x 3 under the semaphore) would
+        otherwise eat the whole budget and a healthy Ollama would be reported
+        down. One short extra request is cheap; Ollama queues it itself.
+        An HTTP error keeps Ollama's own message (e.g. model not found).
         """
         model = self.embedding_model
 
         async def _one() -> EmbeddingResponse:
-            async with _EMBED_SEMAPHORE:
-                async with httpx.AsyncClient(timeout=timeout) as client:
-                    resp = await client.post(
-                        f"{self.base_url}/api/embed",
-                        json={"model": model, "input": text},
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{self.base_url}/api/embed",
+                    json={"model": model, "input": text},
+                )
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"Ollama HTTP {resp.status_code}: {resp.text[:300]}"
                     )
-                    if resp.status_code >= 400:
-                        raise RuntimeError(
-                            f"Ollama HTTP {resp.status_code}: {resp.text[:300]}"
-                        )
-                    data = resp.json()
+                data = resp.json()
             vector = data["embeddings"][0]
             return EmbeddingResponse(
                 vector=vector, model=model, dimensions=len(vector), input_tokens=0,

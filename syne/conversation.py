@@ -3916,11 +3916,33 @@ class ConversationManager:
         """
         # Maintenance gate (/restore): no channel, node or task may start a
         # turn while the database is being replaced. DM: notice; group: None.
-        if _maint.active():
-            _inb = (message_metadata or {}).get("inbound")
-            if _inb is not None and getattr(_inb, "is_group", False):
-                return None
-            return _maint.NOTICE
+        # track() comes BEFORE the active() check, with no await between: a
+        # turn is either refused here or already tracked when
+        # maintenance.begin() runs (and then cancelled) - never in between.
+        _me = asyncio.current_task()
+        _maint.track(_me)
+        try:
+            if _maint.active():
+                _inb = (message_metadata or {}).get("inbound")
+                if _inb is not None and getattr(_inb, "is_group", False):
+                    return None
+                return _maint.NOTICE
+            return await self._handle_message_inner(
+                platform, chat_id, user, message, message_metadata
+            )
+        finally:
+            _maint.untrack(_me)
+
+    async def _handle_message_inner(
+        self,
+        platform: str,
+        chat_id: str,
+        user: dict,
+        message: str,
+        message_metadata: Optional[dict] = None,
+    ) -> str:
+        """Body of handle_message; the whole turn is tracked by the
+        maintenance gate."""
 
         # Extract extra context from metadata (e.g., CLI working directory)
         extra_context = None
@@ -3992,8 +4014,6 @@ class ConversationManager:
         # get a short notice; a group gets it once per incident, then None
         # (= silent drop in every channel).
         from . import embed_health as _eh
-        _me = asyncio.current_task()
-        _maint.track(_me)
         try:
             await _eh.gate(getattr(conv.memory, "provider", None) or conv.provider)
             response = await conv.chat(message, message_metadata=message_metadata)
@@ -4002,8 +4022,6 @@ class ConversationManager:
             if _eh.should_reply(_is_group, platform, chat_id):
                 return _eh.user_notice()
             return None
-        finally:
-            _maint.untrack(_me)
 
         if response is None:
             return None  # Silent drop (lock timeout)

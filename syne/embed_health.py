@@ -8,6 +8,9 @@ sounds normal but ignores stored decisions. Owner decision (Riyo, 17 Nov
 
 - The recall embed is one bounded attempt (embedding.recall_timeout,
   default 10s, no retry).
+- A refused connection or an HTTP error means down at once. A timeout or a
+  429 refuses only that turn (no owner DM, no 60s window); a second
+  consecutive one means down. Success resets the count.
 - On failure the state is "down" for DOWN_TTL seconds: every turn, of every
   sender on every channel, is refused at once with a short English notice.
   Groups get the notice once per incident, then silence.
@@ -30,11 +33,22 @@ logger = logging.getLogger("syne.embed_health")
 DOWN_TTL = 60.0
 DEFAULT_RECALL_TIMEOUT = 10.0
 SYSTEMCTL = "/usr/bin/systemctl"
-SUDOERS_HINT = (
-    "echo 'syne ALL=(root) NOPASSWD: /usr/bin/systemctl restart ollama' "
-    "| sudo tee /etc/sudoers.d/syne-ollama && "
-    "sudo chmod 440 /etc/sudoers.d/syne-ollama && sudo visudo -c"
-)
+SOFT_FAILS_TO_DOWN = 2
+
+
+def sudoers_hint() -> str:
+    """One-time sudoers setup for the user Syne actually runs as (not
+    necessarily a user named 'syne')."""
+    import getpass
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = "syne"
+    return (
+        f"echo '{user} ALL=(root) NOPASSWD: {SYSTEMCTL} restart ollama' "
+        "| sudo tee /etc/sudoers.d/syne-ollama && "
+        "sudo chmod 440 /etc/sudoers.d/syne-ollama && sudo visudo -c"
+    )
 
 _since: Optional[float] = None      # wall clock of the first failure
 _checked: float = 0.0               # monotonic time of the last failed probe
@@ -43,6 +57,7 @@ _driver: str = ""
 _incident: int = 0
 _notified_incident: int = 0
 _groups_told: set = set()
+_soft_fails: int = 0                # consecutive timeouts / 429 while up
 
 
 def is_flagged() -> bool:
@@ -149,6 +164,27 @@ async def gate(provider) -> None:
     await quick_embed(provider, "health check")
 
 
+def is_soft_failure(err: BaseException) -> bool:
+    """Timeout or rate limit: the service may just be busy (cold model
+    load, a long background embed, a 429), not dead."""
+    import re
+    if isinstance(err, (asyncio.TimeoutError, TimeoutError)):
+        return True
+    try:
+        import httpx
+        if isinstance(err, httpx.TimeoutException):
+            return True
+    except ImportError:
+        pass
+    status = getattr(err, "status_code", None) or getattr(
+        getattr(err, "response", None), "status_code", None
+    )
+    if status == 429:
+        return True
+    text = str(err).lower()
+    return bool(re.search(r"\b429\b", text)) or "too many requests" in text or "rate limit" in text
+
+
 async def quick_embed(provider, text: str) -> list:
     """Embed for recall, bounded and without retry.
 
@@ -164,9 +200,23 @@ async def quick_embed(provider, text: str) -> list:
     except asyncio.CancelledError:
         raise
     except Exception as e:
+        global _soft_fails
+        if _since is None and is_soft_failure(e) and _soft_fails < SOFT_FAILS_TO_DOWN - 1:
+            # Busy, not dead: refuse only this turn, no incident yet.
+            _soft_fails += 1
+            msg = _describe(e, timeout)
+            logger.warning(
+                f"Embedding slow/limited: {msg} - turn refused, not marked down "
+                f"({_soft_fails}/{SOFT_FAILS_TO_DOWN})"
+            )
+            raise EmbeddingUnavailableError(msg) from e
+        _soft_fails = 0
         await mark_down(e, timeout)
         schedule_owner_notice()
         raise EmbeddingUnavailableError(_error) from e
+    if _soft_fails:
+        _soft_fails = 0
+        _groups_told.clear()
     mark_up()
     return vector
 
@@ -278,7 +328,7 @@ async def restart_ollama(progress: ProgressFn = None) -> str:
         msg = (err or out or b"").decode(errors="replace").strip()[:500]
         return (
             f"❌ Restart failed (exit {proc.returncode}): {msg}\n\n"
-            f"One-time setup on the server:\n{SUDOERS_HINT}"
+            f"One-time setup on the server:\n{sudoers_hint()}"
         )
 
     await say("⏳ Ollama restarted, waiting for it to answer...")

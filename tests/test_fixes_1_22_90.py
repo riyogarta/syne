@@ -75,6 +75,7 @@ def eh(monkeypatch):
     monkeypatch.setattr(E, "_incident", 0)
     monkeypatch.setattr(E, "_notified_incident", 0)
     monkeypatch.setattr(E, "_groups_told", set())
+    monkeypatch.setattr(E, "_soft_fails", 0)
     monkeypatch.setattr(E, "recall_timeout", _AM(return_value=0.2))
     monkeypatch.setattr(E, "active_embedding_entry", _AM(return_value={"driver": "ollama"}))
     monkeypatch.setattr(E, "schedule_owner_notice", lambda: None)
@@ -434,3 +435,103 @@ async def test_restore_raises_and_releases_global_gate(maint, monkeypatch, tmp_p
     await TelegramChannel._handle_restore_callback(me, q, "confirmed:b.sql")
     assert seen["active"] is True      # gate was up while restoring
     assert not maint.active()          # a failed restore releases it
+
+
+# ── 1.22.92 review follow-ups ───────────────────────────────────────────
+
+async def test_handle_message_tracks_before_maintenance_check(maint, monkeypatch):
+    from syne.conversation import ConversationManager
+    seen = {}
+
+    def spy():
+        seen["tracked"] = _asyncio.current_task() in maint._turns
+        return True
+    monkeypatch.setattr(maint, "active", spy)
+    mgr = ConversationManager.__new__(ConversationManager)
+    out = await mgr.handle_message("telegram", "1", {"id": 1}, "hi",
+                                   message_metadata={"inbound": _NS(is_group=False)})
+    assert out == maint.NOTICE
+    assert seen["tracked"] is True
+    assert not maint._turns
+
+
+async def test_begin_cancels_turn_still_before_chat(maint):
+    from syne.conversation import ConversationManager
+    started = _asyncio.Event()
+
+    async def slow_session(*a, **k):
+        started.set()
+        await _asyncio.sleep(30)
+    mgr = ConversationManager.__new__(ConversationManager)
+    mgr._stream_callbacks = None
+    mgr.get_or_create_session = slow_session
+    t = _asyncio.create_task(mgr.handle_message(
+        "telegram", "1", {"id": 1}, "hi", message_metadata={"inbound": _NS(is_group=False)}))
+    await started.wait()
+    assert await maint.begin("restore", timeout=2) == 1
+    assert t.cancelled()
+
+
+async def test_ollama_embed_fast_skips_semaphore(monkeypatch):
+    from syne.llm import ollama as O
+
+    class C:
+        def __init__(self, *a, **k): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, json=None):
+            return _NS(status_code=200, text="", json=lambda: {"embeddings": [[0.5, 0.5]]})
+    monkeypatch.setattr(O.httpx, "AsyncClient", C)
+    p = O.OllamaProvider.__new__(O.OllamaProvider)
+    p.embedding_model = "m"
+    p.base_url = "http://x"
+    async with O._EMBED_SEMAPHORE:      # a slow background embed holds it
+        r = await p.embed_fast("hi", timeout=1)
+    assert r.vector == [0.5, 0.5]
+
+
+class _Timeout:
+    async def embed_fast(self, text, timeout=10.0):
+        raise _asyncio.TimeoutError()
+
+
+async def test_one_timeout_refuses_turn_but_is_not_down(eh, monkeypatch):
+    from syne.llm.provider import EmbeddingUnavailableError
+    sent = []
+    monkeypatch.setattr(eh, "schedule_owner_notice", lambda: sent.append(1))
+    with pytest.raises(EmbeddingUnavailableError):
+        await eh.quick_embed(_Timeout(), "a b")
+    assert not eh.is_flagged() and sent == []
+    with pytest.raises(EmbeddingUnavailableError):
+        await eh.quick_embed(_Timeout(), "a b")
+    assert eh.is_flagged() and sent == [1]
+
+
+async def test_success_resets_soft_failures(eh):
+    from syne.llm.provider import EmbeddingUnavailableError
+    with pytest.raises(EmbeddingUnavailableError):
+        await eh.quick_embed(_Timeout(), "a b")
+    assert await eh.quick_embed(_OkEmbed(), "a b") == [0.1, 0.2]
+    with pytest.raises(EmbeddingUnavailableError):
+        await eh.quick_embed(_Timeout(), "a b")
+    assert not eh.is_flagged()
+
+
+async def test_429_is_soft_refused_connection_is_hard(eh):
+    from syne.llm.provider import EmbeddingUnavailableError
+
+    class RL:
+        async def embed_fast(self, text, timeout=10.0):
+            raise RuntimeError("Ollama HTTP 429: too many requests")
+    with pytest.raises(EmbeddingUnavailableError):
+        await eh.quick_embed(RL(), "a b")
+    assert not eh.is_flagged()
+    assert eh.is_soft_failure(RuntimeError("HTTP 404: model not found")) is False
+    assert eh.is_soft_failure(ConnectionError("connection refused")) is False
+
+
+def test_sudoers_hint_uses_running_user(monkeypatch):
+    import getpass
+    from syne import embed_health as E
+    monkeypatch.setattr(getpass, "getuser", lambda: "riyo")
+    assert "echo 'riyo ALL=(root) NOPASSWD: /usr/bin/systemctl restart ollama'" in E.sudoers_hint()
