@@ -207,12 +207,15 @@ def markdown_to_telegram_html(text: str) -> str:
     return output
 
 
-def _render_table_plain(table_lines: list[str]) -> str:
-    """Render markdown table rows as padded plain text inside ``` code block.
+# Chat apps (Telegram, WhatsApp, Discord) render no tables and a monospace
+# block cannot scroll sideways on a phone: a table wider than this many
+# characters wraps mid-row and becomes unreadable. Such tables are turned
+# into "cards" (one block per row: first cell as a bold title, then
+# "Header: value" lines). Narrower tables keep the aligned monospace view.
+_TABLE_MAX_WIDTH = 36
 
-    For WhatsApp and other platforms that don't support HTML but do support
-    triple-backtick code blocks for monospace display.
-    """
+
+def _parse_table_rows(table_lines: list[str]) -> list[list[str]]:
     rows = []
     for line in table_lines:
         stripped = line.strip()
@@ -220,11 +223,55 @@ def _render_table_plain(table_lines: list[str]) -> str:
             stripped = stripped[1:]
         if stripped.endswith('|'):
             stripped = stripped[:-1]
-        cells = [_strip_md(c.strip()) for c in stripped.split('|')]
-        rows.append(cells)
+        rows.append([_strip_md(c.strip()) for c in stripped.split('|')])
+    return rows
 
+
+def _table_width(rows: list[list[str]]) -> int:
+    """Width of the widest line the monospace rendering would produce."""
+    if not rows:
+        return 0
+    col_count = max(len(r) for r in rows)
+    widths = [0] * col_count
+    for row in rows:
+        for j, cell in enumerate(row):
+            widths[j] = max(widths[j], len(cell))
+    widths = [max(3, w) for w in widths]
+    return sum(widths) + 3 * col_count + 1
+
+
+def _table_as_cards(rows: list[list[str]], bold_open: str, bold_close: str, esc=lambda t: t) -> str:
+    """Render table rows as cards: bold title from the first cell, then
+    '• Header: value' per remaining non-empty cell. First row = headers."""
+    headers, body = rows[0], rows[1:]
+    if not body:  # header-only table: nothing to pair with, list the cells
+        return '\n'.join('• ' + esc(h) for h in headers if h)
+    cards = []
+    for row in body:
+        title = row[0] if row and row[0] else '-'
+        lines = [f'{bold_open}{esc(title)}{bold_close}']
+        for j in range(1, len(row)):
+            if not row[j]:
+                continue
+            head = headers[j] if j < len(headers) and headers[j] else ''
+            lines.append('• ' + (f'{esc(head)}: ' if head else '') + esc(row[j]))
+        cards.append('\n'.join(lines))
+    return '\n\n'.join(cards)
+
+
+def _render_table_plain(table_lines: list[str], bold: str = '*') -> str:
+    """Render markdown table rows as padded plain text inside ``` code block.
+
+    For WhatsApp and other platforms that don't support HTML but do support
+    triple-backtick code blocks for monospace display. Tables wider than
+    _TABLE_MAX_WIDTH become cards; ``bold`` is the platform's bold marker
+    ('*' WhatsApp, '**' Discord).
+    """
+    rows = _parse_table_rows(table_lines)
     if not rows:
         return ''
+    if _table_width(rows) > _TABLE_MAX_WIDTH:
+        return _table_as_cards(rows, bold, bold)
 
     col_count = max(len(r) for r in rows)
     widths = [0] * col_count
@@ -387,7 +434,7 @@ def markdown_to_discord(text: str) -> str:
                 table_lines.append(lines[i])
                 i += 1
             if table_lines:
-                result.append(_render_table_plain(table_lines))
+                result.append(_render_table_plain(table_lines, bold='**'))
             continue
 
         # Horizontal rule -> box-drawing line ('---' would show literally).
@@ -433,20 +480,13 @@ def _strip_md(text: str) -> str:
 
 
 def _render_table(table_lines: list[str]) -> str:
-    """Render markdown table rows as padded monospace <pre> block."""
-    rows = []
-    for line in table_lines:
-        stripped = line.strip()
-        # Remove leading/trailing pipes and split
-        if stripped.startswith('|'):
-            stripped = stripped[1:]
-        if stripped.endswith('|'):
-            stripped = stripped[:-1]
-        cells = [_strip_md(c.strip()) for c in stripped.split('|')]
-        rows.append(cells)
-
+    """Render markdown table rows as padded monospace <pre> block,
+    or as HTML cards when wider than _TABLE_MAX_WIDTH."""
+    rows = _parse_table_rows(table_lines)
     if not rows:
         return ''
+    if _table_width(rows) > _TABLE_MAX_WIDTH:
+        return _table_as_cards(rows, '<b>', '</b>', _escape)
 
     # Calculate column widths
     col_count = max(len(r) for r in rows)
