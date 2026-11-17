@@ -34,11 +34,18 @@ _QUERY_SECRET_RE = re.compile(
 )
 # Google API keys have a fixed shape; catch them even outside a URL.
 _GOOGLE_KEY_RE = re.compile(r'AIza[0-9A-Za-z_\-]{35}')
+# Telegram bot tokens ("<bot id>:<35-char secret>"). python-telegram-bot puts
+# them in the URL PATH (https://api.telegram.org/bot<TOKEN>/getUpdates), which
+# the query-string pattern above never sees. The bot id is public (it is the
+# bot's user id), so it is kept for debugging; only the secret is masked.
+_TG_TOKEN_RE = re.compile(r'(?<![0-9])(\d{5,}):[A-Za-z0-9_\-]{30,}')
 
 
 def redact_secrets(text: str) -> str:
-    """Mask API keys in URL query strings and bare Google API keys."""
+    """Mask API keys in URL query strings, bare Google API keys and
+    Telegram bot tokens."""
     text = _QUERY_SECRET_RE.sub(r'\1***', text)
+    text = _TG_TOKEN_RE.sub(r'\1:***', text)
     return _GOOGLE_KEY_RE.sub('AIza***', text)
 
 

@@ -25,6 +25,16 @@ logging.basicConfig(
         build_file_handler(_log_file),                   # ~/.log-syne/syne.log: 50 MB, backups syne.log.1.gz .. .5.gz
     ],
 )
+# httpx logs every request at INFO with the full URL, which carries the
+# Telegram bot token (/bot<TOKEN>/...) and ?key= API keys. Keep only its
+# warnings (python-telegram-bot's own docs recommend this).
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# Second layer: scrub secrets from every record (message + traceback) that
+# reaches the console (journal) and syne.log, whichever logger emitted it.
+from .log_redact import install as _install_log_redact
+
+_install_log_redact(logging.getLogger().handlers)
 logger = logging.getLogger("syne")
 
 # Global reference for scheduler callback
