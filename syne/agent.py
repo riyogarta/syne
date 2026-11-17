@@ -244,7 +244,7 @@ class SyneAgent:
         await close_db()
         logger.info("Syne agent stopped.")
 
-    async def reload_provider(self):
+    async def reload_provider(self, raise_on_unavailable: bool = True):
         """Hot-reload the LLM provider from DB config.
 
         Called after /model switch to apply the new provider without restart.
@@ -254,6 +254,10 @@ class SyneAgent:
         # that raises its original error on use. The owner's choice stays in
         # config and no other model takes over. The error is re-raised at the
         # end so the caller (/models) shows it.
+        # raise_on_unavailable=False is for callers that did not change the
+        # default model (context window, thinking level, embedding, OAuth
+        # login): the reload still applies, but an already-broken default
+        # must not make their own action look failed or crash the handler.
         new_provider = await self._init_provider()
         self.provider = new_provider
         logger.info(f"Provider reloaded: {new_provider.name}")
@@ -320,7 +324,7 @@ class SyneAgent:
         if self.subagents:
             self.subagents.provider = new_provider
 
-        if isinstance(new_provider, UnavailableProvider):
+        if raise_on_unavailable and isinstance(new_provider, UnavailableProvider):
             raise new_provider.error
 
     async def create_provider_for_model(self, model_key: str):

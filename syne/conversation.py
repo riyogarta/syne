@@ -2021,6 +2021,7 @@ class Conversation:
         # memories (decision / preference / lesson) and rewrites once on a
         # conflict. Code-enforced: it runs whether or not the model "means"
         # to check. Fail-open, same contract as the rule checker.
+        _pre_guard_response = response
         if (response.content or "").strip() and not getattr(self, "_pending_consent_hash", ""):
             try:
                 response = await self._memory_guard_and_maybe_rewrite(
@@ -2033,6 +2034,45 @@ class Conversation:
                 )
             except Exception:
                 logger.exception("Memory guard crashed — sending response as-is")
+
+        # ─── Re-check a guard rewrite against the hard rules ───────────────
+        # The guard runs AFTER the rule checker. A rewrite is a brand-new
+        # draft: it was never judged against the hard rules, and any
+        # "⚠️ [Rule checker …]" tag on the old draft is gone. Judge the
+        # rewrite again so what is sent is always the checked text, with
+        # its own tag when the check did not pass.
+        if (
+            response is not _pre_guard_response
+            and _rule_check_enabled
+            and (response.content or "").strip()
+            and not getattr(self, "_pending_consent_hash", "")
+        ):
+            try:
+                response = await self._rule_check_and_maybe_regenerate(
+                    response=response,
+                    context=context,
+                    tool_schemas=tool_schemas,
+                    access_level=access_level,
+                    chat_kwargs=chat_kwargs,
+                    user_message=user_message,
+                    tools_ran=tools_ran_this_turn,
+                )
+            except Exception:
+                logger.exception("Rule checker crashed on guard rewrite — tagging response")
+                response = ChatResponse(
+                    content=(
+                        "⚠️ [Rule checker unavailable — response sent unevaluated]\n\n"
+                        f"{response.content or ''}"
+                    ),
+                    model=response.model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    tool_calls=response.tool_calls,
+                    thinking=response.thinking,
+                    stop_reason=response.stop_reason,
+                    cache_read_tokens=response.cache_read_tokens,
+                    cache_write_tokens=response.cache_write_tokens,
+                )
 
         # Save assistant response, with this turn's instrumentation
         _turn_stats = self._ts_finish()

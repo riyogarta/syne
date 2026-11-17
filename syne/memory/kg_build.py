@@ -286,7 +286,7 @@ async def prune_orphan_chunks(conn) -> int:
         """DELETE FROM kg_entities e
            WHERE e.entity_type = 'chunk' AND e.description LIKE 'memory:%'
              AND NOT EXISTS (SELECT 1 FROM memory m
-                             WHERE m.id = substring(e.description from 7)::int)"""
+                             WHERE m.id = substring(e.description from 8)::int)"""
     )
     try:
         return int(res.split()[-1])

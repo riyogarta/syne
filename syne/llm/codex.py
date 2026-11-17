@@ -30,6 +30,9 @@ _REFRESH_BUFFER_SECONDS = 300  # 5 minutes
 
 _TOTAL_ATTEMPTS = _MAX_RETRIES + 1  # 5
 
+# Strong refs for fire-and-forget token saves (the loop keeps only weak ones).
+_BG_SAVE_TASKS: set = set()
+
 # Terminal error codes from Codex CLI response.failed handling
 _TERMINAL_CODES = {"context_length_exceeded", "insufficient_quota", "invalid_prompt"}
 _RETRYABLE_CODES = {"server_is_overloaded", "slow_down", "rate_limit_exceeded"}
@@ -137,30 +140,44 @@ class CodexProvider(LLMProvider):
             logger.error(f"Codex token refresh error: {e}")
             return False
 
+    # (access, refresh, expires_at) config keys; XaiProvider overrides.
+    _cred_keys = (
+        "credential.codex_access_token",
+        "credential.codex_refresh_token",
+        "credential.codex_expires_at",
+    )
+
     def _save_tokens_to_db(self, access_token: str, refresh_token: str, expires_at: float):
-        """Save refreshed tokens to DB in background."""
+        """Save refreshed tokens to DB in background.
+
+        The asyncpg pool belongs to the main event loop, so the save is
+        scheduled on THAT loop. A fresh loop in a side thread (the old way)
+        cannot use the pool and its error was swallowed, so a refreshed
+        token never reached the DB and the next restart used a dead one.
+        """
         import asyncio
-        import threading
+
+        keys = self._cred_keys
+        label = self.name
 
         async def _save():
             try:
                 from ..db.models import set_config
-                await set_config("credential.codex_access_token", access_token)
-                await set_config("credential.codex_refresh_token", refresh_token)
-                await set_config("credential.codex_expires_at", expires_at)
-                logger.debug("Codex tokens saved to DB")
+                await set_config(keys[0], access_token)
+                await set_config(keys[1], refresh_token)
+                await set_config(keys[2], expires_at)
+                logger.debug(f"{label} tokens saved to DB")
             except Exception as e:
-                logger.warning(f"Failed to save Codex tokens to DB: {e}")
+                logger.error(f"Failed to save {label} tokens to DB: {e}", exc_info=True)
 
-        def _run():
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(_save())
-                loop.close()
-            except Exception:
-                pass
-
-        threading.Thread(target=_run, daemon=True).start()
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.error(f"{label} token refreshed outside the event loop — not saved to DB")
+            return
+        task = loop.create_task(_save())
+        _BG_SAVE_TASKS.add(task)
+        task.add_done_callback(_BG_SAVE_TASKS.discard)
 
     def _get_headers(self) -> dict:
         # Refresh token if needed before building headers

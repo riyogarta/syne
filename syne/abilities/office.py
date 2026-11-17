@@ -114,15 +114,20 @@ class OfficeAbility(Ability):
     # MIME mapping for pre_process
     _DOCX_MIMES = {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/msword",
     }
     _XLSX_MIMES = {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
     }
     _PPTX_MIMES = {
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        "application/vnd.ms-powerpoint",
+    }
+
+    # Office 97-2003 binary formats: not readable, rejected with a clear message
+    _LEGACY_EXTS = {".doc": ".docx", ".xls": ".xlsx", ".ppt": ".pptx"}
+    _LEGACY_MIMES = {
+        "application/msword": ".docx",
+        "application/vnd.ms-excel": ".xlsx",
+        "application/vnd.ms-powerpoint": ".pptx",
     }
 
     # Read limits — truncate to keep LLM context manageable
@@ -142,12 +147,25 @@ class OfficeAbility(Ability):
         mime = (input_data.get("mime_type") or "").lower()
         filename = (input_data.get("filename") or "").lower()
 
+        # Legacy binary formats (.doc/.xls/.ppt, Office 97-2003) are a
+        # different file format: python-docx/openpyxl/python-pptx cannot
+        # open them and used to fail with a confusing zip error. Say so.
+        legacy_ext = next(
+            (e for e in self._LEGACY_EXTS if filename.endswith(e)), None,
+        )
+        if legacy_ext or mime in self._LEGACY_MIMES:
+            new_ext = self._LEGACY_EXTS.get(legacy_ext) or self._LEGACY_MIMES.get(mime)
+            raise ValueError(
+                f"'{filename or 'document'}' is an old Office 97-2003 file, which "
+                f"cannot be read. Save it as {new_ext} and send it again."
+            )
+
         kind = None
-        if mime in self._DOCX_MIMES or filename.endswith(".docx") or filename.endswith(".doc"):
+        if mime in self._DOCX_MIMES or filename.endswith(".docx"):
             kind = "docx"
-        elif mime in self._XLSX_MIMES or filename.endswith(".xlsx") or filename.endswith(".xls"):
+        elif mime in self._XLSX_MIMES or filename.endswith(".xlsx"):
             kind = "xlsx"
-        elif mime in self._PPTX_MIMES or filename.endswith(".pptx") or filename.endswith(".ppt"):
+        elif mime in self._PPTX_MIMES or filename.endswith(".pptx"):
             kind = "pptx"
         else:
             return None  # not an Office doc — let other abilities handle

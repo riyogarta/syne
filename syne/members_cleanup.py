@@ -66,6 +66,15 @@ async def _activity_rows(conn, platforms: list[str]) -> list[dict]:
         "  SELECT MAX(s.updated_at) FROM sessions s WHERE s.user_id = u.id "
         f"  AND NOT {group_session_sql('s')} "
         "  AND s.platform_chat_id NOT LIKE 'scheduled:%'"
+        "), ("
+        # Group activity: every group keeps settings.members[<platform id>]
+        # with a 'seen' timestamp refreshed on each message in that group.
+        "  SELECT MAX((mem.value->>'seen')::timestamptz) FROM groups g, "
+        "  jsonb_each(CASE WHEN jsonb_typeof(g.settings->'members') = 'object' "
+        "    THEN g.settings->'members' ELSE '{}'::jsonb END) mem "
+        "  WHERE g.platform = u.platform AND mem.key = u.platform_id "
+        "  AND jsonb_typeof(mem.value) = 'object' "
+        "  AND mem.value->>'seen' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'"
         ")) AS last_active "
         "FROM users u WHERE u.active = true AND u.platform = ANY($1::text[])",
         platforms,

@@ -335,7 +335,20 @@ async def create_hybrid_provider(model_entry: dict) -> LLMProvider:
     from ..db.models import get_config
     
     chat_provider = await create_provider(model_entry)
-    embed_provider = await create_active_embedding_provider()
+    # A broken embedding config must not take chat down with it: every chat
+    # model would otherwise fail to build. The error is kept and raised, as
+    # is, by embed()/embed_batch() only — no silent switch to another model.
+    try:
+        embed_provider = await create_active_embedding_provider()
+    except Exception as embed_err:
+        logger.error(
+            f"Embedding model failed to load (chat continues): "
+            f"{type(embed_err).__name__}: {embed_err}",
+            exc_info=True,
+        )
+        embed_provider = UnavailableProvider(
+            embed_err, label="embedding", embed_error=embed_err,
+        )
     if embed_provider is None:
         return chat_provider
     return HybridProvider(chat_provider=chat_provider, embed_provider=embed_provider)

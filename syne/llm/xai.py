@@ -81,30 +81,8 @@ class XaiProvider(CodexProvider):
         logger.info("xAI OAuth token refreshed successfully")
         return True
 
-    def _save_tokens_to_db(self, access_token: str, refresh_token: str, expires_at: float):
-        """Save refreshed tokens to DB in background (same pattern as Codex)."""
-        import asyncio
-        import threading
-
-        async def _save():
-            try:
-                from ..db.models import set_config
-                await set_config(CRED_ACCESS, access_token)
-                await set_config(CRED_REFRESH, refresh_token)
-                await set_config(CRED_EXPIRES, expires_at)
-                logger.debug("xAI tokens saved to DB")
-            except Exception as e:
-                logger.warning(f"Failed to save xAI tokens to DB: {e}")
-
-        def _run():
-            try:
-                loop = asyncio.new_event_loop()
-                loop.run_until_complete(_save())
-                loop.close()
-            except Exception:
-                pass
-
-        threading.Thread(target=_run, daemon=True).start()
+    # Saving is inherited from CodexProvider; only the config keys differ.
+    _cred_keys = (CRED_ACCESS, CRED_REFRESH, CRED_EXPIRES)
 
     def _get_headers(self) -> dict:
         self._refresh_token_sync()

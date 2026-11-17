@@ -58,11 +58,14 @@ class ImageAnalysisAbility(Ability):
         if input_type == "images" or isinstance(input_data, list):
             images = input_data if isinstance(input_data, list) else [input_data]
             parts: list[str] = []
+            failed: list[str] = []  # tracked per photo, never parsed from text
             total = len(images)
             for idx, img in enumerate(images, start=1):
                 b64 = img.get("base64", "") if isinstance(img, dict) else ""
                 if not b64:
-                    parts.append(f"[Foto {idx}/{total}: gagal dibaca (data kosong)]")
+                    msg = f"[Foto {idx}/{total}: gagal dibaca (data kosong)]"
+                    parts.append(msg)
+                    failed.append(msg)
                     continue
                 result = await self.execute(
                     params={
@@ -78,10 +81,11 @@ class ImageAnalysisAbility(Ability):
                 else:
                     err = result.get("error", "unknown")
                     logger.warning(f"Image analysis failed (photo {idx}/{total}): {err}")
-                    parts.append(f"=== Foto {idx}/{total} ===\n[Analisis gagal: {err}]")
+                    msg = f"=== Foto {idx}/{total} ===\n[Analisis gagal: {err}]"
+                    parts.append(msg)
+                    failed.append(msg)
             # A photo that failed is a failure of the request — reported
             # as-is, never silently dropped.
-            failed = [p for p in parts if "[Analisis gagal" in p or "gagal dibaca" in p]
             if failed:
                 raise RuntimeError("\n".join(failed))
             return "\n\n".join(parts)

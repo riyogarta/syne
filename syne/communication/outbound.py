@@ -289,3 +289,29 @@ def process_outbound(text: str, strip_paths: bool = True) -> str:
     text = strip_narration(text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
+
+
+_UPLOAD_NAME_MAX = 120  # bytes; prefix (wa_/dc_ + id) is added on top
+
+
+def safe_upload_name(filename: str, max_bytes: int = _UPLOAD_NAME_MAX) -> str:
+    """Make a sender-supplied file name safe to use as a path component.
+
+    Removes path separators, '..', NUL and every other control character,
+    and caps the length in UTF-8 bytes (most filesystems allow 255 per
+    name) while keeping the extension, so the file still opens as the
+    right type. Never returns an empty string.
+    """
+    name = str(filename or "")
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    name = name.replace("/", "_").replace("\\", "_").replace("..", "_")
+    name = name.strip().strip(".") or "file"
+
+    if len(name.encode("utf-8")) <= max_bytes:
+        return name
+    stem, ext = os.path.splitext(name)
+    if len(ext.encode("utf-8")) > 16:  # not a real extension
+        stem, ext = name, ""
+    budget = max_bytes - len(ext.encode("utf-8"))
+    stem = stem.encode("utf-8")[:budget].decode("utf-8", "ignore").rstrip() or "file"
+    return stem + ext

@@ -17,6 +17,8 @@ from telegram.ext import (
     MessageHandler,
     MessageReactionHandler,
     CallbackQueryHandler,
+    TypeHandler,
+    ApplicationHandlerStop,
     filters,
     ContextTypes,
 )
@@ -231,6 +233,8 @@ class TelegramChannel:
         self._active_tasks: dict[int, asyncio.Task] = {}
         # Background xAI device-code polling tasks per user_id (/cancel aborts)
         self._xai_device_tasks: dict[int, asyncio.Task] = {}
+        # True while /restore replaces the database (see _restore_gate)
+        self._restore_running: bool = False
         # Deduplicate inbound Telegram messages (Telegram may retry delivering the same update)
         # Format: {chat_id: deque([message_id, ...], maxlen=200)}
         self._seen_inbound: dict[int, deque[int]] = {}
@@ -279,6 +283,8 @@ class TelegramChannel:
     def _register_handlers(self):
         """Register all Telegram handlers on self.app."""
         # Command handlers
+        # Must run before every other handler: blocks all updates while /restore runs
+        self.app.add_handler(TypeHandler(Update, self._restore_gate), group=-1)
         self.app.add_handler(CommandHandler("start", self._cmd_start))
         self.app.add_handler(CommandHandler("help", self._cmd_help))
         self.app.add_handler(CommandHandler("version", self._cmd_version))
@@ -3263,6 +3269,10 @@ Or just send me a message!"""
         )])
         for m in self._sort_models_for_display(models, active_key):
             key = m.get("key", "")
+            # Telegram caps callback_data at 64 bytes; one oversized key used
+            # to make Telegram reject the whole menu. Same rule as /checker.
+            if not key or len(f"guard:set:{key}".encode()) > 64:
+                continue
             label = m.get("label", key)
             buttons.append([InlineKeyboardButton(
                 f"{'✅ ' if key == current_key else ''}{label}",
@@ -4264,7 +4274,7 @@ Or just send me a message!"""
 
             active_key = await get_config("provider.active_model", "gemini-pro")
             if self.agent and model_key == active_key:
-                await self.agent.reload_provider()
+                await self.agent.reload_provider(raise_on_unavailable=False)
 
             ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
             await query.answer(f"Context window set to {ctx_display}")
@@ -4425,7 +4435,7 @@ Or just send me a message!"""
             if updated:
                 await set_config("provider.models", models)
                 if self.agent:
-                    await self.agent.reload_provider()
+                    await self.agent.reload_provider(raise_on_unavailable=False)
                 await query.answer(f"Thinking → {self._format_thinking_level(new_tb)}")
             await self._models_menu_detail(query, model_key)
 
@@ -4993,7 +5003,7 @@ Or just send me a message!"""
                 new_active = models[0]
                 await set_config("provider.active_embedding", new_active["key"])
                 if self.agent:
-                    await self.agent.reload_provider()
+                    await self.agent.reload_provider(raise_on_unavailable=False)
             await query.answer("Embedding deleted")
             await self._embed_menu_main(query)
 
@@ -5104,7 +5114,7 @@ Or just send me a message!"""
                 await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
 
                 # Hot-reload provider (picks up new embedding)
-                await self.agent.reload_provider()
+                await self.agent.reload_provider(raise_on_unavailable=False)
 
                 return True, embed_entry.get("label", embed_key)
             else:
@@ -5226,6 +5236,27 @@ Or just send me a message!"""
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
+    async def _restore_gate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """While /restore replaces the database, nothing else may touch it.
+
+        Runs before every other handler (group -1). Any update that arrives
+        mid-restore — messages, commands, button presses, including a second
+        "Yes, restore" — gets a short notice and is stopped here, so it is
+        never written into a database that is being dropped and reloaded.
+        """
+        if not self._restore_running:
+            return
+        notice = "⏳ Database restore in progress — Syne will restart when it finishes."
+        try:
+            if update.callback_query:
+                await update.callback_query.answer(notice, show_alert=True)
+            elif update.effective_message and update.effective_chat \
+                    and update.effective_chat.type == "private":
+                await update.effective_message.reply_text(notice)
+        except Exception:
+            pass
+        raise ApplicationHandlerStop
+
     async def _handle_restore_callback(self, query, filename):
         """Handle restore confirmation/execution from inline callback."""
         if filename == "cancel":
@@ -5255,9 +5286,19 @@ Or just send me a message!"""
             await query.edit_message_text(f"File not found: {actual_filename}")
             return
 
-        await query.edit_message_text(f"Restoring from {actual_filename}...")
-
-        success, message = await asyncio.to_thread(run_restore, filepath)
+        if self._restore_running:
+            await query.answer("A restore is already running.", show_alert=True)
+            return
+        # Set before the first await below, so a second "Yes, restore" (or any
+        # other update) is stopped by _restore_gate from here on.
+        self._restore_running = True
+        try:
+            await query.edit_message_text(f"Restoring from {actual_filename}...")
+            success, message = await asyncio.to_thread(run_restore, filepath)
+        except Exception as e:
+            success, message = False, str(e)
+        if not success:
+            self._restore_running = False
         if success:
             await query.edit_message_text(f"Restored {actual_filename}. Restarting...")
             import os, threading; threading.Timer(1, os._exit, args=[1]).start()
@@ -8901,9 +8942,11 @@ Or just send me a message!"""
         try:
             if provider == "codex":
                 await self._exchange_codex_oauth(code, state)
+                await self._reload_after_oauth()
                 await bot.send_message(chat_id=chat_id, text="✅ OpenAI/Codex OAuth configured successfully!")
             elif provider == "claude":
                 await self._exchange_claude_oauth(code, state)
+                await self._reload_after_oauth()
                 await bot.send_message(chat_id=chat_id, text="✅ Claude OAuth configured successfully!")
             else:
                 await bot.send_message(chat_id=chat_id, text=f"❌ Unknown provider: {provider}")
@@ -9331,7 +9374,7 @@ Or just send me a message!"""
         if updated:
             await set_config("provider.models", models)
             if self.agent:
-                await self.agent.reload_provider()
+                await self.agent.reload_provider(raise_on_unavailable=False)
 
             ctx_display = f"{new_ctx/1000000:.1f}M" if new_ctx >= 1000000 else f"{new_ctx//1000}K"
             await bot.send_message(
@@ -9385,7 +9428,7 @@ Or just send me a message!"""
         else:
             await set_config("provider.models", models)
             if self.agent:
-                await self.agent.reload_provider()
+                await self.agent.reload_provider(raise_on_unavailable=False)
             shown = json.dumps(caps, indent=2) if caps else "{}  (auto-detect)"
             await bot.send_message(
                 chat_id=chat_id,
@@ -9471,7 +9514,7 @@ Or just send me a message!"""
         if updated:
             await set_config("provider.models", models)
             if self.agent:
-                await self.agent.reload_provider()
+                await self.agent.reload_provider(raise_on_unavailable=False)
             import json as _json
             await bot.send_message(
                 chat_id=chat_id,
@@ -9852,6 +9895,7 @@ Or just send me a message!"""
             data = await poll_device_token(dev["device_code"], dev["interval"], dev["expires_in"])
             await save_tokens(data)
             logger.info("xAI OAuth credentials saved to DB")
+            await self._reload_after_oauth()
             await bot.send_message(chat_id=chat_id, text=f"✅ {label} OAuth configured successfully!")
         except asyncio.CancelledError:
             logger.info(f"xAI device flow cancelled by user {user_id}")
@@ -9918,6 +9962,21 @@ Or just send me a message!"""
         })
         url = f"{_AUTHORIZE_URL}?{params}"
         return url, {"verifier": verifier, "challenge": challenge, "state": verifier}
+
+    async def _reload_after_oauth(self):
+        """Apply freshly saved OAuth tokens to the running providers.
+
+        The login only wrote the tokens to the DB; the live provider kept the
+        old (often expired) ones until a restart. Reload picks them up. A
+        default model that is still unavailable must not turn a successful
+        login into an error, so it never raises here.
+        """
+        if not self.agent:
+            return
+        try:
+            await self.agent.reload_provider(raise_on_unavailable=False)
+        except Exception as e:
+            logger.error(f"Provider reload after OAuth login failed: {e}", exc_info=True)
 
     async def _exchange_codex_oauth(self, code: str, state: dict):
         """Exchange Codex auth code for tokens and save to DB."""

@@ -776,15 +776,22 @@ class PdfAbility(Ability):
         if "pdf" not in mime and not filename.lower().endswith(".pdf"):
             return None
 
+        # Channels hand over either base64 or a saved file path (WhatsApp and
+        # Discord store large files on disk), same contract as office.
         b64 = input_data.get("base64", "")
-        if not b64:
+        path = input_data.get("path", "")
+        if not b64 and not path:
             raise ValueError(f"PDF '{filename}' has no data")
 
         try:
-            import base64
-            content = base64.b64decode(b64)
+            if b64:
+                import base64
+                content = base64.b64decode(b64)
+            else:
+                with open(path, "rb") as f:
+                    content = f.read()
         except Exception as e:
-            logger.warning(f"PDF pre_process: base64 decode failed: {e}")
+            logger.warning(f"PDF pre_process: read failed: {e}")
             raise
 
         if len(content) > self._MAX_PDF_BYTES:

@@ -47,6 +47,7 @@ from .tags import parse_reply_tag, parse_react_tags
 from .outbound import (
     extract_all_media,
     process_outbound,
+    safe_upload_name,
     split_message,
 )
 from .formatting import escape_markdown, markdown_to_discord
@@ -945,7 +946,7 @@ class DiscordChannel:
 
         uploads = self.agent.workspace_uploads
         os.makedirs(uploads, exist_ok=True)
-        safe = filename.replace("/", "_").replace("\\", "_").replace("..", "_")
+        safe = safe_upload_name(filename)
         sid = re.sub(r"[^A-Za-z0-9]", "", str(getattr(att, "id", "") or msg_id))[:40] or "att"
         tag = "reply_" if from_reply else ""
         path = os.path.join(uploads, f"dc_{sid}_{tag}{safe}")

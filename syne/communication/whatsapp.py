@@ -107,7 +107,7 @@ from ..db.models import (
 )
 from .formatting import markdown_to_whatsapp
 from .inbound import InboundContext, build_user_context_prefix, load_group_settings
-from .outbound import extract_all_media, process_outbound, split_message
+from .outbound import extract_all_media, process_outbound, safe_upload_name, split_message
 from .tags import parse_reply_tag
 from .registry import (
     CHANNEL_TELEGRAM,
@@ -1148,7 +1148,7 @@ class WhatsAppChannel:
 
         uploads = self.agent.workspace_uploads
         os.makedirs(uploads, exist_ok=True)
-        safe = filename.replace("/", "_").replace("\\", "_").replace("..", "_")
+        safe = safe_upload_name(filename)
         sid = re.sub(r"[^A-Za-z0-9]", "", str(msg_id or ""))[:40] or "doc"
         tag = "reply_" if from_reply else ""
         path = os.path.join(uploads, f"wa_{sid}_{tag}{safe}")
