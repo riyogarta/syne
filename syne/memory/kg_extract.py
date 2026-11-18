@@ -41,10 +41,13 @@ from .. import maintenance as _maint
 from ..anchor_text import split_context_prefix
 from ..db.connection import get_connection
 from ..db.models import get_config
+from . import kg_refs as _refs
 
 logger = logging.getLogger("syne.memory.kg_extract")
 
-# Entities of the rule-built reference graph: never resolution targets.
+# Entities of the rule-built reference graph: never resolution targets,
+# except 'ayah': a name that is exactly one Qur'an verse ("QS 54:46",
+# "Al-Baqarah ayat 255") joins the existing ayah entity (resolve_ayah).
 REFERENCE_TYPES = ["chunk", "ayah", "quran_ayah_ref", "quran_chunk",
                    "quran_surah", "kaidah_entry"]
 
@@ -373,9 +376,76 @@ def parse_extraction(raw: str, s: dict) -> dict:
 Embedder = Callable[[str], Awaitable[Optional[list]]]
 
 
+_AYAH_INDEX: dict = {"at": 0.0, "index": None, "pattern": None}
+_AYAH_INDEX_TTL = 3600.0
+
+
+async def ayah_index(conn) -> tuple:
+    """(SurahIndex, QS pattern) built from the 'ayah' entities (names from
+    their descriptions, "Al-Qamar 46"), the Qur'an aliases of kg.ref_sources
+    and kg.qs_pattern. Cached for an hour."""
+    now = time.monotonic()
+    if _AYAH_INDEX["index"] is not None and now - _AYAH_INDEX["at"] < _AYAH_INDEX_TTL:
+        return _AYAH_INDEX["index"], _AYAH_INDEX["pattern"]
+    rows = await conn.fetch(
+        "SELECT name, description FROM kg_entities WHERE entity_type = 'ayah'")
+    names: dict = {}
+    counts: dict = {}
+    for r in rows:
+        m = re.fullmatch(r"QS (\d{1,3}):(\d{1,3})", r["name"] or "")
+        if not m:
+            continue
+        su, ay = int(m.group(1)), int(m.group(2))
+        counts[su] = max(counts.get(su, 0), ay)
+        desc = (r["description"] or "").strip()
+        head, _, tail = desc.rpartition(" ")
+        nm = head if tail.isdigit() else desc
+        if nm:
+            names.setdefault(su, nm)
+    aliases = dict(_refs.DEFAULT_SURAH_ALIASES)
+    pattern = _refs.DEFAULT_QS_PATTERN
+    try:
+        src = await get_config("kg.ref_sources", None)
+        if isinstance(src, dict):
+            for v in src.values():
+                if (isinstance(v, dict) and v.get("kind") == "quran"
+                        and isinstance(v.get("aliases"), dict)):
+                    aliases = dict(v["aliases"])
+        pattern = await get_config("kg.qs_pattern", None) or pattern
+    except Exception:
+        pass
+    idx = _refs.surah_index_from(names, counts, aliases)
+    _AYAH_INDEX.update(at=now, index=idx, pattern=pattern)
+    return idx, pattern
+
+
+async def resolve_ayah(conn, name: str) -> Optional[int]:
+    """ID of the 'ayah' entity when the whole name is one Qur'an verse."""
+    index, pattern = await ayah_index(conn)
+    ref = _refs.parse_single_ayah(name, index, pattern)
+    if not ref:
+        return None
+    return await conn.fetchval(
+        "SELECT id FROM kg_entities WHERE entity_type = 'ayah' AND name = $1 LIMIT 1",
+        _refs.ayah_entity_name(*ref),
+    )
+
+
 async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
                          s: dict) -> tuple:
-    """(entity id, how): how = norm | embedding | new."""
+    """(entity id, how): how = ayah | norm | embedding | new.
+
+    A name that is exactly one Qur'an verse joins the 'ayah' entity of the
+    reference graph (not for persons: "Yusuf 12" may be a name).
+    """
+    if etype != "person" and re.search(r"\d", name or ""):
+        try:
+            aid = await resolve_ayah(conn, name)
+        except Exception as e:
+            logger.debug(f"KG ayah link skipped ({name!r}): {e}")
+            aid = None
+        if aid:
+            return aid, "ayah"
     norm = normalize_name(name)
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "

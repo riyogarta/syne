@@ -7,6 +7,7 @@ same tables are ignored without deleting them.
 
   step 2 - entities named in the message: word n-grams of the message,
            normalised like extraction does, matched on kg_entities.norm_name;
+           Qur'an verses named with "QS ..." are matched on the 'ayah' entities;
   step 5 - expansion: seeds are those entities plus the entities of
            relations taken from the memories recalled this turn (their
            chunk IDs in kg_relation_sources). Hop 1 = relations of the
@@ -21,12 +22,14 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from datetime import timezone
 from typing import Optional
 
 from ..db.connection import get_connection
 from ..db.models import get_config
-from .kg_extract import REFERENCE_TYPES, ngrams, parse_era
+from . import kg_refs as _refs
+from .kg_extract import REFERENCE_TYPES, ayah_index, ngrams, parse_era
 
 logger = logging.getLogger("syne.memory.kg_recall")
 
@@ -164,6 +167,45 @@ JOIN kg_entities oe ON oe.id = x.object_id
 """
 
 
+_AYAH_SQL = """
+SELECT e.id, e.name
+FROM kg_entities e
+WHERE e.entity_type = 'ayah' AND e.name = ANY($1::text[])
+  AND EXISTS (
+      SELECT 1 FROM kg_relations r
+      JOIN kg_relation_sources s ON s.relation_id = r.id
+      WHERE (r.subject_id = e.id OR r.object_id = e.id)
+        AND r.updated_at >= $2
+        AND s.origin = 'llm' AND s.created_at >= $2)
+"""
+
+_AYAH_MAX_RANGE = 10   # a longer "QS 2:1-286" mention seeds nothing
+
+
+async def _ayah_seeds(conn, query: str, era) -> list:
+    """'ayah' entity IDs of the "QS ..." mentions in the message that have
+    relations from the KG worker, in the order mentioned."""
+    try:
+        index, pattern = await ayah_index(conn)
+        refs, _rej = _refs.parse_mentions(query, index, pattern)
+    except Exception as e:
+        logger.debug(f"KG recall ayah mentions skipped: {e}")
+        return []
+    names: list = []
+    for ref in refs:
+        if ref.end - ref.start + 1 > _AYAH_MAX_RANGE:
+            continue
+        for a in ref.ayahs():
+            n = _refs.ayah_entity_name(ref.surah, a)
+            if n not in names:
+                names.append(n)
+    if not names:
+        return []
+    rows = await conn.fetch(_AYAH_SQL, names, era)
+    order = {n: i for i, n in enumerate(names)}
+    return [int(r["id"]) for r in sorted(rows, key=lambda r: order.get(r["name"], 1 << 20))]
+
+
 # ── ranking + formatting (pure) ───────────────────────────────────────────
 
 def rank(hop1: list, hop2: list, seeds: list, limit: int) -> list:
@@ -256,6 +298,10 @@ async def recall_kg(
                 for r in sorted(rows, key=lambda r: (order.get(r["norm_name"], 1 << 20), r["id"])):
                     if int(r["id"]) not in seeds:
                         seeds.append(int(r["id"]))
+            if re.search(r"\d", query or ""):
+                for eid in await _ayah_seeds(conn, query, era):
+                    if eid not in seeds:
+                        seeds.append(eid)
             if mids:
                 mrank = {m: n for n, m in enumerate(mids)}
                 rows = await conn.fetch(_MEMORY_SEEDS_SQL, mids, era)

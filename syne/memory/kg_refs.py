@@ -137,6 +137,11 @@ def build_surah_index(quran_chunks: Iterable[str],
         idx.names.setdefault(surah, name)
         idx.ayah_counts[surah] = max(idx.ayah_counts.get(surah, 0), a2)
 
+    return _index_keys(idx, aliases)
+
+
+def _index_keys(idx: SurahIndex, aliases: Optional[dict]) -> SurahIndex:
+    """Lookup keys from idx.names, then aliases (see build_surah_index)."""
     claims: dict[str, set] = {}
     for surah, name in idx.names.items():
         for k in surah_keys(name):
@@ -158,6 +163,14 @@ def build_surah_index(quran_chunks: Iterable[str],
             idx.keys[k] = surah
             idx.ambiguous.discard(k)
     return idx
+
+
+def surah_index_from(names: dict, ayah_counts: dict,
+                     aliases: Optional[dict] = None) -> SurahIndex:
+    """Index from known surah names {number: name} and ayah counts
+    {number: last ayah}, e.g. read back from the 'ayah' entities."""
+    idx = SurahIndex(names=dict(names), ayah_counts=dict(ayah_counts))
+    return _index_keys(idx, aliases)
 
 
 # ── References ───────────────────────────────────────────────────────────
@@ -272,3 +285,29 @@ def parse_part(title: str, pattern: str = DEFAULT_PART_PATTERN
         return None
     base = (t[:m.start()] + t[m.end():]).strip()
     return base, i, n
+
+
+_QS_PREFIX = re.compile(r"^\s*(?i:q\.?\s?s\.?)\s*")
+
+
+def parse_single_ayah(name: str, index: SurahIndex,
+                      pattern: str = DEFAULT_QS_PATTERN) -> Optional[tuple[int, int]]:
+    """(surah, ayah) when the WHOLE name is one Qur'an verse, else None.
+
+    "QS 54:46", "QS. Al-Qamar: 46", "Al-Baqarah ayat 255", "Surah Al-Kahfi 10",
+    "QS. Al-Baqarah (2): 255". A range, an unknown surah, an ayah out of
+    range or any other text gives None (never guesses).
+    """
+    s = (name or "").strip()
+    if not s or not re.search(r"\d", s):
+        return None
+    m = re.fullmatch(pattern, "QS " + _QS_PREFIX.sub("", s))
+    if not m:
+        return None
+    if m.group("a2") and m.group("a2") != m.group("a1"):
+        return None
+    nm = (m.group("name") or "").strip(" -'")
+    ref, _why = make_ref(index, nm or None, m.group("snum") or m.group("snum2"), m.group("a1"))
+    if ref is None:
+        return None
+    return ref.surah, ref.start
