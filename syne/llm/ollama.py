@@ -17,6 +17,28 @@ logger = logging.getLogger("syne.llm.ollama")
 # handle parallel requests well (model load contention).
 _EMBED_SEMAPHORE = asyncio.Semaphore(1)
 
+# Recall embeds (embed_fast) in flight. Background embeds (history,
+# memory_store, guard) hold off while any is running, so a recall never
+# queues on Ollama (one request at a time) behind a NEW long background
+# request. Bounded by _FAST_YIELD_MAX so a stream of recalls cannot
+# starve background work.
+_fast_inflight = 0
+_fast_idle = asyncio.Event()
+_fast_idle.set()
+_FAST_YIELD_MAX = 30.0
+
+
+async def _yield_to_recall() -> None:
+    """Wait (bounded) until no recall embed is in flight."""
+    if _fast_idle.is_set():
+        return
+    try:
+        await asyncio.wait_for(_fast_idle.wait(), _FAST_YIELD_MAX)
+    except asyncio.TimeoutError:
+        logger.warning(
+            f"Background embed waited {_FAST_YIELD_MAX:.0f}s for recall embeds; proceeding"
+        )
+
 _EMBED_TIMEOUT = 120.0  # was 30s — local Ollama can be slow under load / cold start
 _BATCH_TIMEOUT = 180.0
 _MAX_RETRIES = 3
@@ -75,6 +97,7 @@ class OllamaProvider(LLMProvider):
         async with _EMBED_SEMAPHORE:
             for attempt in range(_MAX_RETRIES):
                 try:
+                    await _yield_to_recall()
                     async with httpx.AsyncClient(timeout=_EMBED_TIMEOUT) as client:
                         resp = await client.post(
                             f"{self.base_url}/api/embed",
@@ -134,7 +157,15 @@ class OllamaProvider(LLMProvider):
                 vector=vector, model=model, dimensions=len(vector), input_tokens=0,
             )
 
-        return await asyncio.wait_for(_one(), timeout)
+        global _fast_inflight
+        _fast_inflight += 1
+        _fast_idle.clear()
+        try:
+            return await asyncio.wait_for(_one(), timeout)
+        finally:
+            _fast_inflight -= 1
+            if _fast_inflight == 0:
+                _fast_idle.set()
 
     async def embed_batch(
         self,
@@ -152,6 +183,7 @@ class OllamaProvider(LLMProvider):
         async with _EMBED_SEMAPHORE:
             for attempt in range(_MAX_RETRIES):
                 try:
+                    await _yield_to_recall()
                     async with httpx.AsyncClient(timeout=_BATCH_TIMEOUT) as client:
                         resp = await client.post(
                             f"{self.base_url}/api/embed",
