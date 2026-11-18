@@ -158,6 +158,11 @@ class SyneAgent:
         # Can still be triggered manually via /memory dedup
         # self._dedup_task = asyncio.create_task(self._periodic_memory_dedup())
 
+        # 11. BM25 keyword index: index rows written before migration 51, in
+        # small batches in the background (never holds up startup).
+        from .memory.bm25_backfill import run_backfill
+        self._bm25_backfill_task = asyncio.create_task(run_backfill())
+
         logger.info("Syne agent started.")
 
     async def _run_startup_migration(self):
@@ -233,6 +238,13 @@ class SyneAgent:
             self._dedup_task.cancel()
             try:
                 await self._dedup_task
+            except asyncio.CancelledError:
+                pass
+        _bf = getattr(self, '_bm25_backfill_task', None)
+        if _bf and not _bf.done():
+            _bf.cancel()
+            try:
+                await _bf
             except asyncio.CancelledError:
                 pass
         if hasattr(self, '_token_refresh_task') and self._token_refresh_task:

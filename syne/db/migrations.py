@@ -1403,6 +1403,23 @@ async def _m50_drop_memory_auto_archive(conn) -> None:
     await conn.execute("DROP TABLE IF EXISTS memory_auto_archive")
 
 
+async def _m51_bm25_keyword_index(conn) -> None:
+    """BM25 keyword index for memory and messages (Riyo, 18 Nov 2026). Idempotent.
+
+    KG-RAG stage 1, step 1: tsv / tsv_len columns, GIN indexes, BM25
+    statistics tables (bm25_corpus, bm25_terms), the syne_tsv() word
+    splitter (Arabic harakat removed) and the triggers that keep both in
+    step. The DDL lives in syne/db/bm25_ddl.py; schema.sql carries the
+    same text. Old rows stay tsv NULL until the background backfill.
+    """
+    from ..cli.helpers import _split_sql_statements
+    from .bm25_ddl import BM25_SCHEMA_SQL
+    for stmt in _split_sql_statements(BM25_SCHEMA_SQL):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            await conn.execute(stmt)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1454,6 +1471,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (48, _m48_memory_guard_max_retries, "transactional"),
     (49, _m49_remove_memory_decay, "transactional"),
     (50, _m50_drop_memory_auto_archive, "transactional"),
+    (51, _m51_bm25_keyword_index, "transactional"),
 ]
 
 
