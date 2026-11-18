@@ -200,3 +200,73 @@ def test_schema_sql_carries_ddl_and_seeds():
 def test_ddl_splits_into_statements():
     stmts = [s.strip() for s in _split_sql_statements(KG_EXTRACT_SCHEMA_SQL)]
     assert sum(1 for s in stmts if s.endswith(";")) == 4
+
+
+# ── /kgextract Telegram menu ──────────────────────────────────────────────
+
+def _kgx_env(monkeypatch, store):
+    import syne.communication.telegram as T
+    from unittest.mock import AsyncMock
+
+    async def gc(key, default=None):
+        return store.get(key, default)
+
+    async def sc(key, value, description=None):
+        store[key] = value
+    monkeypatch.setattr(T, "get_config", gc)
+    monkeypatch.setattr(T, "set_config", sc)
+    monkeypatch.setattr(T, "_checker_default_model_label", AsyncMock(return_value="Def"))
+    return T
+
+
+def _fake_channel(T):
+    from types import SimpleNamespace
+    fake = SimpleNamespace(_sort_models_for_display=T.TelegramChannel._sort_models_for_display)
+    fake._kgextract_menu_main = lambda *a, **k: T.TelegramChannel._kgextract_menu_main(fake, *a, **k)
+    return fake
+
+
+async def test_kgextract_menu_lists_models_and_skips_long_keys(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    long_key = "k" * 60
+    store = {"provider.models": [{"key": "ok", "label": "OK"}, {"key": long_key, "label": "L"}],
+             "provider.active_model": "ok", "kg.extract_enabled": True, "kg.extract_model": ""}
+    T = _kgx_env(monkeypatch, store)
+    msg = SimpleNamespace(reply_text=AsyncMock())
+    await T.TelegramChannel._kgextract_menu_main(_fake_channel(T), SimpleNamespace(message=msg))
+    kw = msg.reply_text.call_args.kwargs
+    datas = [b.callback_data for row in kw["reply_markup"].inline_keyboard for b in row]
+    assert datas[:3] == ["kgx:toggle:off", "kgx:set:", "kgx:set:ok"]
+    assert f"kgx:set:{long_key}" not in datas
+    assert all(len(d.encode()) <= 64 for d in datas)
+    assert "Default</b> (Def)" in msg.reply_text.call_args.args[0]
+
+
+async def test_kgextract_callbacks_write_config(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    store = {"provider.models": [{"key": "ok", "label": "OK", "model_id": "m1"}],
+             "provider.active_model": "ok", "kg.extract_enabled": True, "kg.extract_model": ""}
+    T = _kgx_env(monkeypatch, store)
+    fake = _fake_channel(T)
+    q = SimpleNamespace(data="x", message=None, edit_message_text=AsyncMock())
+    await T.TelegramChannel._handle_kgextract_callback(fake, q, "kgx:set:ok")
+    assert store["kg.extract_model"] == "ok"
+    assert "<b>OK</b>" in q.edit_message_text.call_args.args[0]
+    await T.TelegramChannel._handle_kgextract_callback(fake, q, "kgx:toggle:off")
+    assert store["kg.extract_enabled"] is False
+    await T.TelegramChannel._handle_kgextract_callback(fake, q, "kgx:set:")
+    assert store["kg.extract_model"] == ""
+    await T.TelegramChannel._handle_kgextract_callback(fake, q, "kgx:set:missing")
+    assert store["kg.extract_model"] == ""
+    assert q.edit_message_text.call_args.args[0] == "Model not found in /models."
+
+
+def test_kgextract_registered():
+    import inspect
+    import syne.communication.telegram as T
+    src = inspect.getsource(T)
+    assert 'CommandHandler("kgextract", self._cmd_kgextract)' in src
+    assert 'BotCommand("kgextract"' in src
+    assert 'data.startswith("kgx:")' in src

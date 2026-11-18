@@ -293,6 +293,7 @@ class TelegramChannel:
         self.app.add_handler(CommandHandler("consent", self._cmd_consent))
         self.app.add_handler(CommandHandler("checker", self._cmd_checker))
         self.app.add_handler(CommandHandler("guard", self._cmd_guard))
+        self.app.add_handler(CommandHandler("kgextract", self._cmd_kgextract))
         self.app.add_handler(CommandHandler("identity", self._cmd_identity))
         self.app.add_handler(CommandHandler("restart", self._cmd_restart))
         self.app.add_handler(CommandHandler("restartollama", self._cmd_restartollama))
@@ -407,6 +408,7 @@ class TelegramChannel:
             BotCommand("evaluator", "Manage evaluator model (owner only)"),
             BotCommand("guard", "Memory guard: on/off and judge model (owner only)"),
             BotCommand("help", "Available commands"),
+            BotCommand("kgextract", "KG extraction: on/off and model (owner only)"),
             BotCommand("identity", "Show agent identity"),
             BotCommand("imagegen", "Switch image generation provider (owner only)"),
             BotCommand("memory", "Memory statistics"),
@@ -2637,6 +2639,7 @@ class TelegramChannel:
 /consent — Toggle consent gate for destructive tools
 /checker — Rule checker: off, default model, evaluator, any /models entry, or timeout <sec>
 /guard — Memory guard: on/off and judge model (from /models)
+/kgextract — KG extraction: on/off and model (from /models)
 /createability — Toggle the self-modification gate (ability creation)
 /allowlist — Manage shell allowlist (add/remove/list)
 /denylist — Manage shell denylist (add/remove/list)
@@ -3376,6 +3379,116 @@ Or just send me a message!"""
             await self._guard_menu_main(
                 query,
                 note=f"Judge model set to <b>{_html.escape(entry.get('label', model_key))}</b>.",
+            )
+
+    # ── KG extraction (KG-RAG stage 2): on/off + model picked from /models ──
+
+    async def _cmd_kgextract(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /kgextract — KG ingestion on/off and the extraction model."""
+        user = update.effective_user
+        existing_user = await get_user("telegram", str(user.id))
+        access_level = existing_user.get("access_level", "public") if existing_user else "public"
+        if access_level != "owner":
+            await update.message.reply_text("Only the owner can manage KG extraction.")
+            return
+        await self._kgextract_menu_main(update)
+
+    async def _kgextract_menu_main(self, update_or_query, note: str = ""):
+        """Render the KG-extraction menu: on/off toggle + model picker (from /models).
+
+        kg.extract_enabled / kg.extract_model are read by the KG worker every
+        round, so a change applies without a restart.
+        """
+        import html as _html
+
+        raw_on = await get_config("kg.extract_enabled", True)
+        enabled = raw_on if isinstance(raw_on, bool) else (
+            str(raw_on).strip().lower() not in ("false", "0", "no", "off", ""))
+        current_key = await get_config("kg.extract_model", "") or ""
+        current_key = current_key.strip() if isinstance(current_key, str) else ""
+        models = await get_config("provider.models", []) or []
+        active_key = await get_config("provider.active_model", "")
+        default_label = await _checker_default_model_label()
+
+        if not current_key:
+            current_text = f"<b>Default</b> ({_html.escape(default_label)})"
+        else:
+            entry = next((m for m in models if m.get("key") == current_key), None)
+            if entry:
+                current_text = (
+                    f"<b>{_html.escape(entry.get('label', current_key))}</b>\n"
+                    f"Model ID: <code>{_html.escape(entry.get('model_id', ''))}</code>"
+                )
+            else:
+                current_text = (
+                    f"<code>{_html.escape(current_key)}</code> — not found in /models, "
+                    f"extraction waits until a valid model is chosen"
+                )
+
+        state = "ON" if enabled else "OFF"
+        buttons = [[InlineKeyboardButton(
+            f"{'🟢' if enabled else '⚪'} Extraction {state} — tap to turn "
+            f"{'off' if enabled else 'on'}",
+            callback_data=f"kgx:toggle:{'off' if enabled else 'on'}",
+        )]]
+        buttons.append([InlineKeyboardButton(
+            f"{'✅ ' if not current_key else ''}Default ({default_label})",
+            callback_data="kgx:set:",
+        )])
+        for m in self._sort_models_for_display(models, active_key):
+            key = m.get("key", "")
+            # Telegram caps callback_data at 64 bytes (same rule as /guard).
+            if not key or len(f"kgx:set:{key}".encode()) > 64:
+                continue
+            label = m.get("label", key)
+            buttons.append([InlineKeyboardButton(
+                f"{'✅ ' if key == current_key else ''}{label}",
+                callback_data=f"kgx:set:{key}",
+            )])
+
+        text = (
+            f"<b>KG Extraction</b>: {state}\n\n"
+            f"New memories and chat messages are read in the background; the model "
+            f"extracts entities and relations into the knowledge graph.\n\n"
+            f"Model: {current_text}"
+        )
+        if note:
+            text = f"{note}\n\n{text}"
+        markup = InlineKeyboardMarkup(buttons)
+        if hasattr(update_or_query, 'message') and update_or_query.message and not hasattr(update_or_query, 'data'):
+            await update_or_query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+        else:
+            await update_or_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+
+    async def _handle_kgextract_callback(self, query, data: str):
+        """Handle kgx:* callbacks (owner gate is applied by _handle_callback)."""
+        import html as _html
+
+        if data == "kgx:main":
+            await self._kgextract_menu_main(query)
+            return
+
+        if data.startswith("kgx:toggle:"):
+            on = data.split(":", 2)[2] == "on"
+            await set_config("kg.extract_enabled", on)
+            await self._kgextract_menu_main(query, note=f"KG extraction turned <b>{'ON' if on else 'OFF'}</b>.")
+            return
+
+        if data.startswith("kgx:set:"):
+            model_key = data.split(":", 2)[2]
+            if not model_key:
+                await set_config("kg.extract_model", "")
+                await self._kgextract_menu_main(query, note="Extraction model set to <b>Default</b>.")
+                return
+            models = await get_config("provider.models", []) or []
+            entry = next((m for m in models if m.get("key") == model_key), None)
+            if not entry:
+                await query.edit_message_text("Model not found in /models.")
+                return
+            await set_config("kg.extract_model", model_key)
+            await self._kgextract_menu_main(
+                query,
+                note=f"Extraction model set to <b>{_html.escape(entry.get('label', model_key))}</b>.",
             )
 
     async def _cmd_allowlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -10441,6 +10554,9 @@ Or just send me a message!"""
 
         elif data.startswith("guard:"):
             await self._handle_guard_callback(query, data)
+
+        elif data.startswith("kgx:"):
+            await self._handle_kgextract_callback(query, data)
 
         elif data.startswith("consent_toggle:"):
             toggle = data.split(":", 1)[1]
