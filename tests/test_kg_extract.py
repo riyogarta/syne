@@ -107,10 +107,12 @@ def test_speaker_of():
     msg = ('Conversation info (untrusted metadata):\n```json\n{\n  "conversation_label": "Riyogarta Pratikto",\n'
            '  "group_subject": "YBA"\n}\n```\n\nSender (untrusted metadata):\n```json\n{\n  "name": "Yuli",\n'
            '  "id": "1"\n}\n```\n\nAnakku lulus Paket C')
-    who, body = K.speaker_of(msg, "user")
-    assert who == "Yuli (the user)" and body == "Anakku lulus Paket C"
+    who, body = K.speaker_of(msg, "user", "Yuliazmi")
+    assert who == "Yuliazmi (the user)" and body == "Anakku lulus Paket C"
+    # the display names inside the message are never read
+    assert K.speaker_of(msg, "user")[0] == "the user"
     dm = 'Conversation info (untrusted metadata):\n```json\n{\n  "conversation_label": "Riyogarta Pratikto"\n}\n```\n\nhalo'
-    assert K.speaker_of(dm, "user")[0] == "Riyogarta Pratikto (the user)"
+    assert K.speaker_of(dm, "user")[0] == "the user"
     assert K.speaker_of("jawaban", "assistant")[0].startswith("Molt")
 
 
@@ -279,3 +281,54 @@ def test_reasoning_menu_entry_removed():
     src = inspect.getsource(T)
     assert 'BotCommand("reasoning"' not in src
     assert 'models:reasoning:' in src
+
+
+# ── access rule (Riyo, 18 Nov 2026) ───────────────────────────────────────
+
+def test_writer_levels_follow_memory_store():
+    from syne.security import TOOL_PERMISSIONS
+    assert TOOL_PERMISSIONS["memory_store"] == 0o660
+    assert K.writer_levels() == {"owner", "family"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("access", [None, "public", "blocked"])
+async def test_process_one_skips_rows_without_write_access(access):
+    async def judge(*_a, **_k):
+        raise AssertionError("no LLM call for a row without write access")
+    item = {"type": "message", "id": 1, "role": "user", "session_id": 1, "access": access,
+            "content": "Riyogarta Pratikto memutuskan menjual rumah di Bintaro"}
+    res = await K.process_one(item, judge, None, _s())
+    assert res["status"] == "skipped" and res["reason"].startswith("access")
+
+
+@pytest.mark.asyncio
+async def test_sender_meta_trusted_sources(monkeypatch):
+    from types import SimpleNamespace
+    import syne.db.models as models
+    from syne.conversation import Conversation
+
+    async def fake_get_user(platform, pid):
+        if pid == "3478983":
+            return {"name": "Riyogarta", "display_name": "Riyogarta Pratikto"}
+        return None
+    monkeypatch.setattr(models, "get_user", fake_get_user)
+
+    def conv(sender_access, sender_id, is_group, user):
+        inb = SimpleNamespace(sender_access=sender_access, sender_id=sender_id,
+                              platform="telegram", sender_alias=None)
+        return SimpleNamespace(inbound=inb, is_group=is_group, user=user, _sender_names={})
+
+    owner = {"access_level": "owner", "name": "Riyogarta", "display_name": "Riyogarta Pratikto"}
+    # DM: the user record
+    assert await Conversation._sender_meta(conv(None, None, False, owner)) == \
+        {"access": "owner", "speaker": "Riyogarta Pratikto"}
+    # group where the owner is public: the registry level wins, name by id
+    assert await Conversation._sender_meta(conv("public", "3478983", True, owner)) == \
+        {"access": "public", "speaker": "Riyogarta Pratikto"}
+    # group sender the registry does not know: public, not the session user's level
+    assert await Conversation._sender_meta(conv(None, "999", True, owner)) == \
+        {"access": "public", "speaker": ""}
+    # DM whose session user is someone else: no borrowed name
+    assert await Conversation._sender_meta(conv("public", None, False, owner)) == \
+        {"access": "public", "speaker": ""}

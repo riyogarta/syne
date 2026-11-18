@@ -205,6 +205,8 @@ class Conversation:
         self.session_id = session_id
         self.user = user
         self.system_prompt = system_prompt
+        # (platform, sender id) -> trusted sender name, for _sender_meta
+        self._sender_names: dict = {}
         # InboundContext is the single source of truth for chat context
         self.inbound: Optional["InboundContext"] = inbound
         self.is_group: bool = inbound.is_group if inbound else False
@@ -380,6 +382,48 @@ class Conversation:
                 f"cache now {len(self._message_cache)} (limit={limit})"
             )
 
+    async def _sender_meta(self) -> dict:
+        """Access level and trusted name of this turn's sender.
+
+        Stored on user and assistant rows (metadata.access / metadata.speaker)
+        so KG extraction can apply the memory_store rule per message (Riyo,
+        18 Nov 2026). Access is the sender's at this moment: the channel's
+        sender_access (group member registry, WhatsApp DM sender) or, in a
+        DM, the user record. A group sender the registry does not know is
+        public, never the session user's level. The name comes from the
+        users table by sender id, the member alias, or the DM user record -
+        never from display names inside the message, which anyone can set.
+        """
+        inb = self.inbound
+        own = self.user.get("access_level", "public")
+        if inb is not None and inb.sender_access:
+            access = inb.sender_access
+        elif self.is_group:
+            access = "public"
+        else:
+            access = own
+        name = ""
+        sid = getattr(inb, "sender_id", None) if inb is not None else None
+        platform = getattr(inb, "platform", None) if inb is not None else None
+        if sid and platform:
+            key = (platform, str(sid))
+            name = self._sender_names.get(key)
+            if name is None:
+                try:
+                    from .db.models import get_user
+                    u = await get_user(platform, str(sid))
+                except Exception:
+                    u = None
+                name = ((u or {}).get("display_name") or (u or {}).get("name")
+                        or getattr(inb, "sender_alias", None) or "")
+                self._sender_names[key] = name
+        elif not self.is_group and access == own:
+            # DM without a resolved sender id: the user record, unless the
+            # channel says the speaker has another level (a WhatsApp DM
+            # session opened by someone else).
+            name = self.user.get("display_name") or self.user.get("name") or ""
+        return {"access": access, "speaker": name}
+
     async def save_message(self, role: str, content: str, metadata: Optional[dict] = None,
                            defer_embed: bool = False):
         """Save a message to the database.
@@ -401,7 +445,16 @@ class Conversation:
             return
         self._last_saved_hash = msg_hash
 
-        meta_json = json.dumps(metadata) if metadata else "{}"
+        persist_meta = metadata
+        if role in ("user", "assistant"):
+            # Who wrote this turn and with which access: KG extraction takes
+            # only rows written with write access (the memory_store rule).
+            # Persisted only; the in-memory cache keeps the caller's metadata.
+            try:
+                persist_meta = {**(metadata or {}), **(await self._sender_meta())}
+            except Exception as e:
+                logger.warning(f"save_message: sender meta not recorded: {e}")
+        meta_json = json.dumps(persist_meta) if persist_meta else "{}"
 
         inserted_id: Optional[int] = None
         for attempt in range(2):

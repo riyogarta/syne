@@ -24,6 +24,13 @@ Runs in the background (run_worker), polling the tables, so memory_store
 and replies are never slowed down and nothing is lost on a restart. Every
 processed chunk gets one kg_extract_log row (done / skipped / error);
 errors are retried up to kg.extract_max_attempts times.
+
+Chat rows follow the memory_store access rule (Riyo, 18 Nov 2026): a
+message is extracted only when metadata.access (the sender's level when
+it was written, set by save_message) may write memory; any other row,
+or one without the field, is logged as skipped. The speaker is named from
+metadata.speaker (users table / member registry), never from the display
+names inside the message.
 """
 
 from __future__ import annotations
@@ -597,21 +604,27 @@ async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
 
 # ── Worker ────────────────────────────────────────────────────────────────
 
-def speaker_of(content: str, role: str, owner_name: str = "") -> tuple:
-    """(speaker label, text without the channel header)."""
+def writer_levels() -> frozenset:
+    """Access levels that may write memory: the memory_store permission in
+    security.py. Chat rows written at another level never reach the graph,
+    so a chat cannot write the KG where it could not store a memory."""
+    from ..security import TOOL_PERMISSIONS, get_permission_digit, has_permission
+    perm = TOOL_PERMISSIONS.get("memory_store", 0)
+    return frozenset(lvl for lvl in ("owner", "family", "public")
+                     if has_permission(get_permission_digit(perm, lvl), "w"))
+
+
+def speaker_of(content: str, role: str, name: str = "") -> tuple:
+    """(speaker label, text without the channel header).
+
+    name must come from a trusted source (metadata.speaker). The sender and
+    conversation blocks inside the message carry display names anyone can
+    set, so they are stripped and never read.
+    """
     if role == "assistant":
         return "Molt (the assistant)", (content or "").strip()
-    prefix, body = split_context_prefix(content or "")
-    name = ""
-    m = re.search(r"Sender \(untrusted metadata\):\s*```json\s*(\{.*?\})\s*```", prefix, re.S)
-    if m:
-        try:
-            name = str(json.loads(m.group(1)).get("name") or "")
-        except Exception:
-            name = ""
-    if not name:
-        m = re.search(r'"conversation_label"\s*:\s*"([^"]+)"', prefix)
-        name = m.group(1) if m else owner_name
+    _prefix, body = split_context_prefix(content or "")
+    name = (name or "").strip()
     return (f"{name} (the user)" if name else "the user"), body or (content or "").strip()
 
 
@@ -658,7 +671,8 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
         return out
     skip_sched = "AND coalesce(se.platform_chat_id, '') NOT LIKE 'scheduled:%' " if s["kg.extract_skip_scheduled"] else ""
     rows = await conn.fetch(
-        "SELECT x.id, x.content, x.role, x.session_id, u.name AS owner_name FROM messages x "
+        "SELECT x.id, x.content, x.role, x.session_id, u.name AS owner_name, "
+        "x.metadata->>'access' AS access, x.metadata->>'speaker' AS speaker FROM messages x "
         "LEFT JOIN sessions se ON se.id = x.session_id "
         "LEFT JOIN users u ON u.id = se.user_id "
         "WHERE x.id > $1 AND x.created_at >= $2 AND x.role IN ('user', 'assistant') "
@@ -671,13 +685,17 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
 
 
 async def previous_message(conn, session_id: int, message_id: int) -> str:
+    """The message before, as context for words like 'ya' or 'dia'. Left out
+    when it was not written with write access: text from a sender who may
+    not write memory must not steer what is stored."""
     row = await conn.fetchrow(
-        "SELECT role, content FROM messages WHERE session_id = $1 AND id < $2 "
+        "SELECT role, content, metadata->>'access' AS access, "
+        "metadata->>'speaker' AS speaker FROM messages WHERE session_id = $1 AND id < $2 "
         "AND role IN ('user', 'assistant') AND btrim(coalesce(content, '')) <> '' "
         "ORDER BY id DESC LIMIT 1", session_id, message_id)
-    if not row:
+    if not row or row["access"] not in writer_levels():
         return ""
-    who, body = speaker_of(row["content"], row["role"])
+    who, body = speaker_of(row["content"], row["role"], row["speaker"] or "")
     return f"[{who}] {body[-1500:]}"
 
 
@@ -692,7 +710,11 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
     if st == "memory":
         speaker, text, context = f"stored memory, category {item.get('category')}", (item["content"] or "").strip(), ""
     else:
-        speaker, text = speaker_of(item["content"], item.get("role"), item.get("owner_name") or "")
+        if item.get("access") not in writer_levels():
+            return {**log, "status": "skipped",
+                    "reason": f"access {item.get('access') or 'unknown'}", "model": None,
+                    "latency_ms": int((time.monotonic() - t0) * 1000)}
+        speaker, text = speaker_of(item["content"], item.get("role"), item.get("speaker") or "")
         context = ""
     async with get_connection() as conn:
         if st == "message":
