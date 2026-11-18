@@ -376,7 +376,7 @@ def parse_extraction(raw: str, s: dict) -> dict:
 Embedder = Callable[[str], Awaitable[Optional[list]]]
 
 
-_AYAH_INDEX: dict = {"at": 0.0, "index": None, "pattern": None}
+_AYAH_INDEX: dict = {"at": 0.0, "index": None, "pattern": None, "max_range": 50}
 _AYAH_INDEX_TTL = 3600.0
 
 
@@ -404,6 +404,7 @@ async def ayah_index(conn) -> tuple:
             names.setdefault(su, nm)
     aliases = dict(_refs.DEFAULT_SURAH_ALIASES)
     pattern = _refs.DEFAULT_QS_PATTERN
+    max_range = 50
     try:
         src = await get_config("kg.ref_sources", None)
         if isinstance(src, dict):
@@ -412,10 +413,13 @@ async def ayah_index(conn) -> tuple:
                         and isinstance(v.get("aliases"), dict)):
                     aliases = dict(v["aliases"])
         pattern = await get_config("kg.qs_pattern", None) or pattern
+        mr = await get_config("kg.max_mention_range", None)
+        if mr:
+            max_range = max(1, int(mr))
     except Exception:
         pass
     idx = _refs.surah_index_from(names, counts, aliases)
-    _AYAH_INDEX.update(at=now, index=idx, pattern=pattern)
+    _AYAH_INDEX.update(at=now, index=idx, pattern=pattern, max_range=max_range)
     return idx, pattern
 
 
@@ -429,6 +433,23 @@ async def resolve_ayah(conn, name: str) -> Optional[int]:
         "SELECT id FROM kg_entities WHERE entity_type = 'ayah' AND name = $1 LIMIT 1",
         _refs.ayah_entity_name(*ref),
     )
+
+
+async def resolve_ayah_span(conn, name: str) -> list:
+    """'ayah' entity IDs when the whole name is a Qur'an reference. A range
+    becomes one ID per verse (decision 14 Nov 2026: QS 18:71-73 = QS 18:71,
+    18:72, 18:73); a range longer than kg.max_mention_range gives []."""
+    index, pattern = await ayah_index(conn)
+    ref = _refs.parse_ayah_ref(name, index, pattern)
+    if ref is None or ref.end - ref.start + 1 > _AYAH_INDEX["max_range"]:
+        return []
+    names = [_refs.ayah_entity_name(ref.surah, a) for a in ref.ayahs()]
+    rows = await conn.fetch(
+        "SELECT id, name FROM kg_entities WHERE entity_type = 'ayah' AND name = ANY($1::text[])",
+        names,
+    )
+    by = {r["name"]: int(r["id"]) for r in rows}
+    return [by[n] for n in names if n in by]
 
 
 async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
@@ -493,29 +514,44 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
 
 async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
                       embed: Optional[Embedder], s: dict) -> tuple:
-    """Resolve entities, upsert relations with their source. (entities, relations)."""
+    """Resolve entities, upsert relations with their source. (entities, relations).
+
+    A Qur'an reference resolves to its 'ayah' entities; a range gives one
+    relation per verse.
+    """
     ids: dict = {}
     for e in extracted["entities"]:
+        span: list = []
+        if e["type"] != "person" and re.search(r"\d", e["name"] or ""):
+            try:
+                span = await resolve_ayah_span(conn, e["name"])
+            except Exception as ex:
+                logger.debug(f"KG ayah link skipped ({e['name']!r}): {ex}")
+                span = []
+        if span:
+            ids[e["name"].lower()] = span
+            continue
         eid, _how = await resolve_entity(conn, e["name"], e["type"], embed, s)
-        ids[e["name"].lower()] = eid
+        ids[e["name"].lower()] = [eid]
     n_rel = 0
     for r in extracted["relations"]:
-        a, b = ids.get(r["subject"].lower()), ids.get(r["object"].lower())
-        if not a or not b or a == b:
-            continue
-        rel_id = await conn.fetchval(
-            "INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id) "
-            "VALUES ($1, $2, $3, $4) ON CONFLICT (subject_id, predicate, object_id) "
-            "DO UPDATE SET updated_at = now() RETURNING id",
-            a, r["predicate"], b, source_id if source_type == "memory" else None,
-        )
-        await conn.execute(
-            "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin) "
-            "VALUES ($1, $2, $3, 'llm') ON CONFLICT DO NOTHING",
-            rel_id, source_type, source_id,
-        )
-        n_rel += 1
-    return len(set(ids.values())), n_rel
+        for a in ids.get(r["subject"].lower()) or []:
+            for b in ids.get(r["object"].lower()) or []:
+                if not a or not b or a == b:
+                    continue
+                rel_id = await conn.fetchval(
+                    "INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id) "
+                    "VALUES ($1, $2, $3, $4) ON CONFLICT (subject_id, predicate, object_id) "
+                    "DO UPDATE SET updated_at = now() RETURNING id",
+                    a, r["predicate"], b, source_id if source_type == "memory" else None,
+                )
+                await conn.execute(
+                    "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin) "
+                    "VALUES ($1, $2, $3, 'llm') ON CONFLICT DO NOTHING",
+                    rel_id, source_type, source_id,
+                )
+                n_rel += 1
+    return len({i for v in ids.values() for i in v}), n_rel
 
 
 # ── Worker ────────────────────────────────────────────────────────────────

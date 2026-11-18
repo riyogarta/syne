@@ -290,13 +290,13 @@ def parse_part(title: str, pattern: str = DEFAULT_PART_PATTERN
 _QS_PREFIX = re.compile(r"^\s*(?i:q\.?\s?s\.?)\s*")
 
 
-def parse_single_ayah(name: str, index: SurahIndex,
-                      pattern: str = DEFAULT_QS_PATTERN) -> Optional[tuple[int, int]]:
-    """(surah, ayah) when the WHOLE name is one Qur'an verse, else None.
+def parse_ayah_ref(name: str, index: SurahIndex,
+                   pattern: str = DEFAULT_QS_PATTERN) -> Optional[Ref]:
+    """Ref when the WHOLE name is one Qur'an verse or one range, else None.
 
     "QS 54:46", "QS. Al-Qamar: 46", "Al-Baqarah ayat 255", "Surah Al-Kahfi 10",
-    "QS. Al-Baqarah (2): 255". A range, an unknown surah, an ayah out of
-    range or any other text gives None (never guesses).
+    "QS. Al-Baqarah (2): 255", "QS 18:71-73". An unknown surah, an ayah
+    out of range or any other text gives None (never guesses).
     """
     s = (name or "").strip()
     if not s or not re.search(r"\d", s):
@@ -304,10 +304,16 @@ def parse_single_ayah(name: str, index: SurahIndex,
     m = re.fullmatch(pattern, "QS " + _QS_PREFIX.sub("", s))
     if not m:
         return None
-    if m.group("a2") and m.group("a2") != m.group("a1"):
-        return None
     nm = (m.group("name") or "").strip(" -'")
-    ref, _why = make_ref(index, nm or None, m.group("snum") or m.group("snum2"), m.group("a1"))
-    if ref is None:
+    ref, _why = make_ref(index, nm or None, m.group("snum") or m.group("snum2"),
+                         m.group("a1"), m.group("a2"))
+    return ref
+
+
+def parse_single_ayah(name: str, index: SurahIndex,
+                      pattern: str = DEFAULT_QS_PATTERN) -> Optional[tuple[int, int]]:
+    """(surah, ayah) when the WHOLE name is exactly one Qur'an verse, else None."""
+    ref = parse_ayah_ref(name, index, pattern)
+    if ref is None or ref.end != ref.start:
         return None
     return ref.surah, ref.start
