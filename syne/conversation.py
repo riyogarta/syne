@@ -217,6 +217,10 @@ class Conversation:
         self._processing: bool = False
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
+        # History embed of this turn's user row, held back until recall has
+        # embedded its query (save_message(defer_embed=True), started by
+        # _flush_deferred_embed).
+        self._deferred_embed: Optional[tuple] = None
         # System-prompt hot-reload versioning. _sys_epoch is bumped by
         # ConversationManager.refresh_system_prompts() whenever identity/soul/
         # rules/abilities change. _ctx_sys_epoch records which epoch the system
@@ -376,7 +380,8 @@ class Conversation:
                 f"cache now {len(self._message_cache)} (limit={limit})"
             )
 
-    async def save_message(self, role: str, content: str, metadata: Optional[dict] = None):
+    async def save_message(self, role: str, content: str, metadata: Optional[dict] = None,
+                           defer_embed: bool = False):
         """Save a message to the database.
 
         If the session row was deleted externally (e.g. manual reset),
@@ -441,11 +446,24 @@ class Conversation:
         # Fire-and-forget: embed user rows (history_search level 1) and
         # assistant rows with text (level 2). Tool and system rows, and
         # empty assistant tool-call shells, are never embedded.
+        # defer_embed=True holds the embed until _flush_deferred_embed():
+        # Ollama serves one request at a time, and a long user row (image
+        # analysis appended) embedded here made the recall embed that
+        # follows wait past embedding.recall_timeout, refusing the turn.
         if (
             role in ("user", "assistant") and inserted_id is not None
             and content and content.strip()
         ):
-            asyncio.create_task(self._embed_message_row(inserted_id, content))
+            if defer_embed:
+                self._deferred_embed = (inserted_id, content)
+            else:
+                asyncio.create_task(self._embed_message_row(inserted_id, content))
+
+    def _flush_deferred_embed(self) -> None:
+        """Start the history embed held back by save_message(defer_embed=True)."""
+        pending, self._deferred_embed = self._deferred_embed, None
+        if pending:
+            asyncio.create_task(self._embed_message_row(*pending))
 
     async def _delete_last_user_message(self) -> bool:
         """Remove the most recent user message of this session from the DB
@@ -1720,10 +1738,12 @@ class Conversation:
                 try:
                     return await self._chat_inner(user_message, message_metadata)
                 except EmbeddingUnavailableError:
-                    # The turn was refused (embedding down): drop the user
-                    # message saved before recall so history matches what
-                    # was actually processed. ConversationManager answers.
-                    await self._delete_last_user_message()
+                    # The turn was refused (embedding slow or down). The
+                    # saved user message is KEPT: it is real input, often
+                    # carrying an image analysis that cannot be recreated,
+                    # and the next turn must still see it. Deleting it (only
+                    # right for a provider content refusal, below) lost such
+                    # turns for good. ConversationManager sends the notice.
                     raise
                 except LLMBadRequestError as e:
                     # Provider rejected the request — most likely a safety
@@ -1795,9 +1815,9 @@ class Conversation:
         # Save user message (redact credentials from history if flagged)
         if message_metadata and message_metadata.get("has_credential"):
             from .security import redact_content_output
-            await self.save_message("user", redact_content_output(user_message))
+            await self.save_message("user", redact_content_output(user_message), defer_embed=True)
         else:
-            await self.save_message("user", user_message)
+            await self.save_message("user", user_message, defer_embed=True)
 
         # Attach media metadata (image/audio/doc) to the cached message for LLM context.
         # This is NOT persisted to DB — only needed for the current turn.
@@ -1815,7 +1835,13 @@ class Conversation:
 
         # Build context — use original text (without context prefix) for memory recall
         recall_query = (message_metadata or {}).get("original_text", user_message)
-        context = await self.build_context(user_message, recall_query=recall_query)
+        try:
+            context = await self.build_context(user_message, recall_query=recall_query)
+        finally:
+            # Recall has embedded its query (or was refused): only now start
+            # the user row's history embed, so the two never queue on the
+            # single-request Ollama ahead of the 10s recall budget.
+            self._flush_deferred_embed()
         self._ts_mark_base(context)
 
         # Log context usage

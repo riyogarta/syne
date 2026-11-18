@@ -203,14 +203,6 @@ async def test_build_context_recall_uses_quick_embed():
     assert "Query embed failed" not in src  # no more silent None
 
 
-async def test_chat_drops_saved_user_message_on_refusal():
-    import inspect
-    from syne.conversation import Conversation
-    src = inspect.getsource(Conversation.chat)
-    i = src.index("except EmbeddingUnavailableError")
-    assert "_delete_last_user_message()" in src[i:i + 400]
-
-
 # ── /restartollama ──────────────────────────────────────────────────────
 
 class _Proc:
