@@ -1547,6 +1547,21 @@ async def _m56_kg_prune_on_delete(conn) -> None:
     await prune_orphan_sources(conn)
 
 
+async def _m57_memory_guard(conn) -> None:
+    """Memory guard (Riyo, 18 Nov 2026). Idempotent.
+
+    A chunk referenced by another chunk cannot be deleted (AFTER DELETE
+    statement trigger on memory, runs before the KG prune). DDL in
+    syne/db/memory_guard_ddl.py, schema.sql carries the same text.
+    """
+    from ..cli.helpers import _split_sql_statements
+    from .memory_guard_ddl import MEMORY_GUARD_SCHEMA_SQL
+    for stmt in _split_sql_statements(MEMORY_GUARD_SCHEMA_SQL):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            await conn.execute(stmt)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1604,6 +1619,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (54, _m54_kg_recall_config, "transactional"),
     (55, _m55_kg_link_targets, "transactional"),
     (56, _m56_kg_prune_on_delete, "transactional"),
+    (57, _m57_memory_guard, "transactional"),
 ]
 
 

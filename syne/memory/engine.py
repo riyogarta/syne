@@ -852,17 +852,27 @@ class MemoryEngine:
                     })
                     deleted_ids.add(remove["id"])
 
+        blocked_ids = []
         if not dry_run and deleted_ids:
+            from ..db.memory_guard_ddl import guard_refusal
+            # One by one: a duplicate the memory guard protects (a chunk
+            # referenced by another chunk) is skipped, the rest still go.
             async with get_connection() as conn:
-                await conn.execute(
-                    "DELETE FROM memory WHERE id = ANY($1::int[])",
-                    list(deleted_ids),
-                )
-            logger.info(f"Dedup: removed {len(deleted_ids)} duplicate memories")
+                for mid in sorted(deleted_ids):
+                    try:
+                        await conn.execute("DELETE FROM memory WHERE id = $1", mid)
+                    except Exception as e:
+                        if guard_refusal(e) is None:
+                            raise
+                        blocked_ids.append(mid)
+            deleted_ids -= set(blocked_ids)
+            logger.info(f"Dedup: removed {len(deleted_ids)} duplicate memories"
+                        f" ({len(blocked_ids)} kept by the memory guard)")
 
         return {
             "duplicates_found": len(duplicates_found),
             "deleted_ids": list(deleted_ids),
+            "blocked_ids": blocked_ids,
             "kept_ids": [d["keep_id"] for d in duplicates_found],
             "details": duplicates_found,
         }

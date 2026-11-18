@@ -469,40 +469,44 @@ async def _load_api_key(credential_key: Optional[str]) -> Optional[str]:
     return None
 
 
-async def test_embedding(embed_entry: dict, timeout: int = 10) -> tuple[bool, str]:
-    """Test an embedding provider by generating a small embedding.
-    
-    Args:
-        embed_entry: Embedding registry entry dict
-        timeout: Timeout in seconds
-        
-    Returns:
-        Tuple of (success, error_message)
+async def probe_embedding(embed_entry: dict, timeout: int = 10) -> tuple[bool, str, int]:
+    """Generate one test embedding.
+
+    Returns (success, error_message, dimensions of the vector the model
+    really produced - 0 on failure). The dimension comes from the live
+    vector, never from the registry entry.
     """
     try:
         provider = await create_embedding_provider(embed_entry)
         if not provider:
-            return False, "Failed to create provider (missing API key?)"
-        
+            return False, "Failed to create provider (missing API key?)", 0
+
         model_id = embed_entry.get("model_id", "")
         result = await asyncio.wait_for(
             provider.embed("test embedding", model=model_id),
             timeout=timeout,
         )
-        
+
         if result and result.vector and len(result.vector) > 0:
-            logger.info(f"Embedding test passed: {embed_entry.get('label')} → {len(result.vector)} dims")
-            return True, ""
+            dims = len(result.vector)
+            logger.info(f"Embedding test passed: {embed_entry.get('label')} → {dims} dims")
+            return True, "", dims
         else:
-            return False, "Empty embedding response"
-            
+            return False, "Empty embedding response", 0
+
     except asyncio.TimeoutError:
-        return False, f"Timeout after {timeout}s"
+        return False, f"Timeout after {timeout}s", 0
     except Exception as e:
         error_msg = str(e)
         if hasattr(e, "response") and hasattr(e.response, "status_code"):
             error_msg = f"HTTP {e.response.status_code}: {error_msg[:100]}"
-        return False, error_msg[:200]
+        return False, error_msg[:200], 0
+
+
+async def test_embedding(embed_entry: dict, timeout: int = 10) -> tuple[bool, str]:
+    """Test an embedding provider. Returns (success, error_message)."""
+    ok, err, _dims = await probe_embedding(embed_entry, timeout=timeout)
+    return ok, err
 
 
 async def test_model(provider: LLMProvider, timeout: int = 10) -> tuple[bool, str]:

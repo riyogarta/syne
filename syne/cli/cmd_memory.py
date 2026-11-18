@@ -159,7 +159,17 @@ def memory_delete(memory_id):
             console.print(f"\n[bold]Memory #{row['id']}[/bold] [{row['category'] or 'none'}]")
             console.print(f"  {preview}\n")
 
-            deleted = await conn.execute("DELETE FROM memory WHERE id = $1", memory_id)
+            try:
+                deleted = await conn.execute("DELETE FROM memory WHERE id = $1", memory_id)
+            except Exception as e:
+                from rich.markup import escape
+                from syne.db.memory_guard_ddl import guard_refusal
+                msg = guard_refusal(e)
+                if msg is None:
+                    raise
+                console.print(f"[red]✗ Refused:[/red] {escape(msg)}")
+                await close_db()
+                return
             console.print(f"[green]✓ Deleted memory #{memory_id}[/green] ({deleted})")
 
         await close_db()
@@ -219,7 +229,17 @@ def memory_prune(pattern, yes):
                     return
 
             ids = [r["id"] for r in rows]
-            await conn.execute("DELETE FROM memory WHERE id = ANY($1::bigint[])", ids)
+            try:
+                await conn.execute("DELETE FROM memory WHERE id = ANY($1::bigint[])", ids)
+            except Exception as e:
+                from rich.markup import escape
+                from syne.db.memory_guard_ddl import guard_refusal
+                msg = guard_refusal(e)
+                if msg is None:
+                    raise
+                console.print(f"[red]✗ Refused, nothing deleted:[/red] {escape(msg)}")
+                await close_db()
+                return
             console.print(f"[green]✓ Deleted {len(ids)} memories.[/green]")
 
         await close_db()

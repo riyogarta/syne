@@ -929,7 +929,7 @@ class SyneAgent:
         # Memory delete tool
         self.tools.register(
             name="memory_delete",
-            description="Delete memory entries by ID.",
+            description="Delete memory entries by ID. All IDs go in one statement: a chunk still referenced by another chunk is refused (nothing deleted); delete the referencing chunks first or in the same call.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -2599,15 +2599,22 @@ class SyneAgent:
         if not ids:
             return "Error: No valid memory IDs provided"
 
-        deleted = 0
-        not_found = []
+        from .db.memory_guard_ddl import guard_refusal
+
+        # One statement: the memory guard refuses it whole when a chunk is
+        # still referenced by a chunk outside this set (Riyo, 18 Nov 2026).
         async with get_connection() as conn:
-            for mid in ids:
-                result = await conn.execute("DELETE FROM memory WHERE id = $1", mid)
-                if "DELETE 1" in str(result):
-                    deleted += 1
-                else:
-                    not_found.append(str(mid))
+            try:
+                rows = await conn.fetch(
+                    "DELETE FROM memory WHERE id = ANY($1::int[]) RETURNING id", ids)
+            except Exception as e:
+                msg = guard_refusal(e)
+                if msg is None:
+                    raise
+                return f"Refused, nothing deleted. {msg}"
+        gone = {r["id"] for r in rows}
+        deleted = len(gone)
+        not_found = [str(m) for m in dict.fromkeys(ids) if m not in gone]
 
         parts = []
         if deleted:

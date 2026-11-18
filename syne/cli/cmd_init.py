@@ -181,7 +181,7 @@ def init():
 
     # Permanent warning
     console.print("  [bold yellow]Warning:[/bold yellow] Choose your embedding model for the long term.")
-    console.print("  [dim]Switching later to a model with a different vector dimension deletes ALL memories.[/dim]")
+    console.print("  [dim]Switching later to a model with a different vector dimension is refused once memories exist.[/dim]")
     console.print("  [dim]Choose based on your server's long-term capacity.[/dim]")
     console.print()
 

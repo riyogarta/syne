@@ -4998,7 +4998,7 @@ Or just send me a message!"""
         text = (
             f"🧬 <b>Embedding</b> — {count} registered\n\n"
             f"⚠️ <b>Warning:</b> Switching to a model with a different vector "
-            f"dimension deletes ALL memories. Same-dimension switches keep them — "
+            f"dimension is refused — memories are never deleted. Same-dimension switches keep them — "
             f"run <code>syne memory reembed-memory --force</code> afterwards."
         )
         markup = InlineKeyboardMarkup(buttons)
@@ -5063,31 +5063,32 @@ Or just send me a message!"""
             if embed_key == active_key:
                 await query.answer("Already active", show_alert=True)
                 return
-            # Check dimension change — warn about memory loss
-            current_dims = await get_config("provider.embedding_dimensions", 768)
-            new_dims = entry.get("dimensions", 768)
-            if current_dims != new_dims:
-                from ..db.connection import get_connection
-                async with get_connection() as conn:
-                    row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM memory WHERE embedding IS NOT NULL")
-                    mem_count = row["cnt"] if row else 0
-                warn = (
-                    f"⚠️ <b>Warning: This will DELETE all memories!</b>\n\n"
-                    f"Dimension change: {current_dims} → {new_dims}\n"
-                    f"Memories affected: <b>{mem_count}</b>\n\n"
-                    f"Vectors from different embedding models are incompatible. "
-                    f"Re-embedding across dimensions is not supported — all existing "
-                    f"memories will be permanently deleted.\n\n"
-                    f"Are you sure?"
+            # A switch never deletes memories (Riyo, 18 Nov 2026): a model whose
+            # dimension differs from the stored vectors is refused. Checked again
+            # against the live test vector in _apply_embedding.
+            from ..db.connection import get_connection
+            from ..memory.embed_dims import stored_embedding_dims, refuse_switch_message
+            async with get_connection() as conn:
+                stored_dims, mem_count = await stored_embedding_dims(conn)
+            new_dims = entry.get("dimensions")
+            refusal = refuse_switch_message(stored_dims, new_dims, mem_count)
+            if refusal:
+                await query.edit_message_text(
+                    refusal,
+                    parse_mode="HTML",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("⬅️ Back", callback_data=f"embed:detail:{embed_key}")],
+                    ]),
                 )
-            else:
-                warn = (
-                    f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
-                    f"Same dimensions ({new_dims}), memories will be preserved.\n"
-                    f"Vectors from different models are not comparable — run "
-                    f"<code>syne memory reembed-memory --force</code> and "
-                    f"<code>syne memory reembed-history</code> afterwards so search keeps working."
-                )
+                return
+            warn = (
+                f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
+                f"Same dimensions ({new_dims or stored_dims or '?'}), memories will be preserved.\n"
+                f"The dimension is checked again with a live test before switching.\n"
+                f"Vectors from different models are not comparable — run "
+                f"<code>syne memory reembed-memory --force</code> and "
+                f"<code>syne memory reembed-history</code> afterwards so search keeps working."
+            )
             await query.edit_message_text(
                 warn,
                 parse_mode="HTML",
@@ -5145,9 +5146,11 @@ Or just send me a message!"""
             if len(models) <= 1:
                 await query.answer("Cannot delete the only embedding", show_alert=True)
                 return
-            warn = ""
             if embed_key == active_key:
-                warn = "\n\n⚠️ This is the active embedding. Deleting will switch to the next available."
+                # Never auto-switch to an untested model (Riyo, 18 Nov 2026).
+                await query.answer("Active embedding — switch to another one first", show_alert=True)
+                return
+            warn = ""
             await query.edit_message_text(
                 f"🗑 <b>Delete {entry.get('label', embed_key)}?</b>{warn}",
                 parse_mode="HTML",
@@ -5163,13 +5166,12 @@ Or just send me a message!"""
             embed_key = data.split(":", 2)[2]
             models = await get_config("provider.embedding_models", [])
             active_key = await get_config("provider.active_embedding", "together-bge")
+            if embed_key == active_key:
+                await query.answer("Active embedding — switch to another one first", show_alert=True)
+                await self._embed_menu_main(query)
+                return
             models = [m for m in models if m.get("key") != embed_key]
             await set_config("provider.embedding_models", models)
-            if embed_key == active_key and models:
-                new_active = models[0]
-                await set_config("provider.active_embedding", new_active["key"])
-                if self.agent:
-                    await self.agent.reload_provider(raise_on_unavailable=False)
             await query.answer("Embedding deleted")
             await self._embed_menu_main(query)
 
@@ -5223,8 +5225,9 @@ Or just send me a message!"""
     async def _apply_embedding(self, embed_key: str, chat_id: int, bot) -> tuple[bool, str]:
         """Apply an embedding model from registry — test before switching.
 
-        If the new model has different dimensions, all existing memories are
-        deleted (incompatible vector spaces cannot be mixed).
+        A switch never deletes memories (Riyo, 18 Nov 2026). The live test
+        measures the dimension the model really produces; when it differs
+        from the stored vectors the switch is refused and nothing changes.
 
         Args:
             embed_key: Key of embedding model to switch to
@@ -5234,8 +5237,9 @@ Or just send me a message!"""
         Returns:
             Tuple of (success, message)
         """
-        from ..llm.drivers import test_embedding, get_model_from_list
+        from ..llm.drivers import probe_embedding, get_model_from_list
         from ..db.connection import get_connection
+        from ..memory.embed_dims import stored_embedding_dims, refuse_switch_message
 
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
@@ -5243,51 +5247,42 @@ Or just send me a message!"""
 
         if not embed_entry:
             return False, f"Embedding '{embed_key}' not found in registry"
-
-        # Save current for rollback
-        previous_key = await get_config("provider.active_embedding", "together-bge")
-        await set_config("provider.previous_embedding", previous_key)
-
-        # Check if dimensions will change (requires memory reset)
-        current_dims = await get_config("provider.embedding_dimensions", 768)
-        new_dims = embed_entry.get("dimensions", 768)
-        dims_changed = (current_dims != new_dims)
+        label = embed_entry.get("label", embed_key)
 
         # Send "testing" message
         await bot.send_message(
             chat_id=chat_id,
-            text=f"🔄 Testing {embed_entry.get('label', embed_key)}...",
+            text=f"🔄 Testing {label}...",
         )
 
         try:
-            success, error = await test_embedding(embed_entry, timeout=15)
+            success, error, dims = await probe_embedding(embed_entry, timeout=15)
+            if not success:
+                return False, f"{label} failed: {error}"
 
-            if success:
-                # Reset memory if dimensions changed
-                if dims_changed:
-                    async with get_connection() as conn:
-                        row = await conn.fetchrow("SELECT COUNT(*) as cnt FROM memory WHERE embedding IS NOT NULL")
-                        mem_count = row["cnt"] if row else 0
-                        await conn.execute("DELETE FROM memory WHERE embedding IS NOT NULL")
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🗑️ {mem_count} memories cleared (incompatible vector dimensions).",
-                    )
+            async with get_connection() as conn:
+                stored_dims, mem_count = await stored_embedding_dims(conn)
+            refusal = refuse_switch_message(stored_dims, dims, mem_count)
+            if refusal:
+                await bot.send_message(chat_id=chat_id, text=refusal, parse_mode="HTML")
+                return False, f"dimension {dims} ≠ stored {stored_dims}"
 
-                await set_config("provider.active_embedding", embed_key)
-                await set_config("provider.embedding_model", embed_entry.get("model_id", ""))
-                await set_config("provider.embedding_dimensions", new_dims)
-                await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
+            # Save current for rollback
+            previous_key = await get_config("provider.active_embedding", "together-bge")
+            await set_config("provider.previous_embedding", previous_key)
 
-                # Hot-reload provider (picks up new embedding)
-                await self.agent.reload_provider(raise_on_unavailable=False)
+            await set_config("provider.active_embedding", embed_key)
+            await set_config("provider.embedding_model", embed_entry.get("model_id", ""))
+            await set_config("provider.embedding_dimensions", dims)
+            await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
 
-                return True, embed_entry.get("label", embed_key)
-            else:
-                return False, f"{embed_entry.get('label', embed_key)} failed: {error}"
+            # Hot-reload provider (picks up new embedding)
+            await self.agent.reload_provider(raise_on_unavailable=False)
+
+            return True, label
 
         except Exception as e:
-            return False, f"{embed_entry.get('label', embed_key)} failed: {str(e)[:100]}"
+            return False, f"{label} failed: {str(e)[:100]}"
 
     async def _apply_model(self, model_key: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> tuple[bool, str]:
         """Apply a model from registry — test before switching.
