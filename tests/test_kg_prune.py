@@ -241,3 +241,75 @@ async def test_prune_orphan_sources_once():
         assert await P.prune_orphan_sources(c) == {"memory": 0, "message": 0}
     finally:
         await _close(c, sch)
+
+
+# ── monthly prune by the KG worker (v1.23.05) ─────────────────────────────
+
+class _CM:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *a):
+        return False
+
+
+def _prune_env(monkeypatch, last=None, result=None, exc=None):
+    store = {} if last is None else {K.PRUNE_KEY: last}
+    seen = {"prune": 0, "get": 0}
+
+    async def get_config(key, default=None):
+        seen["get"] += 1
+        return store.get(key, default)
+
+    async def set_config(key, value, description=None):
+        store[key] = value
+
+    async def prune(conn):
+        seen["prune"] += 1
+        if exc:
+            raise exc
+        return result or {"memory": 0, "message": 0}
+    monkeypatch.setattr(K, "get_config", get_config)
+    monkeypatch.setattr(K, "set_config", set_config)
+    monkeypatch.setattr(K, "get_connection", lambda: _CM())
+    monkeypatch.setattr(P, "prune_orphan_sources", prune)
+    monkeypatch.setattr(K, "_prune_retry_at", 0.0)
+    return store, seen
+
+
+_NOW = K.parse_era("2026-12-20T00:00:00+00:00")
+
+
+async def test_monthly_prune_first_run_records_time(monkeypatch):
+    store, seen = _prune_env(monkeypatch, result={"memory": 2, "message": 1})
+    assert await K.maybe_prune(_NOW) == {"memory": 2, "message": 1}
+    assert seen["prune"] == 1 and store[K.PRUNE_KEY] == "2026-12-20T00:00:00+00:00"
+
+
+async def test_monthly_prune_not_due(monkeypatch):
+    _store, seen = _prune_env(monkeypatch, last="2026-12-01T00:00:00+00:00")
+    assert await K.maybe_prune(_NOW) is None
+    assert seen["prune"] == 0
+    # not checked again within the hour
+    assert await K.maybe_prune(_NOW) is None and seen["get"] == 1
+
+
+async def test_monthly_prune_due_after_30_days(monkeypatch):
+    store, seen = _prune_env(monkeypatch, last="2026-11-20T00:00:00+00:00")
+    assert await K.maybe_prune(_NOW) == {"memory": 0, "message": 0}
+    assert seen["prune"] == 1 and store[K.PRUNE_KEY].startswith("2026-12-20")
+
+
+async def test_monthly_prune_failure_not_recorded_retried_later(monkeypatch):
+    store, seen = _prune_env(monkeypatch, exc=RuntimeError("deadlock detected"))
+    assert await K.maybe_prune(_NOW) is None
+    assert K.PRUNE_KEY not in store and K._prune_retry_at > 0
+    assert await K.maybe_prune(_NOW) is None and seen["prune"] == 1
+    monkeypatch.setattr(K, "_prune_retry_at", 0.0)
+    await K.maybe_prune(_NOW)
+    assert seen["prune"] == 2
+
+
+def test_worker_calls_monthly_prune():
+    import inspect
+    assert "await maybe_prune()" in inspect.getsource(K.run_worker)

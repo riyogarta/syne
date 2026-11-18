@@ -41,13 +41,13 @@ import logging
 import math
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from .. import maintenance as _maint
 from ..anchor_text import split_context_prefix
 from ..db.connection import get_connection
-from ..db.models import get_config
+from ..db.models import get_config, set_config
 from . import kg_refs as _refs
 
 logger = logging.getLogger("syne.memory.kg_extract")
@@ -763,6 +763,55 @@ async def backfill_norm_names(batch: int = 2000) -> int:
         await asyncio.sleep(0.2)
 
 
+# ── Monthly prune (Riyo, 18 Nov 2026) - v1.23.05 ──────────────────────────
+# The delete triggers (migration 56) clean the graph of a deleted memory or
+# message at once. What they can miss - a prune that failed (WARNING, the
+# delete went through) or a message deleted while it was being extracted -
+# is cleaned here: once every PRUNE_EVERY, the last run kept in config
+# kg.prune_last_run so a restart does not run it again. A failed run is
+# retried an hour later and not recorded.
+
+PRUNE_EVERY = timedelta(days=30)
+PRUNE_RETRY_SECONDS = 3600
+PRUNE_KEY = "kg.prune_last_run"
+_PRUNE_DESC = ("Last monthly KG prune by the KG worker (ISO, UTC): graph sources whose memory or "
+               "chat message is gone are removed every 30 days. Set by the worker; delete the key "
+               "to run it again on the next round.")
+_prune_retry_at = 0.0
+
+
+async def maybe_prune(now: Optional[datetime] = None) -> Optional[dict]:
+    """Prune orphan graph sources when the last run is PRUNE_EVERY old.
+
+    Returns {source type: ids pruned} when it ran, None when not due or
+    failed. Never raises (except cancellation). Checks the config at most
+    once an hour per process.
+    """
+    global _prune_retry_at
+    if time.monotonic() < _prune_retry_at:
+        return None
+    now = now or datetime.now(timezone.utc)
+    try:
+        last = parse_era(await get_config(PRUNE_KEY, None))
+        if last is not None and now - last < PRUNE_EVERY:
+            _prune_retry_at = time.monotonic() + PRUNE_RETRY_SECONDS
+            return None
+        from ..db.kg_prune_ddl import prune_orphan_sources
+        async with get_connection() as conn:
+            res = await prune_orphan_sources(conn)
+        await set_config(PRUNE_KEY, now.isoformat(timespec="seconds"), _PRUNE_DESC)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        _prune_retry_at = time.monotonic() + PRUNE_RETRY_SECONDS
+        logger.warning(f"KG prune failed, retried in an hour: {e}")
+        return None
+    _prune_retry_at = time.monotonic() + PRUNE_RETRY_SECONDS
+    logger.info(f"KG prune: {res.get('memory', 0)} memories and {res.get('message', 0)} "
+                f"messages that are gone removed from the graph")
+    return res
+
+
 async def run_worker(default_provider_getter: Callable[[], object], embed_provider=None) -> None:
     """Background loop. Never raises (except cancellation)."""
     from ..judge_model import build_judge
@@ -790,6 +839,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
             if _maint.active():
                 await asyncio.sleep(5)
                 continue
+            await maybe_prune()
             s = await load_settings()
             era = s["kg.extract_era_start"]
             if not s["kg.extract_enabled"] or era is None:
