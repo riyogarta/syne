@@ -163,6 +163,14 @@ class SyneAgent:
         from .memory.bm25_backfill import run_backfill
         self._bm25_backfill_task = asyncio.create_task(run_backfill())
 
+        # 12. KG ingestion (KG-RAG stage 2): LLM extraction of entities and
+        # relations from new memories and chat messages, in the background.
+        from .memory.kg_extract import run_worker as _kg_worker
+        self._kg_extract_task = asyncio.create_task(_kg_worker(
+            lambda: self.conversations.provider if self.conversations else self.provider,
+            embed_provider=self.memory.provider if self.memory else None,
+        ))
+
         logger.info("Syne agent started.")
 
     async def _run_startup_migration(self):
@@ -240,13 +248,14 @@ class SyneAgent:
                 await self._dedup_task
             except asyncio.CancelledError:
                 pass
-        _bf = getattr(self, '_bm25_backfill_task', None)
-        if _bf and not _bf.done():
-            _bf.cancel()
-            try:
-                await _bf
-            except asyncio.CancelledError:
-                pass
+        for _name in ('_bm25_backfill_task', '_kg_extract_task'):
+            _bf = getattr(self, _name, None)
+            if _bf and not _bf.done():
+                _bf.cancel()
+                try:
+                    await _bf
+                except asyncio.CancelledError:
+                    pass
         if hasattr(self, '_token_refresh_task') and self._token_refresh_task:
             self._token_refresh_task.cancel()
             try:

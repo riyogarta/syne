@@ -1437,6 +1437,30 @@ async def _m52_bm25_search_config(conn) -> None:
         )
 
 
+async def _m53_kg_extract(conn) -> None:
+    """KG ingestion path (Riyo, 18 Nov 2026). Idempotent.
+
+    KG-RAG stage 2: kg_entities.norm_name, kg_extract_log, the era date
+    kg.extract_era_start (set to the moment this runs; only newer chunks
+    are extracted) - DDL in syne/db/kg_extract_ddl.py, schema.sql carries
+    the same text - plus the kg.extract_* / kg.resolve_* config from
+    syne/memory/kg_extract.py DEFAULTS.
+    """
+    from ..cli.helpers import _split_sql_statements
+    from .kg_extract_ddl import KG_EXTRACT_SCHEMA_SQL
+    from ..memory.kg_extract import DEFAULTS
+    for stmt in _split_sql_statements(KG_EXTRACT_SCHEMA_SQL):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            await conn.execute(stmt)
+    for key, (value, desc) in DEFAULTS.items():
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+            "ON CONFLICT (key) DO NOTHING",
+            key, json.dumps(value), desc,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1490,6 +1514,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (50, _m50_drop_memory_auto_archive, "transactional"),
     (51, _m51_bm25_keyword_index, "transactional"),
     (52, _m52_bm25_search_config, "transactional"),
+    (53, _m53_kg_extract, "transactional"),
 ]
 
 

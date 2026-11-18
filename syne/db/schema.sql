@@ -1287,3 +1287,55 @@ INSERT INTO config (key, value, description) VALUES
     ('memory.recall_fallback', 'true', 'Automatic recall: when keyword routing (memory.category_routes) restricted the search to some categories and found nothing, or the best cosine similarity is below memory.recall_fallback_min_similarity, search again without the category filter.'),
     ('memory.recall_fallback_min_similarity', '0.5', 'Best cosine similarity under which a category-filtered automatic recall is retried without the filter (memory.recall_fallback). Clamped 0-1.')
 ON CONFLICT (key) DO NOTHING;
+
+-- ============================================================
+-- KG INGESTION (Riyo, 18 Nov 2026) - KG-RAG stage 2.
+-- Mirrors migration 53 (syne/db/kg_extract_ddl.py, kept byte-identical).
+-- ============================================================
+ALTER TABLE kg_entities ADD COLUMN IF NOT EXISTS norm_name TEXT;
+CREATE INDEX IF NOT EXISTS idx_kg_entities_norm_name ON kg_entities (norm_name)
+    WHERE norm_name IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS kg_extract_log (
+    source_type VARCHAR(20) NOT NULL CHECK (source_type IN ('memory', 'message')),
+    source_id   INT NOT NULL,
+    layer       SMALLINT,                 -- 0 memory, 1 user message, 2 assistant message
+    session_id  INT,
+    status      VARCHAR(10) NOT NULL CHECK (status IN ('done', 'skipped', 'error')),
+    reason      TEXT,
+    model       TEXT,
+    n_entities  INT NOT NULL DEFAULT 0,
+    n_relations INT NOT NULL DEFAULT 0,
+    latency_ms  INT,
+    attempts    INT NOT NULL DEFAULT 1,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (source_type, source_id)
+);
+
+INSERT INTO config (key, value, description) VALUES
+    ('kg.extract_era_start',
+     to_jsonb(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
+     'KG ingestion era: only memories and chat messages created at or after this moment (ISO, UTC) are extracted into the KG. Set once when migration 53 ran; older chunks are never extracted again. Moving it earlier makes the worker process older rows.')
+ON CONFLICT (key) DO NOTHING;
+
+-- KG ingestion config (Riyo, 18 Nov 2026) - KG-RAG stage 2.
+-- Mirrors migration 53 (keys + defaults from syne/memory/kg_extract.py DEFAULTS).
+INSERT INTO config (key, value, description) VALUES
+    ('kg.extract_enabled', 'true', 'KG ingestion (KG-RAG stage 2): extract entities and relations with an LLM from new memories and chat messages (created at or after kg.extract_era_start), in the background. false = stop.'),
+    ('kg.extract_model', '""', 'Model that extracts entities and relations: a key from /models, empty = the default model (provider.active_model).'),
+    ('kg.extract_min_words', '10', 'Chat messages shorter than this many words are skipped by KG extraction, but only when no entity is detected in them (capitalised word, word with digits, or a phrase already in the graph). Clamped 0-100.'),
+    ('kg.extract_max_chars', '6000', 'Characters of one chunk sent to KG extraction; the rest is cut. Clamped 500-50000.'),
+    ('kg.extract_batch', '5', 'Chunks extracted per round of the KG worker. Clamped 1-50.'),
+    ('kg.extract_interval', '30', 'Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600.'),
+    ('kg.extract_timeout', '120', 'Seconds one KG extraction call may take. Clamped 10-600.'),
+    ('kg.extract_max_attempts', '3', 'Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10.'),
+    ('kg.extract_skip_categories', '[]', 'Memory categories KG extraction skips, e.g. ["alquran"].'),
+    ('kg.extract_skip_scheduled', 'true', 'Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction.'),
+    ('kg.extract_max_entities', '15', 'Most entities kept from one chunk. Clamped 1-50.'),
+    ('kg.extract_max_relations', '20', 'Most relations kept from one chunk. Clamped 1-50.'),
+    ('kg.extract_entity_types', '["person", "place", "org", "project", "item", "concept", "event", "date", "role"]', 'Entity types KG extraction may use; anything else becomes concept.'),
+    ('kg.extract_predicates', '{"part_of": "A is part of B", "member_of": "A is a member of group/organisation B", "has_role": "A has role/position B", "located_in": "A is located in / lives in B", "works_at": "A works at B", "owns": "A owns B", "uses": "A uses B", "studies": "A studies / attends / takes B", "created": "A made / built / wrote B", "child_of": "A is a child of B", "parent_of": "A is a parent of B", "sibling_of": "A is a sibling of B", "married_to": "A is married to B", "friend_of": "A is a friend / colleague of B", "prefers": "A likes / prefers B", "decided": "A decided / agreed on B", "explains": "A explains / is about B", "mentions": "A mentions B", "cites": "A quotes / cites B", "narrated_from": "A (narrator) narrates from B", "happened_on": "A happened on date B", "related_to": "A is related to B (only when no other predicate fits)"}', 'Fixed relation list for KG extraction: {predicate: meaning}. Relations with another predicate are dropped.'),
+    ('kg.resolve_min_similarity', '0.92', 'Entity resolution: a new name joins an existing entity of the same type by name embedding only at this cosine similarity or higher (after normalisation found nothing). Clamped 0.5-1.'),
+    ('kg.resolve_min_trgm', '0.4', 'Entity resolution: the embedding match must also share this much spelling (pg_trgm similarity of the normalised names), so different people with similar-sounding names are not joined. Clamped 0-1.')
+ON CONFLICT (key) DO NOTHING;
