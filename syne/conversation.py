@@ -1124,7 +1124,7 @@ class Conversation:
                 if len(w) > 1
             ]
             _mv = await _shared_query_vector() if len(_mw) >= 2 else None
-            return await self.memory.recall(
+            _res = await self.memory.recall(
                 query=recall_query or user_message,
                 query_vector=_mv,
                 limit=recall_limit,
@@ -1133,6 +1133,35 @@ class Conversation:
                 user_id=self.user.get("id"),
                 requester_access_level=access_level,
             )
+            # Fallback (KG-RAG stage 1): a keyword route narrowed recall to
+            # its categories and found nothing, or only weak matches ->
+            # search again without the category filter. Not done when no
+            # route fired (the exclusion keeps large references out of
+            # everyday chat, which is what routing is for).
+            if _route_include and _mv is not None:
+                try:
+                    from .memory.hybrid import load_settings as _hy_settings
+                    _fs = await _hy_settings()
+                    _best = max((m.get("similarity") or 0.0 for m in (_res or [])), default=0.0)
+                    if _fs["memory.recall_fallback"] and (
+                        not _res or _best < _fs["memory.recall_fallback_min_similarity"]
+                    ):
+                        _res2 = await self.memory.recall(
+                            query=recall_query or user_message,
+                            query_vector=_mv,
+                            limit=recall_limit,
+                            user_id=self.user.get("id"),
+                            requester_access_level=access_level,
+                        )
+                        logger.info(
+                            f"Recall fallback: route {_route_include} gave {len(_res or [])} "
+                            f"(best {_best:.2f}) -> unfiltered {len(_res2 or [])}"
+                        )
+                        if _res2:
+                            _res = _res2
+                except Exception as e:
+                    logger.warning(f"Recall fallback skipped: {e}")
+            return _res
 
         # The keyword KG lookup is no longer injected: its
         # relations are old LLM guesses (Riyo, 17 Nov 2026). Only the

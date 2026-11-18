@@ -370,10 +370,29 @@ async def history_search_handler(
     else:
         order = "(m.embedding <=> $1::vector) ASC, m.created_at DESC"
 
+    # Hybrid ranking for sort_by=similarity (KG-RAG stage 1): cosine list +
+    # BM25 keyword list over the same filters, fused by reciprocal rank
+    # (syne/memory/hybrid.py), then offset/limit applied to the fused list.
+    hybrid = None
+    if sort_by == "similarity":
+        try:
+            from ..memory import hybrid as _hy
+            _hs = await _hy.load_settings()
+            if _hs["bm25.history_enabled"]:
+                hybrid = (_hy, _hs)
+        except Exception as e:
+            logger.debug(f"history_search hybrid off: {e}")
+
+    base_params = list(params)
     limit_param = p
     offset_param = p + 1
-    params.append(limit)
-    params.append(offset)
+    if hybrid:
+        n_fetch = offset + max(limit, hybrid[1]["bm25.candidates"])
+        params.append(n_fetch)
+        params.append(0)
+    else:
+        params.append(limit)
+        params.append(offset)
 
     sql = f"""
         SELECT
@@ -391,6 +410,37 @@ async def history_search_handler(
     try:
         async with get_connection() as conn:
             rows = await conn.fetch(sql, *params)
+            if hybrid:
+                _hy, _hs = hybrid
+                bm25_rows: list = []
+                try:
+                    bq = await _hy.query_terms(
+                        conn, query, f"messages:{_LEVEL_ROLE[level]}", _hs)
+                    if bq is not None:
+                        cte = _hy.bm25_cte(
+                            "messages m LEFT JOIN sessions s ON s.id = m.session_id",
+                            where, p, p + 1)
+                        bsql = f"""
+                            WITH {cte}
+                            SELECT
+                                m.id, m.session_id, m.role, m.created_at,
+                                1 - (m.embedding <=> $1::vector) AS similarity,
+                                s.platform_chat_id AS chat_id,
+                                s.platform AS platform,
+                                sc.bm25
+                            FROM sc
+                            JOIN messages m ON m.id = sc.id
+                            LEFT JOIN sessions s ON s.id = m.session_id
+                            ORDER BY sc.bm25 DESC, m.id DESC
+                        """
+                        bm25_rows = [dict(r) for r in await conn.fetch(
+                            bsql, *base_params, n_fetch, *bq.params(_hs))]
+                except Exception as e:
+                    logger.warning(f"history_search BM25 skipped, cosine only: {e}")
+                    bm25_rows = []
+                rows = _hy.fuse(
+                    [dict(r) for r in rows], bm25_rows, _hs["bm25.rrf_k"]
+                )[offset:offset + limit]
     except Exception as e:
         logger.exception("history_search DB error")
         return f"Error: database query failed: {e}"

@@ -1272,3 +1272,18 @@ INSERT INTO config (key, value, description) VALUES
     ('bm25.backfill_batch', '50', 'Rows indexed per transaction by the BM25 background backfill. Clamped 10-2000. Smaller = shorter waits for new messages and memories, which wait on the same BM25 statistics rows (measured: 200 rows = new writes waited up to ~4 s, 50 rows = ~0.2 s).'),
     ('bm25.backfill_pause', '0.5', 'Seconds the BM25 background backfill waits between batches. Clamped 0-60.')
 ON CONFLICT (key) DO NOTHING;
+
+-- Hybrid search config (Riyo, 18 Nov 2026) - KG-RAG stage 1, step 3.
+-- Mirrors migration 52 (keys + defaults from syne/memory/hybrid.py DEFAULTS).
+INSERT INTO config (key, value, description) VALUES
+    ('bm25.recall_enabled', 'true', 'Memory recall (memory + references) ranks by cosine + BM25 keyword score, fused by reciprocal rank. false = cosine only, as before 1.22.99.'),
+    ('bm25.history_enabled', 'true', 'history_search (sort_by=similarity) ranks by cosine + BM25 keyword score, fused by reciprocal rank. false = cosine only. sort_by=recency is unchanged.'),
+    ('bm25.k1', '1.2', 'BM25 k1: how fast repeated words stop adding score. Clamped 0-3.'),
+    ('bm25.b', '0.75', 'BM25 b: how much long documents are penalised (0 = not at all, 1 = fully). Clamped 0-1.'),
+    ('bm25.max_terms', '16', 'Most query words used for BM25, rarest first. Clamped 1-64.'),
+    ('bm25.max_df_ratio', '0.05', 'Query words found in more than this share of the corpus are not used for BM25 (e.g. dan, yang, hukum, shalat in a fiqih-heavy memory). Higher = more words scored but slower: measured on 30k memories, 0.3 took 0.3-1.0 s per query, 0.05 under 0.2 s. Clamped 0.01-1.'),
+    ('bm25.candidates', '20', 'Rows taken from each list (cosine and BM25) before fusion. Clamped 1-200.'),
+    ('bm25.rrf_k', '60', 'Reciprocal rank fusion constant: score = sum 1/(rrf_k + rank). Clamped 1-1000.'),
+    ('memory.recall_fallback', 'true', 'Automatic recall: when keyword routing (memory.category_routes) restricted the search to some categories and found nothing, or the best cosine similarity is below memory.recall_fallback_min_similarity, search again without the category filter.'),
+    ('memory.recall_fallback_min_similarity', '0.5', 'Best cosine similarity under which a category-filtered automatic recall is retried without the filter (memory.recall_fallback). Clamped 0-1.')
+ON CONFLICT (key) DO NOTHING;

@@ -209,17 +209,32 @@ class MemoryEngine:
 
             where = " AND ".join(conditions)
 
+            # Hybrid ranking (KG-RAG stage 1): the cosine list and a BM25
+            # keyword list over the same filters, fused by reciprocal rank
+            # (syne/memory/hybrid.py). Cosine rows below min_similarity are
+            # dropped as before; a BM25 row keeps its real cosine similarity
+            # (what the model sees as confidence) even when it is lower.
+            # Any BM25 error -> cosine only.
+            from . import hybrid as _hy
+            try:
+                _hs = await _hy.load_settings()
+            except Exception:
+                _hs = None
+            use_bm25 = bool(_hs and _hs["bm25.recall_enabled"])
+            params[1] = max(limit, _hs["bm25.candidates"]) if use_bm25 else limit
+
             # LEFT JOIN memory_blobs is cheap (only metadata, no BYTEA content)
             # so semantic search reveals which results have attachments.
-            rows = await conn.fetch(f"""
-                SELECT
+            select_cols = """
                     m.id, m.content, m.category, m.source, m.importance,
                     m.access_count, m.created_at, m.updated_at,
                     1 - (m.embedding <=> $1::vector) as similarity,
                     (b.memory_id IS NOT NULL) AS has_attachment,
                     b.filename AS attachment_filename,
                     b.mime_type AS attachment_mime,
-                    b.size_bytes AS attachment_size
+                    b.size_bytes AS attachment_size"""
+            rows = await conn.fetch(f"""
+                SELECT {select_cols}
                 FROM memory m
                 LEFT JOIN memory_blobs b ON b.memory_id = m.id
                 WHERE {where}
@@ -227,27 +242,49 @@ class MemoryEngine:
                 ORDER BY m.embedding <=> $1::vector
                 LIMIT $2
             """, *params)
+            # Null guard — defensive; SQL filter should make this impossible
+            cosine = [
+                dict(r) for r in rows
+                if r["similarity"] is not None and r["similarity"] >= min_similarity
+            ]
+            ranked = cosine[:limit]
+            if use_bm25:
+                bm25_rows: list = []
+                try:
+                    bq = await _hy.query_terms(conn, query, "memory", _hs)
+                    if bq is not None:
+                        cte = _hy.bm25_cte(
+                            "memory m", f"{where} AND m.embedding IS NOT NULL", 2, param_idx)
+                        bm25_rows = [dict(r) for r in await conn.fetch(f"""
+                            WITH {cte}
+                            SELECT {select_cols}, sc.bm25
+                            FROM sc
+                            JOIN memory m ON m.id = sc.id
+                            LEFT JOIN memory_blobs b ON b.memory_id = m.id
+                            ORDER BY sc.bm25 DESC, m.id DESC
+                        """, *params, *bq.params(_hs))]
+                except Exception as e:
+                    logger.warning(f"BM25 recall skipped, cosine only: {e}")
+                    bm25_rows = []
+                ranked = _hy.fuse(cosine, bm25_rows, _hs["bm25.rrf_k"], limit)
 
-            # Filter by minimum similarity and update access stats
             results = []
             ids_to_update = []
-            for row in rows:
-                # Null guard — defensive; SQL filter should make this impossible
-                if row["similarity"] is None:
+            for row in ranked:
+                if row.get("similarity") is None:
                     continue
-                if row["similarity"] >= min_similarity:
-                    # ═══════════════════════════════════════════════════════
-                    # RULE 760 CHECK — FAMILY PRIVACY PROTECTION
-                    # Filter out private memory categories for non-owner/family
-                    # ═══════════════════════════════════════════════════════
-                    mem_category = row.get("category", "")
-                    allowed, reason = check_rule_760(mem_category, requester_access_level)
-                    if not allowed:
-                        logger.debug(f"Rule 760 filtered memory id={row['id']}: {reason}")
-                        continue  # Skip this memory
-                    
-                    results.append(dict(row))
-                    ids_to_update.append(row["id"])
+                # ═══════════════════════════════════════════════════════
+                # RULE 760 CHECK — FAMILY PRIVACY PROTECTION
+                # Filter out private memory categories for non-owner/family
+                # ═══════════════════════════════════════════════════════
+                mem_category = row.get("category", "")
+                allowed, reason = check_rule_760(mem_category, requester_access_level)
+                if not allowed:
+                    logger.debug(f"Rule 760 filtered memory id={row['id']}: {reason}")
+                    continue  # Skip this memory
+
+                results.append(row)
+                ids_to_update.append(row["id"])
 
             # Update access stats
             if ids_to_update:

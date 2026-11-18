@@ -1420,6 +1420,23 @@ async def _m51_bm25_keyword_index(conn) -> None:
             await conn.execute(stmt)
 
 
+async def _m52_bm25_search_config(conn) -> None:
+    """Seed the hybrid search config (Riyo, 18 Nov 2026). Idempotent.
+
+    KG-RAG stage 1, step 3: recall and history_search rank by cosine +
+    BM25 (syne/memory/hybrid.py), plus the category fallback of automatic
+    recall. Keys and defaults live in hybrid.DEFAULTS; schema.sql carries
+    the same rows.
+    """
+    from ..memory.hybrid import DEFAULTS
+    for key, (value, desc) in DEFAULTS.items():
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+            "ON CONFLICT (key) DO NOTHING",
+            key, json.dumps(value), desc,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1472,6 +1489,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (49, _m49_remove_memory_decay, "transactional"),
     (50, _m50_drop_memory_auto_archive, "transactional"),
     (51, _m51_bm25_keyword_index, "transactional"),
+    (52, _m52_bm25_search_config, "transactional"),
 ]
 
 

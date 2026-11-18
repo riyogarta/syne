@@ -176,13 +176,28 @@ class TestHistorySearchShape:
         ctx.__aenter__ = AsyncMock(return_value=conn)
         ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("syne.tools.history.get_connection", return_value=ctx):
+        async def cosine_only():
+            from syne.memory.hybrid import DEFAULTS
+            s = {k: v[0] for k, v in DEFAULTS.items()}
+            s["bm25.history_enabled"] = False
+            return s
+
+        # Cosine-only path: limit + offset go straight into the SQL.
+        with patch("syne.tools.history.get_connection", return_value=ctx), \
+                patch("syne.memory.hybrid.load_settings", side_effect=cosine_only):
             await H.history_search_handler(_scope=OWNER_DM, query="x", limit=9999)
 
         # Last two params of the SELECT are limit + offset (see handler SQL).
         params = captured_params["params"]
         assert params[-2] == 10, "limit must be clamped to 10"
         assert params[-1] == 0
+
+        # Hybrid path (default): the cosine list fetches offset + max(limit,
+        # bm25.candidates) rows; the clamped limit is applied after fusion.
+        with patch("syne.tools.history.get_connection", return_value=ctx):
+            await H.history_search_handler(_scope=OWNER_DM, query="x", limit=9999)
+        params = captured_params["params"]
+        assert params[-2] == 20 and params[-1] == 0
 
 
 class TestHistorySearchLevels:
