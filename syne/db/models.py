@@ -259,7 +259,12 @@ async def update_user(
 
 
 async def delete_user(platform: str, platform_id: str) -> bool:
-    """Delete a user and all related data from the database. Returns True if deleted."""
+    """Delete a user and their sessions. Returns True if deleted.
+
+    Memories are never deleted with a user (Riyo, 18 Nov 2026): the rows stay
+    and only their owner (user_id) is cleared. References such as ibnukatsir
+    or fiqih can be recorded under a user and must survive.
+    """
     async with get_connection() as conn:
         # Get user id first
         row = await conn.fetchrow(
@@ -270,10 +275,11 @@ async def delete_user(platform: str, platform_id: str) -> bool:
             return False
         user_id = row["id"]
 
-        # Delete dependent rows (messages cascade from sessions)
-        await conn.execute("DELETE FROM memory WHERE user_id = $1", user_id)
-        await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
-        await conn.execute("DELETE FROM users WHERE id = $1", user_id)
+        # Memories stay, only their owner is cleared; messages cascade from sessions.
+        async with conn.transaction():
+            await conn.execute("UPDATE memory SET user_id = NULL WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
+            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
         return True
 
 
