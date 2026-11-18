@@ -75,7 +75,6 @@ DEFAULT_PREDICATES = {
     "cites": "A quotes / cites B",
     "narrated_from": "A (narrator) narrates from B",
     "happened_on": "A happened on date B",
-    "related_to": "A is related to B (only when no other predicate fits)",
 }
 
 # key -> (default, description). Seeded by migration 53 and schema.sql

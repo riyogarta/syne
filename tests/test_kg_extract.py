@@ -84,6 +84,12 @@ def test_parse_extraction_filters():
     assert {e["name"]: e["type"] for e in out["entities"]}["Paket C"] == "concept"
 
 
+def test_related_to_not_allowed():
+    raw = '{"entities":[{"name":"A","type":"concept"},{"name":"B","type":"concept"}],' \
+          '"relations":[{"subject":"A","predicate":"related_to","object":"B"}]}'
+    assert K.parse_extraction(raw, _s()) == {"entities": [], "relations": []}
+
+
 def test_parse_extraction_empty_and_garbage():
     assert K.parse_extraction('{"entities":[],"relations":[]}', _s()) == {"entities": [], "relations": []}
     with pytest.raises(ValueError):
@@ -92,7 +98,7 @@ def test_parse_extraction_empty_and_garbage():
 
 def test_prompt_has_fixed_predicates_and_speaker():
     p = K.build_prompt("Anakku lulus Paket C", speaker="Riyo (the user)", context="", s=_s())
-    assert "studies:" in p and "related_to:" in p
+    assert "studies:" in p and "happened_on:" in p and "related_to" not in p
     assert "SPEAKER: Riyo (the user)" in p and "(none)" in p
     assert p.rstrip().endswith("Anakku lulus Paket C")
 
