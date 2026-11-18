@@ -415,7 +415,6 @@ class TelegramChannel:
             BotCommand("models", "Manage LLM models (owner only)"),
             BotCommand("nodes", "Manage remote nodes (owner only)"),
             BotCommand("quit", "Exit remote node mode"),
-            BotCommand("reasoning", "Toggle reasoning visibility (on/off)"),
             BotCommand("restart", "Restart Syne (owner only)"),
             BotCommand("restartollama", "Restart Ollama, pull the embedding model if missing (owner only)"),
             BotCommand("restore", "Restore database from backup (owner only)"),

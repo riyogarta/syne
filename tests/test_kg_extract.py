@@ -270,3 +270,12 @@ def test_kgextract_registered():
     assert 'CommandHandler("kgextract", self._cmd_kgextract)' in src
     assert 'BotCommand("kgextract"' in src
     assert 'data.startswith("kgx:")' in src
+
+
+def test_reasoning_menu_entry_removed():
+    """/reasoning had no handler; the per-model toggle lives in /models."""
+    import inspect
+    import syne.communication.telegram as T
+    src = inspect.getsource(T)
+    assert 'BotCommand("reasoning"' not in src
+    assert 'models:reasoning:' in src
