@@ -1529,6 +1529,24 @@ async def _m55_kg_link_targets(conn) -> None:
     await conn.execute("DELETE FROM config WHERE key = 'kg.qs_pattern'")
 
 
+async def _m56_kg_prune_on_delete(conn) -> None:
+    """KG prune on delete (Riyo, 18 Nov 2026). Idempotent.
+
+    Deleting a memory or chat message removes what the knowledge graph holds
+    from it: statement-level AFTER DELETE triggers on memory and messages
+    call kg_prune_sources - DDL in syne/db/kg_prune_ddl.py, schema.sql
+    carries the same text. Sources deleted before this ran are pruned once
+    (prune_orphan_sources).
+    """
+    from ..cli.helpers import _split_sql_statements
+    from .kg_prune_ddl import KG_PRUNE_SCHEMA_SQL, prune_orphan_sources
+    for stmt in _split_sql_statements(KG_PRUNE_SCHEMA_SQL):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            await conn.execute(stmt)
+    await prune_orphan_sources(conn)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1585,6 +1603,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (53, _m53_kg_extract, "transactional"),
     (54, _m54_kg_recall_config, "transactional"),
     (55, _m55_kg_link_targets, "transactional"),
+    (56, _m56_kg_prune_on_delete, "transactional"),
 ]
 
 
