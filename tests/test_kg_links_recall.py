@@ -23,9 +23,11 @@ QROWS = [_q(1, 3, "Ali 'Imran", 1, 200), _q(2, 4, "An-Nisa'", 1, 176),
 
 def test_default_config_keys():
     cfg = B.default_config()
-    assert set(cfg) == {"kg.ref_sources", "kg.qs_pattern", "kg.part_pattern",
+    # v1.23.02: kg.qs_pattern moved into kg.ref_sources[alquran].target.mention
+    assert set(cfg) == {"kg.ref_sources", "kg.part_pattern",
                         "kg.max_mention_range", "kg.chunk_link_limit"}
-    assert cfg["kg.ref_sources"][0]["alquran"]["aliases"] == R.DEFAULT_SURAH_ALIASES
+    assert cfg["kg.ref_sources"][0]["alquran"]["target"]["aliases"] == R.DEFAULT_SURAH_ALIASES
+    assert cfg["kg.ref_sources"][0]["alquran"]["target"]["mention"] == R.DEFAULT_QS_PATTERN
     for v, d in cfg.values():
         json.dumps(v)
         assert d
@@ -58,7 +60,7 @@ async def test_migration_43_seeds_without_overwrite():
     conn.execute = AsyncMock()
     await M._m43_seed_kg_rule_config(conn)
     calls = conn.execute.call_args_list
-    assert len(calls) == 5
+    assert len(calls) == len(B.default_config()) == 4
     for c in calls:
         assert "ON CONFLICT (key) DO NOTHING" in c.args[0]
         assert json.loads(c.args[2]) == B.default_config()[c.args[1]][0]

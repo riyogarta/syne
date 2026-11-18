@@ -1478,6 +1478,57 @@ async def _m54_kg_recall_config(conn) -> None:
         )
 
 
+async def _m55_kg_link_targets(conn) -> None:
+    """Link-target rules move into kg.ref_sources (Riyo, 18 Nov 2026). Idempotent.
+
+    v1.23.02: any reference can be a link target, with its rules in the
+    'target' object of its kg.ref_sources entry. A Qur'an entry from before
+    (kind 'quran' + aliases, no target) gets a target built from the code
+    defaults, carrying over ITS OWN aliases and the CURRENT kg.qs_pattern
+    value as the mention pattern (the stored value is read, never compared
+    with an assumed old default, so an owner edit is kept). kg.qs_pattern
+    is then deleted. The description is refreshed from default_config().
+    """
+    from ..memory import kg_refs as R
+    from ..memory.kg_build import default_config
+
+    def _load(raw):
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (TypeError, ValueError):
+                return None
+        return raw
+
+    qs = _load(await conn.fetchval("SELECT value FROM config WHERE key = 'kg.qs_pattern'"))
+    qs = qs if isinstance(qs, str) and qs.strip() else None
+    src = _load(await conn.fetchval("SELECT value FROM config WHERE key = 'kg.ref_sources'"))
+    if isinstance(src, dict):
+        changed = False
+        for cat, entry in src.items():
+            if not isinstance(entry, dict) or entry.get("kind") != "quran":
+                continue
+            if isinstance(entry.get("target"), dict):
+                continue
+            aliases = entry.pop("aliases", None)
+            entry["target"] = R.quran_target(
+                mention=qs, aliases=aliases if isinstance(aliases, dict) else None)
+            changed = True
+        if changed:
+            await conn.execute(
+                "UPDATE config SET value = $1::jsonb, updated_at = NOW() "
+                "WHERE key = 'kg.ref_sources'",
+                json.dumps(src, ensure_ascii=False),
+            )
+    for key, (_v, desc) in default_config().items():
+        await conn.execute(
+            "UPDATE config SET description = $2 WHERE key = $1 "
+            "AND description IS DISTINCT FROM $2",
+            key, desc,
+        )
+    await conn.execute("DELETE FROM config WHERE key = 'kg.qs_pattern'")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1533,6 +1584,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (52, _m52_bm25_search_config, "transactional"),
     (53, _m53_kg_extract, "transactional"),
     (54, _m54_kg_recall_config, "transactional"),
+    (55, _m55_kg_link_targets, "transactional"),
 ]
 
 

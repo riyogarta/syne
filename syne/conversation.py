@@ -2682,6 +2682,20 @@ class Conversation:
                     # left pending must NOT flip the flag.
                     if not getattr(self, "_pending_consent_hash", ""):
                         tools_ran = True
+                if not (new_resp.content or "").strip() and not new_resp.tool_calls:
+                    # A redraft that came back empty (thinking-only, e.g.
+                    # stop_reason=max_tokens) must not replace a real draft:
+                    # check_rules passes an empty draft as CLEAN and the
+                    # channel would send "No response received" instead.
+                    logger.warning(
+                        "Rule checker retry returned empty "
+                        f"(stop_reason={getattr(new_resp, 'stop_reason', None)!r}) "
+                        "- keeping previous draft"
+                    )
+                    checker_warning = (
+                        "⚠️ [Rule checker retry returned empty — response sent as-is]"
+                    )
+                    break
                 current = new_resp
             except Exception as retry_err:
                 logger.warning(

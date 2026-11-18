@@ -7,7 +7,8 @@ same tables are ignored without deleting them.
 
   step 2 - entities named in the message: word n-grams of the message,
            normalised like extraction does, matched on kg_entities.norm_name;
-           Qur'an verses named with "QS ..." are matched on the 'ayah' entities;
+           items of a link target named in the message ("QS ..." for the
+           Qur'an) are matched on the target's node entities ('ayah');
   step 5 - expansion: seeds are those entities plus the entities of
            relations taken from the memories recalled this turn (their
            chunk IDs in kg_relation_sources). Hop 1 = relations of the
@@ -29,7 +30,7 @@ from typing import Optional
 from ..db.connection import get_connection
 from ..db.models import get_config
 from . import kg_refs as _refs
-from .kg_extract import REFERENCE_TYPES, ayah_index, ngrams, parse_era
+from .kg_extract import ngrams, parse_era, reference_types, target_indexes
 
 logger = logging.getLogger("syne.memory.kg_recall")
 
@@ -170,7 +171,7 @@ JOIN kg_entities oe ON oe.id = x.object_id
 _AYAH_SQL = """
 SELECT e.id, e.name
 FROM kg_entities e
-WHERE e.entity_type = 'ayah' AND e.name = ANY($1::text[])
+WHERE e.entity_type = ANY($3::text[]) AND e.name = ANY($1::text[])
   AND EXISTS (
       SELECT 1 FROM kg_relations r
       JOIN kg_relation_sources s ON s.relation_id = r.id
@@ -183,25 +184,29 @@ _AYAH_MAX_RANGE = 10   # a longer "QS 2:1-286" mention seeds nothing
 
 
 async def _ayah_seeds(conn, query: str, era) -> list:
-    """'ayah' entity IDs of the "QS ..." mentions in the message that have
-    relations from the KG worker, in the order mentioned."""
-    try:
-        index, pattern = await ayah_index(conn)
-        refs, _rej = _refs.parse_mentions(query, index, pattern)
-    except Exception as e:
-        logger.debug(f"KG recall ayah mentions skipped: {e}")
-        return []
+    """Node IDs of the link-target items mentioned in the message ("QS ..."
+    for the Qur'an) that have relations from the KG worker, in the order
+    mentioned. Every link target in kg.ref_sources is tried."""
     names: list = []
-    for ref in refs:
-        if ref.end - ref.start + 1 > _AYAH_MAX_RANGE:
-            continue
-        for a in ref.ayahs():
-            n = _refs.ayah_entity_name(ref.surah, a)
-            if n not in names:
-                names.append(n)
+    types: list = []
+    try:
+        for index in await target_indexes(conn):
+            refs, _rej = _refs.parse_mentions(query, index)
+            for ref in refs:
+                if ref.end - ref.start + 1 > _AYAH_MAX_RANGE:
+                    continue
+                for a in ref.ayahs():
+                    n = index.node_name(ref.surah, a)
+                    if n not in names:
+                        names.append(n)
+                        if index.node_type not in types:
+                            types.append(index.node_type)
+    except Exception as e:
+        logger.debug(f"KG recall target mentions skipped: {e}")
+        return []
     if not names:
         return []
-    rows = await conn.fetch(_AYAH_SQL, names, era)
+    rows = await conn.fetch(_AYAH_SQL, names, era, types)
     order = {n: i for i, n in enumerate(names)}
     return [int(r["id"]) for r in sorted(rows, key=lambda r: order.get(r["name"], 1 << 20))]
 
@@ -293,7 +298,7 @@ async def recall_kg(
         async with get_connection() as conn:
             seeds: list = []
             if grams:
-                rows = await conn.fetch(_MATCH_SQL, grams, REFERENCE_TYPES, era)
+                rows = await conn.fetch(_MATCH_SQL, grams, reference_types(), era)
                 order = {g: n for n, g in enumerate(grams)}
                 for r in sorted(rows, key=lambda r: (order.get(r["norm_name"], 1 << 20), r["id"])):
                     if int(r["id"]) not in seeds:

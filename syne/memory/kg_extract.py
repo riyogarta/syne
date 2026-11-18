@@ -46,8 +46,10 @@ from . import kg_refs as _refs
 logger = logging.getLogger("syne.memory.kg_extract")
 
 # Entities of the rule-built reference graph: never resolution targets,
-# except 'ayah': a name that is exactly one Qur'an verse ("QS 54:46",
-# "Al-Baqarah ayat 255") joins the existing ayah entity (resolve_ayah).
+# except the nodes of a link target ('ayah' for the Qur'an): a name that is
+# exactly one item ("QS 54:46", "Al-Baqarah ayat 255") joins the existing
+# node (resolve_ref). Node types of other targets are added at runtime
+# (reference_types()).
 REFERENCE_TYPES = ["chunk", "ayah", "quran_ayah_ref", "quran_chunk",
                    "quran_surah", "kaidah_entry"]
 
@@ -376,88 +378,127 @@ def parse_extraction(raw: str, s: dict) -> dict:
 Embedder = Callable[[str], Awaitable[Optional[list]]]
 
 
-_AYAH_INDEX: dict = {"at": 0.0, "index": None, "pattern": None, "max_range": 50}
+_AYAH_INDEX: dict = {"at": 0.0, "index": None, "pattern": None, "max_range": 50,
+                     "types": []}
 _AYAH_INDEX_TTL = 3600.0
 
 
-async def ayah_index(conn) -> tuple:
-    """(SurahIndex, QS pattern) built from the 'ayah' entities (names from
-    their descriptions, "Al-Qamar 46"), the Qur'an aliases of kg.ref_sources
-    and kg.qs_pattern. Cached for an hour."""
-    now = time.monotonic()
-    if _AYAH_INDEX["index"] is not None and now - _AYAH_INDEX["at"] < _AYAH_INDEX_TTL:
-        return _AYAH_INDEX["index"], _AYAH_INDEX["pattern"]
-    rows = await conn.fetch(
-        "SELECT name, description FROM kg_entities WHERE entity_type = 'ayah'")
-    names: dict = {}
-    counts: dict = {}
-    for r in rows:
-        m = re.fullmatch(r"QS (\d{1,3}):(\d{1,3})", r["name"] or "")
-        if not m:
-            continue
-        su, ay = int(m.group(1)), int(m.group(2))
-        counts[su] = max(counts.get(su, 0), ay)
-        desc = (r["description"] or "").strip()
-        head, _, tail = desc.rpartition(" ")
-        nm = head if tail.isdigit() else desc
-        if nm:
-            names.setdefault(su, nm)
-    aliases = dict(_refs.DEFAULT_SURAH_ALIASES)
-    pattern = _refs.DEFAULT_QS_PATTERN
-    max_range = 50
+async def _target_rules() -> tuple:
+    """(target rules {category: cfg}, max range) from kg.ref_sources,
+    the legacy kg.qs_pattern (until migration 55) and kg.max_mention_range."""
+    from .kg_build import DEFAULT_REF_SOURCES
+    sources, legacy, max_range = DEFAULT_REF_SOURCES, None, 50
     try:
         src = await get_config("kg.ref_sources", None)
-        if isinstance(src, dict):
-            for v in src.values():
-                if (isinstance(v, dict) and v.get("kind") == "quran"
-                        and isinstance(v.get("aliases"), dict)):
-                    aliases = dict(v["aliases"])
-        pattern = await get_config("kg.qs_pattern", None) or pattern
+        if isinstance(src, dict) and src:
+            sources = src
+        legacy = await get_config("kg.qs_pattern", None)
         mr = await get_config("kg.max_mention_range", None)
         if mr:
             max_range = max(1, int(mr))
     except Exception:
         pass
-    idx = _refs.surah_index_from(names, counts, aliases)
-    _AYAH_INDEX.update(at=now, index=idx, pattern=pattern, max_range=max_range)
-    return idx, pattern
+    targets = _refs.target_configs(sources, legacy if isinstance(legacy, str) else None)
+    if not targets:
+        targets = _refs.target_configs(DEFAULT_REF_SOURCES)
+    return targets, max_range
 
 
-async def resolve_ayah(conn, name: str) -> Optional[int]:
-    """ID of the 'ayah' entity when the whole name is one Qur'an verse."""
-    index, pattern = await ayah_index(conn)
-    ref = _refs.parse_single_ayah(name, index, pattern)
-    if not ref:
-        return None
-    return await conn.fetchval(
-        "SELECT id FROM kg_entities WHERE entity_type = 'ayah' AND name = $1 LIMIT 1",
-        _refs.ayah_entity_name(*ref),
-    )
+async def target_indexes(conn) -> list:
+    """One index per link target (v1.23.02), built from the target's node
+    entities (unit names from their descriptions, "Al-Qamar 46") and its
+    rules in kg.ref_sources. Cached for an hour."""
+    now = time.monotonic()
+    if _AYAH_INDEX["index"] is not None and now - _AYAH_INDEX["at"] < _AYAH_INDEX_TTL:
+        return _AYAH_INDEX["index"]
+    targets, max_range = await _target_rules()
+    out: list = []
+    for cfg in targets.values():
+        rows = await conn.fetch(
+            "SELECT name, description FROM kg_entities WHERE entity_type = $1",
+            cfg["node_type"])
+        node_re = re.compile(cfg["node_regex"])
+        names: dict = {}
+        counts: dict = {}
+        for r in rows:
+            m = node_re.fullmatch(r["name"] or "")
+            if not m:
+                continue
+            unit, item = int(m.group(1)), int(m.group(2))
+            counts[unit] = max(counts.get(unit, 0), item)
+            desc = (r["description"] or "").strip()
+            head, _, tail = desc.rpartition(" ")
+            nm = head if tail.isdigit() else desc
+            if nm:
+                names.setdefault(unit, nm)
+        out.append(_refs.target_index_from(names, counts, cfg))
+    _AYAH_INDEX.update(at=now, index=out, pattern=None, max_range=max_range,
+                       types=[i.node_type for i in out])
+    return out
 
 
-async def resolve_ayah_span(conn, name: str) -> list:
-    """'ayah' entity IDs when the whole name is a Qur'an reference. A range
-    becomes one ID per verse (decision 14 Nov 2026: QS 18:71-73 = QS 18:71,
-    18:72, 18:73); a range longer than kg.max_mention_range gives []."""
-    index, pattern = await ayah_index(conn)
-    ref = _refs.parse_ayah_ref(name, index, pattern)
-    if ref is None or ref.end - ref.start + 1 > _AYAH_INDEX["max_range"]:
-        return []
-    names = [_refs.ayah_entity_name(ref.surah, a) for a in ref.ayahs()]
-    rows = await conn.fetch(
-        "SELECT id, name FROM kg_entities WHERE entity_type = 'ayah' AND name = ANY($1::text[])",
-        names,
-    )
-    by = {r["name"]: int(r["id"]) for r in rows}
-    return [by[n] for n in names if n in by]
+def reference_types() -> list:
+    """REFERENCE_TYPES plus the node types of the link targets loaded so far."""
+    return REFERENCE_TYPES + [t for t in _AYAH_INDEX.get("types") or []
+                              if t not in REFERENCE_TYPES]
+
+
+async def ayah_index(conn) -> tuple:
+    """(index, mention pattern) of the Qur'an target, or of the first target
+    when there is no 'ayah' target. Kept for callers from before v1.23.02."""
+    idxs = await target_indexes(conn)
+    if not idxs:
+        return _refs.SurahIndex(), _refs.DEFAULT_QS_PATTERN
+    idx = next((i for i in idxs if i.node_type == "ayah"), idxs[0])
+    return idx, idx.mention
+
+
+async def resolve_ref(conn, name: str) -> Optional[int]:
+    """ID of the target node when the whole name is exactly one item of a
+    link target ("QS 54:46", "Al-Baqarah ayat 255")."""
+    for index in await target_indexes(conn):
+        ref = _refs.parse_single_ayah(name, index)
+        if not ref:
+            continue
+        return await conn.fetchval(
+            "SELECT id FROM kg_entities WHERE name = $1 AND entity_type = $2 LIMIT 1",
+            index.node_name(*ref), index.node_type,
+        )
+    return None
+
+
+async def resolve_ref_span(conn, name: str) -> list:
+    """Target node IDs when the whole name is one item or one range of a link
+    target. A range becomes one ID per item (decision 14 Nov 2026: QS 18:71-73
+    = QS 18:71, 18:72, 18:73); a range longer than kg.max_mention_range gives []."""
+    for index in await target_indexes(conn):
+        ref = _refs.parse_ayah_ref(name, index)
+        if ref is None:
+            continue
+        if ref.end - ref.start + 1 > _AYAH_INDEX["max_range"]:
+            return []
+        names = [index.node_name(ref.surah, a) for a in ref.ayahs()]
+        rows = await conn.fetch(
+            "SELECT id, name FROM kg_entities WHERE name = ANY($1::text[]) AND entity_type = $2",
+            names, index.node_type,
+        )
+        by = {r["name"]: int(r["id"]) for r in rows}
+        return [by[n] for n in names if n in by]
+    return []
+
+
+# Names from before v1.23.02.
+resolve_ayah = resolve_ref
+resolve_ayah_span = resolve_ref_span
 
 
 async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
                          s: dict) -> tuple:
     """(entity id, how): how = ayah | norm | embedding | new.
 
-    A name that is exactly one Qur'an verse joins the 'ayah' entity of the
-    reference graph (not for persons: "Yusuf 12" may be a name).
+    A name that is exactly one item of a link target (a Qur'an verse) joins
+    that target's node of the reference graph (not for persons: "Yusuf 12"
+    may be a name). how stays 'ayah' for any target.
     """
     if etype != "person" and re.search(r"\d", name or ""):
         try:
@@ -471,7 +512,7 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
         "ORDER BY (entity_type = $3) DESC, id LIMIT 1",
-        norm, REFERENCE_TYPES, etype,
+        norm, reference_types(), etype,
     )
     if row:
         return row["id"], "norm"
@@ -516,8 +557,8 @@ async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
                       embed: Optional[Embedder], s: dict) -> tuple:
     """Resolve entities, upsert relations with their source. (entities, relations).
 
-    A Qur'an reference resolves to its 'ayah' entities; a range gives one
-    relation per verse.
+    A link-target reference (Qur'an verse) resolves to its node entities; a
+    range gives one relation per item.
     """
     ids: dict = {}
     for e in extracted["entities"]:

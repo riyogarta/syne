@@ -3,16 +3,19 @@
 No AI. Reads chunks from `memory`, recognizes references with kg_refs,
 and writes them into the existing KG tables (Riyo, 14 Nov 2026):
 
-  * one 'ayah' entity per Qur'an verse, named "QS surah:ayah";
+  * one node entity per item of a link target: for the Qur'an one 'ayah'
+    entity per verse, named "QS surah:ayah" (v1.23.02: any reference with
+    a 'target' object in kg.ref_sources is a link target, e.g. a policy
+    with numbered articles);
   * one 'chunk' entity per reference chunk (description "memory:<id>");
-  * relations chunk -> ayah ('contains' / title predicate / 'cites'),
+  * relations chunk -> node ('contains' / title predicate / 'cites'),
     and part i -> part i+1 ('next_part');
   * every relation gets a kg_relation_sources row, origin 'rule'.
 
-Rules live in config (kg.ref_sources with per-reference aliases,
-kg.qs_pattern, kg.part_pattern, kg.max_mention_range), seeded by
-migration 43 from default_config(); the code defaults below apply
-only when a key is missing. Idempotent: re-running upserts.
+Rules live in config (kg.ref_sources with each target's rules and aliases,
+kg.part_pattern, kg.max_mention_range), seeded by migration 43 from
+default_config(); the code defaults below apply only when a key is
+missing. Idempotent: re-running upserts.
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ logger = logging.getLogger("syne.memory.kg_build")
 QURAN = "quran"
 
 DEFAULT_REF_SOURCES: dict[str, dict] = {
-    "alquran": {"kind": QURAN, "aliases": dict(R.DEFAULT_SURAH_ALIASES)},
+    "alquran": {"kind": QURAN, "target": R.quran_target()},
     "ibnukatsir": {"title": R.DEFAULT_TITLE_PATTERNS["ibnukatsir"],
                    "title_predicate": "explains", "mentions": True},
     "asbabnuzul": {"title": R.DEFAULT_TITLE_PATTERNS["asbabnuzul"],
@@ -54,14 +57,13 @@ def default_config() -> dict:
         "kg.ref_sources": (
             DEFAULT_REF_SOURCES,
             "Rule-built KG: references to link, by memory category. "
-            "{category: {kind: 'quran' = link target, with aliases {name: surah} "
-            "for spellings that folding cannot join | title: regex, title_predicate, "
-            "mentions: true}}. Re-run `syne memory kg-build` after a change.",
-        ),
-        "kg.qs_pattern": (
-            R.DEFAULT_QS_PATTERN,
-            "Rule-built KG: regex for 'QS ...' mentions in reference text "
-            "(groups name, snum, snum2, a1, a2).",
+            "{category: {target: {node_type, node_format ('QS {unit}:{item}'), "
+            "node_regex, head (regex on the target's chunks: unit, a1, a2, name), "
+            "mention (regex for mentions: name, snum/snum2, a1, a2), normalize "
+            "{articles, folds, squeeze, drop_final_h}, aliases {name: unit}} = a link "
+            "target | title: regex, title_predicate, title_target | mentions: true}}. "
+            "kind 'quran' = Qur'an defaults for the target. "
+            "Re-run `syne memory kg-build` after a change.",
         ),
         "kg.part_pattern": (
             R.DEFAULT_PART_PATTERN,
@@ -70,12 +72,13 @@ def default_config() -> dict:
         ),
         "kg.max_mention_range": (
             DEFAULT_MAX_MENTION_RANGE,
-            "Rule-built KG: a mentioned ayah range longer than this is not linked.",
+            "Rule-built KG: a mentioned range of items (e.g. ayahs) longer than this "
+            "is not linked.",
         ),
         "kg.chunk_link_limit": (
             DEFAULT_CHUNK_LINK_LIMIT,
             "Max KG lines added per turn from the links of recalled reference "
-            "chunks (chunk -> ayah -> other chunks). 0 = off.",
+            "chunks (chunk -> target item -> other chunks). 0 = off.",
         ),
     }
 
@@ -120,27 +123,27 @@ class BuildPlan:
 
 
 def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
-               qs_pattern: str = R.DEFAULT_QS_PATTERN,
+               qs_pattern: Optional[str] = None,
                part_pattern: str = R.DEFAULT_PART_PATTERN,
                max_range: int = DEFAULT_MAX_MENTION_RANGE) -> BuildPlan:
-    """Pure: rows [{id, category, content}] -> BuildPlan."""
-    plan = BuildPlan()
-    quran_cats = {c for c, s in sources.items() if s.get("kind") == QURAN}
-    # Aliases come from the Qur'an entry itself; the code list is only a
-    # fallback for an entry without 'aliases'. `aliases` adds on top.
-    base: dict = {}
-    for c in quran_cats:
-        s = sources[c]
-        base.update(s["aliases"] if isinstance(s.get("aliases"), dict)
-                    else R.DEFAULT_SURAH_ALIASES)
-    index = R.build_surah_index(
-        (r["content"] for r in rows if r["category"] in quran_cats),
-        {**base, **(aliases or {})},
-    )
+    """Pure: rows [{id, category, content}] -> BuildPlan.
 
-    def ayah_key(surah: int, ayah: int) -> tuple:
-        return plan.entity(R.ayah_entity_name(surah, ayah), AYAH,
-                           f"{index.names.get(surah, '')} {ayah}".strip())
+    Every link target in `sources` gets an index from its own chunks; text
+    of the other references is matched against every target. `aliases`
+    adds to each target's aliases; `qs_pattern` is the legacy
+    kg.qs_pattern (Qur'an mention pattern, until migration 55 moves it).
+    """
+    plan = BuildPlan()
+    targets = R.target_configs(sources, qs_pattern)
+    indexes: dict = {
+        cat: R.build_target_index(
+            (r["content"] for r in rows if r["category"] == cat), cfg, aliases)
+        for cat, cfg in targets.items()
+    }
+
+    def node_key(index, unit: int, item: int) -> tuple:
+        return plan.entity(index.node_name(unit, item), index.node_type,
+                           index.node_desc(unit, item))
 
     parts: dict = defaultdict(dict)  # (category, base) -> {i: chunk_key}
     for row in rows:
@@ -154,38 +157,49 @@ def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
         ck = plan.entity(chunk_entity_name(mid, title), CHUNK, f"memory:{mid}")
         plan.chunks += 1
 
-        if src.get("kind") == QURAN:
-            p = R.parse_quran_chunk(content)
+        if cat in indexes:
+            index = indexes[cat]
+            p = R.parse_head(content, index.head)
             if not p:
                 plan.reject(cat, title, "no_match")
             else:
-                surah, _n, a1, a2 = p
+                unit, _n, a1, a2 = p
                 for a in range(a1, a2 + 1):
-                    plan.relate(ck, "contains", ayah_key(surah, a), mid)
+                    plan.relate(ck, "contains", node_key(index, unit, a), mid)
+            continue
+        if src.get("kind") == QURAN:
+            plan.reject(cat, title, "bad_target")
             continue
 
         title_ref = None
-        if src.get("title"):
-            title_ref, why = R.parse_title(title, src["title"], index)
-            if title_ref is None:
-                plan.reject(cat, title, why)
+        title_idx = None
+        if src.get("title") and indexes:
+            tcat = src.get("title_target")
+            title_idx = indexes.get(tcat) if tcat else next(iter(indexes.values()))
+            if title_idx is None:
+                plan.reject(cat, title, "unknown_target")
             else:
-                pred = src.get("title_predicate") or "about"
-                for a in title_ref.ayahs():
-                    plan.relate(ck, pred, ayah_key(title_ref.surah, a), mid)
+                title_ref, why = R.parse_title(title, src["title"], title_idx)
+                if title_ref is None:
+                    plan.reject(cat, title, why)
+                else:
+                    pred = src.get("title_predicate") or "about"
+                    for a in title_ref.ayahs():
+                        plan.relate(ck, pred, node_key(title_idx, title_ref.surah, a), mid)
 
         if src.get("mentions"):
-            refs, rej = R.parse_mentions(content, index, qs_pattern)
-            for raw, why in rej:
-                plan.reject(cat, raw, why)
-            for ref in refs:
-                if ref == title_ref:
-                    continue
-                if ref.end - ref.start + 1 > max_range:
-                    plan.reject(cat, f"{ref.surah}:{ref.start}-{ref.end}", "range_too_long")
-                    continue
-                for a in ref.ayahs():
-                    plan.relate(ck, "cites", ayah_key(ref.surah, a), mid)
+            for index in indexes.values():
+                refs, rej = R.parse_mentions(content, index)
+                for raw, why in rej:
+                    plan.reject(cat, raw, why)
+                for ref in refs:
+                    if index is title_idx and ref == title_ref:
+                        continue
+                    if ref.end - ref.start + 1 > max_range:
+                        plan.reject(cat, f"{ref.surah}:{ref.start}-{ref.end}", "range_too_long")
+                        continue
+                    for a in ref.ayahs():
+                        plan.relate(ck, "cites", node_key(index, ref.surah, a), mid)
 
         pp = R.parse_part(title, part_pattern)
         if pp:
@@ -208,7 +222,8 @@ async def load_settings_from_config() -> dict:
     return {
         "sources": await get_config("kg.ref_sources", None) or DEFAULT_REF_SOURCES,
         "aliases": {},  # per reference, inside kg.ref_sources
-        "qs_pattern": await get_config("kg.qs_pattern", None) or R.DEFAULT_QS_PATTERN,
+        # Legacy key, removed by migration 55; None = each target's own pattern.
+        "qs_pattern": await get_config("kg.qs_pattern", None),
         "part_pattern": await get_config("kg.part_pattern", None) or R.DEFAULT_PART_PATTERN,
         "max_range": int(await get_config("kg.max_mention_range", None)
                          or DEFAULT_MAX_MENTION_RANGE),
@@ -219,20 +234,20 @@ async def build(conn, categories: Optional[list[str]] = None,
                 dry_run: bool = False, settings: Optional[dict] = None) -> BuildPlan:
     """Plan from the database, then write it (unless dry_run).
 
-    The Qur'an chunks are always read so mentions can be validated, even
-    when `categories` limits which references get linked.
+    The link targets' chunks are always read so mentions can be validated,
+    even when `categories` limits which references get linked.
     """
     st = settings or await load_settings_from_config()
     sources = dict(st["sources"])
     if categories:
-        keep = set(categories) | {c for c, s in sources.items() if s.get("kind") == QURAN}
+        keep = set(categories) | set(R.target_configs(sources))
         sources = {c: s for c, s in sources.items() if c in keep}
     rows = await conn.fetch(
         "SELECT id, category, content FROM memory WHERE category = ANY($1::text[]) ORDER BY id",
         list(sources),
     )
     plan = plan_links([dict(r) for r in rows], sources, st["aliases"],
-                      st["qs_pattern"], st["part_pattern"], st["max_range"])
+                      st.get("qs_pattern"), st["part_pattern"], st["max_range"])
     if not dry_run:
         await write_plan(conn, plan)
     return plan

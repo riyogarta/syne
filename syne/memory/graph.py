@@ -15,12 +15,26 @@ from typing import Optional, TYPE_CHECKING
 
 from ..db.connection import get_connection
 from ..db.models import get_config
-from .kg_refs import DEFAULT_PART_PATTERN
+from .kg_refs import DEFAULT_PART_PATTERN, target_node_types
 
 if TYPE_CHECKING:
     from ..llm.provider import LLMProvider
 
 logger = logging.getLogger("syne.memory.graph")
+
+_SAFE_TYPE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
+
+
+async def _target_types() -> list[str]:
+    """Node types of the link targets in kg.ref_sources (v1.23.02), e.g.
+    ['ayah']. Falls back to ['ayah']; only plain identifiers are kept
+    because the keyword step writes them into SQL."""
+    try:
+        types = target_node_types(await get_config("kg.ref_sources", None) or {})
+    except Exception:
+        types = []
+    types = [t for t in types if _SAFE_TYPE.match(t)]
+    return types or ["ayah"]
 
 async def _resolve_entity(name: str, entity_type: str, description: str = "") -> int:
     """Find existing entity or create new one. Returns entity ID.
@@ -280,6 +294,7 @@ async def recall_graph(
     words = _query_words(query)
     if not words:
         return []
+    _skip = ", ".join(f"'{t}'" for t in ["chunk"] + await _target_types())
 
     t0 = time.monotonic()
     kw_rows: list = []
@@ -310,7 +325,7 @@ async def recall_graph(
             score_expr = " + ".join(score_parts)
             kw_rows = await conn.fetch(
                 f"SELECT id, name, ({score_expr}) AS kw FROM kg_entities "
-                f"WHERE ({where_clause}) AND entity_type NOT IN ('chunk', 'ayah') "
+                f"WHERE ({where_clause}) AND entity_type NOT IN ({_skip}) "
                 f"ORDER BY kw DESC, id "
                 f"LIMIT {_KG_KW_CANDIDATES}",
                 *params,
@@ -406,8 +421,9 @@ async def recall_chunk_links(
     chunk has one 'chunk' entity whose description is 'memory:<id>'.
       hop 1: the chunk's own relations (tafsir/asbab/cites -> ayah, Qur'an
              chunk -> its ayahs, part -> next part);
-      hop 2: for every ayah reached, other chunks linked to that ayah (the
-             Qur'an chunk holding it first, then tafsir, hadith citing it).
+      hop 2: for every link-target node reached (an ayah, or an item of
+             any other target in kg.ref_sources), other chunks linked to it
+             (the chunk holding it first, then tafsir, hadith citing it).
     Order: hop-1 explains/asbab_of/cites, then hop 2 (contains, asbab_of,
     cites, explains), then the rest of hop 1; within hop 1 by the recall
     rank of the seed chunk. Parts of one document count once: a line whose
@@ -440,6 +456,7 @@ async def recall_chunk_links(
     cat_join = "JOIN memory m ON m.id = r.source_memory_id" if public_cats is not None else ""
     extra = [public_cats] if public_cats is not None else []
 
+    node_types = set(await _target_types())
     try:
         _pp = await get_config("kg.part_pattern", None)
     except Exception:
@@ -498,7 +515,7 @@ async def recall_chunk_links(
             ayah_ids: list[int] = []
             for r in hop1:
                 for eid, et in ((r["subject_id"], r["s_type"]), (r["object_id"], r["o_type"])):
-                    if et == "ayah" and int(eid) not in ayah_ids:
+                    if et in node_types and int(eid) not in ayah_ids:
                         ayah_ids.append(int(eid))
 
             hop2: list = []

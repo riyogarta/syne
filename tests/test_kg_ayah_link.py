@@ -79,7 +79,9 @@ class _AConn:
         return AYAH_ROWS
 
     async def fetchval(self, sql, *a):
-        if "entity_type = 'ayah'" in sql:
+        # v1.23.02: node type is a parameter (any link target), 'ayah' for the Qur'an
+        if "WHERE name = $1 AND entity_type = $2" in sql:
+            assert a[1] == "ayah"
             self.lookups.append(a[0])
             return self.ayah_id
         return 77
