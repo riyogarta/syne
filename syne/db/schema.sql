@@ -1339,3 +1339,12 @@ INSERT INTO config (key, value, description) VALUES
     ('kg.resolve_min_similarity', '0.92', 'Entity resolution: a new name joins an existing entity of the same type by name embedding only at this cosine similarity or higher (after normalisation found nothing). Clamped 0.5-1.'),
     ('kg.resolve_min_trgm', '0.4', 'Entity resolution: the embedding match must also share this much spelling (pg_trgm similarity of the normalised names), so different people with similar-sounding names are not joined. Clamped 0-1.')
 ON CONFLICT (key) DO NOTHING;
+
+-- KG recall config (Riyo, 18 Nov 2026) - KG-RAG stage 2, steps 2 and 5.
+-- Mirrors migration 54 (keys + defaults from syne/memory/kg_recall.py DEFAULTS).
+INSERT INTO config (key, value, description) VALUES
+    ('kg.graph_recall_limit', '10', 'KG lines (relations from the KG worker, newer than kg.extract_era_start) added to the context per turn, with source and date. 0 = off. Clamped 0-50.'),
+    ('kg.graph_hops', '2', 'KG recall depth: 1 = relations of the entities named in the message and of the recalled memories; 2 = also relations of the entities reached. Clamped 1-2.'),
+    ('kg.graph_per_entity', '8', 'Most relations read per entity in KG recall (newest first), so an entity with many relations does not crowd out the rest. Clamped 1-50.'),
+    ('kg.graph_max_seeds', '10', 'Most starting entities of KG recall: entities named in the message first, then entities from the recalled memories. Clamped 1-50.')
+ON CONFLICT (key) DO NOTHING;

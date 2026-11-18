@@ -1191,6 +1191,20 @@ class Conversation:
                     ]
             except Exception as e:
                 logger.debug(f"Chunk link recall skipped: {e}")
+        # 2d. KG recall (KG-RAG stage 2, steps 2+5): entities named in the
+        #     message + relations of the recalled memories, 1-2 hops over
+        #     relations of the new era only. kg.graph_recall_limit = 0 = off.
+        kg_lines: list = []
+        try:
+            from .memory.kg_recall import recall_kg as _recall_kg
+            kg_lines = await _recall_kg(
+                recall_query or user_message,
+                [m.get("id") for m in (memories or [])],
+                session_id=self.session_id,
+                requester_access_level=access_level,
+            )
+        except Exception as e:
+            logger.debug(f"KG recall skipped: {e}")
         self._ts_add_latency("recall", _ts_time.monotonic() - _t_recall)
 
         # 3. Conversation history
@@ -1253,6 +1267,15 @@ class Conversation:
             messages.append(ChatMessage(role="system", content=graph_block,
                                         metadata={"volatile": True, "ctx_part": "r_graph"}))
             logger.info(f"Graph: injected {len(graph_lines)} relations")
+        if kg_lines:
+            kg_block = "\n".join([
+                "# Knowledge Graph (chat & memories)",
+                "Facts extracted from earlier chat messages and memories, with their source and date. Older sources may be outdated.",
+                "",
+            ] + kg_lines)
+            messages.append(ChatMessage(role="system", content=kg_block,
+                                        metadata={"volatile": True, "ctx_part": "r_graph"}))
+            logger.info(f"KG recall: injected {len(kg_lines)} relations")
 
         # 4d. Memory budget R (enforce mode): drop the weakest recall items.
         self._ts_fit_r(messages)

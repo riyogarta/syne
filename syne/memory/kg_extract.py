@@ -277,6 +277,7 @@ Rules:
 - Every entity name must point to ONE specific thing. A person known only by a relation word (anakku, istrinya, "my son") is named "<relation> <name of that person>", e.g. "anak Riyogarta Pratikto", never just "Anak".
 - A label in square brackets at the start of TARGET (e.g. "[KEPUTUSAN RIYO - 18 Nov 2026]") is a title, not an entity; its date may be used with happened_on.
 - Subject and object of every relation must be in entities. Leave out greetings, opinions about the conversation itself, and anything uncertain.
+- Never make an entity of a commit hash, an ID or record number (memory #123, message 456), a file path, a URL, or a chat command (/models).
 - Nothing worth storing: {{"entities":[],"relations":[]}}
 
 SPEAKER: {speaker}
@@ -310,6 +311,24 @@ def _json_object(raw: str):
     return json.loads(raw[i:j + 1])
 
 
+# Names that are technical references, not things (Riyo, 18 Nov 2026):
+# commit hashes, IDs / record numbers, file paths, URLs, chat commands.
+_NOT_ENTITY = [
+    re.compile(r"^(?=[0-9a-f]*\d)[0-9a-f]{7,40}$", re.I),
+    re.compile(r"^#\d+$"),
+    re.compile(r"^(memori|memory|pesan|message|msg|commit|id|row|baris)\s*#?\s*\d+$", re.I),
+    re.compile(r"^(https?://|www\.)", re.I),
+    re.compile(r"^/[a-z_][a-z0-9_]*$", re.I),
+    re.compile(r"^(~|\.{1,2})?/?([\w.-]+/)+[\w.-]*$"),
+    re.compile(r"^[\w-]+\.(py|sql|md|json|ya?ml|toml|txt|log|sh|js|ts|html|css)$", re.I),
+]
+
+
+def technical_name(name: str) -> bool:
+    n = (name or "").strip()
+    return any(p.search(n) for p in _NOT_ENTITY)
+
+
 def parse_extraction(raw: str, s: dict) -> dict:
     """Validated {entities: [{name, type}], relations: [{subject, predicate, object}]}."""
     data = _json_object(raw)
@@ -320,7 +339,7 @@ def parse_extraction(raw: str, s: dict) -> dict:
         if not isinstance(e, dict):
             continue
         name = re.sub(r"\s+", " ", str(e.get("name") or "")).strip(" \"'")
-        if not name or len(name) > 120 or not normalize_name(name):
+        if not name or len(name) > 120 or not normalize_name(name) or technical_name(name):
             continue
         t = str(e.get("type") or "").strip().lower()
         key = name.lower()

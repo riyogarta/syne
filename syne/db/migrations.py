@@ -1461,6 +1461,23 @@ async def _m53_kg_extract(conn) -> None:
         )
 
 
+async def _m54_kg_recall_config(conn) -> None:
+    """KG recall config (Riyo, 18 Nov 2026). Idempotent.
+
+    KG-RAG stage 2, steps 2 and 5: entities named in the message plus the
+    recalled memories expand 1-2 hops over relations of the new era
+    (syne/memory/kg_recall.py). Keys and defaults live in kg_recall.DEFAULTS;
+    schema.sql carries the same rows.
+    """
+    from ..memory.kg_recall import DEFAULTS
+    for key, (value, desc) in DEFAULTS.items():
+        await conn.execute(
+            "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+            "ON CONFLICT (key) DO NOTHING",
+            key, json.dumps(value), desc,
+        )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1515,6 +1532,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (51, _m51_bm25_keyword_index, "transactional"),
     (52, _m52_bm25_search_config, "transactional"),
     (53, _m53_kg_extract, "transactional"),
+    (54, _m54_kg_recall_config, "transactional"),
 ]
 
 
