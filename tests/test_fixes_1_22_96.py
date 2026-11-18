@@ -14,8 +14,8 @@ def _src():
 def test_recall_embed_is_capped():
     src = _src()
     assert "embedding.recall_query_max_chars" in src
-    assert "_qtext[:_qmax]" in src
-    i = src.index("_qtext = _qtext[:_qmax]")
+    assert "_qtext[-_qmax:]" in src
+    i = src.index("_qtext = _qtext[-_qmax:]")
     assert "quick_embed(self.memory.provider, _qtext)" in src[i:i + 200]
 
 

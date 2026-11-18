@@ -1097,18 +1097,20 @@ class Conversation:
                 if "v" not in _qvec:
                     from . import embed_health as _eh
                     _qtext = recall_query or user_message
-                    # Bound the text embedded for recall: a photo/album turn
-                    # carries every image analysis in the message (no
-                    # original_text), and embedding thousands of chars on a
-                    # CPU Ollama alone missed embedding.recall_timeout. The
-                    # full message still reaches the model and history.
+                    # Bound the text embedded for recall: embedding thousands
+                    # of chars on a CPU Ollama alone missed
+                    # embedding.recall_timeout. Keep the END of the text - in
+                    # a long message the actual question is usually last.
+                    # (Media turns are already shortened to caption + tail of
+                    # the analysis in _chat_inner.) The full message still
+                    # reaches the model and history.
                     _qmax = int(await _get_recall_config(
                         "embedding.recall_query_max_chars", 1500) or 0)
                     if _qmax > 0 and len(_qtext) > _qmax:
                         logger.info(
-                            f"Recall query embed capped: {len(_qtext)} -> {_qmax} chars"
+                            f"Recall query embed capped (tail): {len(_qtext)} -> {_qmax} chars"
                         )
-                        _qtext = _qtext[:_qmax]
+                        _qtext = _qtext[-_qmax:]
                     _qvec["v"] = await _eh.quick_embed(self.memory.provider, _qtext)
             return _qvec["v"]
 
@@ -1818,6 +1820,7 @@ class Conversation:
         #   4. If no ability handles the input → native LLM capability
         # This applies to ALL abilities (bundled + self-created).
         # ═══════════════════════════════════════════════════════════════
+        _pre_media_text = user_message
         if message_metadata:
             user_message, message_metadata = await self._ability_first_preprocess(
                 user_message, message_metadata
@@ -1845,7 +1848,28 @@ class Conversation:
                 )
 
         # Build context — use original text (without context prefix) for memory recall
-        recall_query = (message_metadata or {}).get("original_text", user_message)
+        recall_query = (message_metadata or {}).get("original_text")
+        if recall_query is None:
+            recall_query = user_message
+            if (
+                user_message != _pre_media_text
+                and user_message.startswith(_pre_media_text)
+            ):
+                # Media turn (photo/album/document): the caption - the
+                # actual question - sits before the appended analysis.
+                # Recall on the caption text plus only the TAIL of the
+                # analysis, so neither is cut off by the embed cap.
+                from .db.models import get_config as _get_media_cfg
+                _tail_n = int(await _get_media_cfg(
+                    "embedding.recall_media_tail_chars", 1000) or 0)
+                _added = user_message[len(_pre_media_text):]
+                recall_query = _pre_media_text
+                if _tail_n > 0 and _added.strip():
+                    recall_query = f"{_pre_media_text}\n\n{_added[-_tail_n:]}"
+                logger.info(
+                    f"Media recall query: caption part {len(_pre_media_text)} + "
+                    f"analysis tail {min(len(_added), max(_tail_n, 0))} of {len(_added)} chars"
+                )
         try:
             context = await self.build_context(user_message, recall_query=recall_query)
         finally:
