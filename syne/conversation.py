@@ -1096,9 +1096,20 @@ class Conversation:
             async with _qvec_lock:
                 if "v" not in _qvec:
                     from . import embed_health as _eh
-                    _qvec["v"] = await _eh.quick_embed(
-                        self.memory.provider, recall_query or user_message
-                    )
+                    _qtext = recall_query or user_message
+                    # Bound the text embedded for recall: a photo/album turn
+                    # carries every image analysis in the message (no
+                    # original_text), and embedding thousands of chars on a
+                    # CPU Ollama alone missed embedding.recall_timeout. The
+                    # full message still reaches the model and history.
+                    _qmax = int(await _get_recall_config(
+                        "embedding.recall_query_max_chars", 1500) or 0)
+                    if _qmax > 0 and len(_qtext) > _qmax:
+                        logger.info(
+                            f"Recall query embed capped: {len(_qtext)} -> {_qmax} chars"
+                        )
+                        _qtext = _qtext[:_qmax]
+                    _qvec["v"] = await _eh.quick_embed(self.memory.provider, _qtext)
             return _qvec["v"]
 
         async def _do_memory_recall():
