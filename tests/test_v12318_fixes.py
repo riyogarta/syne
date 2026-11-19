@@ -62,6 +62,7 @@ def test_history_only_refusal_offers_a_way_out():
     plan = {"blocked": [("messages", 1024, 50)], "relax": []}
     assert D.history_only(plan)
     assert "Clear history vectors" in D.refusal_for_plan(plan, 768)
+    assert "reembed" not in D.refusal_for_plan(plan, 768)
     plan = {"blocked": [("memory", 1024, 3), ("messages", 1024, 50)], "relax": []}
     assert not D.history_only(plan)
     assert "Clear history vectors" not in D.refusal_for_plan(plan, 768)

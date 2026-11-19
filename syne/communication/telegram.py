@@ -5139,9 +5139,9 @@ Or just send me a message!"""
                 await query.answer(f"Active → {entry.get('label', embed_key)}")
                 await bot.send_message(
                     chat_id=chat_id, parse_mode="HTML",
-                    text="Chat history vectors were cleared. Run "
-                         "<code>syne memory reembed-history</code> to embed the "
-                         "history with the new model.")
+                    text="Chat history vectors were cleared. Old messages stay "
+                         "findable by keyword only; new messages are embedded "
+                         "with the new model.")
             else:
                 await query.answer(f"Failed: {result[:50]}", show_alert=True)
             await self._embed_menu_main(query)

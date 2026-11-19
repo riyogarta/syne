@@ -116,9 +116,9 @@ def refusal_for_plan(plan: dict, new_dims) -> Optional[str]:
     if history_only(plan):
         out += (
             "\n\nOnly chat history blocks the switch. <b>Clear history vectors and "
-            "switch</b> keeps every message (text and keyword search) and empties "
-            "their vectors; run <code>syne memory reembed-history</code> afterwards "
-            "to embed them with the new model."
+            "switch</b> keeps every message and empties their vectors: old messages "
+            "stay findable by keyword only, new messages are embedded with the "
+            "new model."
         )
     return out
 
@@ -130,9 +130,10 @@ def history_only(plan: dict) -> bool:
 
 async def clear_history_vectors(conn, new_dims) -> int:
     """Empty every messages.embedding and type the column vector(new_dims)
-    with a fresh HNSW index (v1.23.18, review #14). Messages are kept; their
-    vectors come back with `syne memory reembed-history`. Before, a switch
-    was refused as long as any history vector existed, with no way out.
+    with a fresh HNSW index (v1.23.18, review #14). Messages are kept; old
+    ones are not embedded again (Riyo's decision #57758), new ones get
+    vectors of the new model. Before, a switch was refused as long as any
+    history vector existed, with no way out.
     Returns the number of vectors cleared."""
     nd = int(new_dims)
     async with conn.transaction():
