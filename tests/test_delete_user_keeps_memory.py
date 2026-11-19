@@ -30,7 +30,8 @@ class _Conn:
         return {"id": 7, "name": "Budi", "display_name": None, "access_level": "public"}
 
     async def fetch(self, q, *a):
-        if "FROM sessions WHERE user_id" in q:
+        if "FROM sessions s WHERE s.user_id" in q:
+            self.dm_args = a
             return [{"id": i} for i in self.dm]
         if "FROM messages m JOIN sessions" in q:
             return [{"id": i} for i in self.group_rows]
@@ -149,3 +150,18 @@ def test_cli_user_delete_registered():
     from syne.cli import cli
     assert "user" in cli.commands
     assert "delete" in cli.commands["user"].commands
+
+
+def test_dm_recognised_by_group_predicate_not_chat_id():
+    from syne.tools.history import group_session_sql
+    dm, rows = M._delete_user_sql()
+    g = group_session_sql("s")
+    assert dm.endswith(f"AND NOT {g}") and "platform_chat_id = ANY" not in dm
+    assert rows.endswith(f"AND {g}") and "NOT" not in rows.split("sender_id")[1]
+
+
+async def test_dm_query_takes_only_user_id(monkeypatch):
+    conn = _Conn()
+    monkeypatch.setattr(M, "get_connection", lambda: _CM(conn))
+    await M.delete_user_preview("discord", "652096670653218826")
+    assert conn.dm_args == (7,)

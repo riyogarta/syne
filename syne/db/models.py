@@ -258,27 +258,22 @@ async def update_user(
         return result
 
 
-def _dm_chat_ids(platform_id: str) -> list:
-    """Chat ids a user's own DM session can carry (Telegram id, WhatsApp JID)."""
-    pid = str(platform_id)
-    return [pid, pid + "@s.whatsapp.net"]
-
-
-_DM_SESSIONS = (
-    "SELECT id FROM sessions WHERE user_id = $1 AND platform = $2 "
-    "AND platform_chat_id = ANY($3::text[])"
-)
-_GROUP_ROWS = (
-    "SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
-    "WHERE s.platform = $1 AND m.metadata->>'sender_id' = $2 "
-    "AND NOT (s.platform_chat_id = ANY($3::text[]))"
-)
+def _delete_user_sql() -> tuple:
+    """(DM sessions, group rows) queries. A DM is any session owned by the user
+    that is not a group (tools.history.group_session_sql, as in scope_sql):
+    on WhatsApp (@lid) and Discord the DM chat id is not the user's id."""
+    from ..tools.history import group_session_sql
+    g = group_session_sql("s")
+    dm = f"SELECT s.id FROM sessions s WHERE s.user_id = $1 AND NOT {g}"
+    rows = ("SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
+            f"WHERE s.platform = $1 AND m.metadata->>'sender_id' = $2 AND {g}")
+    return dm, rows
 
 
 async def _delete_user_counts(conn, uid: int, platform: str, pid: str) -> dict:
-    chats = _dm_chat_ids(pid)
-    dm_ids = [r["id"] for r in await conn.fetch(_DM_SESSIONS, uid, platform, chats)]
-    group_rows = [r["id"] for r in await conn.fetch(_GROUP_ROWS, platform, pid, chats)]
+    dm_sql, rows_sql = _delete_user_sql()
+    dm_ids = [r["id"] for r in await conn.fetch(dm_sql, uid)]
+    group_rows = [r["id"] for r in await conn.fetch(rows_sql, platform, pid)]
     return {
         "dm_session_ids": dm_ids,
         "dm_messages": int(await conn.fetchval(
@@ -316,7 +311,8 @@ async def delete_user(platform: str, platform_id: str) -> Optional[dict]:
     """Delete a user. Returns a summary dict, or None when the user is unknown.
 
     One transaction (v1.23.11, Riyo 19 Nov 2026):
-      * the user's own DM sessions are deleted (messages cascade; the
+      * the user's own DM sessions (every non-group session they own,
+        including reminder sessions) are deleted (messages cascade; the
         messages trigger prunes their KG sources); sub-agent runs started
         there are detached first (their FK has no ON DELETE);
       * other sessions recorded under the user - a group session is owned by

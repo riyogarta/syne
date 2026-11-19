@@ -40,7 +40,7 @@ def test_schema_sql_title_target():
 
 def test_migration_58_registered():
     assert (58, M._m58_guard_contains_title_target, "transactional") in M.MIGRATIONS
-    assert M.CURRENT_SCHEMA_VERSION == 58
+    assert M.CURRENT_SCHEMA_VERSION >= 58
 
 
 def test_extract_prompt_skips_examples():

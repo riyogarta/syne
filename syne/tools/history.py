@@ -78,7 +78,10 @@ def build_history_scope(conv, access_level: str) -> Optional[dict]:
     """
     if conv is None:
         return None
-    inbound = getattr(conv, "inbound", None)
+    # This turn's inbound (v1.23.12): conv.inbound is overwritten by the
+    # next message in the chat while this turn may still run.
+    _inb = getattr(conv, "_inb", None)
+    inbound = _inb() if callable(_inb) else getattr(conv, "inbound", None)
     user = getattr(conv, "user", None) or {}
     is_group = bool(getattr(conv, "is_group", False))
     platform = getattr(inbound, "platform", None) if inbound is not None else None

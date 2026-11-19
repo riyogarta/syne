@@ -1612,6 +1612,25 @@ async def _m58_guard_contains_title_target(conn) -> None:
     """)
 
 
+async def _m59_prune_kg_without_write_access(conn) -> None:
+    """v1.23.12 (Riyo, 19 Nov 2026). Idempotent.
+
+    Chat rows feed KG extraction only with owner/family access (v1.23.03).
+    Relations extracted earlier from rows without that access - public DMs,
+    rows still lacking metadata.access - lose those sources once; a relation
+    left with no source is removed by kg_prune_sources.
+    """
+    ids = await conn.fetchval("""
+        SELECT array_agg(DISTINCT rs.source_id)
+          FROM kg_relation_sources rs
+          JOIN messages m ON m.id = rs.source_id
+         WHERE rs.source_type = 'message'
+           AND coalesce(m.metadata->>'access', '') NOT IN ('owner', 'family')
+    """)
+    if ids:
+        await conn.execute("SELECT kg_prune_sources('message', $1::int[])", list(ids))
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1671,6 +1690,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (56, _m56_kg_prune_on_delete, "transactional"),
     (57, _m57_memory_guard, "transactional"),
     (58, _m58_guard_contains_title_target, "transactional"),
+    (59, _m59_prune_kg_without_write_access, "transactional"),
 ]
 
 
