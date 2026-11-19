@@ -659,12 +659,14 @@ _LOG_UPSERT = """
 """
 
 # A row is pending unless it has a log row that is final (done / skipped /
-# error with no attempts left) or an error retried less than 10 min ago.
+# error with no attempts left) or an error still waiting: 10 min after the
+# first attempt, doubling per attempt up to 640 min (v1.23.13).
 _PENDING = """
     NOT EXISTS (SELECT 1 FROM kg_extract_log l
                 WHERE l.source_type = '{t}' AND l.source_id = x.id
                   AND NOT (l.status = 'error' AND l.attempts < $3
-                           AND l.updated_at < now() - interval '10 minutes'))
+                           AND l.updated_at < now() - interval '10 minutes'
+                               * power(2, least(l.attempts - 1, 6))))
 """
 
 
@@ -745,8 +747,20 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         else:
             reason = "memory"
     prompt = build_prompt(text[: s["kg.extract_max_chars"]], speaker=speaker, context=context, s=s)
-    raw = await judge(prompt, float(s["kg.extract_timeout"]))
+    try:
+        raw = await judge(prompt, float(s["kg.extract_timeout"]))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        if provider_down(e):
+            raise ProviderDown(f"{type(e).__name__}: {e}") from e
+        raise
     extracted = parse_extraction(raw, s)
+    vecs = await prepare_embeddings(extracted, embed)
+
+    async def _cached(name: str):
+        return vecs.get(name)
+
     async with get_connection() as conn:
         async with conn.transaction():
             # The graph and the log row are written together, and only for the
@@ -759,7 +773,8 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
                     return {**log, "status": "stale", "_logged": True,
                             "reason": "memory changed or deleted during extraction",
                             "latency_ms": int((time.monotonic() - t0) * 1000)}
-            n_e, n_r = await write_graph(conn, extracted, st, sid, embed, s)
+            n_e, n_r = await write_graph(conn, extracted, st, sid,
+                                         _cached if embed is not None else None, s)
             res = {**log, "status": "done", "reason": reason, "n_entities": n_e,
                    "n_relations": n_r, "latency_ms": int((time.monotonic() - t0) * 1000)}
             await _write_log(conn, item, res)
@@ -906,6 +921,117 @@ async def maybe_prune(now: Optional[datetime] = None) -> Optional[dict]:
     return res
 
 
+class ProviderDown(Exception):
+    """The extraction model is unreachable (timeout, 429, 5xx, connection).
+    The chunk is kept: no log row, no attempt used (v1.23.13)."""
+
+
+# Rounds the same chunk may hit ProviderDown before it counts as an attempt
+# anyway (a chunk that always breaks the provider must not stall the worker).
+PROVIDER_DOWN_STRIKES = 6
+PROVIDER_DOWN_MAX_WAIT = 1800
+
+
+def provider_down(err: BaseException) -> bool:
+    from ..embed_health import is_soft_failure
+    if is_soft_failure(err) or isinstance(err, (ConnectionError, OSError)):
+        return True
+    try:
+        import httpx
+        if isinstance(err, httpx.TransportError):
+            return True
+    except ImportError:
+        pass
+    status = getattr(err, "status_code", None) or getattr(
+        getattr(err, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status >= 500
+    text = str(err).lower()
+    return (bool(re.search(r"\b(500|502|503|504|529)\b", text))
+            or "overloaded" in text or "unavailable" in text)
+
+
+async def prepare_embeddings(extracted: dict, embed: Optional[Embedder]) -> dict:
+    """{entity name: vector} for names write_graph may need to embed.
+
+    Done before the write transaction opens (v1.23.13): with embedding
+    retries the transaction stayed open for minutes holding entity and
+    relation locks. Names that resolve without a vector (a reference item,
+    a known norm_name) are not embedded.
+    """
+    if embed is None or not extracted.get("entities"):
+        return {}
+    need: list = []
+    async with get_connection() as conn:
+        for e in extracted["entities"]:
+            name = e["name"]
+            if name in need:
+                continue
+            if e["type"] != "person" and re.search(r"\d", name or ""):
+                try:
+                    if await resolve_ayah_span(conn, name) or await resolve_ayah(conn, name):
+                        continue
+                except Exception:
+                    pass
+            hit = await conn.fetchval(
+                "SELECT 1 FROM kg_entities WHERE norm_name = $1 "
+                "AND entity_type <> ALL($2::text[]) LIMIT 1",
+                normalize_name(name), reference_types())
+            if not hit:
+                need.append(name)
+    vecs: dict = {}
+    for name in need:
+        try:
+            vec = await embed(name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            logger.debug(f"KG entity name not embedded ({name!r}): {ex}")
+            continue
+        if vec:
+            vecs[name] = vec
+    return vecs
+
+
+async def advance_floor(conn, floor: int, era: datetime, s: dict) -> int:
+    """New message floor: every candidate row at or below it is final.
+
+    The queue scan starts above the floor; before v1.23.13 it stayed at the
+    era start and every round rescanned all rows since. Rows of the last
+    five minutes are never passed (a row may commit after a higher id).
+    Only messages: a memory row is extracted again after memory_update.
+    """
+    skip_sched = ("AND coalesce(se.platform_chat_id, '') NOT LIKE 'scheduled:%' "
+                  if s["kg.extract_skip_scheduled"] else "")
+    first = await conn.fetchval(
+        "SELECT x.id FROM messages x LEFT JOIN sessions se ON se.id = x.session_id "
+        "WHERE x.id > $1 AND x.created_at >= $2 AND x.role IN ('user', 'assistant') "
+        "AND btrim(coalesce(x.content, '')) <> '' " + skip_sched +
+        "AND NOT EXISTS (SELECT 1 FROM kg_extract_log l WHERE l.source_type = 'message' "
+        "AND l.source_id = x.id AND (l.status <> 'error' OR l.attempts >= $3)) "
+        "ORDER BY x.id LIMIT 1",
+        floor, era, s["kg.extract_max_attempts"])
+    settled = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM messages "
+        "WHERE id > $1 AND created_at < now() - interval '5 minutes'", floor) or 0)
+    new = settled if first is None else min(int(first) - 1, settled)
+    return max(floor, new)
+
+
+def judge_cache_key(model_key: str, default_provider) -> tuple:
+    """Rebuild the judge when this changes. An empty kg.extract_model
+    follows the default provider, which /models replaces (v1.23.13)."""
+    if model_key:
+        return (model_key,)
+    return ("", default_provider, getattr(default_provider, "chat_model", None))
+
+
+def _error_result(item: dict, judge, reason: str) -> dict:
+    return {"status": "error", "reason": reason,
+            "layer": 0 if item["type"] == "memory" else (1 if item.get("role") == "user" else 2),
+            "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
+
+
 async def run_worker(default_provider_getter: Callable[[], object], embed_provider=None) -> None:
     """Background loop. Never raises (except cancellation)."""
     from ..judge_model import build_judge
@@ -926,8 +1052,9 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
         logger.warning(f"KG extract: name normalisation backfill failed: {e}")
 
     floors: dict = {}
-    floors_era = None
+    floors_key = None
     judge, judge_key = None, None
+    down_wait, down_item, down_hits = 0, None, 0
     while True:
         try:
             if _maint.active():
@@ -939,35 +1066,66 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
             if not s["kg.extract_enabled"] or era is None:
                 await asyncio.sleep(s["kg.extract_interval"])
                 continue
-            if floors_era != era:
+            # Settings that decide what is final restart the floors.
+            fkey = (era, s["kg.extract_max_attempts"], s["kg.extract_skip_scheduled"])
+            if floors_key != fkey:
                 async with get_connection() as conn:
                     floors = {"memory": await era_floor(conn, "memory", era),
                               "messages": await era_floor(conn, "messages", era)}
-                floors_era = era
+                floors_key = fkey
             async with get_connection() as conn:
+                floors["messages"] = await advance_floor(conn, floors["messages"], era, s)
                 items = await pending(conn, floors, era, s)
             if not items:
                 await asyncio.sleep(s["kg.extract_interval"])
                 continue
-            if judge is None or judge_key != s["kg.extract_model"]:
+            key = judge_cache_key(s["kg.extract_model"], default_provider_getter())
+            if judge is None or judge_key != key:
                 judge = await build_judge(
                     s["kg.extract_model"], default_provider=default_provider_getter(),
                     get_config=get_config, who="KG extract")
-                judge_key = s["kg.extract_model"]
+                judge_key = key
                 if judge is None:
                     logger.warning("KG extract: no usable model (kg.extract_model); waiting")
                     await asyncio.sleep(max(60, s["kg.extract_interval"]))
                     continue
             for item in items:
+                if _maint.active():
+                    break
+                # Tracked like a chat turn (v1.23.13): maintenance.begin()
+                # cancels this chunk - its transaction rolls back - and the
+                # worker waits at the gate. No await between check and track.
+                task = asyncio.create_task(process_one(item, judge, embed, s))
+                _maint.track(task)
                 try:
-                    res = await process_one(item, judge, embed, s)
+                    await asyncio.wait({task})
                 except asyncio.CancelledError:
+                    task.cancel()
                     raise
-                except Exception as e:
-                    res = {"status": "error", "reason": f"{type(e).__name__}: {e}",
-                           "layer": 0 if item["type"] == "memory" else (1 if item.get("role") == "user" else 2),
-                           "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
+                finally:
+                    _maint.untrack(task)
+                if task.cancelled():
+                    break
+                try:
+                    res = task.result()
+                except ProviderDown as e:
+                    this = (item["type"], item["id"])
+                    down_hits = down_hits + 1 if down_item == this else 1
+                    down_item = this
+                    if down_hits < PROVIDER_DOWN_STRIKES:
+                        down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
+                        logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
+                                       f"chunks kept, trying again in {down_wait}s")
+                        await asyncio.sleep(down_wait)
+                        break
+                    res = _error_result(item, judge, f"model unavailable: {e}")
                     logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                    down_item, down_hits = None, 0
+                except Exception as e:
+                    res = _error_result(item, judge, f"{type(e).__name__}: {e}")
+                    logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                else:
+                    down_wait, down_item, down_hits = 0, None, 0
                 if not res.get("_logged"):
                     await write_log(item, res)
                 if res["status"] == "stale":

@@ -283,6 +283,23 @@ class Scheduler:
                 f"{days} days, freed {freed / 1_000_000:.1f} MB"
             )
     
+    async def _execute_isolated(self, *args) -> bool:
+        """Run the callback in its own task. False = it was cancelled
+        (maintenance.begin cancels tracked turns); its exception is raised
+        here; cancelling this loop cancels the callback too."""
+        run = asyncio.create_task(self._on_execute(*args))
+        try:
+            await asyncio.wait({run})
+        except asyncio.CancelledError:
+            run.cancel()
+            raise
+        if run.cancelled():
+            return False
+        exc = run.exception()
+        if exc is not None:
+            raise exc
+        return True
+
     async def _check_and_execute(self):
         """Check for due tasks and execute them."""
         from .db.connection import get_connection
@@ -308,7 +325,10 @@ class Scheduler:
             grace = await get_config("scheduler.misfire_grace_seconds", 300)
             sys_tz = await _get_system_tz()
 
+            from . import maintenance as _maint
             for task in due_tasks:
+                if _maint.active():
+                    break  # /restore started meanwhile: the rest waits
                 task_id = task["id"]
                 task_name = task["name"]
                 schedule_type = task["schedule_type"]
@@ -352,8 +372,14 @@ class Scheduler:
                 logger.info(f"Executing scheduled task: {task_name} (id={task_id}) target={target_chat_id}")
 
                 try:
-                    # Execute the callback
-                    await self._on_execute(task_id, payload, created_by, target_chat_id, target_chat_type)
+                    # Own task (v1.23.13): handle_message tracks the task it
+                    # runs in for /restore. Inline that was this loop, and
+                    # maintenance.begin() cancelled the whole scheduler.
+                    if not await self._execute_isolated(
+                            task_id, payload, created_by, target_chat_id, target_chat_type):
+                        logger.warning(f"Scheduled task {task_id} ({task_name}) cancelled; "
+                                       "run again on a later tick")
+                        continue
                     
                     # Update task based on type
                     if schedule_type == "once":

@@ -96,7 +96,9 @@ async def load_settings() -> dict:
 def mention_grams(text: str) -> list:
     """Normalised 1-3 word n-grams, longest first (a full name beats a part)."""
     grams = ngrams(text or "")
-    return sorted(grams, key=lambda g: (-len(g.split()), grams.index(g)))
+    # sorted() is stable: grams of equal length keep their text order.
+    # (grams.index in the key made this quadratic, v1.23.13.)
+    return sorted(grams, key=lambda g: -len(g.split()))
 
 
 # ── SQL ───────────────────────────────────────────────────────────────────
