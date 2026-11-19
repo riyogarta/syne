@@ -229,7 +229,7 @@ class Conversation:
         # History embed of this turn's user row, held back until recall has
         # embedded its query (save_message(defer_embed=True), started by
         # _flush_deferred_embed).
-        self._deferred_embed: Optional[tuple] = None
+        self._deferred_embed: list = []
         # System-prompt hot-reload versioning. _sys_epoch is bumped by
         # ConversationManager.refresh_system_prompts() whenever identity/soul/
         # rules/abilities change. _ctx_sys_epoch records which epoch the system
@@ -527,15 +527,42 @@ class Conversation:
             and content and content.strip()
         ):
             if defer_embed:
-                self._deferred_embed = (inserted_id, content)
+                self._deferred_embed.append((inserted_id, content))
             else:
                 asyncio.create_task(self._embed_message_row(inserted_id, content))
 
     def _flush_deferred_embed(self) -> None:
-        """Start the history embed held back by save_message(defer_embed=True)."""
-        pending, self._deferred_embed = self._deferred_embed, None
-        if pending:
-            asyncio.create_task(self._embed_message_row(*pending))
+        """Start the history embeds held back by save_message(defer_embed=True)."""
+        pending, self._deferred_embed = list(self._deferred_embed or []), []
+        for item in pending:
+            asyncio.create_task(self._embed_message_row(*item))
+
+    def _hold_deferred_embed(self, delay: float = 120.0) -> None:
+        """The turn was refused (embedding slow or down): keep its history
+        embed out of the way of the retry's recall embed (v1.23.14).
+
+        It runs after the next turn's recall (_flush_deferred_embed), or
+        after `delay` seconds when no turn came, unless a recall is running
+        or the embedding service is still down - then it stays for the next
+        turn (and `syne memory reembed-history` backfills rows never embedded).
+        """
+        held = list(self._deferred_embed or [])
+        if not held:
+            return
+
+        async def _late():
+            await asyncio.sleep(delay)
+            from . import embed_health as _eh
+            if getattr(self, "_recall_busy", False) or _eh.is_flagged():
+                return
+            mine = [p for p in held if p in self._deferred_embed]
+            if not mine:
+                return
+            self._deferred_embed = [p for p in self._deferred_embed if p not in mine]
+            for item in mine:
+                asyncio.create_task(self._embed_message_row(*item))
+
+        asyncio.create_task(_late())
 
     async def _delete_last_user_message(self) -> bool:
         """Remove the most recent user message of this session from the DB
@@ -637,7 +664,13 @@ class Conversation:
             # Do NOT re-raise from a fire-and-forget task — an uncaught
             # exception would show up as 'Task exception was never retrieved'
             # in the log without any actionable context.
-            logger.warning(f"_embed_message_row id={message_id} failed: {e}")
+            if "dimension" in str(e).lower():
+                # The vector does not fit messages.embedding (another
+                # dimension): every history embed fails until fixed.
+                logger.error(f"_embed_message_row id={message_id}: {e} - history rows are "
+                             "not embedded; check /embedding and messages.embedding")
+            else:
+                logger.warning(f"_embed_message_row id={message_id} failed: {e}")
 
     def _decorate_system_prompt(self, access_level: str) -> str:
         """Base system prompt + provider guardrails + group restrictions.
@@ -1996,13 +2029,24 @@ class Conversation:
                     f"Media recall query: caption part {len(_pre_media_text)} + "
                     f"analysis tail {min(len(_added), max(_tail_n, 0))} of {len(_added)} chars"
                 )
+        # Recall embeds its query first; only then start the user row's
+        # history embed, so the two never queue on the single-request
+        # Ollama ahead of the 10s recall budget. A refused turn holds it
+        # back: embedded at once, a long row made the user's retry time
+        # out too (v1.23.14).
+        self._recall_busy = True
         try:
             context = await self.build_context(user_message, recall_query=recall_query)
-        finally:
-            # Recall has embedded its query (or was refused): only now start
-            # the user row's history embed, so the two never queue on the
-            # single-request Ollama ahead of the 10s recall budget.
+        except EmbeddingUnavailableError:
+            self._recall_busy = False
+            self._hold_deferred_embed()
+            raise
+        except BaseException:
+            self._recall_busy = False
             self._flush_deferred_embed()
+            raise
+        self._recall_busy = False
+        self._flush_deferred_embed()
         self._ts_mark_base(context)
 
         # Log context usage

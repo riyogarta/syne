@@ -357,8 +357,10 @@ Active chat and embedding models. These reference keys in `provider.models` and
   has issues (rate limits, downtime).
 - **Change embedding model when**: Switching embedding providers. **CRITICAL**: changing
   embedding model requires re-embedding ALL memories. Same dimension: the owner runs
-  `syne memory reembed-memory --force` (not automatic). Different dimension: refused —
-  memories are never deleted, and vectors of different dimensions cannot be mixed.
+  `syne memory reembed-memory --force` and `reembed-history --all`
+  (not automatic). Different dimension: refused while memory or history vectors of
+  the old dimension exist (empty columns are switched) — memories are never deleted,
+  and vectors of different dimensions cannot be mixed.
 - **Warning**: Changing models mid-conversation does not affect existing sessions —
   only new sessions use the new model.
 

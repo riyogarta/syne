@@ -541,8 +541,9 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
             "SELECT id, 1 - (embedding <=> $1::vector) AS sim, "
             "coalesce(similarity(norm_name, $2), 0) AS trgm "
             "FROM kg_entities WHERE entity_type = $3 AND embedding IS NOT NULL "
+            "AND vector_dims(embedding) = $4 "
             "ORDER BY embedding <=> $1::vector LIMIT 1",
-            str(vec), norm, etype,
+            str(vec), norm, etype, len(vec),
         )
         if (row and row["sim"] is not None
                 and row["sim"] >= s["kg.resolve_min_similarity"]

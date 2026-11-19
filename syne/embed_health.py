@@ -34,6 +34,10 @@ DOWN_TTL = 60.0
 DEFAULT_RECALL_TIMEOUT = 10.0
 SYSTEMCTL = "/usr/bin/systemctl"
 SOFT_FAILS_TO_DOWN = 2
+# Two soft failures count as consecutive only when the second embed
+# started after the first failed (not two turns waiting side by side on
+# the same slow spell) and within this many seconds (v1.23.14).
+SOFT_FAIL_WINDOW = 600.0
 
 
 def sudoers_hint() -> str:
@@ -58,6 +62,7 @@ _incident: int = 0
 _notified_incident: int = 0
 _groups_told: set = set()
 _soft_fails: int = 0                # consecutive timeouts / 429 while up
+_soft_fail_at: float = 0.0          # monotonic time of the last one
 
 
 def is_flagged() -> bool:
@@ -192,6 +197,7 @@ async def quick_embed(provider, text: str) -> list:
     per incident and raises EmbeddingUnavailableError.
     """
     timeout = await recall_timeout()
+    t_start = time.monotonic()
     try:
         resp = await provider.embed_fast(text, timeout=timeout)
         vector = getattr(resp, "vector", None)
@@ -200,10 +206,18 @@ async def quick_embed(provider, text: str) -> list:
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        global _soft_fails
-        if _since is None and is_soft_failure(e) and _soft_fails < SOFT_FAILS_TO_DOWN - 1:
+        global _soft_fails, _soft_fail_at
+        soft = _since is None and is_soft_failure(e)
+        if soft and _soft_fails and time.monotonic() - _soft_fail_at > SOFT_FAIL_WINDOW:
+            _soft_fails = 0
+        # Started before the last soft failure was recorded: it waited on
+        # the same slow spell, so it is not a second sign of a dead service.
+        overlapped = soft and _soft_fails > 0 and t_start < _soft_fail_at
+        if soft and (overlapped or _soft_fails < SOFT_FAILS_TO_DOWN - 1):
             # Busy, not dead: refuse only this turn, no incident yet.
-            _soft_fails += 1
+            if not overlapped:
+                _soft_fails += 1
+                _soft_fail_at = time.monotonic()
             msg = _describe(e, timeout)
             logger.warning(
                 f"Embedding slow/limited: {msg} - turn refused, not marked down "

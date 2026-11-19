@@ -4998,8 +4998,9 @@ Or just send me a message!"""
         text = (
             f"🧬 <b>Embedding</b> — {count} registered\n\n"
             f"⚠️ <b>Warning:</b> Switching to a model with a different vector "
-            f"dimension is refused — memories are never deleted. Same-dimension switches keep them — "
-            f"run <code>syne memory reembed-memory --force</code> afterwards."
+            f"dimension is refused while vectors of the old dimension are stored — memories are never "
+            f"deleted. Same-dimension switches keep them — run <code>syne memory reembed-memory "
+            f"--force</code> and <code>reembed-history --all</code> afterwards."
         )
         markup = InlineKeyboardMarkup(buttons)
 
@@ -5067,11 +5068,11 @@ Or just send me a message!"""
             # dimension differs from the stored vectors is refused. Checked again
             # against the live test vector in _apply_embedding.
             from ..db.connection import get_connection
-            from ..memory.embed_dims import stored_embedding_dims, refuse_switch_message
-            async with get_connection() as conn:
-                stored_dims, mem_count = await stored_embedding_dims(conn)
+            from ..memory.embed_dims import plan_switch, refusal_for_plan, switch_note
             new_dims = entry.get("dimensions")
-            refusal = refuse_switch_message(stored_dims, new_dims, mem_count)
+            async with get_connection() as conn:
+                plan = await plan_switch(conn, new_dims)
+            refusal = refusal_for_plan(plan, new_dims)
             if refusal:
                 await query.edit_message_text(
                     refusal,
@@ -5083,11 +5084,11 @@ Or just send me a message!"""
                 return
             warn = (
                 f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
-                f"Same dimensions ({new_dims or stored_dims or '?'}), memories will be preserved.\n"
+                f"{switch_note(plan, new_dims)}\n"
                 f"The dimension is checked again with a live test before switching.\n"
                 f"Vectors from different models are not comparable — run "
                 f"<code>syne memory reembed-memory --force</code> and "
-                f"<code>syne memory reembed-history</code> afterwards so search keeps working."
+                f"<code>syne memory reembed-history --all</code> afterwards so search keeps working."
             )
             await query.edit_message_text(
                 warn,
@@ -5239,7 +5240,7 @@ Or just send me a message!"""
         """
         from ..llm.drivers import probe_embedding, get_model_from_list
         from ..db.connection import get_connection
-        from ..memory.embed_dims import stored_embedding_dims, refuse_switch_message
+        from ..memory.embed_dims import plan_switch, refusal_for_plan, relax_columns
 
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
@@ -5261,11 +5262,15 @@ Or just send me a message!"""
                 return False, f"{label} failed: {error}"
 
             async with get_connection() as conn:
-                stored_dims, mem_count = await stored_embedding_dims(conn)
-            refusal = refuse_switch_message(stored_dims, dims, mem_count)
+                plan = await plan_switch(conn, dims)
+            refusal = refusal_for_plan(plan, dims)
             if refusal:
                 await bot.send_message(chat_id=chat_id, text=refusal, parse_mode="HTML")
-                return False, f"dimension {dims} ≠ stored {stored_dims}"
+                return False, f"dimension {dims} ≠ stored vectors"
+            if plan["relax"]:
+                async with get_connection() as conn:
+                    relaxed = await relax_columns(conn, plan["relax"])
+                logger.warning(f"Embedding switch to {dims} dims: empty columns switched: {relaxed}")
 
             # Save current for rollback
             previous_key = await get_config("provider.active_embedding", "together-bge")

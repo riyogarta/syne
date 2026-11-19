@@ -49,3 +49,96 @@ def refuse_switch_message(stored_dims, new_dims, mem_count: int) -> Optional[str
         "memories to switch models. Nothing was changed. "
         f"Choose a model with {int(stored_dims)} dimensions."
     )
+
+
+# ── v1.23.14: every embedding column, empty columns may switch ────────────
+
+# kg_entities is not checked: its column is untyped and unindexed, so
+# vectors of several dimensions can sit side by side, and the KG worker
+# compares a name only with vectors of its own dimension.
+TABLES = ("memory", "messages")
+LABELS = {"memory": "memories", "messages": "chat history (history_search)"}
+HNSW_INDEX = {"memory": "idx_memory_embedding_hnsw",
+              "messages": "idx_messages_embedding_hnsw"}
+_COL_SQL = ("SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+            "WHERE attrelid = $1::regclass AND attname = 'embedding' AND NOT attisdropped")
+
+
+async def column_state(conn, table: str) -> tuple:
+    """(column dimension or None, stored vector dimension or None, vectors stored)."""
+    assert table in TABLES
+    col = parse_vector_dims(await conn.fetchval(_COL_SQL, table))
+    n = int(await conn.fetchval(
+        f"SELECT count(*) FROM {table} WHERE embedding IS NOT NULL") or 0)
+    vec = None
+    if n:
+        vec = col or await conn.fetchval(
+            f"SELECT vector_dims(embedding) FROM {table} WHERE embedding IS NOT NULL LIMIT 1")
+    return col, vec, n
+
+
+async def plan_switch(conn, new_dims) -> dict:
+    """What a switch to new_dims needs. Read-only.
+
+    blocked: [(table, stored dims, vectors)] - vectors of another dimension.
+    relax:   [table] - typed vector(N) of another N but holding no vector:
+             relax_columns() switches it (before v1.23.14 such a column
+             refused the switch even with no memory at all).
+    """
+    out = {"blocked": [], "relax": []}
+    if not new_dims:
+        return out
+    nd = int(new_dims)
+    for t in TABLES:
+        col, vec, n = await column_state(conn, t)
+        if n and vec and int(vec) != nd:
+            out["blocked"].append((t, int(vec), n))
+        elif col and col != nd:
+            out["relax"].append(t)
+    return out
+
+
+def refusal_for_plan(plan: dict, new_dims) -> Optional[str]:
+    """HTML refusal when stored vectors block new_dims, else None."""
+    if not plan["blocked"]:
+        return None
+    mem = next((b for b in plan["blocked"] if b[0] == "memory"), None)
+    if mem:
+        return refuse_switch_message(mem[1], new_dims, mem[2])
+    lines = "\n".join(f"• {LABELS[t]}: <b>{n}</b> vectors of {d} dimensions"
+                      for t, d, n in plan["blocked"])
+    return (
+        "⛔ <b>Embedding switch refused</b>\n\n"
+        f"This model produces {int(new_dims)}-dimension vectors. Stored vectors of "
+        f"another dimension:\n{lines}\n\n"
+        "Vectors of different dimensions cannot be mixed. Nothing was changed."
+    )
+
+
+def switch_note(plan: dict, new_dims) -> str:
+    if plan["relax"]:
+        names = ", ".join(LABELS[t] for t in plan["relax"])
+        return (f"New dimension ({int(new_dims)}): {names} hold no vectors yet and "
+                "will be switched to it. Memories are preserved.")
+    if new_dims:
+        return f"Same dimensions ({int(new_dims)}), memories will be preserved."
+    return "Memories will be preserved."
+
+
+async def relax_columns(conn, tables: list) -> list:
+    """Make empty typed embedding columns untyped (vector), dropping their
+    HNSW index. ensure_*_hnsw_index() types and indexes them again once
+    vectors of the new dimension are stored (after `syne update` or a
+    reembed command). Refuses a column that holds a vector meanwhile."""
+    done = []
+    async with conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '10s'")
+        for t in tables:
+            assert t in TABLES
+            n = await conn.fetchval(f"SELECT count(*) FROM {t} WHERE embedding IS NOT NULL")
+            if n:
+                raise RuntimeError(f"{t} holds {n} vectors now; nothing was changed")
+            await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX[t]}")
+            await conn.execute(f"ALTER TABLE {t} ALTER COLUMN embedding TYPE vector")
+            done.append(t)
+    return done
