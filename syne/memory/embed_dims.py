@@ -125,20 +125,35 @@ def switch_note(plan: dict, new_dims) -> str:
     return "Memories will be preserved."
 
 
-async def relax_columns(conn, tables: list) -> list:
-    """Make empty typed embedding columns untyped (vector), dropping their
-    HNSW index. ensure_*_hnsw_index() types and indexes them again once
-    vectors of the new dimension are stored (after `syne update` or a
-    reembed command). Refuses a column that holds a vector meanwhile."""
+async def relax_columns(conn, tables: list, new_dims) -> list:
+    """Switch empty embedding columns to vector(new_dims) and rebuild their
+    HNSW index (empty, so instant). Refuses a column that holds a vector.
+
+    v1.23.17: the tables are locked BEFORE counting (a write between count
+    and ALTER slipped in), and the column gets the NEW dimension instead of
+    an untyped `vector`: until reload_provider() swaps the provider, a write
+    from the old one is rejected by the column type instead of mixing two
+    dimensions (which broke every `<=>` query). The index is back at once.
+    """
+    nd = int(new_dims)
+    order = sorted(set(tables))
+    for t in order:
+        assert t in TABLES
     done = []
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '10s'")
-        for t in tables:
-            assert t in TABLES
+        for t in order:
+            await conn.execute(f"LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")
+        for t in order:
             n = await conn.fetchval(f"SELECT count(*) FROM {t} WHERE embedding IS NOT NULL")
             if n:
                 raise RuntimeError(f"{t} holds {n} vectors now; nothing was changed")
             await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX[t]}")
-            await conn.execute(f"ALTER TABLE {t} ALTER COLUMN embedding TYPE vector")
+            await conn.execute(
+                f"ALTER TABLE {t} ALTER COLUMN embedding TYPE vector({nd}) "
+                f"USING embedding::vector({nd})")
+            await conn.execute(
+                f"CREATE INDEX {HNSW_INDEX[t]} ON {t} USING hnsw "
+                "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
             done.append(t)
     return done

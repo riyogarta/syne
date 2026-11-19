@@ -1658,6 +1658,25 @@ async def _m60_kg_scope_daily_limit(conn) -> None:
     )
 
 
+async def _m61_kg_entities_embedding_untyped(conn) -> None:
+    """v1.23.17 (Riyo, 19 Nov 2026). Idempotent.
+
+    Installs that ran v1.22.57-1.22.61 may have kg_entities.embedding typed
+    vector(N) (ensure_kg_entities_hnsw_index typed it). After an embedding
+    switch to another dimension every INSERT of a new entity with a vector
+    would then fail. The column is made untyped `vector` again, as in
+    schema.sql; the KG worker compares a name only with vectors of its own
+    dimension.
+    """
+    t = await conn.fetchval(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = 'kg_entities'::regclass AND attname = 'embedding' "
+        "AND NOT attisdropped")
+    if t and t != "vector":
+        await conn.execute("DROP INDEX IF EXISTS idx_kg_entities_embedding_hnsw")
+        await conn.execute("ALTER TABLE kg_entities ALTER COLUMN embedding TYPE vector")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1719,6 +1738,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (58, _m58_guard_contains_title_target, "transactional"),
     (59, _m59_prune_kg_without_write_access, "transactional"),
     (60, _m60_kg_scope_daily_limit, "transactional"),
+    (61, _m61_kg_entities_embedding_untyped, "transactional"),
 ]
 
 

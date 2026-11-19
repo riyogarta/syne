@@ -312,4 +312,4 @@ async def test_monthly_prune_failure_not_recorded_retried_later(monkeypatch):
 
 def test_worker_calls_monthly_prune():
     import inspect
-    assert "await maybe_prune()" in inspect.getsource(K.run_worker)
+    assert "await gated(maybe_prune())" in inspect.getsource(K.run_worker)

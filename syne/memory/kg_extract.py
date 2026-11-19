@@ -1182,6 +1182,35 @@ async def extracted_today(conn) -> int:
 WORKER_LOCK_KEY = 7311603215
 
 
+class GateClosed(Exception):
+    """/restore started: the gated step did not run (or was cancelled)."""
+
+
+async def gated(coro):
+    """Run one DB step of the worker as a tracked task (v1.23.17).
+
+    maintenance.begin() cancels it (its transaction rolls back) like a chat
+    turn. Before, only process_one was tracked; write_log, maybe_prune,
+    advance_floor and pending still wrote or read while a restore ran.
+    No await between the active() check and track().
+    """
+    if _maint.active():
+        coro.close()
+        raise GateClosed()
+    task = asyncio.create_task(coro)
+    _maint.track(task)
+    try:
+        await asyncio.wait({task})
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+    finally:
+        _maint.untrack(task)
+    if task.cancelled():
+        raise GateClosed()
+    return task.result()
+
+
 async def take_worker_lock():
     """The connection holding the worker lock, or None when it is taken."""
     from ..db.connection import get_pool
@@ -1262,8 +1291,8 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         await asyncio.sleep(60)
                         continue
                     lock_idle_logged = False
-                await maybe_prune()
-                s = await load_settings()
+                await gated(maybe_prune())
+                s = await gated(load_settings())
                 era = s["kg.extract_era_start"]
                 if not s["kg.extract_enabled"] or era is None:
                     await asyncio.sleep(s["kg.extract_interval"])
@@ -1271,22 +1300,31 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                 # Settings that decide what is final restart the floors.
                 fkey = (era, s["kg.extract_max_attempts"], s["kg.extract_skip_scheduled"])
                 if floors_key != fkey:
-                    async with get_connection() as conn:
-                        floors = {"memory": await era_floor(conn, "memory", era),
-                                  "messages": await era_floor(conn, "messages", era)}
+                    async def _floors():
+                        async with get_connection() as conn:
+                            return {"memory": await era_floor(conn, "memory", era),
+                                    "messages": await era_floor(conn, "messages", era)}
+                    floors = await gated(_floors())
                     floors_key = fkey
-                async with get_connection() as conn:
-                    floors["messages"] = await advance_floor(conn, floors["messages"], era, s)
-                    items = await pending(conn, floors, era, s)
-                    if items:
-                        s["_known_people"] = await known_people(conn)
+
+                async def _queue():
+                    async with get_connection() as conn:
+                        fl = await advance_floor(conn, floors["messages"], era, s)
+                        got = await pending(conn, dict(floors, messages=fl), era, s)
+                        known = await known_people(conn) if got else frozenset()
+                        return fl, got, known
+                floors["messages"], items, known = await gated(_queue())
+                if items:
+                    s["_known_people"] = known
                 if not items:
                     await asyncio.sleep(s["kg.extract_interval"])
                     continue
                 limit = s["kg.extract_daily_limit"]
                 if limit:
-                    async with get_connection() as conn:
-                        used = await extracted_today(conn)
+                    async def _used():
+                        async with get_connection() as conn:
+                            return await extracted_today(conn)
+                    used = await gated(_used())
                     if used >= limit:
                         if not limit_logged:
                             logger.warning(f"KG extract: daily limit reached ({used}/{limit} chunks, "
@@ -1357,7 +1395,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         if res.get("status") in ("done", "stale"):
                             last_ok = time.monotonic()
                     if not res.get("_logged"):
-                        await write_log(item, res)
+                        await gated(write_log(item, res))
                     if res["status"] == "stale":
                         logger.info(f"KG extract memory {item['id']}: changed during extraction, "
                                     "extracted again next round")
@@ -1367,6 +1405,8 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                             f"{res['n_relations']} relations ({res['latency_ms']} ms)")
             except asyncio.CancelledError:
                 raise
+            except GateClosed:
+                continue        # the top of the loop waits for the gate
             except Exception as e:
                 logger.warning(f"KG extract round failed: {e}")
                 await asyncio.sleep(60)

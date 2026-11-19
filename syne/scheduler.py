@@ -287,12 +287,22 @@ class Scheduler:
         """Run the callback in its own task. False = it was cancelled
         (maintenance.begin cancels tracked turns); its exception is raised
         here; cancelling this loop cancels the callback too."""
+        # v1.23.17: tracked from creation, with no await after the gate
+        # check. Before, begin() could run between create_task and the
+        # turn's own track(); the turn then saw the gate, returned NOTICE as
+        # a normal result, and a one-shot task was marked done.
+        from . import maintenance as _maint
+        if _maint.active():
+            return False
         run = asyncio.create_task(self._on_execute(*args))
+        _maint.track(run)
         try:
             await asyncio.wait({run})
         except asyncio.CancelledError:
             run.cancel()
             raise
+        finally:
+            _maint.untrack(run)
         if run.cancelled():
             return False
         exc = run.exception()
@@ -380,6 +390,10 @@ class Scheduler:
                         logger.warning(f"Scheduled task {task_id} ({task_name}) cancelled; "
                                        "run again on a later tick")
                         continue
+                    if _maint.active():
+                        # Ran, but /restore started meanwhile: no write to a
+                        # database being replaced (v1.23.17).
+                        break
                     
                     # Update task based on type
                     if schedule_type == "once":

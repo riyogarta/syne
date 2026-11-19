@@ -5269,7 +5269,7 @@ Or just send me a message!"""
                 return False, f"dimension {dims} ≠ stored vectors"
             if plan["relax"]:
                 async with get_connection() as conn:
-                    relaxed = await relax_columns(conn, plan["relax"])
+                    relaxed = await relax_columns(conn, plan["relax"], dims)
                 logger.warning(f"Embedding switch to {dims} dims: empty columns switched: {relaxed}")
 
             # Save current for rollback
