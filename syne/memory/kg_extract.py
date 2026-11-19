@@ -20,6 +20,11 @@ that already is an entity in the graph ("Anakku lulus Paket C" is kept,
 the message before it, which only serves to resolve words like "ya" or
 "dia"; facts are taken from the message itself.
 
+A memory of the era changed by memory_update (content or category) loses
+its LLM relations and its log row in the same transaction
+(reset_extraction) and is extracted again; a worker round that read the
+old content writes nothing (status stale). Rule links are kept.
+
 Runs in the background (run_worker), polling the tables, so memory_store
 and replies are never slowed down and nothing is lost on a restart. Every
 processed chunk gets one kg_extract_log row (done / skipped / error);
@@ -659,7 +664,7 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
     n = s["kg.extract_batch"]
     out = []
     rows = await conn.fetch(
-        "SELECT x.id, x.content, x.category FROM memory x "
+        "SELECT x.id, x.content, x.category, x.updated_at FROM memory x "
         "WHERE x.id > $1 AND x.created_at >= $2 AND " + _PENDING.format(t="memory") +
         " AND NOT (lower(coalesce(x.category, '')) = ANY($5::text[])) "
         "ORDER BY x.id LIMIT $4",
@@ -730,18 +735,93 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
     extracted = parse_extraction(raw, s)
     async with get_connection() as conn:
         async with conn.transaction():
+            # The graph and the log row are written together, and only for the
+            # content that was read: a memory changed (memory_update) or
+            # deleted meanwhile is left to the next round.
+            if st == "memory" and "updated_at" in item:
+                cur = await conn.fetchrow(
+                    "SELECT updated_at FROM memory WHERE id = $1 FOR UPDATE", sid)
+                if cur is None or cur["updated_at"] != item["updated_at"]:
+                    return {**log, "status": "stale", "_logged": True,
+                            "reason": "memory changed or deleted during extraction",
+                            "latency_ms": int((time.monotonic() - t0) * 1000)}
             n_e, n_r = await write_graph(conn, extracted, st, sid, embed, s)
-    return {**log, "status": "done", "reason": reason, "n_entities": n_e,
-            "n_relations": n_r, "latency_ms": int((time.monotonic() - t0) * 1000)}
+            res = {**log, "status": "done", "reason": reason, "n_entities": n_e,
+                   "n_relations": n_r, "latency_ms": int((time.monotonic() - t0) * 1000)}
+            await _write_log(conn, item, res)
+    return {**res, "_logged": True}
+
+
+async def _write_log(conn, item: dict, res: dict) -> None:
+    await conn.execute(
+        _LOG_UPSERT, item["type"], item["id"], res.get("layer"), res.get("session_id"),
+        res["status"], (res.get("reason") or "")[:500], res.get("model"),
+        res.get("n_entities", 0), res.get("n_relations", 0), res.get("latency_ms"),
+    )
 
 
 async def write_log(item: dict, res: dict) -> None:
     async with get_connection() as conn:
+        await _write_log(conn, item, res)
+
+
+# ── memory_update (Riyo, 19 Nov 2026) - v1.23.08 ─────────────────────────
+
+async def current_era() -> Optional[datetime]:
+    return parse_era(await get_config("kg.extract_era_start", None))
+
+
+def needs_reextract(old, content: str, category: str, era: Optional[datetime]) -> bool:
+    """True when an update changes what the KG worker read from a memory of
+    the era (content or category). Older memories are never re-extracted."""
+    if old is None or era is None or old["created_at"] is None:
+        return False
+    created = old["created_at"]
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if created < era:
+        return False
+    return ((old["content"] or "") != (content or "")
+            or (old["category"] or "") != (category or ""))
+
+
+async def reset_extraction(conn, memory_id: int) -> int:
+    """Remove what the KG worker extracted from one memory, so it is
+    extracted again. Run inside the caller's transaction.
+
+    Drops its kg_extract_log row and its LLM sources (rule links stay), the
+    relations left with no source, and the entities those touched that are
+    left with no relation (reference types kept). A relation kept by another
+    source points source_memory_id at a living memory source, or NULL.
+    Returns the number of sources removed.
+    """
+    await conn.execute(
+        "DELETE FROM kg_extract_log WHERE source_type = 'memory' AND source_id = $1", memory_id)
+    rows = await conn.fetch(
+        "DELETE FROM kg_relation_sources WHERE source_type = 'memory' AND source_id = $1 "
+        "AND origin = 'llm' RETURNING relation_id", memory_id)
+    rels = sorted({r["relation_id"] for r in rows})
+    if not rels:
+        return 0
+    ends = await conn.fetch(
+        "DELETE FROM kg_relations r WHERE r.id = ANY($1::int[]) "
+        "AND NOT EXISTS (SELECT 1 FROM kg_relation_sources s WHERE s.relation_id = r.id) "
+        "RETURNING r.subject_id, r.object_id", rels)
+    await conn.execute(
+        "UPDATE kg_relations r SET source_memory_id = ("
+        " SELECT max(s.source_id) FROM kg_relation_sources s JOIN memory m ON m.id = s.source_id"
+        " WHERE s.relation_id = r.id AND s.source_type = 'memory') "
+        "WHERE r.id = ANY($1::int[]) AND r.source_memory_id = $2 "
+        "AND NOT EXISTS (SELECT 1 FROM kg_relation_sources s WHERE s.relation_id = r.id "
+        "AND s.source_type = 'memory' AND s.source_id = $2)", rels, memory_id)
+    ents = sorted({e for r in ends for e in (r["subject_id"], r["object_id"]) if e})
+    if ents:
         await conn.execute(
-            _LOG_UPSERT, item["type"], item["id"], res.get("layer"), res.get("session_id"),
-            res["status"], (res.get("reason") or "")[:500], res.get("model"),
-            res.get("n_entities", 0), res.get("n_relations", 0), res.get("latency_ms"),
-        )
+            "DELETE FROM kg_entities e WHERE e.id = ANY($1::int[]) "
+            "AND COALESCE(e.entity_type, '') <> ALL($2::text[]) "
+            "AND NOT EXISTS (SELECT 1 FROM kg_relations r "
+            "WHERE r.subject_id = e.id OR r.object_id = e.id)", ents, reference_types())
+    return len(rows)
 
 
 async def backfill_norm_names(batch: int = 2000) -> int:
@@ -874,7 +954,11 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                            "layer": 0 if item["type"] == "memory" else (1 if item.get("role") == "user" else 2),
                            "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
                     logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
-                await write_log(item, res)
+                if not res.get("_logged"):
+                    await write_log(item, res)
+                if res["status"] == "stale":
+                    logger.info(f"KG extract memory {item['id']}: changed during extraction, "
+                                "extracted again next round")
                 if res["status"] == "done":
                     logger.info(
                         f"KG extract {item['type']} {item['id']}: {res['n_entities']} entities, "

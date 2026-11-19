@@ -688,13 +688,28 @@ class MemoryEngine:
             embedding_resp = await self.provider.embed(content)
             vector = embedding_resp.vector
 
+        # KG (Riyo, 19 Nov 2026) - v1.23.08: a memory of the KG era whose
+        # content or category changes loses what the KG worker extracted from
+        # it, in the same transaction, and is extracted again. Memories from
+        # before the era keep their graph (old chunks are never re-extracted).
+        from . import kg_extract as _kg
+        era = await _kg.current_era()
+
         async with get_connection() as conn:
-            await conn.execute("""
-                UPDATE memory
-                SET content = $1, embedding = $2::vector, category = $3,
-                    source = $4, importance = $5, updated_at = NOW()
-                WHERE id = $6
-            """, content, str(vector), category, source, importance, memory_id)
+            async with conn.transaction():
+                old = await conn.fetchrow(
+                    "SELECT content, category, created_at FROM memory "
+                    "WHERE id = $1 FOR UPDATE", memory_id)
+                await conn.execute("""
+                    UPDATE memory
+                    SET content = $1, embedding = $2::vector, category = $3,
+                        source = $4, importance = $5, updated_at = NOW()
+                    WHERE id = $6
+                """, content, str(vector), category, source, importance, memory_id)
+                if _kg.needs_reextract(old, content, category, era):
+                    n = await _kg.reset_extraction(conn, memory_id)
+                    logger.info(f"memory {memory_id} changed: KG extraction reset "
+                                f"({n} relation sources removed), extracted again")
 
         return memory_id
 
