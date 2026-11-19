@@ -465,6 +465,12 @@ class Conversation:
             # Persisted only; the in-memory cache keeps the caller's metadata.
             try:
                 persist_meta = {**(metadata or {}), **(await self._sender_meta())}
+                # Group rows name their sender by platform id, so deleting
+                # that user can anonymise exactly their rows (v1.23.11).
+                _inb = getattr(self, "_turn_inbound", None) or self.inbound
+                _sid = getattr(_inb, "sender_id", None) if _inb is not None else None
+                if self.is_group and _sid:
+                    persist_meta["sender_id"] = str(_sid)
             except Exception as e:
                 logger.warning(f"save_message: sender meta not recorded: {e}")
         meta_json = json.dumps(persist_meta) if persist_meta else "{}"
@@ -1476,7 +1482,7 @@ class Conversation:
 
         from .consent import (
             last_reply_token, make_key, canonical_payload, DEFAULT_CONSENT_ENABLED,
-            ALWAYS_GATE_TOOLS,
+            is_always_gate,
         )
         token = last_reply_token(user_message)
         if token not in ("ya", "yes"):
@@ -1501,7 +1507,7 @@ class Conversation:
             enabled = await _get_config("security.consent_enabled", DEFAULT_CONSENT_ENABLED)
         except Exception:
             enabled = DEFAULT_CONSENT_ENABLED
-        if not enabled and pending_tool not in ALWAYS_GATE_TOOLS:
+        if not enabled and not is_always_gate(pending_tool, pending_args):
             return None
 
         agent = getattr(self._mgr, "_agent", None) if self._mgr else None
@@ -3058,9 +3064,9 @@ class Conversation:
             # switch), so a batch containing one still creates a real pending.
             # Serialization must stay ON for that batch or the single-pending
             # model breaks again — the exact bug this phase exists to prevent.
-            from .consent import ALWAYS_GATE_TOOLS as _ALWAYS_GATE
+            from .consent import is_always_gate as _is_always_gate
             _batch_has_always_gate = any(
-                _pname in _ALWAYS_GATE for _pname, _a, _c, _l in parsed_calls
+                _is_always_gate(_pname, _a) for _pname, _a, _c, _l in parsed_calls
             )
             _gate_will_skip = (
                 access_level in ("owner", "family")
@@ -3072,7 +3078,7 @@ class Conversation:
                     _ptool = self.tools.get(_pname)
                     if _ptool is None:
                         continue  # abilities routed elsewhere; skip for this check
-                    if _pname not in _ALWAYS_GATE \
+                    if not _is_always_gate(_pname, _pargs) \
                             and not _needs_consent(access_level, _ptool.permission):
                         continue  # read-only — no serialization needed
                     if not _first_gate_seen:

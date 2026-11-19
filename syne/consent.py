@@ -242,6 +242,18 @@ def _send_family_should_skip(
 # making the owner approve one logical change twice.
 ALWAYS_GATE_TOOLS = {"memory_update"}
 
+# Same, for one action of a multi-action tool: deleting a user removes
+# their DM history, schedules and group entries for good.
+ALWAYS_GATE_ACTIONS = {("manage_user", "delete")}
+
+
+def is_always_gate(tool_name: str, args: Optional[dict] = None) -> bool:
+    """True when this call must ask Yes/No even on a clean owner turn."""
+    if tool_name in ALWAYS_GATE_TOOLS:
+        return True
+    action = (args or {}).get("action") if isinstance(args, dict) else None
+    return (tool_name, action) in ALWAYS_GATE_ACTIONS
+
 # How long a completed consent-bypass dispatch stays replayable, in seconds.
 # Covers the LLM continuation that runs immediately after the user pressed
 # Yes; deliberately short so a stale entry can never stand in for a fresh
@@ -279,6 +291,20 @@ async def _build_prompt_extra(tool_name: str, args: Optional[dict]) -> str:
     the caller wraps this in try/except, so a DB hiccup costs the OLD preview
     but never the prompt itself.
     """
+    if tool_name == "manage_user" and (args or {}).get("action") == "delete":
+        import json as _json
+        from .db.models import delete_user_preview
+        p = await delete_user_preview((args or {}).get("platform") or "telegram",
+                                      str((args or {}).get("user_id") or ""))
+        if not p:
+            return ""
+        return _json.dumps({
+            "name": p["name"], "access_level": p["access_level"],
+            "dm_sessions": len(p["dm_session_ids"]), "dm_messages": p["dm_messages"],
+            "shared_sessions": p["shared_sessions"],
+            "group_messages": len(p["group_message_ids"]),
+            "memories": p["memories"], "schedules": p["schedules"], "groups": p["groups"],
+        })
     if tool_name != "memory_update":
         return ""
     import json as _json
@@ -345,7 +371,7 @@ async def check_and_hold(
         # Irreversible in-place writes always ask, even on a clean owner
         # turn: pre_decided both skips the needs_consent octal check and
         # disables the clean-turn provenance skip below.
-        if tool_name in ALWAYS_GATE_TOOLS:
+        if is_always_gate(tool_name, args):
             pre_decided = True
         if not pre_decided and not needs_consent(access_level, permission):
             return ("allow", None)
@@ -390,7 +416,7 @@ async def check_and_hold(
         except Exception:
             enabled = DEFAULT_CONSENT_ENABLED
         if not enabled:
-            if tool_name not in ALWAYS_GATE_TOOLS:
+            if not is_always_gate(tool_name, args):
                 return ("allow", None)
             _log.info(
                 f"consent: kill switch is OFF but {tool_name} is in "
@@ -643,6 +669,25 @@ def format_consent_prompt(
             _lines.append(f"Kategori: {_old_cat} → {_new_cat}")
         elif _old_cat:
             _lines.append(f"Kategori: {_old_cat}")
+        _lines.append(f"[[CONSENT_BUTTONS:hash={hash_hex}]]")
+        return _PENDING_STATUS_PREFIX + "\n".join(_lines)
+
+    if tool_name == "manage_user" and a.get("action") == "delete":
+        import json as _json
+        try:
+            _x = _json.loads(get_prompt_extra(hash_hex) or "{}")
+        except Exception:
+            _x = {}
+        _who = f"{_x.get('name') or '?'} ({a.get('platform') or 'telegram'} {a.get('user_id')})"
+        _lines = [f"⚠️ Hapus user {_who}?", "Tidak bisa dikembalikan.", ""]
+        if _x:
+            _lines += [
+                f"- DM dihapus: {_x['dm_sessions']} sesi, {_x['dm_messages']} pesan",
+                f"- Pesan di grup dianonimkan: {_x['group_messages']}",
+                f"- Sesi bersama dilepas (riwayat tetap): {_x['shared_sessions']}",
+                f"- Jadwal dihapus: {_x['schedules']}; keluar dari {_x['groups']} grup",
+                f"- Memori tetap ada, pemiliknya dikosongkan: {_x['memories']}",
+            ]
         _lines.append(f"[[CONSENT_BUTTONS:hash={hash_hex}]]")
         return _PENDING_STATUS_PREFIX + "\n".join(_lines)
 

@@ -43,6 +43,7 @@ def _show_help():
             ("memory stats", "Show memory statistics"),
             ("memory search", "Search memories by similarity"),
             ("memory add", "Manually add a memory"),
+            ("user delete", "Delete a user (DM history, schedules; memories stay)"),
             ("db init", "Initialize database schema"),
             ("db reset", "Reset database (DROP ALL + re-init)"),
             ("backup", "Backup database to .sql.gz file"),
@@ -82,6 +83,7 @@ from . import cmd_update  # noqa: E402, F401
 from . import cmd_uninstall  # noqa: E402, F401
 from . import cmd_backup  # noqa: E402, F401
 from . import cmd_config  # noqa: E402, F401
+from . import cmd_user  # noqa: E402, F401
 try:
     from . import cmd_node  # noqa: E402, F401
 except ImportError:

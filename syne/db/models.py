@@ -258,29 +258,110 @@ async def update_user(
         return result
 
 
-async def delete_user(platform: str, platform_id: str) -> bool:
-    """Delete a user and their sessions. Returns True if deleted.
+def _dm_chat_ids(platform_id: str) -> list:
+    """Chat ids a user's own DM session can carry (Telegram id, WhatsApp JID)."""
+    pid = str(platform_id)
+    return [pid, pid + "@s.whatsapp.net"]
 
-    Memories are never deleted with a user (Riyo, 18 Nov 2026): the rows stay
-    and only their owner (user_id) is cleared. References such as ibnukatsir
-    or fiqih can be recorded under a user and must survive.
-    """
+
+_DM_SESSIONS = (
+    "SELECT id FROM sessions WHERE user_id = $1 AND platform = $2 "
+    "AND platform_chat_id = ANY($3::text[])"
+)
+_GROUP_ROWS = (
+    "SELECT m.id FROM messages m JOIN sessions s ON s.id = m.session_id "
+    "WHERE s.platform = $1 AND m.metadata->>'sender_id' = $2 "
+    "AND NOT (s.platform_chat_id = ANY($3::text[]))"
+)
+
+
+async def _delete_user_counts(conn, uid: int, platform: str, pid: str) -> dict:
+    chats = _dm_chat_ids(pid)
+    dm_ids = [r["id"] for r in await conn.fetch(_DM_SESSIONS, uid, platform, chats)]
+    group_rows = [r["id"] for r in await conn.fetch(_GROUP_ROWS, platform, pid, chats)]
+    return {
+        "dm_session_ids": dm_ids,
+        "dm_messages": int(await conn.fetchval(
+            "SELECT count(*) FROM messages WHERE session_id = ANY($1::int[])", dm_ids) or 0),
+        "shared_sessions": int(await conn.fetchval(
+            "SELECT count(*) FROM sessions WHERE user_id = $1 AND NOT (id = ANY($2::int[]))",
+            uid, dm_ids) or 0),
+        "group_message_ids": group_rows,
+        "memories": int(await conn.fetchval(
+            "SELECT count(*) FROM memory WHERE user_id = $1", uid) or 0),
+        "schedules": int(await conn.fetchval(
+            "SELECT count(*) FROM scheduled_tasks WHERE created_by = $1", int(pid)) or 0)
+            if pid.isdigit() else 0,
+        "groups": int(await conn.fetchval(
+            "SELECT count(*) FROM groups WHERE platform = $1 AND settings->'members' ? $2",
+            platform, pid) or 0),
+    }
+
+
+async def delete_user_preview(platform: str, platform_id: str) -> Optional[dict]:
+    """What delete_user would touch, without changing anything. None = no such user."""
+    pid = str(platform_id)
     async with get_connection() as conn:
-        # Get user id first
-        row = await conn.fetchrow(
-            "SELECT id FROM users WHERE platform = $1 AND platform_id = $2",
-            platform, platform_id,
-        )
-        if not row:
-            return False
-        user_id = row["id"]
+        u = await conn.fetchrow(
+            "SELECT id, name, display_name, access_level FROM users "
+            "WHERE platform = $1 AND platform_id = $2", platform, pid)
+        if not u:
+            return None
+        out = await _delete_user_counts(conn, u["id"], platform, pid)
+    out.update(name=u["display_name"] or u["name"], access_level=u["access_level"])
+    return out
 
-        # Memories stay, only their owner is cleared; messages cascade from sessions.
+
+async def delete_user(platform: str, platform_id: str) -> Optional[dict]:
+    """Delete a user. Returns a summary dict, or None when the user is unknown.
+
+    One transaction (v1.23.11, Riyo 19 Nov 2026):
+      * the user's own DM sessions are deleted (messages cascade; the
+        messages trigger prunes their KG sources); sub-agent runs started
+        there are detached first (their FK has no ON DELETE);
+      * other sessions recorded under the user - a group session is owned by
+        whoever wrote there first - are only detached (user_id NULL), so the
+        rest of the group keeps its history;
+      * the user's rows inside those shared sessions (metadata.sender_id,
+        written since v1.23.11) are anonymised and their KG sources pruned;
+      * memories stay, only their owner is cleared (Riyo, 18 Nov 2026);
+      * the user's scheduled tasks and group member entries are removed.
+    KG entities left without any relation are removed by kg_prune_sources.
+    """
+    pid = str(platform_id)
+    async with get_connection() as conn:
+        u = await conn.fetchrow(
+            "SELECT id, name, display_name, access_level FROM users "
+            "WHERE platform = $1 AND platform_id = $2", platform, pid)
+        if not u:
+            return None
+        uid = u["id"]
         async with conn.transaction():
-            await conn.execute("UPDATE memory SET user_id = NULL WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM sessions WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM users WHERE id = $1", user_id)
-        return True
+            c = await _delete_user_counts(conn, uid, platform, pid)
+            dm_ids, rows = c["dm_session_ids"], c["group_message_ids"]
+            if rows:
+                await conn.execute(
+                    "UPDATE messages SET content = '[message from a deleted user]', "
+                    "metadata = (coalesce(metadata, '{}'::jsonb) - 'speaker' - 'sender_id') "
+                    "|| '{\"deleted_user\": true}'::jsonb, embedding = NULL "
+                    "WHERE id = ANY($1::int[])", rows)
+                await conn.execute("SELECT kg_prune_sources('message', $1::int[])", rows)
+            await conn.execute("UPDATE memory SET user_id = NULL WHERE user_id = $1", uid)
+            if dm_ids:
+                await conn.execute(
+                    "UPDATE subagent_runs SET parent_session_id = NULL "
+                    "WHERE parent_session_id = ANY($1::int[])", dm_ids)
+                await conn.execute("DELETE FROM sessions WHERE id = ANY($1::int[])", dm_ids)
+            await conn.execute("UPDATE sessions SET user_id = NULL WHERE user_id = $1", uid)
+            if pid.isdigit():
+                await conn.execute("DELETE FROM scheduled_tasks WHERE created_by = $1", int(pid))
+            await conn.execute(
+                "UPDATE groups SET settings = jsonb_set(settings, '{members}', "
+                "(settings->'members') - $2), updated_at = NOW() "
+                "WHERE platform = $1 AND settings->'members' ? $2", platform, pid)
+            await conn.execute("DELETE FROM users WHERE id = $1", uid)
+    c.update(name=u["display_name"] or u["name"], access_level=u["access_level"])
+    return c
 
 
 async def get_user_alias(user: dict, group_id: str = None) -> str:

@@ -1169,12 +1169,17 @@ class SyneAgent:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "update", "get"],
-                        "description": "Action to perform",
+                        "enum": ["list", "update", "get", "delete"],
+                        "description": "Action to perform. delete removes the user: DM history, schedules and group member entries; group messages are anonymised; memories stay. Always asks Yes/No.",
                     },
                     "user_id": {
                         "type": "string",
                         "description": "User platform ID (e.g. Telegram user ID)",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "enum": ["telegram", "whatsapp", "discord", "cli"],
+                        "description": "Platform of user_id (delete only, default telegram)",
                     },
                     "display_name": {
                         "type": "string",
@@ -2722,6 +2727,37 @@ class SyneAgent:
 
         return f"Unknown action: {action}"
 
+    async def _manage_user_delete(self, user_id: str, platform: str) -> str:
+        """manage_user(action=delete). Consent already granted upstream
+        (consent.ALWAYS_GATE_ACTIONS), so reaching here means Yes was pressed."""
+        from .db.models import delete_user_preview, delete_user
+        if not user_id:
+            return "Error: user_id is required for delete action."
+        if self._get_active_conversation() is None:
+            return ("Error: deleting a user requires an interactive session - "
+                    "nobody is present to approve it.")
+        p = await delete_user_preview(platform, str(user_id))
+        if not p:
+            return f"User {platform} {user_id} not found."
+        if p["access_level"] == "owner":
+            return "Refused: an owner cannot be deleted."
+        res = await delete_user(platform, str(user_id))
+        if not res:
+            return f"User {platform} {user_id} not found."
+        gone = set(res["dm_session_ids"])
+        active = getattr(self.conversations, "_active", {}) if self.conversations else {}
+        for key, c in list(active.items()):
+            if getattr(c, "session_id", None) in gone:
+                active.pop(key, None)
+        return (
+            f"User {res['name']} ({platform} {user_id}) deleted: "
+            f"{len(gone)} DM session(s) / {res['dm_messages']} message(s) removed, "
+            f"{len(res['group_message_ids'])} group message(s) anonymised, "
+            f"{res['shared_sessions']} shared session(s) detached, "
+            f"{res['schedules']} schedule(s) removed, left {res['groups']} group(s), "
+            f"{res['memories']} memorie(s) kept without owner."
+        )
+
     async def _tool_manage_user(
         self,
         action: str,
@@ -2729,10 +2765,13 @@ class SyneAgent:
         display_name: str = "",
         aliases: str = "",
         access_level: str = "",
+        platform: str = "",
         # Context passed by conversation handler
         _caller_user: dict = None,
     ) -> str:
         """Tool handler: manage users."""
+        if action == "delete":
+            return await self._manage_user_delete(user_id, platform or "telegram")
         from .db.models import get_user, update_user, list_users
         import json
 
