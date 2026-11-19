@@ -114,7 +114,7 @@ DEFAULTS: dict = {
     "kg.extract_interval": (30, "Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600."),
     "kg.extract_timeout": (120, "Seconds one KG extraction call may take. Clamped 10-600."),
     "kg.extract_max_attempts": (3, "Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10."),
-    "kg.extract_daily_limit": (300, "Most calls to the KG extraction model per day (system.timezone). Every call counts: retries, failures and results discarded as stale; deleting messages or memories does not give calls back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000."),
+    "kg.extract_daily_limit": (300, "Most chunks sent to the KG extraction model per day (system.timezone). A chunk counts once a day however many attempts it takes, also when its result is discarded as stale; chunks skipped without a model call do not count; deleting messages or memories does not give the count back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000."),
     "kg.extract_skip_categories": ([], "Memory categories KG extraction skips, e.g. [\"alquran\"]."),
     "kg.extract_skip_scheduled": (True, "Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction."),
     "kg.extract_max_entities": (15, "Most entities kept from one chunk. Clamped 1-50."),
@@ -851,7 +851,7 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         else:
             reason = "memory"
     prompt = build_prompt(text[: s["kg.extract_max_chars"]], speaker=speaker, context=context, s=s)
-    await _count_call()
+    await _count_chunk(item)
     try:
         raw = await judge(prompt, float(s["kg.extract_timeout"]))
     except asyncio.CancelledError:
@@ -1223,36 +1223,45 @@ async def _system_tz() -> str:
     return tz
 
 
-async def extracted_today(conn) -> int:
-    """Calls to the extraction model today (system.timezone).
+# Days of kg_extract_usage kept; older rows are dropped while counting.
+USAGE_KEEP_DAYS = 7
 
-    v1.23.18: read from kg_extract_usage, one counter row per day bumped
-    before every call (count_call). Counting kg_extract_log rows missed
-    retries (one row per chunk), stale results, and gave calls back when a
-    log row was deleted with its message or memory.
+
+async def extracted_today(conn) -> int:
+    """Chunks sent to the extraction model today (system.timezone).
+
+    Per chunk (Riyo, decision #57773): kg_extract_usage holds one row per
+    chunk per day, written before its model call (count_chunk), so a chunk
+    tried three times counts once. The table is separate from
+    kg_extract_log: deleting a message or memory does not give the count
+    back, and a stale result still counts (v1.23.19).
     """
     return int(await conn.fetchval(
-        "SELECT calls FROM kg_extract_usage WHERE day = (now() AT TIME ZONE $1)::date",
+        "SELECT count(*) FROM kg_extract_usage WHERE day = (now() AT TIME ZONE $1)::date",
         await _system_tz()) or 0)
 
 
-async def count_call(conn) -> None:
+async def count_chunk(conn, source_type: str, source_id: int) -> None:
+    tz = await _system_tz()
     await conn.execute(
-        "INSERT INTO kg_extract_usage (day, calls) VALUES ((now() AT TIME ZONE $1)::date, 1) "
-        "ON CONFLICT (day) DO UPDATE SET calls = kg_extract_usage.calls + 1",
-        await _system_tz())
+        "INSERT INTO kg_extract_usage (day, source_type, source_id) "
+        "VALUES ((now() AT TIME ZONE $1)::date, $2, $3) ON CONFLICT DO NOTHING",
+        tz, source_type, int(source_id))
+    await conn.execute(
+        "DELETE FROM kg_extract_usage WHERE day < (now() AT TIME ZONE $1)::date - $2::int",
+        tz, USAGE_KEEP_DAYS)
 
 
-async def _count_call() -> None:
-    """count_call on its own connection. Never raises (except cancellation):
+async def _count_chunk(item: dict) -> None:
+    """count_chunk on its own connection. Never raises (except cancellation):
     a failed count must not stop the extraction."""
     try:
         async with get_connection() as conn:
-            await count_call(conn)
+            await count_chunk(conn, item["type"], item["id"])
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        logger.debug(f"KG extract: call not counted: {e}")
+        logger.debug(f"KG extract: chunk not counted: {e}")
 
 
 # One KG worker per database (v1.23.15): a session advisory lock held on a
@@ -1406,7 +1415,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                     used = await gated(_used())
                     if used >= limit:
                         if not limit_logged:
-                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} calls, "
+                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} chunks, "
                                            "kg.extract_daily_limit); waiting for the next day")
                             limit_logged = True
                         await asyncio.sleep(300)

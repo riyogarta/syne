@@ -39,11 +39,14 @@ CREATE TABLE IF NOT EXISTS kg_extract_log (
     PRIMARY KEY (source_type, source_id)
 );
 
--- Calls to the KG extraction model per day (system.timezone), the base of
--- kg.extract_daily_limit (v1.23.18, migration 62).
+-- Chunks sent to the KG extraction model per day (system.timezone), the
+-- base of kg.extract_daily_limit: one row per chunk per day, so attempts of
+-- the same chunk count once (Riyo, decision #57773; v1.23.19, migration 63).
 CREATE TABLE IF NOT EXISTS kg_extract_usage (
-    day   DATE PRIMARY KEY,
-    calls INT NOT NULL DEFAULT 0
+    day         DATE NOT NULL,
+    source_type VARCHAR(20) NOT NULL,
+    source_id   INT NOT NULL,
+    PRIMARY KEY (day, source_type, source_id)
 );
 
 INSERT INTO config (key, value, description) VALUES

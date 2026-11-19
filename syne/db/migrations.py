@@ -1701,6 +1701,34 @@ async def _m62_kg_usage_split_merges(conn) -> None:
         logger.info(f"KG: dropped wrong aliases of {res['entities']} entities")
 
 
+KG_USAGE_CHUNK_DDL = [
+    "CREATE TABLE IF NOT EXISTS kg_extract_usage ("
+    "day DATE NOT NULL, source_type VARCHAR(20) NOT NULL, source_id INT NOT NULL, "
+    "PRIMARY KEY (day, source_type, source_id))",
+]
+
+
+async def _m63_kg_usage_per_chunk(conn) -> None:
+    """v1.23.19 (Riyo, decision #57773). Idempotent.
+
+    kg.extract_daily_limit counts chunks, not model calls: kg_extract_usage
+    becomes one row per chunk per day. The v1.23.18 shape (day, calls) is
+    dropped; its count of the current day cannot be mapped to chunks and
+    starts again from 0. The description is updated. schema.sql carries the
+    same DDL.
+    """
+    from ..memory.kg_extract import DEFAULTS
+    has_chunk = await conn.fetchval(
+        "SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('kg_extract_usage') "
+        "AND attname = 'source_id' AND NOT attisdropped")
+    if not has_chunk:
+        await conn.execute("DROP TABLE IF EXISTS kg_extract_usage")
+    for stmt in KG_USAGE_CHUNK_DDL:
+        await conn.execute(stmt)
+    await conn.execute("UPDATE config SET description = $2 WHERE key = $1",
+                       "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1764,6 +1792,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (60, _m60_kg_scope_daily_limit, "transactional"),
     (61, _m61_kg_entities_embedding_untyped, "transactional"),
     (62, _m62_kg_usage_split_merges, "transactional"),
+    (63, _m63_kg_usage_per_chunk, "transactional"),
 ]
 
 
