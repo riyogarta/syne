@@ -46,6 +46,7 @@ BEGIN
         SELECT DISTINCT t.mem, m.id AS by_mem
           FROM targets t
           JOIN kg_relations r ON r.object_id = t.target
+                             AND r.predicate <> 'contains'
           JOIN kg_entities s ON s.id = r.subject_id AND s.entity_type = 'chunk'
           JOIN memory m ON m.id = CASE WHEN s.description ~ '^memory:[0-9]{1,9}$'
                                        THEN substring(s.description from 8)::int END

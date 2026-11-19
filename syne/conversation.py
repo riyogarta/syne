@@ -7,6 +7,7 @@ import json
 import logging
 import time as _ts_time
 from typing import Optional
+import contextvars
 
 
 try:
@@ -181,6 +182,12 @@ async def _load_time_config() -> dict:
 # Conversation._trim_message_cache.
 _TRIM_KEEP_RATIO = 0.7
 
+
+
+# The conversation whose turn runs in this asyncio task; tools resolve
+# the caller through it, never through 'any conversation that is busy'.
+CURRENT_CONVERSATION: contextvars.ContextVar = contextvars.ContextVar(
+    "syne_current_conversation", default=None)
 
 class Conversation:
     """Manages a single conversation session."""
@@ -382,6 +389,12 @@ class Conversation:
                 f"cache now {len(self._message_cache)} (limit={limit})"
             )
 
+    def _inb(self):
+        """This turn's InboundContext. The manager overwrites self.inbound
+        as soon as the next message for this chat arrives, possibly while
+        this turn still runs; a turn keeps the context it started with."""
+        return getattr(self, "_turn_inbound", None) or self.inbound
+
     async def _sender_meta(self) -> dict:
         """Access level and trusted name of this turn's sender.
 
@@ -394,7 +407,7 @@ class Conversation:
         users table by sender id, the member alias, or the DM user record -
         never from display names inside the message, which anyone can set.
         """
-        inb = self.inbound
+        inb = getattr(self, "_turn_inbound", None) or self.inbound
         own = self.user.get("access_level", "public")
         if inb is not None and inb.sender_access:
             access = inb.sender_access
@@ -484,8 +497,8 @@ class Conversation:
                                 VALUES ($1, $2, $3, $4)
                                 ON CONFLICT (id) DO NOTHING
                             """, self.session_id, self.user.get("id"),
-                                self.inbound.platform if self.inbound else "unknown",
-                                self.inbound.chat_id if self.inbound else "unknown",
+                                self._inb().platform if self._inb() else "unknown",
+                                self._inb().chat_id if self._inb() else "unknown",
                             )
                     except Exception as re_err:
                         logger.error(f"Failed to recreate session: {re_err}")
@@ -1054,8 +1067,8 @@ class Conversation:
         # The effective access level for memory is the SENDER (who asked) when
         # the channel resolved one in InboundContext.sender_access -- the group
         # member registry, or the WhatsApp DM sender. Otherwise the user record.
-        if self.inbound and self.inbound.sender_access:
-            access_level = self.inbound.sender_access
+        if self._inb() and self._inb().sender_access:
+            access_level = self._inb().sender_access
 
         # 1. System prompt (decorated). Snapshot the epoch it was built from
         # so a mid-turn refresh can be detected between tool rounds.
@@ -1833,6 +1846,8 @@ class Conversation:
             # without providing pixels itself. Reset each turn (this line).
             self._cached_input_data: dict = {}
             self._message_metadata = message_metadata
+            self._turn_inbound = (message_metadata or {}).get("inbound") or self.inbound
+            CURRENT_CONVERSATION.set(self)
             # Provenance taint: seed from this turn's INPUT (image / uploaded
             # file / URL). May also flip True later if an untrusted tool runs
             # mid-turn (see taint-set after tool/ability dispatch). The consent
@@ -1881,8 +1896,8 @@ class Conversation:
                         except Exception:
                             pass
                         _access = self.user.get("access_level", "public")
-                        if self.inbound and self.inbound.sender_access:
-                            _access = self.inbound.sender_access
+                        if self._inb() and self._inb().sender_access:
+                            _access = self._inb().sender_access
                         return classify_error(e, model=_model, access_level=_access)
                     raise
             finally:
@@ -1994,8 +2009,8 @@ class Conversation:
         # Tool access is based on the SENDER when the channel resolved one
         # (group member registry, WhatsApp DM sender), not the cached session
         # user -- a session can carry messages from more than one person.
-        if self.inbound and self.inbound.sender_access:
-            access_level = self.inbound.sender_access
+        if self._inb() and self._inb().sender_access:
+            access_level = self._inb().sender_access
 
         # SECURITY (Groups): tools are sender-based, but owner-only tools stay DM-only.
         # We enforce DM-only for owner tools by filtering them out from tool schemas below.
@@ -2903,8 +2918,8 @@ class Conversation:
         # current group when a reminder is created from a group conversation.
         _chat_type = "group" if self.is_group else "direct"
         _chat_id_for_ctx = None
-        if self.inbound and self.inbound.chat_id:
-            _chat_id_for_ctx = str(self.inbound.chat_id)
+        if self._inb() and self._inb().chat_id:
+            _chat_id_for_ctx = str(self._inb().chat_id)
         elif self.chat_id:
             _chat_id_for_ctx = str(self.chat_id)
         set_current_chat(_chat_id_for_ctx, _chat_type)

@@ -35,9 +35,11 @@ QURAN = "quran"
 DEFAULT_REF_SOURCES: dict[str, dict] = {
     "alquran": {"kind": QURAN, "target": R.quran_target()},
     "ibnukatsir": {"title": R.DEFAULT_TITLE_PATTERNS["ibnukatsir"],
-                   "title_predicate": "explains", "mentions": True},
+                   "title_predicate": "explains", "title_target": "alquran",
+                   "mentions": True},
     "asbabnuzul": {"title": R.DEFAULT_TITLE_PATTERNS["asbabnuzul"],
-                   "title_predicate": "asbab_of", "mentions": True},
+                   "title_predicate": "asbab_of", "title_target": "alquran",
+                   "mentions": True},
     "bukhari": {"mentions": True},
     "muslim": {"mentions": True},
     "riyadhus": {"mentions": True},
@@ -175,7 +177,12 @@ def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
         title_idx = None
         if src.get("title") and indexes:
             tcat = src.get("title_target")
-            title_idx = indexes.get(tcat) if tcat else next(iter(indexes.values()))
+            if tcat:
+                title_idx = indexes.get(tcat)
+            elif len(indexes) == 1:
+                title_idx = next(iter(indexes.values()))
+            else:  # several targets: guessing by jsonb key order is wrong
+                title_idx = None
             if title_idx is None:
                 plan.reject(cat, title, "unknown_target")
             else:

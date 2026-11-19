@@ -1562,6 +1562,56 @@ async def _m57_memory_guard(conn) -> None:
             await conn.execute(stmt)
 
 
+async def _m58_guard_contains_title_target(conn) -> None:
+    """v1.23.10 (Riyo, 19 Nov 2026). Idempotent.
+
+    1. Memory guard DDL again: 'contains' no longer counts as a reference,
+       so two chunks holding the same ayah do not lock each other.
+    2. kg.ref_sources: an entry with a title pattern and no title_target
+       gets one when exactly one link target exists (jsonb key order must
+       not decide which reference a tafsir title points at).
+    3. Chat rows that are KG sources but carry no metadata.access (written
+       before v1.23.03) get the access level of their DM session's user.
+    """
+    from ..cli.helpers import _split_sql_statements
+    from .memory_guard_ddl import MEMORY_GUARD_SCHEMA_SQL
+    for stmt in _split_sql_statements(MEMORY_GUARD_SCHEMA_SQL):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            await conn.execute(stmt)
+
+    raw = await conn.fetchval("SELECT value FROM config WHERE key = 'kg.ref_sources'")
+    src = json.loads(raw) if isinstance(raw, str) else raw
+    if isinstance(src, dict):
+        targets = [k for k, v in src.items() if isinstance(v, dict) and isinstance(v.get("target"), dict)]
+        changed = False
+        if len(targets) == 1:
+            for entry in src.values():
+                if isinstance(entry, dict) and entry.get("title") and not entry.get("title_target"):
+                    entry["title_target"] = targets[0]
+                    changed = True
+        if changed:
+            await conn.execute(
+                "UPDATE config SET value = $1::jsonb, updated_at = NOW() WHERE key = 'kg.ref_sources'",
+                json.dumps(src, ensure_ascii=False))
+
+    await conn.execute("""
+        UPDATE messages m
+           SET metadata = coalesce(m.metadata, '{}'::jsonb)
+                          || jsonb_build_object('access', u.access_level)
+          FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE m.session_id = s.id
+           AND m.role IN ('user', 'assistant')
+           AND coalesce(m.metadata->>'access', '') = ''
+           AND (s.platform_chat_id = u.platform_id
+                OR s.platform_chat_id = u.platform_id || '@s.whatsapp.net')
+           AND (EXISTS (SELECT 1 FROM kg_relation_sources rs
+                         WHERE rs.source_type = 'message' AND rs.source_id = m.id)
+                OR EXISTS (SELECT 1 FROM kg_extract_log l
+                            WHERE l.source_type = 'message' AND l.source_id = m.id))
+    """)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1620,6 +1670,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (55, _m55_kg_link_targets, "transactional"),
     (56, _m56_kg_prune_on_delete, "transactional"),
     (57, _m57_memory_guard, "transactional"),
+    (58, _m58_guard_contains_title_target, "transactional"),
 ]
 
 

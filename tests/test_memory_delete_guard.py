@@ -41,7 +41,7 @@ def test_guard_fires_before_kg_prune():
 
 def test_migration_57_registered():
     assert (57, M._m57_memory_guard, "transactional") in M.MIGRATIONS
-    assert M.CURRENT_SCHEMA_VERSION == 57
+    assert M.CURRENT_SCHEMA_VERSION >= 57
 
 
 async def test_migration_57_runs_ddl():

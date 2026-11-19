@@ -32,6 +32,12 @@ logger = logging.getLogger("syne.agent")
 _TOOL_PROTECTED_CONFIG_PREFIXES = ("provider.", "credential.")
 
 
+
+def _conv_inbound(conv):
+    """The InboundContext of the turn conv is running (not the latest one)."""
+    f = getattr(conv, "_inb", None)
+    return f() if callable(f) else getattr(conv, "inbound", None)
+
 class SyneAgent:
     """The main Syne agent. Initializes all components and handles messages."""
 
@@ -1476,6 +1482,11 @@ class SyneAgent:
         """Get the conversation that is currently processing a message."""
         if not self.conversations:
             return None
+        # The conversation running in this task (set by Conversation.chat).
+        from .conversation import CURRENT_CONVERSATION
+        cur = CURRENT_CONVERSATION.get()
+        if cur is not None:
+            return cur
         # Return the most recently active conversation
         for conv in self.conversations._active.values():
             if hasattr(conv, '_processing') and conv._processing:
@@ -2183,8 +2194,8 @@ class SyneAgent:
         # Pass requester access level for Rule 760 filtering
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
-            access = conv.inbound.sender_access
+        if conv and _conv_inbound(conv) and _conv_inbound(conv).sender_access:
+            access = _conv_inbound(conv).sender_access
         results = await self.memory.recall(query, limit=limit, categories=categories or None, requester_access_level=access)
         if not results:
             return "No relevant memories found."
@@ -2426,8 +2437,8 @@ class SyneAgent:
 
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
-            access = conv.inbound.sender_access
+        if conv and _conv_inbound(conv) and _conv_inbound(conv).sender_access:
+            access = _conv_inbound(conv).sender_access
         allowed, reason = check_rule_760(row["category"] or "", access)
         if not allowed:
             return f"Error: {reason}"
@@ -2486,8 +2497,8 @@ class SyneAgent:
 
         conv = self._get_active_conversation()
         access = conv.user.get("access_level", "public") if conv else "public"
-        if conv and getattr(conv, 'inbound', None) and conv.inbound.sender_access:
-            access = conv.inbound.sender_access
+        if conv and _conv_inbound(conv) and _conv_inbound(conv).sender_access:
+            access = _conv_inbound(conv).sender_access
         allowed, reason = check_rule_760(row["category"] or "", access)
         if not allowed:
             return f"Error: {reason}"

@@ -293,6 +293,7 @@ Rules:
 - Names as written in the text, in their original language, without titles of respect added. At most {max_e} entities and {max_r} relations.
 - Every entity name must point to ONE specific thing. A person known only by a relation word (anakku, istrinya, "my son") is named "<relation> <name of that person>", e.g. "anak Riyogarta Pratikto", never just "Anak".
 - A label in square brackets at the start of TARGET (e.g. "[KEPUTUSAN RIYO - 18 Nov 2026]") is a title, not an entity; its date may be used with happened_on.
+- Examples, illustrations, quotations and hypothetical scenarios ("misalnya", "contoh", "seandainya", "for example", "suppose") are not facts: extract nothing from them.
 - Subject and object of every relation must be in entities. Leave out greetings, opinions about the conversation itself, and anything uncertain.
 - Never make an entity of a commit hash, an ID or record number (memory #123, message 456), a file path, a URL, or a chat command (/models).
 - Nothing worth storing: {{"entities":[],"relations":[]}}
@@ -565,6 +566,19 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
     return eid, "new"
 
 
+def _rel_pairs(subs: list, objs: list) -> list:
+    """Entity pairs for one extracted relation. One side a single entity:
+    every item of the other side. Range to range: item by item when both
+    have the same length, else nothing - a cross product would turn one
+    stated fact into up to range^2 relations."""
+    if len(subs) <= 1 or len(objs) <= 1:
+        return [(a, b) for a in subs for b in objs]
+    if len(subs) == len(objs):
+        return list(zip(subs, objs))
+    logger.debug(f"KG range relation skipped: {len(subs)} x {len(objs)} items")
+    return []
+
+
 async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
                       embed: Optional[Embedder], s: dict) -> tuple:
     """Resolve entities, upsert relations with their source. (entities, relations).
@@ -588,22 +602,22 @@ async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
         ids[e["name"].lower()] = [eid]
     n_rel = 0
     for r in extracted["relations"]:
-        for a in ids.get(r["subject"].lower()) or []:
-            for b in ids.get(r["object"].lower()) or []:
-                if not a or not b or a == b:
-                    continue
-                rel_id = await conn.fetchval(
-                    "INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id) "
-                    "VALUES ($1, $2, $3, $4) ON CONFLICT (subject_id, predicate, object_id) "
-                    "DO UPDATE SET updated_at = now() RETURNING id",
-                    a, r["predicate"], b, source_id if source_type == "memory" else None,
-                )
-                await conn.execute(
-                    "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin) "
-                    "VALUES ($1, $2, $3, 'llm') ON CONFLICT DO NOTHING",
-                    rel_id, source_type, source_id,
-                )
-                n_rel += 1
+        for a, b in _rel_pairs(ids.get(r["subject"].lower()) or [],
+                               ids.get(r["object"].lower()) or []):
+            if not a or not b or a == b:
+                continue
+            rel_id = await conn.fetchval(
+                "INSERT INTO kg_relations (subject_id, predicate, object_id, source_memory_id) "
+                "VALUES ($1, $2, $3, $4) ON CONFLICT (subject_id, predicate, object_id) "
+                "DO UPDATE SET updated_at = now() RETURNING id",
+                a, r["predicate"], b, source_id if source_type == "memory" else None,
+            )
+            await conn.execute(
+                "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin) "
+                "VALUES ($1, $2, $3, 'llm') ON CONFLICT DO NOTHING",
+                rel_id, source_type, source_id,
+            )
+            n_rel += 1
     return len({i for v in ids.values() for i in v}), n_rel
 
 
