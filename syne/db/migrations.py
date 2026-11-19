@@ -1687,9 +1687,9 @@ async def _m62_kg_usage_split_merges(conn) -> None:
     """v1.23.18 (Riyo, 19 Nov 2026). Idempotent.
 
     kg_extract_usage: calls to the KG extraction model per day, the base of
-    kg.extract_daily_limit (its description is updated). Entities that an
-    embedding match merged across different numbers are split: their chunks
-    are extracted again. schema.sql carries the same DDL.
+    kg.extract_daily_limit (its description is updated). Aliases an
+    embedding match added across different numbers are dropped; no chunk is
+    extracted again (#57758). schema.sql carries the same DDL.
     """
     from ..memory.kg_extract import DEFAULTS, split_bad_merges
     for stmt in KG_USAGE_DDL:
@@ -1698,8 +1698,7 @@ async def _m62_kg_usage_split_merges(conn) -> None:
                        "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
     res = await split_bad_merges(conn)
     if res["entities"]:
-        logger.info(f"KG: split {res['entities']} wrongly merged entities; "
-                    f"{res['sources']} chunks will be extracted again")
+        logger.info(f"KG: dropped wrong aliases of {res['entities']} entities")
 
 
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [

@@ -970,37 +970,25 @@ async def reset_source(conn, source_type: str, source_id: int) -> int:
 
 
 async def split_bad_merges(conn) -> dict:
-    """Undo merges an embedding match made between names with different
-    numbers (v1.23.18, review #10): "v1.23.02" holding the aliases
-    "v1.23.06" and "v1.23.13", "Migrasi 44" holding "Migrasi 45".
+    """Drop aliases an embedding match added across different numbers
+    (v1.23.18, review #10): "v1.23.02" holding "v1.23.06", "Migrasi 44"
+    holding "Migrasi 45". Later mentions of those names resolve to their own
+    entity (same_numbers).
 
-    Which relation came from which alias is not stored, so every chunk with
-    an LLM relation on such an entity is extracted again (reset_source);
-    same_numbers() now keeps the names apart. An entity that survives (rule
-    links) loses the wrong aliases. Run inside the caller's transaction.
+    No chunk is extracted again (Riyo's decision #57758): relations already
+    attached stay as they are. Run inside the caller's transaction.
     """
-    bad: dict = {}
+    n = 0
     for r in await conn.fetch(
             "SELECT id, name, norm_name, aliases FROM kg_entities "
             "WHERE cardinality(aliases) > 0"):
         base = r["norm_name"] or normalize_name(r["name"])
         keep = [x for x in r["aliases"] if same_numbers(normalize_name(x), base)]
         if len(keep) != len(r["aliases"]):
-            bad[r["id"]] = keep
-    if not bad:
-        return {"entities": 0, "sources": 0}
-    ids = sorted(bad)
-    srcs = await conn.fetch(
-        "SELECT DISTINCT s.source_type, s.source_id FROM kg_relation_sources s "
-        "JOIN kg_relations r ON r.id = s.relation_id "
-        "WHERE s.origin = 'llm' AND (r.subject_id = ANY($1::int[]) OR r.object_id = ANY($1::int[])) "
-        "ORDER BY 1, 2", ids)
-    for s in srcs:
-        await reset_source(conn, s["source_type"], s["source_id"])
-    for eid, keep in bad.items():
-        await conn.execute("UPDATE kg_entities SET aliases = $2::text[], updated_at = now() "
-                           "WHERE id = $1", eid, keep)
-    return {"entities": len(ids), "sources": len(srcs)}
+            await conn.execute("UPDATE kg_entities SET aliases = $2::text[], updated_at = now() "
+                               "WHERE id = $1", r["id"], keep)
+            n += 1
+    return {"entities": n}
 
 
 async def backfill_norm_names(batch: int = 2000) -> int:

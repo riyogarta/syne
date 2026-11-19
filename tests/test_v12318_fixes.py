@@ -145,16 +145,16 @@ async def test_split_bad_merges():
         """)
         async with c.transaction():
             res = await K.split_bad_merges(c)
-        assert res == {"entities": 1, "sources": 1}
-        # chunk 100 goes back to the queue, its relations and orphans go
-        assert await c.fetchval("SELECT count(*) FROM kg_extract_log") == 1
-        assert await c.fetchval("SELECT count(*) FROM kg_relations WHERE id IN (10, 12)") == 0
-        assert await c.fetchval("SELECT count(*) FROM kg_entities WHERE id IN (1, 4)") == 0
+        assert res == {"entities": 1}
+        assert await c.fetchval("SELECT aliases FROM kg_entities WHERE id = 1") == ["v1.23.02"]
+        # nothing goes back to the extraction queue, nothing is deleted (#57758)
+        assert await c.fetchval("SELECT count(*) FROM kg_extract_log") == 2
+        assert await c.fetchval("SELECT count(*) FROM kg_relations") == 3
+        assert await c.fetchval("SELECT count(*) FROM kg_entities") == 4
         # PostgreSQL / Postgres is a right merge and stays
         assert await c.fetchval("SELECT aliases FROM kg_entities WHERE id = 3") == ["Postgres"]
-        assert await c.fetchval("SELECT count(*) FROM kg_relations WHERE id = 11") == 1
         async with c.transaction():
-            assert await K.split_bad_merges(c) == {"entities": 0, "sources": 0}
+            assert await K.split_bad_merges(c) == {"entities": 0}
     finally:
         await c.execute(f"DROP SCHEMA {s} CASCADE")
         await c.close()
