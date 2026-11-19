@@ -135,6 +135,7 @@ def markdown_to_telegram_html(text: str) -> str:
     - ```code blocks``` → <pre>code blocks</pre>
     - [text](url) → <a href="url">text</a>
     - ~~strikethrough~~ → <s>strikethrough</s>
+    - > quote lines → <blockquote> (consecutive lines form one quote)
     - Markdown tables → wrapped in <pre> for monospace alignment
     - Raw HTML from LLM → converted to Telegram-safe format
 
@@ -169,6 +170,18 @@ def markdown_to_telegram_html(text: str) -> str:
             result.append(f'<pre>{code_content}</pre>')
             continue
         
+        # Blockquote (v1.23.09): consecutive "> " lines become one
+        # <blockquote>. Before, the '>' was escaped and reached the chat raw.
+        if _QUOTE_RE.match(line):
+            quoted = []
+            while i < len(lines) and _QUOTE_RE.match(lines[i]):
+                quoted.append(_format_inline(_QUOTE_RE.sub('', lines[i], count=1)))
+                i += 1
+            body = '\n'.join(quoted).strip('\n')
+            if body.strip():
+                result.append(f'<blockquote>{body}</blockquote>')
+            continue
+
         # Markdown table detection: line starts with | and contains |
         # Also detect lines that look like table rows (at least 2 pipes)
         stripped = line.strip()
@@ -557,6 +570,10 @@ def _wrap_stray_tables(html: str) -> str:
     
     return ''.join(new_parts)
 
+
+# A quote line: '>' at line start (up to 3 spaces indent), followed by a
+# space or the end of the line. ">= 5" or "->" is not a quote.
+_QUOTE_RE = re.compile(r'^ {0,3}>(?: |$)')
 
 _CODE_SPAN_RE = re.compile(r'`([^`]+)`')
 _CODE_PLACEHOLDER_RE = re.compile('\x00(\\d+)\x00')
