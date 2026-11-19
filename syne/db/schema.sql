@@ -847,8 +847,12 @@ CREATE TABLE IF NOT EXISTS kg_entities (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type
-    ON kg_entities (LOWER(name), entity_type);
+-- scope (v1.23.15, migration 60): NULL = shared; 'chat:<platform>:<chat id>'
+-- = a person named in that chat only (syne/memory/kg_extract.py person_scope).
+ALTER TABLE kg_entities ADD COLUMN IF NOT EXISTS scope TEXT;
+DROP INDEX IF EXISTS idx_kg_entities_name_type;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type_scope
+    ON kg_entities (LOWER(name), entity_type, coalesce(scope, ''));
 CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities (entity_type);
 CREATE INDEX IF NOT EXISTS idx_kg_entities_name_trgm
     ON kg_entities USING gin (LOWER(name) gin_trgm_ops);
@@ -1144,13 +1148,19 @@ $$;
 
 -- Add (p_sign = 1) or remove (p_sign = -1) one document from the statistics.
 -- Words are upserted in sorted order so concurrent writers lock in the same
--- order. Any error is downgraded to a WARNING: a write must never fail
--- because of statistics; syne_bm25_rebuild() repairs drift.
+-- order. A deadlock / lock timeout is retried up to 5 times with a short
+-- random pause (v1.23.15); any other error, or the 5th failure, is downgraded
+-- to a WARNING: a write must never fail because of statistics;
+-- syne_bm25_rebuild() repairs drift.
 CREATE OR REPLACE FUNCTION syne_bm25_apply(p_corpus TEXT, p_tsv tsvector, p_len INT, p_sign INT) RETURNS void AS $$
+DECLARE
+    v_try INT := 0;
 BEGIN
     IF p_corpus IS NULL OR p_tsv IS NULL OR coalesce(p_len, 0) = 0 THEN
         RETURN;
     END IF;
+    LOOP
+    v_try := v_try + 1;
     BEGIN
         INSERT INTO bm25_corpus AS c (corpus, n_docs, total_len)
         VALUES (p_corpus, p_sign, p_sign::bigint * p_len)
@@ -1167,9 +1177,19 @@ BEGIN
              WHERE corpus = p_corpus AND df <= 0
                AND term = ANY (tsvector_to_array(p_tsv));
         END IF;
-    EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'bm25 statistics not updated (%): %', p_corpus, SQLERRM;
+        RETURN;
+    EXCEPTION
+        WHEN deadlock_detected OR lock_not_available OR serialization_failure THEN
+            IF v_try >= 5 THEN
+                RAISE WARNING 'bm25 statistics not updated (%) after % attempts: %', p_corpus, v_try, SQLERRM;
+                RETURN;
+            END IF;
+            PERFORM pg_sleep(0.05 * v_try + random() * 0.05);
+        WHEN OTHERS THEN
+            RAISE WARNING 'bm25 statistics not updated (%): %', p_corpus, SQLERRM;
+            RETURN;
     END;
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -1330,6 +1350,7 @@ INSERT INTO config (key, value, description) VALUES
     ('kg.extract_interval', '30', 'Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600.'),
     ('kg.extract_timeout', '120', 'Seconds one KG extraction call may take. Clamped 10-600.'),
     ('kg.extract_max_attempts', '3', 'Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10.'),
+    ('kg.extract_daily_limit', '300', 'Most chunks sent to the KG extraction model per day (system.timezone), retries included. At the limit the worker waits for the next day. 0 = no limit. Clamped 0-100000.'),
     ('kg.extract_skip_categories', '[]', 'Memory categories KG extraction skips, e.g. ["alquran"].'),
     ('kg.extract_skip_scheduled', 'true', 'Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction.'),
     ('kg.extract_max_entities', '15', 'Most entities kept from one chunk. Clamped 1-50.'),

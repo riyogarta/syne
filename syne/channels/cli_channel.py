@@ -956,7 +956,7 @@ async def run_cli(debug: bool = False, yolo: bool = False, fresh: bool = False, 
             listen_task = asyncio.create_task(node_client.listen())
         # ── Local mode setup ──
         else:
-            await agent.start()
+            await agent.start(background=False)
             agent._cli_cwd = os.getcwd()
             from ..tools.file_ops import set_workspace
             set_workspace(os.getcwd())

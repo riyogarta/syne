@@ -70,8 +70,12 @@ class SyneAgent:
         from .tools.file_ops import set_workspace
         set_workspace(self.workspace)
 
-    async def start(self):
-        """Start the agent — initialize DB, provider, memory, tools."""
+    async def start(self, background: bool = True):
+        """Start the agent — initialize DB, provider, memory, tools.
+
+        background=False (syne cli, repair --fix) leaves out the BM25
+        backfill and the KG worker: they belong to the service (v1.23.15).
+        """
         logger.info("Starting Syne agent...")
 
         # 1. Database
@@ -166,16 +170,18 @@ class SyneAgent:
 
         # 11. BM25 keyword index: index rows written before migration 51, in
         # small batches in the background (never holds up startup).
-        from .memory.bm25_backfill import run_backfill
-        self._bm25_backfill_task = asyncio.create_task(run_backfill())
+        if background:
+            from .memory.bm25_backfill import run_backfill
+            self._bm25_backfill_task = asyncio.create_task(run_backfill())
 
         # 12. KG ingestion (KG-RAG stage 2): LLM extraction of entities and
         # relations from new memories and chat messages, in the background.
-        from .memory.kg_extract import run_worker as _kg_worker
-        self._kg_extract_task = asyncio.create_task(_kg_worker(
-            lambda: self.conversations.provider if self.conversations else self.provider,
-            embed_provider=self.memory.provider if self.memory else None,
-        ))
+        if background:
+            from .memory.kg_extract import run_worker as _kg_worker
+            self._kg_extract_task = asyncio.create_task(_kg_worker(
+                lambda: self.conversations.provider if self.conversations else self.provider,
+                embed_provider=self.memory.provider if self.memory else None,
+            ))
 
         logger.info("Syne agent started.")
 

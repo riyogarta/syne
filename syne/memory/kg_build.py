@@ -272,7 +272,7 @@ async def write_plan(conn, plan: BuildPlan) -> None:
         rows = await conn.fetch(
             """INSERT INTO kg_entities (name, entity_type, description)
                SELECT * FROM unnest($1::text[], $2::text[], $3::text[])
-               ON CONFLICT (LOWER(name), entity_type)
+               ON CONFLICT (LOWER(name), entity_type, coalesce(scope, ''))
                DO UPDATE SET description = EXCLUDED.description, updated_at = NOW()
                RETURNING id, LOWER(name) AS lname, entity_type""",
             [v[0] for _k, v in part], [v[1] for _k, v in part], [v[2] for _k, v in part],

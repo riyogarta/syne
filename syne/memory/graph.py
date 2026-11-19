@@ -65,7 +65,7 @@ async def _resolve_entity(name: str, entity_type: str, description: str = "") ->
         row = await conn.fetchrow(
             """INSERT INTO kg_entities (name, entity_type, description)
                VALUES ($1, $2, $3)
-               ON CONFLICT (LOWER(name), entity_type) DO UPDATE SET updated_at = NOW()
+               ON CONFLICT (LOWER(name), entity_type, coalesce(scope, '')) DO UPDATE SET updated_at = NOW()
                RETURNING id""",
             name, entity_type, description or "",
         )

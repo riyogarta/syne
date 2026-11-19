@@ -114,6 +114,7 @@ DEFAULTS: dict = {
     "kg.extract_interval": (30, "Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600."),
     "kg.extract_timeout": (120, "Seconds one KG extraction call may take. Clamped 10-600."),
     "kg.extract_max_attempts": (3, "Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10."),
+    "kg.extract_daily_limit": (300, "Most chunks sent to the KG extraction model per day (system.timezone), retries included. At the limit the worker waits for the next day. 0 = no limit. Clamped 0-100000."),
     "kg.extract_skip_categories": ([], "Memory categories KG extraction skips, e.g. [\"alquran\"]."),
     "kg.extract_skip_scheduled": (True, "Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction."),
     "kg.extract_max_entities": (15, "Most entities kept from one chunk. Clamped 1-50."),
@@ -137,6 +138,7 @@ _CLAMPS = {
     "kg.extract_interval": (5, 3600),
     "kg.extract_timeout": (10, 600),
     "kg.extract_max_attempts": (1, 10),
+    "kg.extract_daily_limit": (0, 100000),
     "kg.extract_max_entities": (1, 50),
     "kg.extract_max_relations": (1, 50),
     "kg.resolve_min_similarity": (0.5, 1.0),
@@ -506,12 +508,17 @@ resolve_ayah_span = resolve_ref_span
 
 
 async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
-                         s: dict) -> tuple:
+                         s: dict, scope: Optional[str] = None) -> tuple:
     """(entity id, how): how = ayah | norm | embedding | new.
 
     A name that is exactly one item of a link target (a Qur'an verse) joins
     that target's node of the reference graph (not for persons: "Yusuf 12"
     may be a name). how stays 'ayah' for any target.
+
+    v1.23.15: a name joins only an entity of the same type and the same
+    scope (person_scope): "Al Azhar" the org and "Azhar" the person stay
+    apart, and a person named in one chat is not merged with a namesake
+    from another chat.
     """
     if etype != "person" and re.search(r"\d", name or ""):
         try:
@@ -524,8 +531,8 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
     norm = normalize_name(name)
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
-        "ORDER BY (entity_type = $3) DESC, id LIMIT 1",
-        norm, reference_types(), etype,
+        "AND entity_type = $3 AND scope IS NOT DISTINCT FROM $4 ORDER BY id LIMIT 1",
+        norm, reference_types(), etype, scope,
     )
     if row:
         return row["id"], "norm"
@@ -541,9 +548,9 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
             "SELECT id, 1 - (embedding <=> $1::vector) AS sim, "
             "coalesce(similarity(norm_name, $2), 0) AS trgm "
             "FROM kg_entities WHERE entity_type = $3 AND embedding IS NOT NULL "
-            "AND vector_dims(embedding) = $4 "
+            "AND vector_dims(embedding) = $4 AND scope IS NOT DISTINCT FROM $5 "
             "ORDER BY embedding <=> $1::vector LIMIT 1",
-            str(vec), norm, etype, len(vec),
+            str(vec), norm, etype, len(vec), scope,
         )
         if (row and row["sim"] is not None
                 and row["sim"] >= s["kg.resolve_min_similarity"]
@@ -556,15 +563,67 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
             )
             return row["id"], "embedding"
     eid = await conn.fetchval(
-        "INSERT INTO kg_entities (name, entity_type, norm_name, embedding) "
-        "VALUES ($1, $2, $3, $4::vector) "
-        "ON CONFLICT (LOWER(name), entity_type) DO UPDATE SET updated_at = now(), "
+        "INSERT INTO kg_entities (name, entity_type, norm_name, embedding, scope) "
+        "VALUES ($1, $2, $3, $4::vector, $5) "
+        "ON CONFLICT (LOWER(name), entity_type, coalesce(scope, '')) DO UPDATE SET updated_at = now(), "
         "norm_name = coalesce(kg_entities.norm_name, EXCLUDED.norm_name), "
         "embedding = coalesce(kg_entities.embedding, EXCLUDED.embedding) "
         "RETURNING id",
-        name, etype, norm, str(vec) if vec else None,
+        name, etype, norm, str(vec) if vec else None, scope,
     )
     return eid, "new"
+
+
+def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
+    """Scope of an entity extracted from a chunk (v1.23.15).
+
+    A person named in a chat message belongs to that chat ('chat:<platform>:
+    <chat id>'), so two people called Budi in two groups stay two entities.
+    Shared (None): every other type, memory chunks, and people who are
+    registered owner/family users or listed in family.directory (their name,
+    or its first or last word, e.g. "Pak Riyo", "Agha Gamitra").
+    """
+    if etype != "person" or not chat_scope:
+        return None
+    norm = normalize_name(name)
+    toks = norm.split()
+    if norm in known or (toks and (toks[0] in known or toks[-1] in known)):
+        return None
+    return chat_scope
+
+
+async def known_people(conn) -> frozenset:
+    """Normalised names of owner/family users, their aliases, the
+    family.directory names and the assistant's own name."""
+    names: set = set()
+    for r in await conn.fetch(
+            "SELECT name, display_name, aliases FROM users "
+            "WHERE access_level IN ('owner', 'family')"):
+        names.update([r["name"], r["display_name"]])
+        al = r["aliases"]
+        if isinstance(al, str):
+            try:
+                al = json.loads(al)
+            except ValueError:
+                al = {}
+        if isinstance(al, dict):
+            names.add(al.get("default"))
+            if isinstance(al.get("groups"), dict):
+                names.update(al["groups"].values())
+    try:
+        d = await get_config("family.directory", [])
+        if isinstance(d, str):
+            d = json.loads(d)
+        for p in d or []:
+            names.update(p.get("names") or [])
+    except Exception:
+        pass
+    try:
+        names.add(await conn.fetchval(
+            "SELECT value FROM identity WHERE key = 'name' AND active = true"))
+    except Exception:
+        pass
+    return frozenset(n for n in (normalize_name(str(x)) for x in names if x) if n)
 
 
 def _rel_pairs(subs: list, objs: list) -> list:
@@ -581,7 +640,8 @@ def _rel_pairs(subs: list, objs: list) -> list:
 
 
 async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
-                      embed: Optional[Embedder], s: dict) -> tuple:
+                      embed: Optional[Embedder], s: dict,
+                      chat_scope: Optional[str] = None) -> tuple:
     """Resolve entities, upsert relations with their source. (entities, relations).
 
     A link-target reference (Qur'an verse) resolves to its node entities; a
@@ -599,7 +659,8 @@ async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
         if span:
             ids[e["name"].lower()] = span
             continue
-        eid, _how = await resolve_entity(conn, e["name"], e["type"], embed, s)
+        scope = person_scope(e["name"], e["type"], chat_scope, s.get("_known_people") or frozenset())
+        eid, _how = await resolve_entity(conn, e["name"], e["type"], embed, s, scope)
         ids[e["name"].lower()] = [eid]
     n_rel = 0
     for r in extracted["relations"]:
@@ -694,6 +755,7 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
     skip_sched = "AND coalesce(se.platform_chat_id, '') NOT LIKE 'scheduled:%' " if s["kg.extract_skip_scheduled"] else ""
     rows = await conn.fetch(
         "SELECT x.id, x.content, x.role, x.session_id, u.name AS owner_name, "
+        "'chat:' || se.platform || ':' || coalesce(se.platform_chat_id, '') AS chat_scope, "
         "x.metadata->>'access' AS access, x.metadata->>'speaker' AS speaker FROM messages x "
         "LEFT JOIN sessions se ON se.id = x.session_id "
         "LEFT JOIN users u ON u.id = se.user_id "
@@ -775,7 +837,8 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
                             "reason": "memory changed or deleted during extraction",
                             "latency_ms": int((time.monotonic() - t0) * 1000)}
             n_e, n_r = await write_graph(conn, extracted, st, sid,
-                                         _cached if embed is not None else None, s)
+                                         _cached if embed is not None else None, s,
+                                         chat_scope=item.get("chat_scope"))
             res = {**log, "status": "done", "reason": reason, "n_entities": n_e,
                    "n_relations": n_r, "latency_ms": int((time.monotonic() - t0) * 1000)}
             await _write_log(conn, item, res)
@@ -976,8 +1039,8 @@ async def prepare_embeddings(extracted: dict, embed: Optional[Embedder]) -> dict
                     pass
             hit = await conn.fetchval(
                 "SELECT 1 FROM kg_entities WHERE norm_name = $1 "
-                "AND entity_type <> ALL($2::text[]) LIMIT 1",
-                normalize_name(name), reference_types())
+                "AND entity_type <> ALL($2::text[]) AND entity_type = $3 LIMIT 1",
+                normalize_name(name), reference_types(), e["type"])
             if not hit:
                 need.append(name)
     vecs: dict = {}
@@ -1033,6 +1096,55 @@ def _error_result(item: dict, judge, reason: str) -> dict:
             "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
 
 
+async def extracted_today(conn) -> int:
+    """Chunks sent to the extraction model today (system.timezone)."""
+    tz = str(await get_config("system.timezone", "UTC") or "UTC")
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+    except Exception:
+        tz = "UTC"
+    return int(await conn.fetchval(
+        "SELECT count(*) FROM kg_extract_log WHERE status IN ('done', 'error') "
+        "AND coalesce(model, '') <> '' AND updated_at >= "
+        "(date_trunc('day', now() AT TIME ZONE $1) AT TIME ZONE $1)", tz) or 0)
+
+
+# One KG worker per database (v1.23.15): a session advisory lock held on a
+# dedicated pool connection. A second process (syne cli, repair --fix, a
+# second service) stays idle instead of extracting the same chunks.
+WORKER_LOCK_KEY = 7311603215
+
+
+async def take_worker_lock():
+    """The connection holding the worker lock, or None when it is taken."""
+    from ..db.connection import get_pool
+    pool = get_pool()
+    conn = await pool.acquire()
+    try:
+        if await conn.fetchval("SELECT pg_try_advisory_lock($1::bigint)", WORKER_LOCK_KEY):
+            return conn
+    except Exception as e:
+        logger.debug(f"KG extract: worker lock not taken: {e}")
+    await pool.release(conn)
+    return None
+
+
+async def drop_worker_lock(conn) -> None:
+    if conn is None:
+        return
+    from ..db.connection import get_pool
+    try:
+        if not conn.is_closed():
+            await conn.execute("SELECT pg_advisory_unlock($1::bigint)", WORKER_LOCK_KEY)
+    except Exception:
+        pass
+    try:
+        await get_pool().release(conn)
+    except Exception:
+        pass
+
+
 async def run_worker(default_provider_getter: Callable[[], object], embed_provider=None) -> None:
     """Background loop. Never raises (except cancellation)."""
     from ..judge_model import build_judge
@@ -1056,88 +1168,118 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
     floors_key = None
     judge, judge_key = None, None
     down_wait, down_item, down_hits = 0, None, 0
-    while True:
-        try:
-            if _maint.active():
-                await asyncio.sleep(5)
-                continue
-            await maybe_prune()
-            s = await load_settings()
-            era = s["kg.extract_era_start"]
-            if not s["kg.extract_enabled"] or era is None:
-                await asyncio.sleep(s["kg.extract_interval"])
-                continue
-            # Settings that decide what is final restart the floors.
-            fkey = (era, s["kg.extract_max_attempts"], s["kg.extract_skip_scheduled"])
-            if floors_key != fkey:
-                async with get_connection() as conn:
-                    floors = {"memory": await era_floor(conn, "memory", era),
-                              "messages": await era_floor(conn, "messages", era)}
-                floors_key = fkey
-            async with get_connection() as conn:
-                floors["messages"] = await advance_floor(conn, floors["messages"], era, s)
-                items = await pending(conn, floors, era, s)
-            if not items:
-                await asyncio.sleep(s["kg.extract_interval"])
-                continue
-            key = judge_cache_key(s["kg.extract_model"], default_provider_getter())
-            if judge is None or judge_key != key:
-                judge = await build_judge(
-                    s["kg.extract_model"], default_provider=default_provider_getter(),
-                    get_config=get_config, who="KG extract")
-                judge_key = key
-                if judge is None:
-                    logger.warning("KG extract: no usable model (kg.extract_model); waiting")
-                    await asyncio.sleep(max(60, s["kg.extract_interval"]))
-                    continue
-            for item in items:
+    lock_conn, lock_idle_logged, limit_logged = None, False, False
+    try:
+        while True:
+            try:
                 if _maint.active():
-                    break
-                # Tracked like a chat turn (v1.23.13): maintenance.begin()
-                # cancels this chunk - its transaction rolls back - and the
-                # worker waits at the gate. No await between check and track.
-                task = asyncio.create_task(process_one(item, judge, embed, s))
-                _maint.track(task)
-                try:
-                    await asyncio.wait({task})
-                except asyncio.CancelledError:
-                    task.cancel()
-                    raise
-                finally:
-                    _maint.untrack(task)
-                if task.cancelled():
-                    break
-                try:
-                    res = task.result()
-                except ProviderDown as e:
-                    this = (item["type"], item["id"])
-                    down_hits = down_hits + 1 if down_item == this else 1
-                    down_item = this
-                    if down_hits < PROVIDER_DOWN_STRIKES:
-                        down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
-                        logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
-                                       f"chunks kept, trying again in {down_wait}s")
-                        await asyncio.sleep(down_wait)
+                    await asyncio.sleep(5)
+                    continue
+                if lock_conn is None or lock_conn.is_closed():
+                    await drop_worker_lock(lock_conn)
+                    lock_conn = await take_worker_lock()
+                    if lock_conn is None:
+                        if not lock_idle_logged:
+                            logger.info("KG extract: another Syne process runs the KG worker; "
+                                        "this one stays idle")
+                            lock_idle_logged = True
+                        await asyncio.sleep(60)
+                        continue
+                    lock_idle_logged = False
+                await maybe_prune()
+                s = await load_settings()
+                era = s["kg.extract_era_start"]
+                if not s["kg.extract_enabled"] or era is None:
+                    await asyncio.sleep(s["kg.extract_interval"])
+                    continue
+                # Settings that decide what is final restart the floors.
+                fkey = (era, s["kg.extract_max_attempts"], s["kg.extract_skip_scheduled"])
+                if floors_key != fkey:
+                    async with get_connection() as conn:
+                        floors = {"memory": await era_floor(conn, "memory", era),
+                                  "messages": await era_floor(conn, "messages", era)}
+                    floors_key = fkey
+                async with get_connection() as conn:
+                    floors["messages"] = await advance_floor(conn, floors["messages"], era, s)
+                    items = await pending(conn, floors, era, s)
+                    if items:
+                        s["_known_people"] = await known_people(conn)
+                if not items:
+                    await asyncio.sleep(s["kg.extract_interval"])
+                    continue
+                limit = s["kg.extract_daily_limit"]
+                if limit:
+                    async with get_connection() as conn:
+                        used = await extracted_today(conn)
+                    if used >= limit:
+                        if not limit_logged:
+                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} chunks, "
+                                           "kg.extract_daily_limit); waiting for the next day")
+                            limit_logged = True
+                        await asyncio.sleep(300)
+                        continue
+                    limit_logged = False
+                    items = items[: limit - used]
+                key = judge_cache_key(s["kg.extract_model"], default_provider_getter())
+                if judge is None or judge_key != key:
+                    judge = await build_judge(
+                        s["kg.extract_model"], default_provider=default_provider_getter(),
+                        get_config=get_config, who="KG extract")
+                    judge_key = key
+                    if judge is None:
+                        logger.warning("KG extract: no usable model (kg.extract_model); waiting")
+                        await asyncio.sleep(max(60, s["kg.extract_interval"]))
+                        continue
+                for item in items:
+                    if _maint.active():
                         break
-                    res = _error_result(item, judge, f"model unavailable: {e}")
-                    logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
-                    down_item, down_hits = None, 0
-                except Exception as e:
-                    res = _error_result(item, judge, f"{type(e).__name__}: {e}")
-                    logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
-                else:
-                    down_wait, down_item, down_hits = 0, None, 0
-                if not res.get("_logged"):
-                    await write_log(item, res)
-                if res["status"] == "stale":
-                    logger.info(f"KG extract memory {item['id']}: changed during extraction, "
-                                "extracted again next round")
-                if res["status"] == "done":
-                    logger.info(
-                        f"KG extract {item['type']} {item['id']}: {res['n_entities']} entities, "
-                        f"{res['n_relations']} relations ({res['latency_ms']} ms)")
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.warning(f"KG extract round failed: {e}")
-            await asyncio.sleep(60)
+                    # Tracked like a chat turn (v1.23.13): maintenance.begin()
+                    # cancels this chunk - its transaction rolls back - and the
+                    # worker waits at the gate. No await between check and track.
+                    task = asyncio.create_task(process_one(item, judge, embed, s))
+                    _maint.track(task)
+                    try:
+                        await asyncio.wait({task})
+                    except asyncio.CancelledError:
+                        task.cancel()
+                        raise
+                    finally:
+                        _maint.untrack(task)
+                    if task.cancelled():
+                        break
+                    try:
+                        res = task.result()
+                    except ProviderDown as e:
+                        this = (item["type"], item["id"])
+                        down_hits = down_hits + 1 if down_item == this else 1
+                        down_item = this
+                        if down_hits < PROVIDER_DOWN_STRIKES:
+                            down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
+                            logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
+                                           f"chunks kept, trying again in {down_wait}s")
+                            await asyncio.sleep(down_wait)
+                            break
+                        res = _error_result(item, judge, f"model unavailable: {e}")
+                        logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                        down_item, down_hits = None, 0
+                    except Exception as e:
+                        res = _error_result(item, judge, f"{type(e).__name__}: {e}")
+                        logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                    else:
+                        down_wait, down_item, down_hits = 0, None, 0
+                    if not res.get("_logged"):
+                        await write_log(item, res)
+                    if res["status"] == "stale":
+                        logger.info(f"KG extract memory {item['id']}: changed during extraction, "
+                                    "extracted again next round")
+                    if res["status"] == "done":
+                        logger.info(
+                            f"KG extract {item['type']} {item['id']}: {res['n_entities']} entities, "
+                            f"{res['n_relations']} relations ({res['latency_ms']} ms)")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"KG extract round failed: {e}")
+                await asyncio.sleep(60)
+    finally:
+        await drop_worker_lock(lock_conn)

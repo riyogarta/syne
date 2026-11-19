@@ -369,7 +369,7 @@ def repair(fix):
                     try:
                         from syne.agent import SyneAgent
                         agent = SyneAgent(settings)
-                        await agent.start()
+                        await agent.start(background=False)
                         repaired = 0
                         failed = 0
                         for z in zombies:

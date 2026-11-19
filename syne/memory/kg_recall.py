@@ -108,6 +108,9 @@ SELECT e.id, e.norm_name
 FROM kg_entities e
 WHERE e.norm_name = ANY($1::text[])
   AND e.entity_type <> ALL($2::text[])
+  AND (e.scope IS NULL OR e.scope = (
+      SELECT 'chat:' || ss.platform || ':' || coalesce(ss.platform_chat_id, '')
+      FROM sessions ss WHERE ss.id = $4))
   AND EXISTS (
       SELECT 1 FROM kg_relations r
       JOIN kg_relation_sources s ON s.relation_id = r.id
@@ -300,7 +303,7 @@ async def recall_kg(
         async with get_connection() as conn:
             seeds: list = []
             if grams:
-                rows = await conn.fetch(_MATCH_SQL, grams, reference_types(), era)
+                rows = await conn.fetch(_MATCH_SQL, grams, reference_types(), era, session_id)
                 order = {g: n for n, g in enumerate(grams)}
                 for r in sorted(rows, key=lambda r: (order.get(r["norm_name"], 1 << 20), r["id"])):
                     if int(r["id"]) not in seeds:

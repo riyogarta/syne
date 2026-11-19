@@ -1631,6 +1631,33 @@ async def _m59_prune_kg_without_write_access(conn) -> None:
         await conn.execute("SELECT kg_prune_sources('message', $1::int[])", list(ids))
 
 
+KG_SCOPE_DDL = [
+    "ALTER TABLE kg_entities ADD COLUMN IF NOT EXISTS scope TEXT",
+    "DROP INDEX IF EXISTS idx_kg_entities_name_type",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type_scope "
+    "ON kg_entities (LOWER(name), entity_type, coalesce(scope, ''))",
+]
+
+
+async def _m60_kg_scope_daily_limit(conn) -> None:
+    """v1.23.15 (Riyo, 19 Nov 2026). Idempotent.
+
+    kg_entities.scope: a person named in a chat belongs to that chat, so
+    namesakes in different chats stay apart; existing entities stay shared
+    (NULL). The name index becomes (name, type, scope). Seeds
+    kg.extract_daily_limit. schema.sql carries the same DDL.
+    """
+    from ..memory.kg_extract import DEFAULTS
+    for stmt in KG_SCOPE_DDL:
+        await conn.execute(stmt)
+    value, desc = DEFAULTS["kg.extract_daily_limit"]
+    await conn.execute(
+        "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
+        "ON CONFLICT (key) DO NOTHING",
+        "kg.extract_daily_limit", json.dumps(value), desc,
+    )
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1691,6 +1718,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (57, _m57_memory_guard, "transactional"),
     (58, _m58_guard_contains_title_target, "transactional"),
     (59, _m59_prune_kg_without_write_access, "transactional"),
+    (60, _m60_kg_scope_daily_limit, "transactional"),
 ]
 
 

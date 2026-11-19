@@ -79,13 +79,19 @@ $$;
 
 -- Add (p_sign = 1) or remove (p_sign = -1) one document from the statistics.
 -- Words are upserted in sorted order so concurrent writers lock in the same
--- order. Any error is downgraded to a WARNING: a write must never fail
--- because of statistics; syne_bm25_rebuild() repairs drift.
+-- order. A deadlock / lock timeout is retried up to 5 times with a short
+-- random pause (v1.23.15); any other error, or the 5th failure, is downgraded
+-- to a WARNING: a write must never fail because of statistics;
+-- syne_bm25_rebuild() repairs drift.
 CREATE OR REPLACE FUNCTION syne_bm25_apply(p_corpus TEXT, p_tsv tsvector, p_len INT, p_sign INT) RETURNS void AS $$
+DECLARE
+    v_try INT := 0;
 BEGIN
     IF p_corpus IS NULL OR p_tsv IS NULL OR coalesce(p_len, 0) = 0 THEN
         RETURN;
     END IF;
+    LOOP
+    v_try := v_try + 1;
     BEGIN
         INSERT INTO bm25_corpus AS c (corpus, n_docs, total_len)
         VALUES (p_corpus, p_sign, p_sign::bigint * p_len)
@@ -102,9 +108,19 @@ BEGIN
              WHERE corpus = p_corpus AND df <= 0
                AND term = ANY (tsvector_to_array(p_tsv));
         END IF;
-    EXCEPTION WHEN OTHERS THEN
-        RAISE WARNING 'bm25 statistics not updated (%): %', p_corpus, SQLERRM;
+        RETURN;
+    EXCEPTION
+        WHEN deadlock_detected OR lock_not_available OR serialization_failure THEN
+            IF v_try >= 5 THEN
+                RAISE WARNING 'bm25 statistics not updated (%) after % attempts: %', p_corpus, v_try, SQLERRM;
+                RETURN;
+            END IF;
+            PERFORM pg_sleep(0.05 * v_try + random() * 0.05);
+        WHEN OTHERS THEN
+            RAISE WARNING 'bm25 statistics not updated (%): %', p_corpus, SQLERRM;
+            RETURN;
     END;
+    END LOOP;
 END;
 $$ LANGUAGE plpgsql;
 

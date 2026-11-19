@@ -75,7 +75,7 @@ def test_scheduler_checks_gate_per_task():
 def test_worker_tracks_each_chunk():
     src = inspect.getsource(K.run_worker)
     assert "_maint.track(task)" in src and "_maint.untrack(task)" in src
-    assert src.index("if _maint.active():\n                    break") < src.index("_maint.track(task)")
+    assert src.index("if _maint.active():\n                        break") < src.index("_maint.track(task)")
 
 
 # ── #3 mention_grams ──────────────────────────────────────────────────────
