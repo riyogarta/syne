@@ -107,12 +107,47 @@ def refusal_for_plan(plan: dict, new_dims) -> Optional[str]:
         return refuse_switch_message(mem[1], new_dims, mem[2])
     lines = "\n".join(f"• {LABELS[t]}: <b>{n}</b> vectors of {d} dimensions"
                       for t, d, n in plan["blocked"])
-    return (
+    out = (
         "⛔ <b>Embedding switch refused</b>\n\n"
         f"This model produces {int(new_dims)}-dimension vectors. Stored vectors of "
         f"another dimension:\n{lines}\n\n"
         "Vectors of different dimensions cannot be mixed. Nothing was changed."
     )
+    if history_only(plan):
+        out += (
+            "\n\nOnly chat history blocks the switch. <b>Clear history vectors and "
+            "switch</b> keeps every message (text and keyword search) and empties "
+            "their vectors; run <code>syne memory reembed-history</code> afterwards "
+            "to embed them with the new model."
+        )
+    return out
+
+
+def history_only(plan: dict) -> bool:
+    """True when chat history alone blocks the switch (v1.23.18)."""
+    return bool(plan["blocked"]) and all(b[0] == "messages" for b in plan["blocked"])
+
+
+async def clear_history_vectors(conn, new_dims) -> int:
+    """Empty every messages.embedding and type the column vector(new_dims)
+    with a fresh HNSW index (v1.23.18, review #14). Messages are kept; their
+    vectors come back with `syne memory reembed-history`. Before, a switch
+    was refused as long as any history vector existed, with no way out.
+    Returns the number of vectors cleared."""
+    nd = int(new_dims)
+    async with conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '10s'")
+        await conn.execute("LOCK TABLE messages IN ACCESS EXCLUSIVE MODE")
+        await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX['messages']}")
+        n = await conn.execute(
+            "UPDATE messages SET embedding = NULL WHERE embedding IS NOT NULL")
+        await conn.execute(
+            f"ALTER TABLE messages ALTER COLUMN embedding TYPE vector({nd}) "
+            f"USING embedding::vector({nd})")
+        await conn.execute(
+            f"CREATE INDEX {HNSW_INDEX['messages']} ON messages USING hnsw "
+            "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
+    return int(n.split()[-1]) if n else 0
 
 
 def switch_note(plan: dict, new_dims) -> str:

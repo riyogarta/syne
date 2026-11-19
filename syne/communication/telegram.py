@@ -5068,18 +5068,23 @@ Or just send me a message!"""
             # dimension differs from the stored vectors is refused. Checked again
             # against the live test vector in _apply_embedding.
             from ..db.connection import get_connection
-            from ..memory.embed_dims import plan_switch, refusal_for_plan, switch_note
+            from ..memory.embed_dims import (plan_switch, refusal_for_plan, switch_note,
+                                             history_only)
             new_dims = entry.get("dimensions")
             async with get_connection() as conn:
                 plan = await plan_switch(conn, new_dims)
             refusal = refusal_for_plan(plan, new_dims)
             if refusal:
+                rows = []
+                if history_only(plan):
+                    rows.append([InlineKeyboardButton(
+                        "🧹 Clear history vectors and switch",
+                        callback_data=f"embed:confirm_clear:{embed_key}")])
+                rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"embed:detail:{embed_key}")])
                 await query.edit_message_text(
                     refusal,
                     parse_mode="HTML",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("⬅️ Back", callback_data=f"embed:detail:{embed_key}")],
-                    ]),
+                    reply_markup=InlineKeyboardMarkup(rows),
                 )
                 return
             warn = (
@@ -5113,6 +5118,30 @@ Or just send me a message!"""
             success, result = await self._apply_embedding(embed_key, chat_id, bot)
             if success:
                 await query.answer(f"Active → {entry.get('label', embed_key)}")
+            else:
+                await query.answer(f"Failed: {result[:50]}", show_alert=True)
+            await self._embed_menu_main(query)
+
+        elif data.startswith("embed:confirm_clear:"):
+            # v1.23.18: only chat history blocked the switch; its vectors
+            # are emptied (messages kept) and the switch goes on.
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
+            chat_id = query.message.chat_id
+            bot = query._bot or self.app.bot
+            success, result = await self._apply_embedding(embed_key, chat_id, bot,
+                                                          clear_history=True)
+            if success:
+                await query.answer(f"Active → {entry.get('label', embed_key)}")
+                await bot.send_message(
+                    chat_id=chat_id, parse_mode="HTML",
+                    text="Chat history vectors were cleared. Run "
+                         "<code>syne memory reembed-history</code> to embed the "
+                         "history with the new model.")
             else:
                 await query.answer(f"Failed: {result[:50]}", show_alert=True)
             await self._embed_menu_main(query)
@@ -5223,7 +5252,8 @@ Or just send me a message!"""
                 parse_mode="HTML",
             )
 
-    async def _apply_embedding(self, embed_key: str, chat_id: int, bot) -> tuple[bool, str]:
+    async def _apply_embedding(self, embed_key: str, chat_id: int, bot,
+                               clear_history: bool = False) -> tuple[bool, str]:
         """Apply an embedding model from registry — test before switching.
 
         A switch never deletes memories (Riyo, 18 Nov 2026). The live test
@@ -5240,7 +5270,8 @@ Or just send me a message!"""
         """
         from ..llm.drivers import probe_embedding, get_model_from_list
         from ..db.connection import get_connection
-        from ..memory.embed_dims import plan_switch, refusal_for_plan, relax_columns
+        from ..memory.embed_dims import (plan_switch, refusal_for_plan, relax_columns,
+                                         history_only, clear_history_vectors)
 
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
@@ -5263,6 +5294,11 @@ Or just send me a message!"""
 
             async with get_connection() as conn:
                 plan = await plan_switch(conn, dims)
+            if clear_history and history_only(plan):
+                async with get_connection() as conn:
+                    n = await clear_history_vectors(conn, dims)
+                logger.warning(f"Embedding switch to {dims} dims: {n} chat history vectors cleared")
+                plan = dict(plan, blocked=[])
             refusal = refusal_for_plan(plan, dims)
             if refusal:
                 await bot.send_message(chat_id=chat_id, text=refusal, parse_mode="HTML")

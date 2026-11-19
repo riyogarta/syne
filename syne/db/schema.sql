@@ -1355,6 +1355,13 @@ CREATE TABLE IF NOT EXISTS kg_extract_log (
     PRIMARY KEY (source_type, source_id)
 );
 
+-- Calls to the KG extraction model per day (system.timezone), the base of
+-- kg.extract_daily_limit (v1.23.18, migration 62).
+CREATE TABLE IF NOT EXISTS kg_extract_usage (
+    day   DATE PRIMARY KEY,
+    calls INT NOT NULL DEFAULT 0
+);
+
 INSERT INTO config (key, value, description) VALUES
     ('kg.extract_era_start',
      to_jsonb(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
@@ -1372,7 +1379,7 @@ INSERT INTO config (key, value, description) VALUES
     ('kg.extract_interval', '30', 'Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600.'),
     ('kg.extract_timeout', '120', 'Seconds one KG extraction call may take. Clamped 10-600.'),
     ('kg.extract_max_attempts', '3', 'Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10.'),
-    ('kg.extract_daily_limit', '300', 'Most chunks sent to the KG extraction model per day (system.timezone), retries included. At the limit the worker waits for the next day. 0 = no limit. Clamped 0-100000.'),
+    ('kg.extract_daily_limit', '300', 'Most calls to the KG extraction model per day (system.timezone). Every call counts: retries, failures and results discarded as stale; deleting messages or memories does not give calls back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000.'),
     ('kg.extract_skip_categories', '[]', 'Memory categories KG extraction skips, e.g. ["alquran"].'),
     ('kg.extract_skip_scheduled', 'true', 'Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction.'),
     ('kg.extract_max_entities', '15', 'Most entities kept from one chunk. Clamped 1-50.'),

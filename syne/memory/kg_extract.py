@@ -114,7 +114,7 @@ DEFAULTS: dict = {
     "kg.extract_interval": (30, "Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600."),
     "kg.extract_timeout": (120, "Seconds one KG extraction call may take. Clamped 10-600."),
     "kg.extract_max_attempts": (3, "Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10."),
-    "kg.extract_daily_limit": (300, "Most chunks sent to the KG extraction model per day (system.timezone), retries included. At the limit the worker waits for the next day. 0 = no limit. Clamped 0-100000."),
+    "kg.extract_daily_limit": (300, "Most calls to the KG extraction model per day (system.timezone). Every call counts: retries, failures and results discarded as stale; deleting messages or memories does not give calls back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000."),
     "kg.extract_skip_categories": ([], "Memory categories KG extraction skips, e.g. [\"alquran\"]."),
     "kg.extract_skip_scheduled": (True, "Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction."),
     "kg.extract_max_entities": (15, "Most entities kept from one chunk. Clamped 1-50."),
@@ -145,6 +145,7 @@ _CLAMPS = {
     "kg.resolve_min_trgm": (0.0, 1.0),
 }
 _FLOATS = {"kg.resolve_min_similarity", "kg.resolve_min_trgm"}
+_NEGATIVE_IS_DEFAULT = {"kg.extract_daily_limit"}
 
 
 def _clamp(key: str, v):
@@ -154,6 +155,10 @@ def _clamp(key: str, v):
     except (TypeError, ValueError):
         x = float(default)
     if math.isnan(x):
+        x = float(default)
+    if x < 0 and key in _NEGATIVE_IS_DEFAULT:
+        # v1.23.18: -1 was clamped to 0 = no limit; whoever wrote -1 to
+        # switch extraction off got unlimited extraction instead.
         x = float(default)
     lo, hi = _CLAMPS[key]
     x = max(lo, min(hi, x))
@@ -545,7 +550,7 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
             vec = None
     if vec:
         row = await conn.fetchrow(
-            "SELECT id, 1 - (embedding <=> $1::vector) AS sim, "
+            "SELECT id, norm_name, 1 - (embedding <=> $1::vector) AS sim, "
             "coalesce(similarity(norm_name, $2), 0) AS trgm "
             "FROM kg_entities WHERE entity_type = $3 AND embedding IS NOT NULL "
             "AND vector_dims(embedding) = $4 AND scope IS NOT DISTINCT FROM $5 "
@@ -554,7 +559,8 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
         )
         if (row and row["sim"] is not None
                 and row["sim"] >= s["kg.resolve_min_similarity"]
-                and row["trgm"] >= s["kg.resolve_min_trgm"]):
+                and row["trgm"] >= s["kg.resolve_min_trgm"]
+                and same_numbers(row.get("norm_name") or "", norm)):
             await conn.execute(
                 "UPDATE kg_entities SET aliases = array_append(aliases, $2), updated_at = now() "
                 "WHERE id = $1 AND NOT (lower($2) = ANY (SELECT lower(a) FROM unnest(aliases) a)) "
@@ -572,6 +578,19 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
         name, etype, norm, str(vec) if vec else None, scope,
     )
     return eid, "new"
+
+
+_NUM = re.compile(r"\d+")
+
+
+def same_numbers(a: str, b: str) -> bool:
+    """True when both names carry the same numbers in the same order.
+
+    v1.23.18: an embedding match joined "v1.23.02" with "v1.23.06", "Migrasi
+    44" with "Migrasi 45" and "18 Nov 2026" with "19 Nov 2026": the vectors
+    and the spelling are close, the numbers are what tells them apart.
+    """
+    return _NUM.findall(a or "") == _NUM.findall(b or "")
 
 
 def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
@@ -832,6 +851,7 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         else:
             reason = "memory"
     prompt = build_prompt(text[: s["kg.extract_max_chars"]], speaker=speaker, context=context, s=s)
+    await _count_call()
     try:
         raw = await judge(prompt, float(s["kg.extract_timeout"]))
     except asyncio.CancelledError:
@@ -903,7 +923,13 @@ def needs_reextract(old, content: str, category: str, era: Optional[datetime]) -
 
 async def reset_extraction(conn, memory_id: int) -> int:
     """Remove what the KG worker extracted from one memory, so it is
-    extracted again. Run inside the caller's transaction.
+    extracted again. Run inside the caller's transaction."""
+    return await reset_source(conn, "memory", memory_id)
+
+
+async def reset_source(conn, source_type: str, source_id: int) -> int:
+    """Remove what the KG worker extracted from one chunk (memory or
+    message), so it is extracted again. Run inside the caller's transaction.
 
     Drops its kg_extract_log row and its LLM sources (rule links stay), the
     relations left with no source, and the entities those touched that are
@@ -911,11 +937,13 @@ async def reset_extraction(conn, memory_id: int) -> int:
     source points source_memory_id at a living memory source, or NULL.
     Returns the number of sources removed.
     """
+    assert source_type in ("memory", "message")
     await conn.execute(
-        "DELETE FROM kg_extract_log WHERE source_type = 'memory' AND source_id = $1", memory_id)
+        "DELETE FROM kg_extract_log WHERE source_type = $1 AND source_id = $2",
+        source_type, source_id)
     rows = await conn.fetch(
-        "DELETE FROM kg_relation_sources WHERE source_type = 'memory' AND source_id = $1 "
-        "AND origin = 'llm' RETURNING relation_id", memory_id)
+        "DELETE FROM kg_relation_sources WHERE source_type = $1 AND source_id = $2 "
+        "AND origin = 'llm' RETURNING relation_id", source_type, source_id)
     rels = sorted({r["relation_id"] for r in rows})
     if not rels:
         return 0
@@ -923,13 +951,14 @@ async def reset_extraction(conn, memory_id: int) -> int:
         "DELETE FROM kg_relations r WHERE r.id = ANY($1::int[]) "
         "AND NOT EXISTS (SELECT 1 FROM kg_relation_sources s WHERE s.relation_id = r.id) "
         "RETURNING r.subject_id, r.object_id", rels)
-    await conn.execute(
-        "UPDATE kg_relations r SET source_memory_id = ("
-        " SELECT max(s.source_id) FROM kg_relation_sources s JOIN memory m ON m.id = s.source_id"
-        " WHERE s.relation_id = r.id AND s.source_type = 'memory') "
-        "WHERE r.id = ANY($1::int[]) AND r.source_memory_id = $2 "
-        "AND NOT EXISTS (SELECT 1 FROM kg_relation_sources s WHERE s.relation_id = r.id "
-        "AND s.source_type = 'memory' AND s.source_id = $2)", rels, memory_id)
+    if source_type == "memory":
+        await conn.execute(
+            "UPDATE kg_relations r SET source_memory_id = ("
+            " SELECT max(s.source_id) FROM kg_relation_sources s JOIN memory m ON m.id = s.source_id"
+            " WHERE s.relation_id = r.id AND s.source_type = 'memory') "
+            "WHERE r.id = ANY($1::int[]) AND r.source_memory_id = $2 "
+            "AND NOT EXISTS (SELECT 1 FROM kg_relation_sources s WHERE s.relation_id = r.id "
+            "AND s.source_type = 'memory' AND s.source_id = $2)", rels, source_id)
     ents = sorted({e for r in ends for e in (r["subject_id"], r["object_id"]) if e})
     if ents:
         await conn.execute(
@@ -938,6 +967,40 @@ async def reset_extraction(conn, memory_id: int) -> int:
             "AND NOT EXISTS (SELECT 1 FROM kg_relations r "
             "WHERE r.subject_id = e.id OR r.object_id = e.id)", ents, reference_types())
     return len(rows)
+
+
+async def split_bad_merges(conn) -> dict:
+    """Undo merges an embedding match made between names with different
+    numbers (v1.23.18, review #10): "v1.23.02" holding the aliases
+    "v1.23.06" and "v1.23.13", "Migrasi 44" holding "Migrasi 45".
+
+    Which relation came from which alias is not stored, so every chunk with
+    an LLM relation on such an entity is extracted again (reset_source);
+    same_numbers() now keeps the names apart. An entity that survives (rule
+    links) loses the wrong aliases. Run inside the caller's transaction.
+    """
+    bad: dict = {}
+    for r in await conn.fetch(
+            "SELECT id, name, norm_name, aliases FROM kg_entities "
+            "WHERE cardinality(aliases) > 0"):
+        base = r["norm_name"] or normalize_name(r["name"])
+        keep = [x for x in r["aliases"] if same_numbers(normalize_name(x), base)]
+        if len(keep) != len(r["aliases"]):
+            bad[r["id"]] = keep
+    if not bad:
+        return {"entities": 0, "sources": 0}
+    ids = sorted(bad)
+    srcs = await conn.fetch(
+        "SELECT DISTINCT s.source_type, s.source_id FROM kg_relation_sources s "
+        "JOIN kg_relations r ON r.id = s.relation_id "
+        "WHERE s.origin = 'llm' AND (r.subject_id = ANY($1::int[]) OR r.object_id = ANY($1::int[])) "
+        "ORDER BY 1, 2", ids)
+    for s in srcs:
+        await reset_source(conn, s["source_type"], s["source_id"])
+    for eid, keep in bad.items():
+        await conn.execute("UPDATE kg_entities SET aliases = $2::text[], updated_at = now() "
+                           "WHERE id = $1", eid, keep)
+    return {"entities": len(ids), "sources": len(srcs)}
 
 
 async def backfill_norm_names(batch: int = 2000) -> int:
@@ -1162,18 +1225,46 @@ def _error_result(item: dict, judge, reason: str) -> dict:
             "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
 
 
-async def extracted_today(conn) -> int:
-    """Chunks sent to the extraction model today (system.timezone)."""
+async def _system_tz() -> str:
     tz = str(await get_config("system.timezone", "UTC") or "UTC")
     try:
         from zoneinfo import ZoneInfo
         ZoneInfo(tz)
     except Exception:
         tz = "UTC"
+    return tz
+
+
+async def extracted_today(conn) -> int:
+    """Calls to the extraction model today (system.timezone).
+
+    v1.23.18: read from kg_extract_usage, one counter row per day bumped
+    before every call (count_call). Counting kg_extract_log rows missed
+    retries (one row per chunk), stale results, and gave calls back when a
+    log row was deleted with its message or memory.
+    """
     return int(await conn.fetchval(
-        "SELECT count(*) FROM kg_extract_log WHERE status IN ('done', 'error') "
-        "AND coalesce(model, '') <> '' AND updated_at >= "
-        "(date_trunc('day', now() AT TIME ZONE $1) AT TIME ZONE $1)", tz) or 0)
+        "SELECT calls FROM kg_extract_usage WHERE day = (now() AT TIME ZONE $1)::date",
+        await _system_tz()) or 0)
+
+
+async def count_call(conn) -> None:
+    await conn.execute(
+        "INSERT INTO kg_extract_usage (day, calls) VALUES ((now() AT TIME ZONE $1)::date, 1) "
+        "ON CONFLICT (day) DO UPDATE SET calls = kg_extract_usage.calls + 1",
+        await _system_tz())
+
+
+async def _count_call() -> None:
+    """count_call on its own connection. Never raises (except cancellation):
+    a failed count must not stop the extraction."""
+    try:
+        async with get_connection() as conn:
+            await count_call(conn)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.debug(f"KG extract: call not counted: {e}")
 
 
 # One KG worker per database (v1.23.15): a session advisory lock held on a
@@ -1327,7 +1418,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                     used = await gated(_used())
                     if used >= limit:
                         if not limit_logged:
-                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} chunks, "
+                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} calls, "
                                            "kg.extract_daily_limit); waiting for the next day")
                             limit_logged = True
                         await asyncio.sleep(300)

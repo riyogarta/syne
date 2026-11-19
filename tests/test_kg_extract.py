@@ -201,7 +201,7 @@ def test_schema_sql_carries_ddl_and_seeds():
 
 def test_ddl_splits_into_statements():
     stmts = [s.strip() for s in _split_sql_statements(KG_EXTRACT_SCHEMA_SQL)]
-    assert sum(1 for s in stmts if s.endswith(";")) == 4
+    assert sum(1 for s in stmts if s.endswith(";")) == 5
 
 
 # ── /kgextract Telegram menu ──────────────────────────────────────────────

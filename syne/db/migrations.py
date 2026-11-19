@@ -1677,6 +1677,31 @@ async def _m61_kg_entities_embedding_untyped(conn) -> None:
         await conn.execute("ALTER TABLE kg_entities ALTER COLUMN embedding TYPE vector")
 
 
+KG_USAGE_DDL = [
+    "CREATE TABLE IF NOT EXISTS kg_extract_usage ("
+    "day DATE PRIMARY KEY, calls INT NOT NULL DEFAULT 0)",
+]
+
+
+async def _m62_kg_usage_split_merges(conn) -> None:
+    """v1.23.18 (Riyo, 19 Nov 2026). Idempotent.
+
+    kg_extract_usage: calls to the KG extraction model per day, the base of
+    kg.extract_daily_limit (its description is updated). Entities that an
+    embedding match merged across different numbers are split: their chunks
+    are extracted again. schema.sql carries the same DDL.
+    """
+    from ..memory.kg_extract import DEFAULTS, split_bad_merges
+    for stmt in KG_USAGE_DDL:
+        await conn.execute(stmt)
+    await conn.execute("UPDATE config SET description = $2 WHERE key = $1",
+                       "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
+    res = await split_bad_merges(conn)
+    if res["entities"]:
+        logger.info(f"KG: split {res['entities']} wrongly merged entities; "
+                    f"{res['sources']} chunks will be extracted again")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1739,6 +1764,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (59, _m59_prune_kg_without_write_access, "transactional"),
     (60, _m60_kg_scope_daily_limit, "transactional"),
     (61, _m61_kg_entities_embedding_untyped, "transactional"),
+    (62, _m62_kg_usage_split_merges, "transactional"),
 ]
 
 

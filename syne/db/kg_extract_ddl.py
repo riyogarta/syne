@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS kg_extract_log (
     PRIMARY KEY (source_type, source_id)
 );
 
+-- Calls to the KG extraction model per day (system.timezone), the base of
+-- kg.extract_daily_limit (v1.23.18, migration 62).
+CREATE TABLE IF NOT EXISTS kg_extract_usage (
+    day   DATE PRIMARY KEY,
+    calls INT NOT NULL DEFAULT 0
+);
+
 INSERT INTO config (key, value, description) VALUES
     ('kg.extract_era_start',
      to_jsonb(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
