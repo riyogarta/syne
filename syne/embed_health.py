@@ -21,6 +21,7 @@ sounds normal but ignores stored decisions. Owner decision (Riyo, 17 Nov
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -190,7 +191,40 @@ def is_soft_failure(err: BaseException) -> bool:
     return bool(re.search(r"\b429\b", text)) or "too many requests" in text or "rate limit" in text
 
 
+_recall_inflight: int = 0           # recall embeds running (all chats)
+_bg_inflight: int = 0               # background (history) embeds running
+_bg_last_end: float = 0.0           # monotonic end of the last one
+
+
+def recall_in_flight() -> bool:
+    return _recall_inflight > 0
+
+
+@contextlib.asynccontextmanager
+async def background_embed():
+    """Mark a background embed (v1.23.16). A recall that times out while one
+    runs, or that started before one ended, queued behind it on a
+    one-request-at-a-time server (Ollama): busy, not dead."""
+    global _bg_inflight, _bg_last_end
+    _bg_inflight += 1
+    try:
+        yield
+    finally:
+        _bg_inflight -= 1
+        _bg_last_end = time.monotonic()
+
+
 async def quick_embed(provider, text: str) -> list:
+    """Recall embed; counted in recall_in_flight() while it runs."""
+    global _recall_inflight
+    _recall_inflight += 1
+    try:
+        return await _quick_embed(provider, text)
+    finally:
+        _recall_inflight -= 1
+
+
+async def _quick_embed(provider, text: str) -> list:
     """Embed for recall, bounded and without retry.
 
     Success clears a down state. Failure marks it, notifies the owner once
@@ -213,6 +247,10 @@ async def quick_embed(provider, text: str) -> list:
         # Started before the last soft failure was recorded: it waited on
         # the same slow spell, so it is not a second sign of a dead service.
         overlapped = soft and _soft_fails > 0 and t_start < _soft_fail_at
+        # Queued behind a background embed: busy, not a sign of a dead
+        # service - refuse this turn, count nothing (v1.23.16).
+        if soft and (_bg_inflight > 0 or _bg_last_end > t_start):
+            overlapped = True
         if soft and (overlapped or _soft_fails < SOFT_FAILS_TO_DOWN - 1):
             # Busy, not dead: refuse only this turn, no incident yet.
             if not overlapped:

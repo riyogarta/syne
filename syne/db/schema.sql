@@ -1147,26 +1147,46 @@ CREATE OR REPLACE FUNCTION syne_tsv_len(p_tsv tsvector) RETURNS INT
 $$;
 
 -- Add (p_sign = 1) or remove (p_sign = -1) one document from the statistics.
--- Words are upserted in sorted order so concurrent writers lock in the same
--- order. A deadlock / lock timeout is retried up to 5 times with a short
--- random pause (v1.23.15); any other error, or the 5th failure, is downgraded
--- to a WARNING: a write must never fail because of statistics;
--- syne_bm25_rebuild() repairs drift.
+-- Lock order (v1.23.16): every call first locks ALL bm25_corpus rows
+-- ('memory', 'messages:assistant', 'messages:user') in one fixed order and
+-- keeps them to the end of the transaction. Before, a backfill batch (user
+-- then assistant rows) and a bulk DELETE (assistant then user rows) locked
+-- the corpus rows in opposite order and deadlocked; the retry could not
+-- help because the first lock of each side belonged to the outer
+-- transaction. Now the second writer simply waits for the first. Words are
+-- upserted in sorted order. A deadlock / lock timeout is still retried up to
+-- 5 times; any other error, or the 5th failure, is downgraded to a WARNING:
+-- a write must never fail because of statistics; syne_bm25_rebuild()
+-- repairs drift.
 CREATE OR REPLACE FUNCTION syne_bm25_apply(p_corpus TEXT, p_tsv tsvector, p_len INT, p_sign INT) RETURNS void AS $$
 DECLARE
     v_try INT := 0;
+    v_all TEXT[];
+    v_locked INT;
 BEGIN
     IF p_corpus IS NULL OR p_tsv IS NULL OR coalesce(p_len, 0) = 0 THEN
         RETURN;
     END IF;
+    v_all := ARRAY(SELECT DISTINCT c
+                     FROM unnest(ARRAY['memory', 'messages:assistant', 'messages:user', p_corpus]) AS c
+                    ORDER BY c);
     LOOP
     v_try := v_try + 1;
     BEGIN
-        INSERT INTO bm25_corpus AS c (corpus, n_docs, total_len)
-        VALUES (p_corpus, p_sign, p_sign::bigint * p_len)
-        ON CONFLICT (corpus) DO UPDATE
-            SET n_docs = c.n_docs + EXCLUDED.n_docs,
-                total_len = c.total_len + EXCLUDED.total_len;
+        PERFORM 1 FROM bm25_corpus WHERE corpus = ANY (v_all) ORDER BY corpus FOR UPDATE;
+        GET DIAGNOSTICS v_locked = ROW_COUNT;
+        IF v_locked < array_length(v_all, 1) THEN
+            -- First write after install or rebuild: create the missing rows
+            -- (in the same order), then lock them all.
+            INSERT INTO bm25_corpus (corpus)
+            SELECT c FROM unnest(v_all) AS c ORDER BY c
+            ON CONFLICT (corpus) DO NOTHING;
+            PERFORM 1 FROM bm25_corpus WHERE corpus = ANY (v_all) ORDER BY corpus FOR UPDATE;
+        END IF;
+        UPDATE bm25_corpus
+           SET n_docs = n_docs + p_sign,
+               total_len = total_len + p_sign::bigint * p_len
+         WHERE corpus = p_corpus;
         INSERT INTO bm25_terms AS t (corpus, term, df)
         SELECT p_corpus, lx, p_sign
           FROM unnest(tsvector_to_array(p_tsv)) AS lx
@@ -1266,13 +1286,15 @@ BEGIN
     LOCK TABLE bm25_corpus, bm25_terms IN EXCLUSIVE MODE;
     DELETE FROM bm25_terms;
     DELETE FROM bm25_corpus;
+    -- All three corpus rows always exist (syne_bm25_apply locks them).
     INSERT INTO bm25_corpus (corpus, n_docs, total_len)
     SELECT 'memory', count(*), coalesce(sum(tsv_len), 0)
       FROM memory WHERE tsv_len > 0;
     INSERT INTO bm25_corpus (corpus, n_docs, total_len)
-    SELECT 'messages:' || role, count(*), coalesce(sum(tsv_len), 0)
-      FROM messages WHERE role IN ('user', 'assistant') AND tsv_len > 0
-     GROUP BY role;
+    SELECT r.corpus, count(m.id), coalesce(sum(m.tsv_len), 0)
+      FROM (VALUES ('messages:assistant', 'assistant'), ('messages:user', 'user')) AS r (corpus, role)
+      LEFT JOIN messages m ON m.role = r.role AND m.tsv_len > 0
+     GROUP BY r.corpus;
     INSERT INTO bm25_terms (corpus, term, df)
     SELECT 'memory', lx, count(*)
       FROM memory, unnest(tsvector_to_array(tsv)) AS lx

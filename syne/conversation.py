@@ -551,16 +551,25 @@ class Conversation:
             return
 
         async def _late():
-            await asyncio.sleep(delay)
-            from . import embed_health as _eh
-            if getattr(self, "_recall_busy", False) or _eh.is_flagged():
-                return
-            mine = [p for p in held if p in self._deferred_embed]
-            if not mine:
-                return
-            self._deferred_embed = [p for p in self._deferred_embed if p not in mine]
-            for item in mine:
-                asyncio.create_task(self._embed_message_row(*item))
+            # v1.23.16: tracked by the restore gate (begin() cancels it), held
+            # while ANY chat runs a recall, and the embeds run inside this
+            # task one by one instead of as untracked tasks.
+            me = asyncio.current_task()
+            _maint.track(me)
+            try:
+                await asyncio.sleep(delay)
+                from . import embed_health as _eh
+                if (_maint.active() or getattr(self, "_recall_busy", False)
+                        or _eh.is_flagged() or _eh.recall_in_flight()):
+                    return
+                mine = [p for p in held if p in self._deferred_embed]
+                if not mine:
+                    return
+                self._deferred_embed = [p for p in self._deferred_embed if p not in mine]
+                for item in mine:
+                    await self._embed_message_row(*item)
+            finally:
+                _maint.untrack(me)
 
         asyncio.create_task(_late())
 
@@ -644,7 +653,9 @@ class Conversation:
 
             max_chars = int(await get_config("history_search.max_content_chars", 4000))
             body = text if len(text) <= max_chars else text[:max_chars]
-            resp = await self.memory.provider.embed(body)
+            from . import embed_health as _eh
+            async with _eh.background_embed():
+                resp = await self.memory.provider.embed(body)
             vector = getattr(resp, "vector", None)
             if not vector:
                 logger.warning(

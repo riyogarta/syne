@@ -65,7 +65,7 @@ CREATE TABLE memory (id INT PRIMARY KEY, content TEXT, embedding vector, categor
     updated_at TIMESTAMPTZ DEFAULT now());
 CREATE TABLE kg_entities (id SERIAL PRIMARY KEY, name TEXT NOT NULL, entity_type VARCHAR(50),
     description TEXT, norm_name TEXT, embedding vector, aliases TEXT[] DEFAULT '{}',
-    updated_at TIMESTAMPTZ DEFAULT now());
+    scope TEXT, updated_at TIMESTAMPTZ DEFAULT now());
 CREATE UNIQUE INDEX kg_entities_name_type ON kg_entities (LOWER(name), entity_type, coalesce(scope, ''));
 CREATE TABLE kg_relations (
     id SERIAL PRIMARY KEY,

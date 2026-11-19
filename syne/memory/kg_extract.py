@@ -577,8 +577,9 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
 def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
     """Scope of an entity extracted from a chunk (v1.23.15).
 
-    A person named in a chat message belongs to that chat ('chat:<platform>:
+    A person named in a group message belongs to that group ('chat:<platform>:
     <chat id>'), so two people called Budi in two groups stay two entities.
+    DM messages carry no chat_scope (v1.23.16), so their people are shared.
     Shared (None): every other type, memory chunks, and people who are
     registered owner/family users or listed in family.directory (their name,
     or its first or last word, e.g. "Pak Riyo", "Agha Gamitra").
@@ -610,20 +611,36 @@ async def known_people(conn) -> frozenset:
             names.add(al.get("default"))
             if isinstance(al.get("groups"), dict):
                 names.update(al["groups"].values())
+    # v1.23.16: one malformed entry no longer drops the whole directory,
+    # and "names" given as a string is one name, not a list of letters.
     try:
         d = await get_config("family.directory", [])
         if isinstance(d, str):
             d = json.loads(d)
-        for p in d or []:
-            names.update(p.get("names") or [])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"KG extract: family.directory unreadable: {e}")
+        d = []
+    for p in d if isinstance(d, list) else []:
+        if not isinstance(p, dict):
+            continue
+        n = p.get("names") or []
+        names.update([n] if isinstance(n, str) else (n if isinstance(n, list) else []))
     try:
         names.add(await conn.fetchval(
             "SELECT value FROM identity WHERE key = 'name' AND active = true"))
     except Exception:
         pass
-    return frozenset(n for n in (normalize_name(str(x)) for x in names if x) if n)
+    out: set = set()
+    for x in names:
+        if not isinstance(x, str):
+            continue
+        norm = normalize_name(x)
+        if not norm:
+            continue
+        out.add(norm)
+        # Each word of a multi-word name too: "Riyogarta" alone is the owner.
+        out.update(t for t in norm.split() if len(t) >= 3)
+    return frozenset(out)
 
 
 def _rel_pairs(subs: list, objs: list) -> list:
@@ -739,6 +756,7 @@ async def era_floor(conn, table: str, era: datetime) -> int:
 
 
 async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
+    from ..tools.history import group_session_sql
     n = s["kg.extract_batch"]
     out = []
     rows = await conn.fetch(
@@ -755,7 +773,11 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
     skip_sched = "AND coalesce(se.platform_chat_id, '') NOT LIKE 'scheduled:%' " if s["kg.extract_skip_scheduled"] else ""
     rows = await conn.fetch(
         "SELECT x.id, x.content, x.role, x.session_id, u.name AS owner_name, "
-        "'chat:' || se.platform || ':' || coalesce(se.platform_chat_id, '') AS chat_scope, "
+        # v1.23.16: people are scoped to the chat only in groups. A DM is
+        # written by one owner/family user, so a person named there is the
+        # same person when that user asks from another chat or platform.
+        "CASE WHEN " + group_session_sql("se") + " THEN "
+        "'chat:' || se.platform || ':' || coalesce(se.platform_chat_id, '') END AS chat_scope, "
         "x.metadata->>'access' AS access, x.metadata->>'speaker' AS speaker FROM messages x "
         "LEFT JOIN sessions se ON se.id = x.session_id "
         "LEFT JOIN users u ON u.id = se.user_id "
@@ -819,7 +841,8 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
             raise ProviderDown(f"{type(e).__name__}: {e}") from e
         raise
     extracted = parse_extraction(raw, s)
-    vecs = await prepare_embeddings(extracted, embed)
+    vecs = await prepare_embeddings(extracted, embed, item.get("chat_scope"),
+                                    s.get("_known_people") or frozenset())
 
     async def _cached(name: str):
         return vecs.get(name)
@@ -994,6 +1017,12 @@ class ProviderDown(Exception):
 # anyway (a chunk that always breaks the provider must not stall the worker).
 PROVIDER_DOWN_STRIKES = 6
 PROVIDER_DOWN_MAX_WAIT = 1800
+# v1.23.16: a "model unavailable" failure costs the chunk an attempt only
+# when the model answered another chunk after this one first failed (the
+# chunk itself is the problem, e.g. too slow for a local model), or after
+# PROVIDER_DOWN_STRIKES failures spread over at least this long (a daily
+# quota resets within it). A plain outage never costs attempts.
+PROVIDER_DOWN_GIVE_UP = 24 * 3600
 
 
 def provider_down(err: BaseException) -> bool:
@@ -1011,17 +1040,52 @@ def provider_down(err: BaseException) -> bool:
     if isinstance(status, int):
         return status >= 500
     text = str(err).lower()
-    return (bool(re.search(r"\b(500|502|503|504|529)\b", text))
-            or "overloaded" in text or "unavailable" in text)
+    if (re.search(r"\b(500|502|503|504|529)\b", text)
+            or "overloaded" in text or "unavailable" in text):
+        return True
+    # Syne's drivers (anthropic / openai / codex) end their own retries with
+    # a RuntimeError that has no status code, e.g. "Anthropic stream failed
+    # after 3 attempts: ConnectError" (v1.23.16).
+    return bool(_DRIVER_DOWN.search(text))
 
 
-async def prepare_embeddings(extracted: dict, embed: Optional[Embedder]) -> dict:
+_DRIVER_DOWN = re.compile(
+    r"stream failed after|transient error after|api failed after"
+    r"|connecterror|connecttimeout|readtimeout|writetimeout|pooltimeout|readerror"
+    r"|remoteprotocolerror|timed out|connection (?:refused|reset|closed|error)")
+
+
+async def _nap(seconds: float) -> None:
+    """Sleep up to ``seconds``; wake early when /restore starts or
+    kg.extract_enabled turns false (v1.23.16: a 30-minute outage wait used
+    to ignore both)."""
+    end = time.monotonic() + seconds
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return
+        await asyncio.sleep(min(30.0, left))
+        if _maint.active():
+            return
+        try:
+            v = await get_config("kg.extract_enabled", True)
+        except Exception:
+            continue
+        if v is False or str(v).strip().lower() in ("false", "0", "no", "off", ""):
+            return
+
+
+async def prepare_embeddings(extracted: dict, embed: Optional[Embedder],
+                             chat_scope: Optional[str] = None,
+                             known: frozenset = frozenset()) -> dict:
     """{entity name: vector} for names write_graph may need to embed.
 
     Done before the write transaction opens (v1.23.13): with embedding
     retries the transaction stayed open for minutes holding entity and
     relation locks. Names that resolve without a vector (a reference item,
-    a known norm_name) are not embedded.
+    a known norm_name of the same type AND scope) are not embedded. v1.23.16:
+    the scope was missing, so a person scoped to a group never got a vector
+    when a shared namesake existed.
     """
     if embed is None or not extracted.get("entities"):
         return {}
@@ -1037,10 +1101,12 @@ async def prepare_embeddings(extracted: dict, embed: Optional[Embedder]) -> dict
                         continue
                 except Exception:
                     pass
+            scope = person_scope(name, e["type"], chat_scope, known)
             hit = await conn.fetchval(
                 "SELECT 1 FROM kg_entities WHERE norm_name = $1 "
-                "AND entity_type <> ALL($2::text[]) AND entity_type = $3 LIMIT 1",
-                normalize_name(name), reference_types(), e["type"])
+                "AND entity_type <> ALL($2::text[]) AND entity_type = $3 "
+                "AND scope IS NOT DISTINCT FROM $4 LIMIT 1",
+                normalize_name(name), reference_types(), e["type"], scope)
             if not hit:
                 need.append(name)
     vecs: dict = {}
@@ -1124,6 +1190,15 @@ async def take_worker_lock():
     try:
         if await conn.fetchval("SELECT pg_try_advisory_lock($1::bigint)", WORKER_LOCK_KEY):
             return conn
+    except asyncio.CancelledError:
+        # v1.23.16: the connection went back to the pool on errors only; a
+        # cancellation here leaked it and Pool.close() then hung at shutdown.
+        # Releasing resets it (asyncpg unlocks advisory locks on reset).
+        try:
+            await pool.release(conn)
+        except BaseException:
+            pass
+        raise
     except Exception as e:
         logger.debug(f"KG extract: worker lock not taken: {e}")
     await pool.release(conn)
@@ -1167,7 +1242,8 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
     floors: dict = {}
     floors_key = None
     judge, judge_key = None, None
-    down_wait, down_item, down_hits = 0, None, 0
+    # (type, id) -> (monotonic time of first "model unavailable", strikes)
+    down_wait, suspects, last_ok = 0, {}, 0.0
     lock_conn, lock_idle_logged, limit_logged = None, False, False
     try:
         while True:
@@ -1230,6 +1306,9 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         logger.warning("KG extract: no usable model (kg.extract_model); waiting")
                         await asyncio.sleep(max(60, s["kg.extract_interval"]))
                         continue
+                # Chunks that failed as "model unavailable" go last: if another
+                # chunk gets an answer first, the model is up.
+                items.sort(key=lambda it: (it["type"], it["id"]) in suspects)
                 for item in items:
                     if _maint.active():
                         break
@@ -1251,22 +1330,32 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         res = task.result()
                     except ProviderDown as e:
                         this = (item["type"], item["id"])
-                        down_hits = down_hits + 1 if down_item == this else 1
-                        down_item = this
-                        if down_hits < PROVIDER_DOWN_STRIKES:
+                        now = time.monotonic()
+                        first, strikes = suspects.get(this, (now, 0))
+                        strikes += 1
+                        if last_ok > first or (strikes >= PROVIDER_DOWN_STRIKES
+                                               and now - first >= PROVIDER_DOWN_GIVE_UP):
+                            # The model is up for other chunks (or this has
+                            # failed for a day): this chunk costs an attempt
+                            # and waits its normal error backoff.
+                            suspects.pop(this, None)
+                            res = _error_result(item, judge, f"model unavailable: {e}")
+                            logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                        else:
+                            suspects[this] = (first, strikes)
                             down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
                             logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
                                            f"chunks kept, trying again in {down_wait}s")
-                            await asyncio.sleep(down_wait)
+                            await _nap(down_wait)
                             break
-                        res = _error_result(item, judge, f"model unavailable: {e}")
-                        logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
-                        down_item, down_hits = None, 0
                     except Exception as e:
                         res = _error_result(item, judge, f"{type(e).__name__}: {e}")
                         logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
                     else:
-                        down_wait, down_item, down_hits = 0, None, 0
+                        down_wait = 0
+                        suspects.pop((item["type"], item["id"]), None)
+                        if res.get("status") in ("done", "stale"):
+                            last_ok = time.monotonic()
                     if not res.get("_logged"):
                         await write_log(item, res)
                     if res["status"] == "stale":
