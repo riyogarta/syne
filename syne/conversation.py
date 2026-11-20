@@ -529,22 +529,38 @@ class Conversation:
             if defer_embed:
                 self._deferred_embed.append((inserted_id, content))
             else:
-                asyncio.create_task(self._embed_message_row(inserted_id, content))
+                self._spawn_embed(inserted_id, content)
+
+    def _spawn_embed(self, message_id: int, content: str) -> None:
+        """Start one history embed as a task tracked by the restore gate
+        (v1.23.26): maintenance.begin() cancels it, and none starts while the
+        gate is up - it would write into a database being replaced. A row
+        skipped here stays NULL; `syne memory reembed-history` backfills it."""
+        if _maint.active():
+            return
+        t = asyncio.create_task(self._embed_message_row(message_id, content))
+        _maint.track(t)
+        t.add_done_callback(_maint.untrack)
 
     def _flush_deferred_embed(self) -> None:
         """Start the history embeds held back by save_message(defer_embed=True)."""
         pending, self._deferred_embed = list(self._deferred_embed or []), []
         for item in pending:
-            asyncio.create_task(self._embed_message_row(*item))
+            self._spawn_embed(*item)
+
+    LATE_ROUNDS = 3
 
     def _hold_deferred_embed(self, delay: float = 120.0) -> None:
         """The turn was refused (embedding slow or down): keep its history
         embed out of the way of the retry's recall embed (v1.23.14).
 
         It runs after the next turn's recall (_flush_deferred_embed), or
-        after `delay` seconds when no turn came, unless a recall is running
-        or the embedding service is still down - then it stays for the next
-        turn (and `syne memory reembed-history` backfills rows never embedded).
+        after `delay` seconds when no turn came. Before EACH row (v1.23.26:
+        once, before the first) it checks that no recall runs in any chat and
+        the embedding service is not down; when blocked the rest stays held
+        and is tried again after another `delay`, at most LATE_ROUNDS times,
+        then left for the next turn (`syne memory reembed-history` backfills
+        rows never embedded).
         """
         held = list(self._deferred_embed or [])
         if not held:
@@ -557,17 +573,25 @@ class Conversation:
             me = asyncio.current_task()
             _maint.track(me)
             try:
-                await asyncio.sleep(delay)
                 from . import embed_health as _eh
-                if (_maint.active() or getattr(self, "_recall_busy", False)
-                        or _eh.is_flagged() or _eh.recall_in_flight()):
-                    return
-                mine = [p for p in held if p in self._deferred_embed]
-                if not mine:
-                    return
-                self._deferred_embed = [p for p in self._deferred_embed if p not in mine]
-                for item in mine:
-                    await self._embed_message_row(*item)
+
+                def blocked() -> bool:
+                    return (getattr(self, "_recall_busy", False)
+                            or _eh.is_flagged() or _eh.recall_in_flight())
+
+                for _ in range(self.LATE_ROUNDS):
+                    await asyncio.sleep(delay)
+                    if _maint.active():
+                        return
+                    for item in held:
+                        if item not in self._deferred_embed:
+                            continue        # a turn's flush took it
+                        if _maint.active() or blocked():
+                            break
+                        self._deferred_embed = [p for p in self._deferred_embed if p != item]
+                        await self._embed_message_row(*item)
+                    if not any(p in self._deferred_embed for p in held):
+                        return
             finally:
                 _maint.untrack(me)
 
