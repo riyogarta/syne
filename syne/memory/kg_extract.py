@@ -1049,22 +1049,31 @@ def speaker_person(item: dict, groups) -> Optional[frozenset]:
 
 
 UNLINKED_KEY = "kg.unlinked_accounts_notified"
-_UNLINKED_DESC = ("Fingerprint of the owner/family accounts missing from family.directory "
-                  "that the owner was last told about (KG worker, v1.23.38). Set by Syne.")
+_UNLINKED_DESC = ("Fingerprint of the family accounts that look like another known person "
+                  "the owner was last told about (KG worker, v1.23.39). Set by Syne.")
 UNLINKED_EVERY = 3600.0
+UNLINKED_RETRY = 60.0
 _unlinked_retry_at = 0.0
 
 
 async def unlinked_accounts(conn) -> list:
-    """[(platform, id, name)] of owner/family user rows (not the console)
-    whose account is in no family.directory entry (v1.23.38)."""
+    """[(platform, id, name, like)] of family accounts in no family.directory
+    entry that share a name with another owner/family person (`like`: that
+    person's first name). v1.23.39: only these need the owner. Owner
+    accounts join the owner on their own; a family member with one account,
+    or with names nobody else has, is one person already."""
     d = _as_json(await conn.fetchval(
         "SELECT value FROM config WHERE key = 'family.directory'"), [])
     listed: set = set()
+    others: list = []              # (accounts, names, label)
     for p in d if isinstance(d, list) else []:
         if isinstance(p, dict):
-            listed.update(entry_accounts(p))
-    out: set = set()
+            accs = entry_accounts(p)
+            listed.update(accs)
+            names = _entry_names(p)
+            label = next((x.strip() for x in names if isinstance(x, str) and x.strip()), "")
+            others.append((set(accs), _person_norms(names), label))
+    rows = []
     for u in await conn.fetch(
             "SELECT platform, platform_id, name, display_name, aliases, access_level "
             "FROM users WHERE access_level IN ('owner', 'family')"):
@@ -1072,22 +1081,37 @@ async def unlinked_accounts(conn) -> list:
         if pf == "cli" or not u.get("platform_id"):
             continue
         acc = (pf, _account_id(pf, str(u.get("platform_id"))))
+        rows.append((u, acc))
         if acc not in listed:
-            out.add((acc[0], acc[1], str(u.get("display_name") or u.get("name") or "")))
+            others.append(({acc}, _person_norms(_user_names(u)),
+                           str(u.get("display_name") or u.get("name") or "")))
+    out: set = set()
+    for u, acc in rows:
+        if u.get("access_level") != "family" or acc in listed:
+            continue
+        mine = _person_norms(_user_names(u))
+        like = next((lb for accs, names, lb in others
+                     if acc not in accs and names & mine), None)
+        if like is not None:
+            out.add((acc[0], acc[1], str(u.get("display_name") or u.get("name") or ""), like))
     return sorted(out)
 
 
 def unlinked_text(rows: list) -> str:
-    lines = "\n".join(f"- {pf} {cid}" + (f" ({nm})" if nm else "") for pf, cid, nm in rows)
-    return ("Knowledge graph: these owner/family accounts are not listed in "
-            "family.directory:\n" + lines + "\n\nAdd each one to the \"accounts\" list "
-            "of that person's entry, so the graph knows whose account it is.")
+    lines = "\n".join(f"- {pf} {cid}" + (f" ({nm})" if nm else "") + f", looks like {like}"
+                      for pf, cid, nm, like in rows)
+    return ("Knowledge graph: these family accounts are not in family.directory and "
+            "share a name with another person:\n" + lines + "\n\nIf it is the same "
+            "person, add the account to the \"accounts\" list of their entry (ask me "
+            "to do it). Until then the graph keeps them as two people.")
 
 
 async def maybe_notify_unlinked() -> bool:
     """Tell the owner once per distinct set of unlinked accounts. Checked at
-    most once an hour; a failed send is retried at the next check. Never
-    raises (except cancellation). True when a notice was sent."""
+    most once an hour; with no Telegram channel yet (the first check runs
+    while channels still start) or a failed send, again after
+    UNLINKED_RETRY seconds (v1.23.39). Never raises (except cancellation).
+    True when a notice was sent."""
     global _unlinked_retry_at
     if time.monotonic() < _unlinked_retry_at:
         return False
@@ -1102,9 +1126,11 @@ async def maybe_notify_unlinked() -> bool:
             from ..communication.registry import CHANNEL_TELEGRAM, get_channel
             ch = get_channel(CHANNEL_TELEGRAM)
             if ch is None or not hasattr(ch, "notify_owner"):
-                logger.info("KG: unlinked accounts found, no Telegram channel to tell the owner")
+                _unlinked_retry_at = time.monotonic() + UNLINKED_RETRY
+                logger.debug("KG: unlinked accounts found, no Telegram channel yet")
                 return False
             if not await ch.notify_owner(unlinked_text(rows)):
+                _unlinked_retry_at = time.monotonic() + UNLINKED_RETRY
                 logger.warning("KG: unlinked accounts notice not delivered; retried later")
                 return False
         await set_config(UNLINKED_KEY, digest, _UNLINKED_DESC)

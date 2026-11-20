@@ -83,16 +83,14 @@ async def test_owner_rows_join_entry_without_access_flag():
 
 
 async def test_unlinked_accounts_listed():
+    # v1.23.39: owner accounts and listed accounts are never reported
     yuli_wa = _u("whatsapp", "628111681524", "Yuli WA", access="family")
-    rows = await K.unlinked_accounts(_C([RIYO, YULI], [OWNER_TG, OWNER_WA, CLI, yuli_wa]))
-    assert rows == [("whatsapp", "628111681624", "Pak Riyo")]
-    t = K.unlinked_text(rows)
-    assert "628111681624" in t and '"accounts"' in t
+    assert await K.unlinked_accounts(_C([RIYO, YULI], [OWNER_TG, OWNER_WA, CLI, yuli_wa])) == []
 
 
 async def test_unlinked_notice_sent_once(monkeypatch):
     import syne.communication.registry as REG
-    conn = _C([RIYO], [OWNER_TG, OWNER_WA])
+    conn = _C([RIYO, YULI], [OWNER_TG, _u("discord", "77", "Bunli", access="family")])
 
     @asynccontextmanager
     async def gconn(timeout=None):

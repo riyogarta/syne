@@ -228,6 +228,50 @@ Controls which groups the bot responds in.
 - **Warning**: Disabling require_mention in active groups will cause the bot to respond
   to every message, which is expensive and potentially annoying.
 
+## Family Directory
+
+| Key | Default | Type |
+|-----|---------|------|
+| `family.directory` | not set | JSON list, one entry per person |
+
+Who the owner and their family are, across platforms. Used for:
+- **Relays** — owner/family sessions see the names -> chat_id list, so
+  "kirim ke Bunli" becomes one `send_message` call.
+- **Knowledge graph** — one shared person entity per entry, anchored to its
+  account ids (`kg_entity_accounts`). Every name of the entry finds it; a
+  message from any of its accounts is known to come from that person.
+
+Entry fields:
+- `names` — list of names and nicknames; the first is the name the graph uses.
+- `chat_id` — the main account id; `platform` — its platform (default `telegram`).
+- `access` — `"owner"` or `"family"` (optional; the owner entry is also found
+  from the owner's accounts).
+- `accounts` — more accounts of the same person: `[{"platform": "whatsapp",
+  "chat_id": "628..."}]`. WhatsApp: the number, with or without
+  `@s.whatsapp.net`. Discord: the user id.
+
+Example:
+```json
+[{"names": ["Riyo", "Riyogarta", "Yahyo"], "access": "owner",
+  "chat_id": "3478983", "platform": "telegram",
+  "accounts": [{"platform": "whatsapp", "chat_id": "628111681624"}]},
+ {"names": ["Yuli", "Bunli"], "access": "family", "chat_id": "1544010",
+  "accounts": [{"platform": "whatsapp", "chat_id": "628111681524"}]}]
+```
+
+When it is needed:
+- **Not needed**: the owner's accounts on every platform are one person on
+  their own; a family member with one account is one person on their own.
+- **Needed**: a family member on more than one platform (without an entry
+  each account is a separate person), and nicknames that are on no profile.
+- Syne tells the owner on Telegram, once, when a family account is in no
+  entry and shares a name with another person.
+- A name in two entries belongs to neither: give each entry names of its own.
+
+How to change: `update_config(action='get', key='family.directory')`, edit
+the list, then `update_config(action='set', key='family.directory', value=<whole list>)`.
+`set` replaces the whole list, so always write it back complete.
+
 ## Execution & Tools
 
 ### Exec Limits
