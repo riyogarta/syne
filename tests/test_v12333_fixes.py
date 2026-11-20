@@ -28,7 +28,9 @@ async def test_user_without_entry_has_no_canon():
 
 
 def test_migration_66_registered():
-    assert M.MIGRATIONS[-1][0] == 66 and M.CURRENT_SCHEMA_VERSION == 66
+    # v1.23.38: later migrations follow; 66 stays registered.
+    assert (66, M._m66_kg_name_known_people, "transactional") in M.MIGRATIONS
+    assert M.CURRENT_SCHEMA_VERSION >= 66
 
 
 _DB = os.environ.get("SYNE_TEST_DATABASE_URL")

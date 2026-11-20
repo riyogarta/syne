@@ -59,7 +59,8 @@ def test_boot_lists_extra_accounts():
 # ── B ─────────────────────────────────────────────────────────────────────
 
 def test_clear_does_not_rewrite():
-    src = inspect.getsource(D.clear_history_vectors)
+    # v1.23.38: the drop/add moved to _rebuild_empty_column (shared with relax_columns)
+    src = inspect.getsource(D.clear_history_vectors) + inspect.getsource(D._rebuild_empty_column)
     assert "DROP COLUMN embedding" in src and "ADD COLUMN embedding" in src
     assert "UPDATE messages SET embedding = NULL" not in src
     assert "USING embedding::" not in src

@@ -95,6 +95,9 @@ DECLARE
 BEGIN
     SELECT vector_dims(embedding) INTO dim FROM memory WHERE embedding IS NOT NULL LIMIT 1;
     IF dim IS NULL THEN RETURN; END IF;
+    -- v1.23.38: pgvector builds HNSW up to 2000 dimensions; above it the
+    -- column stays unindexed (search scans the table).
+    IF dim > 2000 THEN RETURN; END IF;
     -- Smart guard: pgvector stores dimension directly in atttypmod. If the
     -- column is already typed vector(dim) AND the HNSW index exists, skip the
     -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
@@ -203,6 +206,9 @@ DECLARE
 BEGIN
     SELECT vector_dims(embedding) INTO dim FROM messages WHERE embedding IS NOT NULL LIMIT 1;
     IF dim IS NULL THEN RETURN; END IF;
+    -- v1.23.38: pgvector builds HNSW up to 2000 dimensions; above it the
+    -- column stays unindexed (search scans the table).
+    IF dim > 2000 THEN RETURN; END IF;
     -- Smart guard: pgvector stores dimension directly in atttypmod. If the
     -- column is already typed vector(dim) AND the HNSW index exists, skip the
     -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
@@ -856,6 +862,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_entities_name_type_scope
 CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities (entity_type);
 CREATE INDEX IF NOT EXISTS idx_kg_entities_name_trgm
     ON kg_entities USING gin (LOWER(name) gin_trgm_ops);
+
+-- v1.23.38 (migration 67): owner/family person entities anchored to their
+-- account ids (family.directory chat_id + accounts, owner/family users).
+CREATE TABLE IF NOT EXISTS kg_entity_accounts (
+    entity_id  INT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    platform   TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (platform, account_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kg_entity_accounts_entity ON kg_entity_accounts (entity_id);
 
 CREATE TABLE IF NOT EXISTS kg_relations (
     id SERIAL PRIMARY KEY,

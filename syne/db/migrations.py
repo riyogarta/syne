@@ -1769,6 +1769,103 @@ async def _m66_kg_name_known_people(conn) -> None:
         logger.info(f"KG: {n} person entities renamed after family.directory")
 
 
+
+KG_ENTITY_ACCOUNTS_DDL = (
+    """CREATE TABLE IF NOT EXISTS kg_entity_accounts (
+    entity_id  INT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    platform   TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (platform, account_id)
+)""",
+    "CREATE INDEX IF NOT EXISTS idx_kg_entity_accounts_entity ON kg_entity_accounts (entity_id)",
+)
+
+
+async def _m67_kg_entity_accounts(conn) -> None:
+    """v1.23.38 (Riyo, 20 Nov 2026). Idempotent.
+
+    Person entities of owner/family people are anchored to their account
+    ids (kg_entity_accounts), so a name no longer decides who they are.
+    Existing entities are linked by their names once. No chunk is
+    extracted again.
+    """
+    for stmt in KG_ENTITY_ACCOUNTS_DDL:
+        await conn.execute(stmt)
+    from ..memory.kg_extract import link_known_people
+    n = await link_known_people(conn)
+    if n:
+        logger.info(f"KG: {n} person entities linked to their accounts")
+
+
+HNSW_GUARD_SQL = (
+    """CREATE OR REPLACE FUNCTION ensure_memory_hnsw_index() RETURNS void AS $$
+DECLARE
+    dim INT;
+    cur_typmod INT;
+    idx_exists BOOL;
+BEGIN
+    SELECT vector_dims(embedding) INTO dim FROM memory WHERE embedding IS NOT NULL LIMIT 1;
+    IF dim IS NULL THEN RETURN; END IF;
+    -- v1.23.38: pgvector builds HNSW up to 2000 dimensions; above it the
+    -- column stays unindexed (search scans the table).
+    IF dim > 2000 THEN RETURN; END IF;
+    -- Smart guard: pgvector stores dimension directly in atttypmod. If the
+    -- column is already typed vector(dim) AND the HNSW index exists, skip the
+    -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
+    SELECT a.atttypmod INTO cur_typmod
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'memory' AND a.attname = 'embedding';
+    SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_memory_embedding_hnsw') INTO idx_exists;
+    IF cur_typmod = dim AND idx_exists THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE memory ALTER COLUMN embedding TYPE vector(%s)', dim);
+    DROP INDEX IF EXISTS idx_memory_embedding_hnsw;
+    EXECUTE 'CREATE INDEX idx_memory_embedding_hnsw '
+            'ON memory USING hnsw (embedding vector_cosine_ops) '
+            'WITH (m = 24, ef_construction = 200)';
+END;
+$$ LANGUAGE plpgsql;""",
+    """CREATE OR REPLACE FUNCTION ensure_messages_hnsw_index() RETURNS void AS $$
+DECLARE
+    dim INT;
+    cur_typmod INT;
+    idx_exists BOOL;
+BEGIN
+    SELECT vector_dims(embedding) INTO dim FROM messages WHERE embedding IS NOT NULL LIMIT 1;
+    IF dim IS NULL THEN RETURN; END IF;
+    -- v1.23.38: pgvector builds HNSW up to 2000 dimensions; above it the
+    -- column stays unindexed (search scans the table).
+    IF dim > 2000 THEN RETURN; END IF;
+    -- Smart guard: pgvector stores dimension directly in atttypmod. If the
+    -- column is already typed vector(dim) AND the HNSW index exists, skip the
+    -- expensive DROP+CREATE (rebuilding a large index can take ~90s).
+    SELECT a.atttypmod INTO cur_typmod
+      FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+     WHERE c.relname = 'messages' AND a.attname = 'embedding';
+    SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_messages_embedding_hnsw') INTO idx_exists;
+    IF cur_typmod = dim AND idx_exists THEN RETURN; END IF;
+    EXECUTE format('ALTER TABLE messages ALTER COLUMN embedding TYPE vector(%s)', dim);
+    DROP INDEX IF EXISTS idx_messages_embedding_hnsw;
+    EXECUTE 'CREATE INDEX idx_messages_embedding_hnsw '
+            'ON messages USING hnsw (embedding vector_cosine_ops) '
+            'WITH (m = 24, ef_construction = 200)';
+END;
+$$ LANGUAGE plpgsql;""",
+)
+
+
+async def _m68_hnsw_dims_guard(conn) -> None:
+    """v1.23.38 (review A). Idempotent CREATE OR REPLACE.
+
+    ensure_memory_hnsw_index() / ensure_messages_hnsw_index() return when the
+    vectors have more than 2000 dimensions: pgvector cannot build HNSW there,
+    and the CREATE INDEX failed every `syne update` / `syne repair` on a
+    qwen3-embedding:4b/8b install. Same bodies as schema.sql.
+    """
+    for stmt in HNSW_GUARD_SQL:
+        await conn.execute(stmt)
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1836,6 +1933,8 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (64, _m64_kg_merge_titled_people, "transactional"),
     (65, _m65_kg_merge_known_people, "transactional"),
     (66, _m66_kg_name_known_people, "transactional"),
+    (67, _m67_kg_entity_accounts, "transactional"),
+    (68, _m68_hnsw_dims_guard, "transactional"),
 ]
 
 

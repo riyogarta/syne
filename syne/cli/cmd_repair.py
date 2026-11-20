@@ -321,6 +321,22 @@ def repair(fix):
                 if idx:
                     console.print(f"   [green]✓ HNSW index on {table}.embedding exists[/green]")
                     continue
+                # v1.23.38 (review A): pgvector has no HNSW above 2000
+                # dimensions; a missing index is then expected, not an issue.
+                async with get_connection() as conn:
+                    dims = await conn.fetchval(
+                        "SELECT nullif(substring(format_type(atttypid, atttypmod) "
+                        "from 'vector\\((\\d+)\\)'), '')::int FROM pg_attribute "
+                        "WHERE attrelid = $1::regclass AND attname = 'embedding' "
+                        "AND NOT attisdropped", table)
+                    if dims is None:
+                        dims = await conn.fetchval(
+                            f"SELECT vector_dims(embedding) FROM {table} "
+                            "WHERE embedding IS NOT NULL LIMIT 1")
+                if dims and int(dims) > 2000:
+                    console.print(f"   [dim]{table}.embedding: HNSW not available above 2000 "
+                                  "dimensions; search scans the table[/dim]")
+                    continue
                 issues.append(f"HNSW vector index missing on {table}.embedding")
                 console.print(f"   [yellow]⚠ HNSW index on {table}.embedding not found[/yellow]")
                 if not fix:

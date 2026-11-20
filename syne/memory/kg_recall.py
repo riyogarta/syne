@@ -30,7 +30,7 @@ from typing import Optional
 from ..db.connection import get_connection
 from ..db.models import get_config
 from . import kg_refs as _refs
-from .kg_extract import (ngrams, parse_era, person_groups, person_key,
+from .kg_extract import (_as_json, group_of, ngrams, parse_era, person_groups, person_key,
                          reference_types, target_indexes)
 
 logger = logging.getLogger("syne.memory.kg_recall")
@@ -118,7 +118,52 @@ WHERE e.norm_name = ANY($1::text[])
       WHERE (r.subject_id = e.id OR r.object_id = e.id)
         AND r.updated_at >= $3
         AND s.origin = 'llm' AND s.created_at >= $3)
+  AND NOT (e.id = ANY($5::int[]))
 """
+
+_ANCHORED_SQL = (
+    "SELECT DISTINCT entity_id FROM kg_entity_accounts "
+    "WHERE (platform, account_id) IN (SELECT * FROM unnest($1::text[], $2::text[]))")
+
+
+async def _outsiders(conn, session_id, pg) -> tuple:
+    """(people, entity ids) of owner/family people who are not members of
+    the group of this session (v1.23.38, review F); ([], []) in a DM, with
+    no session, or when it cannot be read."""
+    if not session_id or not pg:
+        return [], []
+    try:
+        from ..tools.history import group_session_sql
+        row = await conn.fetchrow(
+            "SELECT ss.platform, ss.platform_chat_id, " + group_session_sql("ss") +
+            " AS grp FROM sessions ss WHERE ss.id = $1", session_id)
+        if not row or not row["grp"]:
+            return [], []
+        members: frozenset = frozenset()
+        g = group_of(f"chat:{row['platform']}:{row['platform_chat_id'] or ''}")
+        if g:
+            st = _as_json(await conn.fetchval(
+                "SELECT settings FROM groups WHERE platform = $1 AND platform_group_id = $2",
+                g[0], g[1]), {})
+            m = st.get("members") if isinstance(st, dict) else None
+            if isinstance(m, dict):
+                members = frozenset((g[0], str(k)) for k in m)
+        people = [p for p in {id(v): v for v in pg.values()}.values()
+                  if not (frozenset(getattr(p, "accounts", None) or ()) & members)]
+        accs = sorted({a for p in people for a in (getattr(p, "accounts", None) or ())})
+        ids: list = []
+        if accs:
+            ids = [int(r["entity_id"]) for r in await conn.fetch(
+                _ANCHORED_SQL, [a[0] for a in accs], [a[1] for a in accs])]
+        return people, ids
+    except Exception as e:
+        logger.debug(f"KG recall: group members not read: {e}")
+        return [], []
+
+
+def _key_in(gram: str, pg: dict, outsiders: list):
+    k = person_key(gram, pg)
+    return () if not k or any(k is o for o in outsiders) else k
 
 _MEMORY_SEEDS_SQL = """
 SELECT s.source_id, r.subject_id, r.object_id
@@ -300,16 +345,19 @@ async def recall_kg(
             mids.append(i)
 
     grams = mention_grams(query)
-    if grams:
-        # v1.23.32: any name of an owner/family person finds their one entity.
-        pg = await person_groups()
-        more = [n for g in grams for n in sorted(person_key(g, pg) or ())]
-        grams = list(dict.fromkeys(grams + more))
+    # v1.23.32: any name of an owner/family person finds their one entity.
+    pg = await person_groups() if grams else {}
     try:
         async with get_connection() as conn:
             seeds: list = []
             if grams:
-                rows = await conn.fetch(_MATCH_SQL, grams, reference_types(), era, session_id)
+                # v1.23.38 (review F): in a group, a family person who is not
+                # a member is not who a name there means.
+                out_p, skip = await _outsiders(conn, session_id, pg)
+                more = [n for g in grams for n in sorted(_key_in(g, pg, out_p))]
+                grams = list(dict.fromkeys(grams + more))
+                rows = await conn.fetch(_MATCH_SQL, grams, reference_types(), era,
+                                        session_id, skip)
                 order = {g: n for n, g in enumerate(grams)}
                 for r in sorted(rows, key=lambda r: (order.get(r["norm_name"], 1 << 20), r["id"])):
                     if int(r["id"]) not in seeds:

@@ -41,6 +41,7 @@ names inside the message.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -541,8 +542,9 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
     norm = entity_norm(name, etype)        # v1.23.31: titles off for persons
     if etype == "person" and scope is None:
         # v1.23.32: every name of an owner/family person is one entity.
+        # v1.23.38: found by their accounts first (kg_entity_accounts).
         key = person_key(norm, s.get("_person_groups") or {})
-        pid = await person_entity(conn, key) if key else None
+        pid = await anchored_person(conn, key) if key else None
         if pid:
             await conn.execute(
                 "UPDATE kg_entities SET aliases = array_append(aliases, $2), updated_at = now() "
@@ -560,6 +562,7 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
                 "ON CONFLICT (LOWER(name), entity_type, coalesce(scope, '')) "
                 "DO UPDATE SET updated_at = now() RETURNING id",
                 canon, person_norm(canon), name)
+            await link_accounts(conn, eid, getattr(key, "accounts", None) or ())
             return eid, "person"
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
@@ -697,6 +700,10 @@ async def merge_entity(conn, drop: int, keep: int) -> int:
         "SELECT DISTINCT n FROM unnest($2::text[]) n WHERE lower(n) <> lower(k.name) "
         "AND NOT lower(n) = ANY (SELECT lower(a) FROM unnest(k.aliases) a)) "
         "WHERE k.id = $1", keep, names)
+    if await _has_accounts_table(conn):
+        # v1.23.38: the account links of `drop` follow it into `keep`.
+        await conn.execute(
+            "UPDATE kg_entity_accounts SET entity_id = $2 WHERE entity_id = $1", drop, keep)
     await conn.execute("DELETE FROM kg_entities WHERE id = $1", drop)
     return kept
 
@@ -708,11 +715,17 @@ _PG_CACHE: dict = {"at": 0.0, "val": None}
 
 
 def _as_json(v, default):
-    if isinstance(v, str):
+    # v1.23.38 (review H): decoded while still text, at most 3 times, so a
+    # family.directory saved as a JSON string inside JSON is still a list.
+    for _ in range(3):
+        if not isinstance(v, str):
+            break
         try:
-            return json.loads(v)
+            v = json.loads(v)
         except ValueError:
             return default
+    if isinstance(v, str):
+        return default
     return default if v is None else v
 
 
@@ -730,6 +743,7 @@ class KnownPeople(frozenset):
     it: shared everywhere). members: (platform, group id) -> member accounts."""
     owner_of: dict = {}
     members: dict = {}
+    person_of: dict = {}    # name -> index of the person (v1.23.38)
 
 
 def _person_norms(names) -> set:
@@ -782,6 +796,24 @@ def entry_accounts(p: dict) -> list:
     return list(dict.fromkeys(out))
 
 
+
+def _owner_entry(people: list, by_chat: dict, users) -> Optional[dict]:
+    """v1.23.38 (bug 1): the directory person of the owner user rows when no
+    entry has access "owner": the entry holding one of their accounts, else
+    the only entry sharing one of their names. None when neither."""
+    owners = [u for u in users if u.get("access_level") == "owner"
+              and str(u.get("platform")) != "cli"]
+    for u in owners:
+        per = by_chat.get((str(u.get("platform")), str(u.get("platform_id"))))
+        if per is not None:
+            return per
+    names: set = set()
+    for u in owners:
+        names |= _person_norms(_user_names(u))
+    hits = [per for per in people if per["names"] & names]
+    return hits[0] if len(hits) == 1 else None
+
+
 async def _people(conn) -> tuple:
     """([person], ambiguous keys) for owner/family people (v1.23.36).
 
@@ -814,9 +846,12 @@ async def _people(conn) -> tuple:
         if owner is None and str(p.get("access") or "") == "owner":
             owner = per
         people.append(per)
-    for u in await conn.fetch(
-            "SELECT platform, platform_id, name, display_name, aliases, access_level "
-            "FROM users WHERE access_level IN ('owner', 'family')"):
+    users = list(await conn.fetch(
+        "SELECT platform, platform_id, name, display_name, aliases, access_level "
+        "FROM users WHERE access_level IN ('owner', 'family')"))
+    if owner is None:
+        owner = _owner_entry(people, by_chat, users)
+    for u in users:
         acc = (str(u.get("platform")), str(u.get("platform_id")))
         if acc[0] == "cli":
             # the local console account is named after the system user
@@ -898,6 +933,187 @@ async def person_entity(conn, key: frozenset) -> Optional[int]:
         "SELECT id FROM kg_entities WHERE entity_type = 'person' AND scope IS NULL "
         "AND (norm_name = ANY($1::text[]) OR string_to_array(norm_name, ' ') <@ $1::text[]) "
         "ORDER BY (norm_name = ANY($1::text[])) DESC, id LIMIT 1", sorted(key))
+
+
+
+# ── Account anchor (v1.23.38, Riyo 20 Nov 2026) ───────────────────────────
+# The shared entity of an owner/family person is linked to their account ids
+# (family.directory chat_id + accounts, owner/family user rows). A name
+# finds an entity only when no account does, and never one anchored to
+# another person.
+
+_ACCOUNTS_TABLE_SQL = "SELECT to_regclass('kg_entity_accounts') IS NOT NULL"
+
+
+async def _has_accounts_table(conn) -> bool:
+    try:
+        return bool(await conn.fetchval(_ACCOUNTS_TABLE_SQL))
+    except Exception:
+        return False
+
+
+def _accs(accounts) -> list:
+    out = set()
+    for a in accounts or ():
+        try:
+            pf, cid = a
+        except (TypeError, ValueError):
+            continue
+        if pf and cid:
+            out.add((str(pf), _account_id(str(pf), str(cid))))
+    return sorted(out)
+
+
+async def account_entity(conn, accounts) -> Optional[int]:
+    """The entity linked to any of these (platform, id) accounts, or None.
+    Accounts of one person linked to two entities: merged into the oldest."""
+    accs = _accs(accounts)
+    if not accs or not await _has_accounts_table(conn):
+        return None
+    rows = await conn.fetch(
+        "SELECT DISTINCT entity_id FROM kg_entity_accounts "
+        "WHERE (platform, account_id) IN (SELECT * FROM unnest($1::text[], $2::text[])) "
+        "ORDER BY entity_id", [p for p, _ in accs], [c for _, c in accs])
+    ids = [int(r["entity_id"]) for r in rows]
+    if not ids:
+        return None
+    for drop in ids[1:]:
+        await merge_entity(conn, drop, ids[0])
+        logger.info(f"KG: person entity {drop} merged into {ids[0]} (same accounts)")
+    return ids[0]
+
+
+async def link_accounts(conn, eid, accounts) -> int:
+    """Link these accounts to entity eid. An account already linked stays
+    where it is. Returns the number of new links."""
+    accs = _accs(accounts)
+    if not eid or not accs or not await _has_accounts_table(conn):
+        return 0
+    res = await conn.execute(
+        "INSERT INTO kg_entity_accounts (entity_id, platform, account_id) "
+        "SELECT $1, p, c FROM unnest($2::text[], $3::text[]) AS t(p, c) "
+        "ON CONFLICT (platform, account_id) DO NOTHING",
+        int(eid), [p for p, _ in accs], [c for _, c in accs])
+    try:
+        return int(str(res).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def anchored_person(conn, key) -> Optional[int]:
+    """The shared entity of one owner/family person (key: PersonNames).
+    Their accounts first; then their names, skipping entities anchored to
+    another person. An entity found by name gets their accounts."""
+    accs = getattr(key, "accounts", None) or frozenset()
+    pid = await account_entity(conn, accs)
+    if pid:
+        await link_accounts(conn, pid, accs)
+        return pid
+    if not await _has_accounts_table(conn):
+        return await person_entity(conn, key)
+    pid = await conn.fetchval(
+        "SELECT e.id FROM kg_entities e WHERE e.entity_type = 'person' AND e.scope IS NULL "
+        "AND (e.norm_name = ANY($1::text[]) OR string_to_array(e.norm_name, ' ') <@ $1::text[]) "
+        "AND NOT EXISTS (SELECT 1 FROM kg_entity_accounts k WHERE k.entity_id = e.id) "
+        "ORDER BY (e.norm_name = ANY($1::text[])) DESC, e.id LIMIT 1", sorted(key))
+    if pid:
+        await link_accounts(conn, pid, accs)
+    return pid
+
+
+async def link_known_people(conn) -> int:
+    """Migration 67: every owner/family person with accounts gets their
+    entity linked. Idempotent. Returns the number of people linked."""
+    groups = await person_groups(conn, fresh=True)
+    n = 0
+    for key in {id(v): v for v in groups.values()}.values():
+        if getattr(key, "accounts", None) and await anchored_person(conn, key):
+            n += 1
+    return n
+
+
+def speaker_person(item: dict, groups) -> Optional[frozenset]:
+    """The owner/family person who sent this chat row, known by account
+    (metadata.sender_id in groups, the session owner in a DM), or None."""
+    if item.get("role") != "user" or not groups:
+        return None
+    pf, acc = item.get("sender_platform"), item.get("sender_account")
+    if not pf or not acc:
+        return None
+    a = (str(pf), _account_id(str(pf), str(acc)))
+    for key in {id(v): v for v in groups.values()}.values():
+        if a in (getattr(key, "accounts", None) or ()) and getattr(key, "canon", None):
+            return key
+    return None
+
+
+
+UNLINKED_KEY = "kg.unlinked_accounts_notified"
+_UNLINKED_DESC = ("Fingerprint of the owner/family accounts missing from family.directory "
+                  "that the owner was last told about (KG worker, v1.23.38). Set by Syne.")
+UNLINKED_EVERY = 3600.0
+_unlinked_retry_at = 0.0
+
+
+async def unlinked_accounts(conn) -> list:
+    """[(platform, id, name)] of owner/family user rows (not the console)
+    whose account is in no family.directory entry (v1.23.38)."""
+    d = _as_json(await conn.fetchval(
+        "SELECT value FROM config WHERE key = 'family.directory'"), [])
+    listed: set = set()
+    for p in d if isinstance(d, list) else []:
+        if isinstance(p, dict):
+            listed.update(entry_accounts(p))
+    out: set = set()
+    for u in await conn.fetch(
+            "SELECT platform, platform_id, name, display_name, aliases, access_level "
+            "FROM users WHERE access_level IN ('owner', 'family')"):
+        pf = str(u.get("platform"))
+        if pf == "cli" or not u.get("platform_id"):
+            continue
+        acc = (pf, _account_id(pf, str(u.get("platform_id"))))
+        if acc not in listed:
+            out.add((acc[0], acc[1], str(u.get("display_name") or u.get("name") or "")))
+    return sorted(out)
+
+
+def unlinked_text(rows: list) -> str:
+    lines = "\n".join(f"- {pf} {cid}" + (f" ({nm})" if nm else "") for pf, cid, nm in rows)
+    return ("Knowledge graph: these owner/family accounts are not listed in "
+            "family.directory:\n" + lines + "\n\nAdd each one to the \"accounts\" list "
+            "of that person's entry, so the graph knows whose account it is.")
+
+
+async def maybe_notify_unlinked() -> bool:
+    """Tell the owner once per distinct set of unlinked accounts. Checked at
+    most once an hour; a failed send is retried at the next check. Never
+    raises (except cancellation). True when a notice was sent."""
+    global _unlinked_retry_at
+    if time.monotonic() < _unlinked_retry_at:
+        return False
+    _unlinked_retry_at = time.monotonic() + UNLINKED_EVERY
+    try:
+        async with get_connection() as conn:
+            rows = await unlinked_accounts(conn)
+        digest = hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:16] if rows else ""
+        if digest == (await get_config(UNLINKED_KEY, "") or ""):
+            return False
+        if rows:
+            from ..communication.registry import CHANNEL_TELEGRAM, get_channel
+            ch = get_channel(CHANNEL_TELEGRAM)
+            if ch is None or not hasattr(ch, "notify_owner"):
+                logger.info("KG: unlinked accounts found, no Telegram channel to tell the owner")
+                return False
+            if not await ch.notify_owner(unlinked_text(rows)):
+                logger.warning("KG: unlinked accounts notice not delivered; retried later")
+                return False
+        await set_config(UNLINKED_KEY, digest, _UNLINKED_DESC)
+        return bool(rows)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning(f"KG: unlinked accounts check failed: {e}")
+        return False
 
 
 async def merge_known_people(conn) -> dict:
@@ -1009,13 +1225,21 @@ def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Opt
     DM messages carry no chat_scope (v1.23.16), so their people are shared.
     Shared (None): every other type, memory chunks, and people who are
     registered owner/family users or listed in family.directory (their name,
-    or its first or last word, e.g. "Pak Riyo", "Agha Gamitra").
+    or, v1.23.38, every word of it, e.g. "Pak Riyo", "Agha Gamitra").
     """
     if etype != "person" or not chat_scope:
         return None
     norm = strip_honorifics(normalize_name(name))
+    hit = norm if norm in known else None
     toks = norm.split()
-    hit = next((c for c in [norm] + ([toks[0], toks[-1]] if toks else []) if c in known), None)
+    if hit is None and len(toks) > 1:
+        # v1.23.38 (review E, option a): a name of several words is a known
+        # person only when EVERY word is a name of that same person ("Agha
+        # Gamitra"); "Riyogarta Hadi" is someone else.
+        po = getattr(known, "person_of", None) or {}
+        who = {po.get(t) for t in toks}
+        if len(who) == 1 and None not in who:
+            hit = toks[0]
     if hit is None:
         return chat_scope
     # v1.23.36 (review F): in a group the name is that person only when they
@@ -1035,9 +1259,11 @@ async def known_people(conn) -> KnownPeople:
     people belongs to neither. owner_of / members: see KnownPeople."""
     people, amb = await _people(conn)
     owner_of: dict = {}
-    for per in people:
+    person_of: dict = {}
+    for i, per in enumerate(people):
         for k in per["keys"] - amb:
             owner_of[k] = frozenset(per["accounts"])
+            person_of[k] = i
     members: dict = {}
     try:
         rows = await conn.fetch("SELECT platform, platform_group_id, settings FROM groups")
@@ -1057,11 +1283,13 @@ async def known_people(conn) -> KnownPeople:
         if me:
             names.add(me)
             owner_of.pop(me, None)
+            person_of.pop(me, None)
     except Exception:
         pass
     out = KnownPeople(names)
     out.owner_of = owner_of
     out.members = members
+    out.person_of = person_of
     return out
 
 
@@ -1080,7 +1308,8 @@ def _rel_pairs(subs: list, objs: list) -> list:
 
 async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
                       embed: Optional[Embedder], s: dict,
-                      chat_scope: Optional[str] = None) -> tuple:
+                      chat_scope: Optional[str] = None,
+                      speaker: Optional[frozenset] = None) -> tuple:
     """Resolve entities, upsert relations with their source. (entities, relations).
 
     A link-target reference (Qur'an verse) resolves to its node entities; a
@@ -1099,6 +1328,9 @@ async def write_graph(conn, extracted: dict, source_type: str, source_id: int,
             ids[e["name"].lower()] = span
             continue
         scope = person_scope(e["name"], e["type"], chat_scope, s.get("_known_people") or frozenset())
+        if scope and speaker is not None and e["type"] == "person" and person_key(
+                entity_norm(e["name"], "person"), s.get("_person_groups") or {}) is speaker:
+            scope = None    # v1.23.38: the sender, known by account
         eid, _how = await resolve_entity(conn, e["name"], e["type"], embed, s, scope)
         ids[e["name"].lower()] = [eid]
     n_rel = 0
@@ -1203,7 +1435,12 @@ async def pending(conn, floors: dict, era: datetime, s: dict, extra: int = 0) ->
         # same person when that user asks from another chat or platform.
         "CASE WHEN " + group_session_sql("se") + " THEN "
         "'chat:' || se.platform || ':' || coalesce(se.platform_chat_id, '') END AS chat_scope, "
-        "x.metadata->>'access' AS access, x.metadata->>'speaker' AS speaker FROM messages x "
+        "x.metadata->>'access' AS access, x.metadata->>'speaker' AS speaker, "
+        # v1.23.38: the sender account (group rows carry sender_id; a DM
+        # is written by the session owner).
+        "se.platform AS sender_platform, CASE WHEN x.role = 'user' THEN "
+        "coalesce(x.metadata->>'sender_id', CASE WHEN NOT " + group_session_sql("se") +
+        " THEN u.platform_id END) END AS sender_account FROM messages x "
         "LEFT JOIN sessions se ON se.id = x.session_id "
         "LEFT JOIN users u ON u.id = se.user_id "
         "WHERE x.id > $1 AND x.created_at >= $2 AND x.role IN ('user', 'assistant') "
@@ -1249,6 +1486,7 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
     layer = 0 if st == "memory" else (1 if item.get("role") == "user" else 2)
     log = {"layer": layer, "session_id": item.get("session_id"), "model": label,
            "n_entities": 0, "n_relations": 0}
+    anchor = None
     if st == "memory":
         speaker, text, context = f"stored memory, category {item.get('category')}", (item["content"] or "").strip(), ""
     else:
@@ -1256,7 +1494,11 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
             return {**log, "status": "skipped",
                     "reason": f"access {item.get('access') or 'unknown'}", "model": None,
                     "latency_ms": int((time.monotonic() - t0) * 1000)}
-        speaker, text = speaker_of(item["content"], item.get("role"), item.get("speaker") or "")
+        # v1.23.38: an owner/family sender is named by account, not by name.
+        anchor = speaker_person(item, s.get("_person_groups"))
+        speaker, text = speaker_of(item["content"], item.get("role"),
+                                   anchor.canon if anchor is not None
+                                   else (item.get("speaker") or ""))
         context = ""
     async with get_connection() as conn:
         if st == "message":
@@ -1301,7 +1543,7 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
                             "latency_ms": int((time.monotonic() - t0) * 1000)}
             n_e, n_r = await write_graph(conn, extracted, st, sid,
                                          _cached if embed is not None else None, s,
-                                         chat_scope=item.get("chat_scope"))
+                                         chat_scope=item.get("chat_scope"), speaker=anchor)
             res = {**log, "status": "done", "reason": reason, "n_entities": n_e,
                    "n_relations": n_r, "latency_ms": int((time.monotonic() - t0) * 1000)}
             await _write_log(conn, item, res)
@@ -1905,6 +2147,7 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         continue
                     lock_idle_logged = False
                 await gated(maybe_prune())
+                await gated(maybe_notify_unlinked())
                 s = await gated(load_settings())
                 era = s["kg.extract_era_start"]
                 if not s["kg.extract_enabled"] or era is None:

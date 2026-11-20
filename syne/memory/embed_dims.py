@@ -140,33 +140,44 @@ def history_only(plan: dict) -> bool:
     return bool(plan["blocked"]) and all(b[0] == "messages" for b in plan["blocked"])
 
 
-async def clear_history_vectors(conn, new_dims) -> int:
+async def _rebuild_empty_column(conn, table: str, nd: int) -> None:
+    """Drop and re-add an embedding column as vector(nd) (v1.23.37/38): two
+    catalog changes, no row rewrite. Other indexes on the column (the
+    partial idx_messages_embedding_pending) go with it and are rebuilt;
+    then the HNSW index (build_hnsw skips it above HNSW_MAX_DIMS)."""
+    keep = await conn.fetch(
+        "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+        "AND tablename = $1 AND indexname <> $2 AND indexdef ~ $3",
+        table, HNSW_INDEX[table], r"\membedding\M")
+    await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX[table]}")
+    await conn.execute(f"ALTER TABLE {table} DROP COLUMN embedding")
+    await conn.execute(f"ALTER TABLE {table} ADD COLUMN embedding vector({nd})")
+    for r in keep:
+        await conn.execute(r["indexdef"])
+    await build_hnsw(conn, table, nd)
+
+
+async def clear_history_vectors(conn, new_dims, n: int = None) -> int:
     """Empty every messages.embedding and type the column vector(new_dims)
     with a fresh HNSW index (v1.23.18, review #14). Messages are kept; old
     ones are not embedded again (Riyo's decision #57758), new ones get
     vectors of the new model. Before, a switch was refused as long as any
     history vector existed, with no way out.
-    Returns the number of vectors cleared."""
+    Returns the number of vectors cleared.
+
+    v1.23.38 (review B): n is the count the caller already read under the
+    same locks (apply_switch's plan); it is counted here only when not given.
+    """
     nd = int(new_dims)
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '10s'")
         await conn.execute("LOCK TABLE messages IN ACCESS EXCLUSIVE MODE")
-        n = int(await conn.fetchval(
-            "SELECT count(*) FROM messages WHERE embedding IS NOT NULL") or 0)
-        # v1.23.37 (review B): drop and re-add the column. Both are catalog
-        # changes; the UPDATE + ALTER TYPE USING before rewrote every row
-        # while the tables were locked. Other indexes on the column (the
-        # partial idx_messages_embedding_pending) go with it and are rebuilt.
-        keep = await conn.fetch(
-            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
-            "AND tablename = 'messages' AND indexname <> $1 AND indexdef ~ $2",
-            HNSW_INDEX["messages"], r"\membedding\M")
-        await conn.execute("ALTER TABLE messages DROP COLUMN embedding")
-        await conn.execute(f"ALTER TABLE messages ADD COLUMN embedding vector({nd})")
-        for r in keep:
-            await conn.execute(r["indexdef"])
-        await build_hnsw(conn, "messages", nd)
-    return n
+        if n is None:
+            n = int(await conn.fetchval(
+                "SELECT count(*) FROM messages WHERE embedding IS NOT NULL") or 0)
+        # v1.23.37 (review B): drop and re-add the column, no row rewrite.
+        await _rebuild_empty_column(conn, "messages", nd)
+    return int(n)
 
 
 async def build_hnsw(conn, table: str, dims: int) -> bool:
@@ -194,7 +205,10 @@ def clear_confirm_text(plan: dict, label) -> str:
         f"Switching to <b>{html.escape(str(label))}</b> empties the vectors of "
         f"<b>{n}</b> chat messages. The messages are kept and stay findable by "
         "keyword in history_search; old messages are not embedded again "
-        "automatically. This cannot be undone."
+        "automatically. This cannot be undone.\n\n"
+        "The disk space of the old vectors comes back only after "
+        "<code>VACUUM FULL messages</code>, which locks the table while it runs; "
+        "Syne never runs it on its own."
     )
 
 
@@ -234,7 +248,8 @@ async def apply_switch(conn, new_dims, config: dict, clear_history: bool = False
                 await conn.execute(f"LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")
             plan = await plan_switch(conn, nd)
         if plan["blocked"] and clear_history and history_only(plan):
-            out["cleared"] = await clear_history_vectors(conn, nd)
+            n_hist = sum(b[2] for b in plan["blocked"] if b[0] == "messages")
+            out["cleared"] = await clear_history_vectors(conn, nd, n_hist)
             plan = await plan_switch(conn, nd)
         refusal = refusal_for_plan(plan, nd)
         if refusal:
@@ -297,6 +312,11 @@ async def relax_columns(conn, tables: list, new_dims) -> list:
     an untyped `vector`: until reload_provider() swaps the provider, a write
     from the old one is rejected by the column type instead of mixing two
     dimensions (which broke every `<=>` query). The index is back at once.
+
+    v1.23.38 (review B): the empty column is dropped and re-added (catalog
+    only; ALTER TYPE USING rewrote the table under the lock) and emptiness
+    is checked with EXISTS instead of counting every row. Still checked
+    under the lock, so a writer that committed first refuses the switch.
     """
     nd = int(new_dims)
     order = sorted(set(tables))
@@ -308,13 +328,9 @@ async def relax_columns(conn, tables: list, new_dims) -> list:
         for t in order:
             await conn.execute(f"LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")
         for t in order:
-            n = await conn.fetchval(f"SELECT count(*) FROM {t} WHERE embedding IS NOT NULL")
-            if n:
-                raise RuntimeError(f"{t} holds {n} vectors now; nothing was changed")
-            await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX[t]}")
-            await conn.execute(
-                f"ALTER TABLE {t} ALTER COLUMN embedding TYPE vector({nd}) "
-                f"USING embedding::vector({nd})")
-            await build_hnsw(conn, t, nd)
+            if await conn.fetchval(
+                    f"SELECT EXISTS (SELECT 1 FROM {t} WHERE embedding IS NOT NULL)"):
+                raise RuntimeError(f"{t} holds vectors now; nothing was changed")
+            await _rebuild_empty_column(conn, t, nd)
             done.append(t)
     return done
