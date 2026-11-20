@@ -335,6 +335,11 @@ async def delete_user(platform: str, platform_id: str) -> Optional[dict]:
         async with conn.transaction():
             c = await _delete_user_counts(conn, uid, platform, pid)
             dm_ids, rows = c["dm_session_ids"], c["group_message_ids"]
+            # Lock order (v1.23.28): memory rows BEFORE anything that fires
+            # the BM25 trigger (which locks every bm25_corpus row). A memory
+            # update locks its row first and the corpus rows after; clearing
+            # memory.user_id after the messages UPDATE deadlocked with it.
+            await conn.execute("UPDATE memory SET user_id = NULL WHERE user_id = $1", uid)
             if rows:
                 await conn.execute(
                     "UPDATE messages SET content = '[message from a deleted user]', "
@@ -342,7 +347,6 @@ async def delete_user(platform: str, platform_id: str) -> Optional[dict]:
                     "|| '{\"deleted_user\": true}'::jsonb, embedding = NULL "
                     "WHERE id = ANY($1::int[])", rows)
                 await conn.execute("SELECT kg_prune_sources('message', $1::int[])", rows)
-            await conn.execute("UPDATE memory SET user_id = NULL WHERE user_id = $1", uid)
             if dm_ids:
                 await conn.execute(
                     "UPDATE subagent_runs SET parent_session_id = NULL "
