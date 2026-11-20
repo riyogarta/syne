@@ -533,7 +533,7 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
             aid = None
         if aid:
             return aid, "ayah"
-    norm = normalize_name(name)
+    norm = entity_norm(name, etype)        # v1.23.31: titles off for persons
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
         "AND entity_type = $3 AND scope IS NOT DISTINCT FROM $4 ORDER BY id LIMIT 1",
@@ -614,6 +614,93 @@ def strip_honorifics(norm: str) -> str:
     while toks and toks[0] in HONORIFICS:
         toks.pop(0)
     return " ".join(toks)
+
+
+def person_norm(name: str) -> str:
+    """norm_name of a person (v1.23.31): leading titles dropped, so "Pak
+    Riyo" and "Riyo" are one entity. A name that is only a title keeps it."""
+    n = normalize_name(name)
+    return strip_honorifics(n) or n
+
+
+def entity_norm(name: str, etype: Optional[str]) -> str:
+    """norm_name stored and matched for an entity of this type."""
+    return person_norm(name) if etype == "person" else normalize_name(name)
+
+
+async def merge_entity(conn, drop: int, keep: int) -> int:
+    """Move every relation of entity `drop` to `keep`, then delete `drop`
+    (v1.23.31). A relation that would duplicate one `keep` already has
+    hands its sources to that one; one that would link `keep` to itself is
+    dropped. The name and aliases of `drop` become aliases of `keep`.
+    Returns the number of relations kept (moved or folded)."""
+    d = await conn.fetchrow(
+        "SELECT name, aliases FROM kg_entities WHERE id = $1 FOR UPDATE", drop)
+    if d is None or drop == keep:
+        return 0
+    await conn.execute("SELECT 1 FROM kg_entities WHERE id = $1 FOR UPDATE", keep)
+    kept = 0
+    rels = await conn.fetch(
+        "SELECT id, subject_id, predicate, object_id FROM kg_relations "
+        "WHERE subject_id = $1 OR object_id = $1 ORDER BY id", drop)
+    for rel in rels:
+        s = keep if rel["subject_id"] == drop else rel["subject_id"]
+        o = keep if rel["object_id"] == drop else rel["object_id"]
+        if s == o:
+            await conn.execute("DELETE FROM kg_relations WHERE id = $1", rel["id"])
+            continue
+        dup = await conn.fetchval(
+            "SELECT id FROM kg_relations WHERE subject_id = $1 AND predicate = $2 "
+            "AND object_id = $3 AND id <> $4", s, rel["predicate"], o, rel["id"])
+        if dup:
+            await conn.execute(
+                "INSERT INTO kg_relation_sources (relation_id, source_type, source_id, origin, created_at) "
+                "SELECT $1, source_type, source_id, origin, created_at FROM kg_relation_sources "
+                "WHERE relation_id = $2 ON CONFLICT DO NOTHING", dup, rel["id"])
+            await conn.execute("UPDATE kg_relations SET updated_at = now() WHERE id = $1", dup)
+            await conn.execute("DELETE FROM kg_relations WHERE id = $1", rel["id"])
+        else:
+            await conn.execute(
+                "UPDATE kg_relations SET subject_id = $2, object_id = $3, updated_at = now() "
+                "WHERE id = $1", rel["id"], s, o)
+        kept += 1
+    names = [d["name"], *(d["aliases"] or [])]
+    await conn.execute(
+        "UPDATE kg_entities k SET updated_at = now(), aliases = k.aliases || ARRAY("
+        "SELECT DISTINCT n FROM unnest($2::text[]) n WHERE lower(n) <> lower(k.name) "
+        "AND NOT lower(n) = ANY (SELECT lower(a) FROM unnest(k.aliases) a)) "
+        "WHERE k.id = $1", keep, names)
+    await conn.execute("DELETE FROM kg_entities WHERE id = $1", drop)
+    return kept
+
+
+async def merge_titled_people(conn) -> dict:
+    """v1.23.31 (Riyo #57775 option B): a person entity whose name starts
+    with a title joins the entity with the same name without it, same scope
+    ("Pak Riyo" -> "Riyo"). With no such entity only its norm_name drops
+    the title. Idempotent. {"merged": n, "renamed": n}."""
+    rows = await conn.fetch(
+        "SELECT id, norm_name, scope FROM kg_entities "
+        "WHERE entity_type = 'person' AND norm_name IS NOT NULL ORDER BY id")
+    merged = renamed = 0
+    for r in rows:
+        target = strip_honorifics(r["norm_name"]) or r["norm_name"]
+        if target == r["norm_name"]:
+            continue
+        keep = await conn.fetchval(
+            "SELECT id FROM kg_entities WHERE entity_type = 'person' AND norm_name = $1 "
+            "AND scope IS NOT DISTINCT FROM $2 AND id <> $3 ORDER BY id LIMIT 1",
+            target, r["scope"], r["id"])
+        if keep is None:
+            await conn.execute(
+                "UPDATE kg_entities SET norm_name = $2, updated_at = now() WHERE id = $1",
+                r["id"], target)
+            renamed += 1
+        else:
+            await merge_entity(conn, r["id"], keep)
+            merged += 1
+            logger.info(f"KG: person entity {r['id']} ({r['norm_name']}) merged into {keep}")
+    return {"merged": merged, "renamed": renamed}
 
 
 def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
@@ -1022,7 +1109,7 @@ async def backfill_norm_names(batch: int = 2000) -> int:
     while True:
         async with get_connection() as conn:
             rows = await conn.fetch(
-                "SELECT id, name FROM kg_entities WHERE norm_name IS NULL "
+                "SELECT id, name, entity_type FROM kg_entities WHERE norm_name IS NULL "
                 "AND entity_type <> ALL($1::text[]) ORDER BY id LIMIT $2",
                 REFERENCE_TYPES, batch)
             if not rows:
@@ -1030,7 +1117,8 @@ async def backfill_norm_names(batch: int = 2000) -> int:
             await conn.execute(
                 "UPDATE kg_entities k SET norm_name = v.n "
                 "FROM unnest($1::int[], $2::text[]) AS v(id, n) WHERE k.id = v.id",
-                [r["id"] for r in rows], [normalize_name(r["name"]) for r in rows])
+                [r["id"] for r in rows],
+                [entity_norm(r["name"], r["entity_type"]) for r in rows])
         done += len(rows)
         await asyncio.sleep(0.2)
 
@@ -1251,7 +1339,7 @@ async def prepare_embeddings(extracted: dict, embed: Optional[Embedder],
                 "SELECT 1 FROM kg_entities WHERE norm_name = $1 "
                 "AND entity_type <> ALL($2::text[]) AND entity_type = $3 "
                 "AND scope IS NOT DISTINCT FROM $4 LIMIT 1",
-                normalize_name(name), reference_types(), e["type"], scope)
+                entity_norm(name, e["type"]), reference_types(), e["type"], scope)
             if not hit:
                 need.append(name)
     vecs: dict = {}

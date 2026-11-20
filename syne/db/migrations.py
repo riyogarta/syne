@@ -1729,6 +1729,19 @@ async def _m63_kg_usage_per_chunk(conn) -> None:
                        "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
 
 
+async def _m64_kg_merge_titled_people(conn) -> None:
+    """v1.23.31 (Riyo, decision #57775 option B). Idempotent.
+
+    A person's norm_name drops leading titles from now on; existing titled
+    person entities join the untitled one ("Pak Riyo" -> "Riyo"), their
+    relations and sources moved. No DDL; no chunk is extracted again.
+    """
+    from ..memory.kg_extract import merge_titled_people
+    res = await merge_titled_people(conn)
+    if res["merged"] or res["renamed"]:
+        logger.info(f"KG: titled people - {res['merged']} merged, {res['renamed']} norm_name fixed")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1793,6 +1806,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (61, _m61_kg_entities_embedding_untyped, "transactional"),
     (62, _m62_kg_usage_split_merges, "transactional"),
     (63, _m63_kg_usage_per_chunk, "transactional"),
+    (64, _m64_kg_merge_titled_people, "transactional"),
 ]
 
 
