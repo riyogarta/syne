@@ -4,6 +4,8 @@ Switching the embedding model never deletes memories. Vectors of different
 dimensions cannot be mixed (memory.embedding is a fixed vector(N) column),
 so a model whose dimension differs from the stored vectors is refused.
 """
+import html
+import json
 import re
 from typing import Optional
 
@@ -149,6 +151,67 @@ async def clear_history_vectors(conn, new_dims) -> int:
             f"CREATE INDEX {HNSW_INDEX['messages']} ON messages USING hnsw "
             "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
     return int(n.split()[-1]) if n else 0
+
+
+def clear_confirm_text(plan: dict, label) -> str:
+    """Confirmation asked before chat history vectors are cleared (v1.23.21,
+    review v1.23.16-19 bug 6: one tap used to clear them at once)."""
+    n = sum(b[2] for b in plan["blocked"] if b[0] == "messages")
+    return (
+        "🧹 <b>Clear chat history vectors?</b>\n\n"
+        f"Switching to <b>{html.escape(str(label))}</b> empties the vectors of "
+        f"<b>{n}</b> chat messages. The messages are kept and stay findable by "
+        "keyword in history_search; old messages are not embedded again "
+        "automatically. This cannot be undone."
+    )
+
+
+class SwitchRefused(Exception):
+    """Stored vectors block the switch; .html is the refusal shown."""
+
+    def __init__(self, text: str):
+        super().__init__("embedding switch refused")
+        self.html = text
+
+
+_CONFIG_UPSERT = (
+    "INSERT INTO config (key, value) VALUES ($1, $2::jsonb) "
+    "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb, updated_at = NOW()")
+
+
+async def apply_switch(conn, new_dims, config: dict, clear_history: bool = False) -> dict:
+    """Switch the embedding columns and write the provider config in ONE
+    transaction (v1.23.21, review v1.23.16-19 bug 3). Before, the history
+    vectors were cleared and the columns retyped in their own transactions
+    and the config written after: a failure in between left the vectors
+    gone and the columns of the new dimension while the old provider stayed
+    active. Now any failure rolls everything back.
+
+    The plan is checked again under the table locks. Chat history vectors
+    are cleared only when clear_history is set and history alone blocks the
+    switch. Raises SwitchRefused (nothing changed) when vectors still block.
+    Returns {"cleared": vectors cleared, "relaxed": tables retyped}.
+    """
+    nd = int(new_dims) if new_dims else None
+    out = {"cleared": 0, "relaxed": []}
+    async with conn.transaction():
+        await conn.execute("SET LOCAL lock_timeout = '10s'")
+        plan = await plan_switch(conn, nd)
+        if plan["blocked"] or plan["relax"]:
+            for t in sorted(TABLES):
+                await conn.execute(f"LOCK TABLE {t} IN ACCESS EXCLUSIVE MODE")
+            plan = await plan_switch(conn, nd)
+        if plan["blocked"] and clear_history and history_only(plan):
+            out["cleared"] = await clear_history_vectors(conn, nd)
+            plan = await plan_switch(conn, nd)
+        refusal = refusal_for_plan(plan, nd)
+        if refusal:
+            raise SwitchRefused(refusal)
+        if plan["relax"]:
+            out["relaxed"] = await relax_columns(conn, plan["relax"], nd)
+        for key, value in config.items():
+            await conn.execute(_CONFIG_UPSERT, key, json.dumps(value))
+    return out
 
 
 def switch_note(plan: dict, new_dims) -> str:

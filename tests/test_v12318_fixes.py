@@ -74,7 +74,8 @@ def test_telegram_offers_clear_only_for_history():
     src = inspect.getsource(T)
     assert "embed:confirm_clear:" in src
     assert "if history_only(plan):" in src
-    assert "clear_history and history_only(plan)" in src
+    assert "embed:ask_clear:" in src
+    assert "clear_history and history_only(plan)" in inspect.getsource(D.apply_switch)
 
 
 # ── real PostgreSQL ───────────────────────────────────────────────────────

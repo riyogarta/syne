@@ -5079,7 +5079,7 @@ Or just send me a message!"""
                 if history_only(plan):
                     rows.append([InlineKeyboardButton(
                         "🧹 Clear history vectors and switch",
-                        callback_data=f"embed:confirm_clear:{embed_key}")])
+                        callback_data=f"embed:ask_clear:{embed_key}")])
                 rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"embed:detail:{embed_key}")])
                 await query.edit_message_text(
                     refusal,
@@ -5121,6 +5121,28 @@ Or just send me a message!"""
             else:
                 await query.answer(f"Failed: {result[:50]}", show_alert=True)
             await self._embed_menu_main(query)
+
+        elif data.startswith("embed:ask_clear:"):
+            # v1.23.21: clearing history vectors cannot be undone; it asks first.
+            embed_key = data.split(":", 2)[2]
+            models = await get_config("provider.embedding_models", [])
+            entry = next((m for m in models if m.get("key") == embed_key), None)
+            if not entry:
+                await query.answer("Embedding not found", show_alert=True)
+                return
+            from ..db.connection import get_connection
+            from ..memory.embed_dims import plan_switch, clear_confirm_text
+            async with get_connection() as conn:
+                plan = await plan_switch(conn, entry.get("dimensions"))
+            await query.edit_message_text(
+                clear_confirm_text(plan, entry.get("label", embed_key)),
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🧹 Yes, clear and switch",
+                                         callback_data=f"embed:confirm_clear:{embed_key}"),
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"embed:detail:{embed_key}"),
+                ]]),
+            )
 
         elif data.startswith("embed:confirm_clear:"):
             # v1.23.18: only chat history blocked the switch; its vectors
@@ -5270,8 +5292,7 @@ Or just send me a message!"""
         """
         from ..llm.drivers import probe_embedding, get_model_from_list
         from ..db.connection import get_connection
-        from ..memory.embed_dims import (plan_switch, refusal_for_plan, relax_columns,
-                                         history_only, clear_history_vectors)
+        from ..memory.embed_dims import apply_switch, SwitchRefused
 
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
@@ -5292,30 +5313,25 @@ Or just send me a message!"""
             if not success:
                 return False, f"{label} failed: {error}"
 
-            async with get_connection() as conn:
-                plan = await plan_switch(conn, dims)
-            if clear_history and history_only(plan):
-                async with get_connection() as conn:
-                    n = await clear_history_vectors(conn, dims)
-                logger.warning(f"Embedding switch to {dims} dims: {n} chat history vectors cleared")
-                plan = dict(plan, blocked=[])
-            refusal = refusal_for_plan(plan, dims)
-            if refusal:
-                await bot.send_message(chat_id=chat_id, text=refusal, parse_mode="HTML")
-                return False, f"dimension {dims} ≠ stored vectors"
-            if plan["relax"]:
-                async with get_connection() as conn:
-                    relaxed = await relax_columns(conn, plan["relax"], dims)
-                logger.warning(f"Embedding switch to {dims} dims: empty columns switched: {relaxed}")
-
-            # Save current for rollback
+            # v1.23.21: clearing, retyping and the config are one transaction;
+            # a failure anywhere leaves everything as it was.
             previous_key = await get_config("provider.active_embedding", "together-bge")
-            await set_config("provider.previous_embedding", previous_key)
-
-            await set_config("provider.active_embedding", embed_key)
-            await set_config("provider.embedding_model", embed_entry.get("model_id", ""))
-            await set_config("provider.embedding_dimensions", dims)
-            await set_config("provider.embedding_driver", embed_entry.get("driver", ""))
+            try:
+                async with get_connection() as conn:
+                    res = await apply_switch(conn, dims, {
+                        "provider.previous_embedding": previous_key,
+                        "provider.active_embedding": embed_key,
+                        "provider.embedding_model": embed_entry.get("model_id", ""),
+                        "provider.embedding_dimensions": dims,
+                        "provider.embedding_driver": embed_entry.get("driver", ""),
+                    }, clear_history=clear_history)
+            except SwitchRefused as r:
+                await bot.send_message(chat_id=chat_id, text=r.html, parse_mode="HTML")
+                return False, f"dimension {dims} ≠ stored vectors"
+            if res["cleared"]:
+                logger.warning(f"Embedding switch to {dims} dims: {res['cleared']} chat history vectors cleared")
+            if res["relaxed"]:
+                logger.warning(f"Embedding switch to {dims} dims: empty columns switched: {res['relaxed']}")
 
             # Hot-reload provider (picks up new embedding)
             await self.agent.reload_provider(raise_on_unavailable=False)

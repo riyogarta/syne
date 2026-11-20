@@ -165,5 +165,6 @@ def test_kg_resolve_compares_same_dimension_only():
 def test_apply_embedding_relaxes_columns():
     from syne.communication import telegram as T
     src = inspect.getsource(T)
-    assert "await relax_columns(conn, plan[\"relax\"], dims)" in src
+    assert "await apply_switch(conn, dims," in src
+    assert "relax_columns(conn, plan[\"relax\"], nd)" in inspect.getsource(D.apply_switch)
     assert "stored_embedding_dims" not in src
