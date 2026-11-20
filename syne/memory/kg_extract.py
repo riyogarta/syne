@@ -1100,9 +1100,12 @@ async def era_floor(conn, table: str, era: datetime) -> int:
         f"SELECT coalesce(max(id), 0) FROM {table} WHERE created_at < $1", era) or 0)
 
 
-async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
+async def pending(conn, floors: dict, era: datetime, s: dict, extra: int = 0) -> list:
+    """Chunks to extract, lowest id first: kg.extract_batch plus `extra`
+    (v1.23.35: the worker asks one more per suspect chunk, so suspects
+    cannot fill the batch and hide the chunks behind them)."""
     from ..tools.history import group_session_sql
-    n = s["kg.extract_batch"]
+    n = s["kg.extract_batch"] + max(0, int(extra))
     out = []
     rows = await conn.fetch(
         "SELECT x.id, x.content, x.category, x.updated_at FROM memory x "
@@ -1133,6 +1136,17 @@ async def pending(conn, floors: dict, era: datetime, s: dict) -> list:
     )
     out += [{"type": "message", **dict(r)} for r in rows]
     return out
+
+
+MAX_SUSPECT_EXTRA = 50
+
+
+def order_batch(items: list, suspects, batch: int, room: Optional[int] = None) -> list:
+    """The chunks of one round (v1.23.35, review C): chunks that failed as
+    "model unavailable" (suspects) go last, THEN the batch and the daily room
+    are cut. Before, the cut came first, so suspects could fill the round."""
+    out = sorted(items, key=lambda it: (it["type"], it["id"]) in suspects)[:max(1, batch)]
+    return out if room is None else out[:max(0, room)]
 
 
 async def previous_message(conn, session_id: int, message_id: int) -> str:
@@ -1814,7 +1828,8 @@ async def run_worker(default_provider_getter: Callable[[], object],
                 async def _queue():
                     async with get_connection() as conn:
                         fl = await advance_floor(conn, floors["messages"], era, s)
-                        got = await pending(conn, dict(floors, messages=fl), era, s)
+                        got = await pending(conn, dict(floors, messages=fl), era, s,
+                                            extra=min(len(suspects), MAX_SUSPECT_EXTRA))
                         known = await known_people(conn) if got else frozenset()
                         groups = await person_groups(conn, fresh=True) if got else {}
                         return fl, got, known, groups
@@ -1826,6 +1841,7 @@ async def run_worker(default_provider_getter: Callable[[], object],
                     await asyncio.sleep(s["kg.extract_interval"])
                     continue
                 limit = s["kg.extract_daily_limit"]
+                room = None
                 if limit:
                     async def _used():
                         async with get_connection() as conn:
@@ -1839,7 +1855,7 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         await asyncio.sleep(300)
                         continue
                     limit_logged = False
-                    items = items[: limit - used]
+                    room = limit - used
                 key = judge_cache_key(s["kg.extract_model"], default_provider_getter())
                 if judge is None or judge_key != key:
                     judge = await build_judge(
@@ -1851,8 +1867,10 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         await asyncio.sleep(max(60, s["kg.extract_interval"]))
                         continue
                 # Chunks that failed as "model unavailable" go last: if another
-                # chunk gets an answer first, the model is up.
-                items.sort(key=lambda it: (it["type"], it["id"]) in suspects)
+                # chunk gets an answer first, the model is up. v1.23.35: sorted
+                # before the batch and the daily room are cut.
+                items = order_batch(items, suspects, s["kg.extract_batch"], room)
+                round_ok = False
                 for item in items:
                     if _maint.active():
                         break
@@ -1885,6 +1903,14 @@ async def run_worker(default_provider_getter: Callable[[], object],
                             suspects.pop(this, None)
                             res = _error_result(item, judge, f"model unavailable: {e}")
                             logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
+                        elif round_ok:
+                            # v1.23.35: another chunk of this round was just
+                            # answered, so the model is up: skip this one
+                            # without a nap; it stays a suspect and goes last.
+                            suspects[this] = (first, strikes)
+                            logger.info(f"KG extract {item['type']} {item['id']}: model unavailable "
+                                        f"for this chunk only ({str(e)[:120]}); skipped this round")
+                            continue
                         else:
                             # v1.23.30: auth failures too - the chunk goes
                             # last, so an error that is really about the chunk
@@ -1915,6 +1941,7 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         suspects.pop((item["type"], item["id"]), None)
                         if res.get("status") in ("done", "stale"):
                             last_ok = time.monotonic()
+                            round_ok = True
                     if not res.get("_logged"):
                         await gated(write_log(item, res))
                     if res["status"] == "stale":
