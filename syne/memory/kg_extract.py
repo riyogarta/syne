@@ -757,6 +757,31 @@ def _user_names(u) -> list:
     return names
 
 
+def _account_id(platform: str, cid: str) -> str:
+    """WhatsApp ids are bare numbers everywhere Syne stores them (users,
+    group members): '628..@s.whatsapp.net' / '628..:51@..' -> '628..'."""
+    cid = str(cid).strip()
+    if platform == "whatsapp":
+        cid = cid.split("@", 1)[0].split(":", 1)[0]
+    return cid
+
+
+def entry_accounts(p: dict) -> list:
+    """(platform, id) of one family.directory entry: its platform + chat_id,
+    plus (v1.23.37) every {"platform", "chat_id"} in its "accounts" list -
+    one person on several platforms (Yuli on WhatsApp, Agha on Discord)."""
+    out = []
+    if p.get("chat_id"):
+        pf = str(p.get("platform") or "telegram")
+        out.append((pf, _account_id(pf, p["chat_id"])))
+    extra = p.get("accounts")
+    for a in extra if isinstance(extra, list) else []:
+        if isinstance(a, dict) and a.get("chat_id"):
+            pf = str(a.get("platform") or "telegram")
+            out.append((pf, _account_id(pf, a["chat_id"])))
+    return list(dict.fromkeys(out))
+
+
 async def _people(conn) -> tuple:
     """([person], ambiguous keys) for owner/family people (v1.23.36).
 
@@ -783,8 +808,7 @@ async def _people(conn) -> tuple:
         per = new(next((x.strip() for x in n if isinstance(x, str)
                         and strip_honorifics(normalize_name(x))), None))
         per["names"] |= _person_norms(n)
-        if p.get("chat_id"):
-            acc = (str(p.get("platform") or "telegram"), str(p["chat_id"]))
+        for acc in entry_accounts(p):
             per["accounts"].add(acc)
             by_chat.setdefault(acc, per)
         if owner is None and str(p.get("access") or "") == "owner":
@@ -1670,11 +1694,29 @@ async def advance_floor(conn, floor: int, era: datetime, s: dict) -> int:
     return max(floor, new)
 
 
-def judge_cache_key(model_key: str, default_provider) -> tuple:
+async def judge_fingerprint(model_key: str) -> Optional[str]:
+    """Digest of the /models entry of kg.extract_model and of its API key
+    (v1.23.37, review D: a key fixed in config was used only after a
+    restart). None for the default model. The key itself is never kept."""
+    if not model_key:
+        return None
+    import hashlib
+    models = await get_config("provider.models", []) or []
+    entry = next((m for m in models if isinstance(m, dict) and m.get("key") == model_key), None)
+    if entry is None:
+        return "missing"
+    cred = entry.get("credential_key")
+    secret = await get_config(cred, None) if cred else None
+    raw = json.dumps(entry, sort_keys=True, default=str) + "\0" + str(secret or "")
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def judge_cache_key(model_key: str, default_provider, fingerprint: Optional[str] = None) -> tuple:
     """Rebuild the judge when this changes. An empty kg.extract_model
-    follows the default provider, which /models replaces (v1.23.13)."""
+    follows the default provider, which /models replaces (v1.23.13); a
+    picked model also when its entry or API key changes (v1.23.37)."""
     if model_key:
-        return (model_key,)
+        return (model_key, fingerprint)
     return ("", default_provider, getattr(default_provider, "chat_model", None))
 
 
@@ -1909,7 +1951,8 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         continue
                     limit_logged = False
                     room = limit - used
-                key = judge_cache_key(s["kg.extract_model"], default_provider_getter())
+                fp = await gated(judge_fingerprint(s["kg.extract_model"]))
+                key = judge_cache_key(s["kg.extract_model"], default_provider_getter(), fp)
                 if judge is None or judge_key != key:
                     judge = await build_judge(
                         s["kg.extract_model"], default_provider=default_provider_getter(),
@@ -1971,6 +2014,9 @@ async def run_worker(default_provider_getter: Callable[[], object],
                             suspects[this] = (first, strikes)
                             down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
                             if kind == "auth":
+                                # v1.23.37: built again next round, so fixed
+                                # credentials are read without a restart.
+                                judge, judge_key = None, None
                                 msg = (f"KG extract: the extraction model rejects the credentials "
                                        f"({str(e)[:200]}); extraction paused, no chunk loses an "
                                        f"attempt. Fix the key or OAuth of kg.extract_model "

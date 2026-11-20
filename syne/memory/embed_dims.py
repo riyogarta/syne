@@ -151,14 +151,22 @@ async def clear_history_vectors(conn, new_dims) -> int:
     async with conn.transaction():
         await conn.execute("SET LOCAL lock_timeout = '10s'")
         await conn.execute("LOCK TABLE messages IN ACCESS EXCLUSIVE MODE")
-        await conn.execute(f"DROP INDEX IF EXISTS {HNSW_INDEX['messages']}")
-        n = await conn.execute(
-            "UPDATE messages SET embedding = NULL WHERE embedding IS NOT NULL")
-        await conn.execute(
-            f"ALTER TABLE messages ALTER COLUMN embedding TYPE vector({nd}) "
-            f"USING embedding::vector({nd})")
+        n = int(await conn.fetchval(
+            "SELECT count(*) FROM messages WHERE embedding IS NOT NULL") or 0)
+        # v1.23.37 (review B): drop and re-add the column. Both are catalog
+        # changes; the UPDATE + ALTER TYPE USING before rewrote every row
+        # while the tables were locked. Other indexes on the column (the
+        # partial idx_messages_embedding_pending) go with it and are rebuilt.
+        keep = await conn.fetch(
+            "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+            "AND tablename = 'messages' AND indexname <> $1 AND indexdef ~ $2",
+            HNSW_INDEX["messages"], r"\membedding\M")
+        await conn.execute("ALTER TABLE messages DROP COLUMN embedding")
+        await conn.execute(f"ALTER TABLE messages ADD COLUMN embedding vector({nd})")
+        for r in keep:
+            await conn.execute(r["indexdef"])
         await build_hnsw(conn, "messages", nd)
-    return int(n.split()[-1]) if n else 0
+    return n
 
 
 async def build_hnsw(conn, table: str, dims: int) -> bool:

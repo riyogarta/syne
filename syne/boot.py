@@ -684,12 +684,25 @@ async def build_user_context(user: dict) -> str:
                 directory = _json.loads(directory)
             entries = []
             for person in (directory or []):
+                if not isinstance(person, dict):
+                    continue
                 names = person.get("names", [])
                 cid = person.get("chat_id", "")
                 plat = person.get("platform", "telegram")
-                if names and cid:
+                targets = [f"{plat} chat_id {cid}"] if cid else []
+                # v1.23.37: more accounts of the same person. Discord ids
+                # are user ids, not the channel id send_message needs.
+                for acc in person.get("accounts") or []:
+                    if not isinstance(acc, dict) or not acc.get("chat_id"):
+                        continue
+                    ap, aid = acc.get("platform") or "telegram", str(acc["chat_id"])
+                    if ap == "whatsapp" and "@" not in aid:
+                        aid += "@s.whatsapp.net"
+                    if ap in ("telegram", "whatsapp"):
+                        targets.append(f"{ap} chat_id {aid}")
+                if names and targets:
                     entries.append(
-                        f"  - {' / '.join(names)} -> {plat} chat_id {cid}"
+                        f"  - {' / '.join(names)} -> {'; '.join(targets)}"
                     )
             if entries:
                 parts.append(
