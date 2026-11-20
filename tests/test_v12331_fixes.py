@@ -17,7 +17,7 @@ def test_person_norm_drops_titles():
 
 
 def test_migration_64_registered():
-    assert M.MIGRATIONS[-1][0] == 64 and M.CURRENT_SCHEMA_VERSION == 64
+    assert (64, M._m64_kg_merge_titled_people, "transactional") in M.MIGRATIONS
 
 
 _DB = os.environ.get("SYNE_TEST_DATABASE_URL")

@@ -30,7 +30,8 @@ from typing import Optional
 from ..db.connection import get_connection
 from ..db.models import get_config
 from . import kg_refs as _refs
-from .kg_extract import ngrams, parse_era, reference_types, target_indexes
+from .kg_extract import (ngrams, parse_era, person_groups, person_key,
+                         reference_types, target_indexes)
 
 logger = logging.getLogger("syne.memory.kg_recall")
 
@@ -299,6 +300,11 @@ async def recall_kg(
             mids.append(i)
 
     grams = mention_grams(query)
+    if grams:
+        # v1.23.32: any name of an owner/family person finds their one entity.
+        pg = await person_groups()
+        more = [n for g in grams for n in sorted(person_key(g, pg) or ())]
+        grams = list(dict.fromkeys(grams + more))
     try:
         async with get_connection() as conn:
             seeds: list = []

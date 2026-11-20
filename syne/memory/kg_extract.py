@@ -265,8 +265,10 @@ def ngrams(text: str, n_max: int = 3) -> list:
     return list(dict.fromkeys(out))
 
 
-async def select_chunk(conn, text: str, min_words: int) -> tuple:
-    """(extract?, reason)."""
+async def select_chunk(conn, text: str, min_words: int,
+                       groups: Optional[dict] = None) -> tuple:
+    """(extract?, reason). groups (person_groups): a short message naming an
+    owner/family person by any of their names is a known entity (v1.23.32)."""
     if not (text or "").strip():
         return False, "empty"
     if len(words(text)) >= min_words:
@@ -274,6 +276,9 @@ async def select_chunk(conn, text: str, min_words: int) -> tuple:
     if cheap_entities(text):
         return True, "entity"
     grams = ngrams(text)
+    if grams and groups:
+        grams = list(dict.fromkeys(
+            grams + [n for g in grams for n in sorted(person_key(g, groups) or ())]))
     if grams:
         hit = await conn.fetchval(
             "SELECT 1 FROM kg_entities WHERE norm_name = ANY($1::text[]) "
@@ -514,7 +519,7 @@ resolve_ayah_span = resolve_ref_span
 
 async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
                          s: dict, scope: Optional[str] = None) -> tuple:
-    """(entity id, how): how = ayah | norm | embedding | new.
+    """(entity id, how): how = ayah | person | norm | embedding | new.
 
     A name that is exactly one item of a link target (a Qur'an verse) joins
     that target's node of the reference graph (not for persons: "Yusuf 12"
@@ -534,6 +539,16 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
         if aid:
             return aid, "ayah"
     norm = entity_norm(name, etype)        # v1.23.31: titles off for persons
+    if etype == "person" and scope is None:
+        # v1.23.32: every name of an owner/family person is one entity.
+        key = person_key(norm, s.get("_person_groups") or {})
+        pid = await person_entity(conn, key) if key else None
+        if pid:
+            await conn.execute(
+                "UPDATE kg_entities SET aliases = array_append(aliases, $2), updated_at = now() "
+                "WHERE id = $1 AND NOT (lower($2) = ANY (SELECT lower(a) FROM unnest(aliases) a)) "
+                "AND lower(name) <> lower($2)", pid, name)
+            return pid, "person"
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
         "AND entity_type = $3 AND scope IS NOT DISTINCT FROM $4 ORDER BY id LIMIT 1",
@@ -672,6 +687,144 @@ async def merge_entity(conn, drop: int, keep: int) -> int:
         "WHERE k.id = $1", keep, names)
     await conn.execute("DELETE FROM kg_entities WHERE id = $1", drop)
     return kept
+
+
+# ── Owner/family people: one entity per person (v1.23.32) ─────────────────
+
+PERSON_GROUPS_TTL = 60.0
+_PG_CACHE: dict = {"at": 0.0, "val": None}
+
+
+def _as_json(v, default):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return default
+    return default if v is None else v
+
+
+def _person_norms(names) -> set:
+    out = set()
+    for x in names:
+        if isinstance(x, str):
+            n = strip_honorifics(normalize_name(x))
+            if n:
+                out.add(n)
+    return out
+
+
+async def person_groups(conn=None, fresh: bool = False) -> dict:
+    """{name: all names of that person} for owner/family people (v1.23.32).
+
+    One person = one family.directory entry plus the owner/family user rows
+    linked to it by platform + chat_id (their name, display name, aliases);
+    a user row with no entry is a person of its own. Entries sharing a name
+    are one person ("Pak Riyo" on WhatsApp is "Riyo" of the directory).
+    Titles are dropped. Cached PERSON_GROUPS_TTL seconds; without a
+    connection a failure gives {} (recall must not break)."""
+    now = time.monotonic()
+    if not fresh and _PG_CACHE["val"] is not None and now - _PG_CACHE["at"] < PERSON_GROUPS_TTL:
+        return _PG_CACHE["val"]
+    if conn is None:
+        try:
+            async with get_connection() as own:
+                return await person_groups(own, fresh=True)
+        except Exception as e:
+            logger.debug(f"KG person groups unavailable: {e}")
+            return {}
+    d = _as_json(await conn.fetchval(
+        "SELECT value FROM config WHERE key = 'family.directory'"), [])
+    sets: list = []
+    by_chat: dict = {}
+    for p in d if isinstance(d, list) else []:
+        if not isinstance(p, dict):
+            continue
+        n = p.get("names") or []
+        sets.append(_person_norms([n] if isinstance(n, str) else (n if isinstance(n, list) else [])))
+        if p.get("chat_id"):
+            by_chat[(str(p.get("platform") or "telegram"), str(p["chat_id"]))] = len(sets) - 1
+    for u in await conn.fetch(
+            "SELECT platform, platform_id, name, display_name, aliases FROM users "
+            "WHERE access_level IN ('owner', 'family')"):
+        names = [u["name"], u["display_name"]]
+        al = _as_json(u["aliases"], {})
+        if isinstance(al, dict):
+            names.append(al.get("default"))
+            if isinstance(al.get("groups"), dict):
+                names.extend(al["groups"].values())
+        i = by_chat.get((str(u["platform"]), str(u["platform_id"])))
+        if i is None:
+            sets.append(_person_norms(names))
+        else:
+            sets[i] |= _person_norms(names)
+    merged: list = []
+    for st in sets:
+        if not st:
+            continue
+        st = set(st)
+        for m in [m for m in merged if m & st]:
+            st |= m
+            merged.remove(m)
+        merged.append(st)
+    # One frozenset per person, shared by all their names.
+    out = {n: f for f in map(frozenset, merged) for n in f}
+    _PG_CACHE["val"], _PG_CACHE["at"] = out, now
+    return out
+
+
+def person_key(norm: str, groups: dict) -> Optional[frozenset]:
+    """All names of the owner/family person this name is, or None. A name of
+    several words counts when every word is a name of the same person
+    ("agha gamitra")."""
+    if not groups or not norm:
+        return None
+    n = strip_honorifics(norm) or norm
+    if n in groups:
+        return groups[n]
+    ws = n.split()
+    if len(ws) > 1:
+        keys = {groups.get(w) for w in ws}
+        if len(keys) == 1 and None not in keys:
+            return keys.pop()
+    return None
+
+
+async def person_entity(conn, key: frozenset) -> Optional[int]:
+    """The shared person entity of one owner/family person."""
+    return await conn.fetchval(
+        "SELECT id FROM kg_entities WHERE entity_type = 'person' AND scope IS NULL "
+        "AND (norm_name = ANY($1::text[]) OR string_to_array(norm_name, ' ') <@ $1::text[]) "
+        "ORDER BY (norm_name = ANY($1::text[])) DESC, id LIMIT 1", sorted(key))
+
+
+async def merge_known_people(conn) -> dict:
+    """v1.23.32: the shared person entities of one owner/family person become
+    one. Kept: a name of the person itself, then the most relations, then
+    the oldest. Idempotent. {"merged": n, "people": n}."""
+    groups = await person_groups(conn, fresh=True)
+    rows = await conn.fetch(
+        "SELECT e.id, e.norm_name, (SELECT count(*) FROM kg_relations r "
+        "WHERE r.subject_id = e.id OR r.object_id = e.id) AS rels FROM kg_entities e "
+        "WHERE e.entity_type = 'person' AND e.scope IS NULL AND e.norm_name IS NOT NULL")
+    by: dict = {}
+    for r in rows:
+        key = person_key(r["norm_name"], groups)
+        if key:
+            by.setdefault(key, []).append(r)
+    merged = people = 0
+    for key, ents in by.items():
+        if len(ents) < 2:
+            continue
+        ents.sort(key=lambda r: ((strip_honorifics(r["norm_name"]) or r["norm_name"]) not in key,
+                                 -int(r["rels"]), r["id"]))
+        keep = ents[0]["id"]
+        people += 1
+        for r in ents[1:]:
+            await merge_entity(conn, r["id"], keep)
+            merged += 1
+            logger.info(f"KG: person entity {r['id']} ({r['norm_name']}) merged into {keep}")
+    return {"merged": merged, "people": people}
 
 
 async def merge_titled_people(conn) -> dict:
@@ -954,7 +1107,8 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         context = ""
     async with get_connection() as conn:
         if st == "message":
-            ok, reason = await select_chunk(conn, text, s["kg.extract_min_words"])
+            ok, reason = await select_chunk(conn, text, s["kg.extract_min_words"],
+                                            s.get("_person_groups"))
             if not ok:
                 return {**log, "status": "skipped", "reason": reason, "model": None,
                         "latency_ms": int((time.monotonic() - t0) * 1000)}
@@ -974,7 +1128,8 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         raise
     extracted = parse_extraction(raw, s)
     vecs = await prepare_embeddings(extracted, embed, item.get("chat_scope"),
-                                    s.get("_known_people") or frozenset())
+                                    s.get("_known_people") or frozenset(),
+                                    s.get("_person_groups"))
 
     async def _cached(name: str):
         return vecs.get(name)
@@ -1310,7 +1465,8 @@ async def _nap(seconds: float) -> None:
 
 async def prepare_embeddings(extracted: dict, embed: Optional[Embedder],
                              chat_scope: Optional[str] = None,
-                             known: frozenset = frozenset()) -> dict:
+                             known: frozenset = frozenset(),
+                             groups: Optional[dict] = None) -> dict:
     """{entity name: vector} for names write_graph may need to embed.
 
     Done before the write transaction opens (v1.23.13): with embedding
@@ -1335,6 +1491,10 @@ async def prepare_embeddings(extracted: dict, embed: Optional[Embedder],
                 except Exception:
                     pass
             scope = person_scope(name, e["type"], chat_scope, known)
+            if e["type"] == "person" and scope is None and groups:
+                key = person_key(entity_norm(name, "person"), groups)
+                if key and await person_entity(conn, key):
+                    continue
             hit = await conn.fetchval(
                 "SELECT 1 FROM kg_entities WHERE norm_name = $1 "
                 "AND entity_type <> ALL($2::text[]) AND entity_type = $3 "
@@ -1594,10 +1754,12 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         fl = await advance_floor(conn, floors["messages"], era, s)
                         got = await pending(conn, dict(floors, messages=fl), era, s)
                         known = await known_people(conn) if got else frozenset()
-                        return fl, got, known
-                floors["messages"], items, known = await gated(_queue())
+                        groups = await person_groups(conn, fresh=True) if got else {}
+                        return fl, got, known, groups
+                floors["messages"], items, known, groups = await gated(_queue())
                 if items:
                     s["_known_people"] = known
+                    s["_person_groups"] = groups
                 if not items:
                     await asyncio.sleep(s["kg.extract_interval"])
                     continue

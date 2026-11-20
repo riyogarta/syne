@@ -1742,6 +1742,20 @@ async def _m64_kg_merge_titled_people(conn) -> None:
         logger.info(f"KG: titled people - {res['merged']} merged, {res['renamed']} norm_name fixed")
 
 
+async def _m65_kg_merge_known_people(conn) -> None:
+    """v1.23.32 (Riyo, 20 Nov 2026). Idempotent.
+
+    The shared person entities of one owner/family person (family.directory
+    names + linked owner/family user names; "Riyogarta Pratikto", "Riyo",
+    "Yahyo") become one; relations and sources moved, the other names kept
+    as aliases. No DDL; no chunk is extracted again.
+    """
+    from ..memory.kg_extract import merge_known_people
+    res = await merge_known_people(conn)
+    if res["merged"]:
+        logger.info(f"KG: {res['merged']} person entities merged into {res['people']} people")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1807,6 +1821,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (62, _m62_kg_usage_split_merges, "transactional"),
     (63, _m63_kg_usage_per_chunk, "transactional"),
     (64, _m64_kg_merge_titled_people, "transactional"),
+    (65, _m65_kg_merge_known_people, "transactional"),
 ]
 
 
