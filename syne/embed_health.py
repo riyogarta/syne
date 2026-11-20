@@ -39,6 +39,14 @@ SOFT_FAILS_TO_DOWN = 2
 # started after the first failed (not two turns waiting side by side on
 # the same slow spell) and within this many seconds (v1.23.14).
 SOFT_FAIL_WINDOW = 600.0
+# v1.23.24 (review v1.23.16-19 bug 4): a recall timeout is excused as
+# "queued behind a history embed" only when that embed is younger than
+# BG_BUSY_GRACE seconds or finished successfully after the recall started,
+# and at most BG_EXCUSE_MAX times in a row. A hung Ollama keeps history
+# embeds running (or failing) forever; before, every timeout was excused,
+# the state never went DOWN and the owner was never told.
+BG_BUSY_GRACE = 60.0
+BG_EXCUSE_MAX = 3
 
 
 def sudoers_hint() -> str:
@@ -193,7 +201,11 @@ def is_soft_failure(err: BaseException) -> bool:
 
 _recall_inflight: int = 0           # recall embeds running (all chats)
 _bg_inflight: int = 0               # background (history) embeds running
-_bg_last_end: float = 0.0           # monotonic end of the last one
+_bg_last_end: float = 0.0           # monotonic end of the last SUCCESSFUL one
+_bg_started: dict = {}              # running background embed -> monotonic start
+_bg_seq: int = 0
+_excused: int = 0                   # recall timeouts excused in a row (v1.23.24)
+_excused_at: float = 0.0
 
 
 def recall_in_flight() -> bool:
@@ -204,14 +216,32 @@ def recall_in_flight() -> bool:
 async def background_embed():
     """Mark a background embed (v1.23.16). A recall that times out while one
     runs, or that started before one ended, queued behind it on a
-    one-request-at-a-time server (Ollama): busy, not dead."""
-    global _bg_inflight, _bg_last_end
+    one-request-at-a-time server (Ollama): busy, not dead.
+    v1.23.24: only its start is kept while it runs, and its end counts only
+    when it succeeded - a failed or hung one is no sign of a busy server."""
+    global _bg_inflight, _bg_last_end, _bg_seq
+    _bg_seq += 1
+    tok = _bg_seq
     _bg_inflight += 1
+    _bg_started[tok] = time.monotonic()
+    ok = False
     try:
         yield
+        ok = True
     finally:
         _bg_inflight -= 1
-        _bg_last_end = time.monotonic()
+        _bg_started.pop(tok, None)
+        if ok:
+            _bg_last_end = time.monotonic()
+
+
+def _behind_live_background(t_start: float, now: float) -> bool:
+    """The recall plausibly queued behind a history embed that is making
+    progress: every running one is younger than BG_BUSY_GRACE, or one
+    finished successfully after the recall started."""
+    if _bg_started and now - min(_bg_started.values()) < BG_BUSY_GRACE:
+        return True
+    return _bg_last_end > t_start
 
 
 async def quick_embed(provider, text: str) -> list:
@@ -240,17 +270,24 @@ async def _quick_embed(provider, text: str) -> list:
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        global _soft_fails, _soft_fail_at
+        global _soft_fails, _soft_fail_at, _excused, _excused_at
         soft = _since is None and is_soft_failure(e)
-        if soft and _soft_fails and time.monotonic() - _soft_fail_at > SOFT_FAIL_WINDOW:
+        now = time.monotonic()
+        if soft and _soft_fails and now - _soft_fail_at > SOFT_FAIL_WINDOW:
             _soft_fails = 0
+        if _excused and now - _excused_at > SOFT_FAIL_WINDOW:
+            _excused = 0
         # Started before the last soft failure was recorded: it waited on
         # the same slow spell, so it is not a second sign of a dead service.
         overlapped = soft and _soft_fails > 0 and t_start < _soft_fail_at
-        # Queued behind a background embed: busy, not a sign of a dead
-        # service - refuse this turn, count nothing (v1.23.16).
-        if soft and (_bg_inflight > 0 or _bg_last_end > t_start):
+        # Queued behind a background embed that is making progress: busy,
+        # not dead - refuse this turn, count nothing (v1.23.16). Bounded
+        # since v1.23.24, so a hung service still reaches DOWN.
+        if (soft and not overlapped and _excused < BG_EXCUSE_MAX
+                and _behind_live_background(t_start, now)):
             overlapped = True
+            _excused += 1
+            _excused_at = now
         if soft and (overlapped or _soft_fails < SOFT_FAILS_TO_DOWN - 1):
             # Busy, not dead: refuse only this turn, no incident yet.
             if not overlapped:
@@ -263,9 +300,11 @@ async def _quick_embed(provider, text: str) -> list:
             )
             raise EmbeddingUnavailableError(msg) from e
         _soft_fails = 0
+        _excused = 0
         await mark_down(e, timeout)
         schedule_owner_notice()
         raise EmbeddingUnavailableError(_error) from e
+    _excused = 0
     if _soft_fails:
         _soft_fails = 0
         _groups_told.clear()

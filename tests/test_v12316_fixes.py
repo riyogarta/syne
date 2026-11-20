@@ -197,6 +197,8 @@ async def test_recall_timeout_behind_background_embed_is_not_counted(monkeypatch
     monkeypatch.setattr(E, "_soft_fail_at", 0.0)
     monkeypatch.setattr(E, "_bg_inflight", 0)
     monkeypatch.setattr(E, "_bg_last_end", 0.0)
+    monkeypatch.setattr(E, "_bg_started", {})
+    monkeypatch.setattr(E, "_excused", 0)
     monkeypatch.setattr(E, "schedule_owner_notice", lambda: None)
 
     async def rt():
