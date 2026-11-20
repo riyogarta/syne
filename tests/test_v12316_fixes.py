@@ -110,15 +110,18 @@ def test_pending_scopes_group_sessions_only():
 async def test_known_people_tolerates_bad_directory(monkeypatch):
     class _Conn:
         async def fetch(self, q, *a):
-            return [{"name": "Riyogarta Pratikto", "display_name": None,
+            if "FROM groups" in q:
+                return [{"platform": "telegram", "platform_group_id": "-1",
+                         "settings": {"members": {"7": {}}}}]
+            return [{"platform": "telegram", "platform_id": "7", "access_level": "owner",
+                     "name": "Riyogarta Pratikto", "display_name": None,
                      "aliases": '{"default": "Yahyo"}'}]
 
         async def fetchval(self, q, *a):
+            if "family.directory" in q:
+                return ["oops", {"names": "Bunli"}, {"names": ["Agha", 7]}, {"names": None}]
             return "Molt"
 
-    async def cfg(key, default=None):
-        return ["oops", {"names": "Bunli"}, {"names": ["Agha", 7]}, {"names": None}]
-    monkeypatch.setattr(K, "get_config", cfg)
     known = await K.known_people(_Conn())
     assert {"riyogarta pratikto", "riyogarta", "pratikto", "yahyo",
             "bunli", "agha", "molt"} <= known

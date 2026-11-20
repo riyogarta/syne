@@ -719,8 +719,17 @@ def _as_json(v, default):
 class PersonNames(frozenset):
     """All names of one owner/family person. canon: the entity name, the
     first name of their family.directory entry (v1.23.33); None when the
-    person has no entry."""
+    person has no entry. accounts: their (platform, id) pairs (v1.23.36)."""
     canon: Optional[str] = None
+    accounts: frozenset = frozenset()
+
+
+class KnownPeople(frozenset):
+    """Names that are owner/family people (v1.23.36). owner_of: name ->
+    accounts of the one person holding it (the assistant's name is not in
+    it: shared everywhere). members: (platform, group id) -> member accounts."""
+    owner_of: dict = {}
+    members: dict = {}
 
 
 def _person_norms(names) -> set:
@@ -733,13 +742,87 @@ def _person_norms(names) -> set:
     return out
 
 
+def _entry_names(p: dict) -> list:
+    n = p.get("names") or []
+    return [n] if isinstance(n, str) else (n if isinstance(n, list) else [])
+
+
+def _user_names(u) -> list:
+    names = [u.get("name"), u.get("display_name")]
+    al = _as_json(u.get("aliases"), {})
+    if isinstance(al, dict):
+        names.append(al.get("default"))
+        if isinstance(al.get("groups"), dict):
+            names.extend(al["groups"].values())
+    return names
+
+
+async def _people(conn) -> tuple:
+    """([person], ambiguous keys) for owner/family people (v1.23.36).
+
+    One person = one family.directory entry plus the user rows linked to it
+    by platform + chat_id. Every owner user row is the owner: the first
+    entry with access "owner" ("Pak Riyo" on WhatsApp). Any other user row
+    with no entry is a person of its own. Entries are never joined by a
+    shared name (review G: two people called "Mama" became one).
+    person: {"names": normalised names, "keys": names + words of their
+    multi-word names, "canon": first entry name, "accounts": {(platform, id)}}.
+    A key held by more than one person is ambiguous (review E)."""
+    d = _as_json(await conn.fetchval(
+        "SELECT value FROM config WHERE key = 'family.directory'"), [])
+
+    def new(canon=None):
+        return {"names": set(), "canon": canon, "accounts": set()}
+    people: list = []
+    by_chat: dict = {}
+    owner = None
+    for p in d if isinstance(d, list) else []:
+        if not isinstance(p, dict):
+            continue
+        n = _entry_names(p)
+        per = new(next((x.strip() for x in n if isinstance(x, str)
+                        and strip_honorifics(normalize_name(x))), None))
+        per["names"] |= _person_norms(n)
+        if p.get("chat_id"):
+            acc = (str(p.get("platform") or "telegram"), str(p["chat_id"]))
+            per["accounts"].add(acc)
+            by_chat.setdefault(acc, per)
+        if owner is None and str(p.get("access") or "") == "owner":
+            owner = per
+        people.append(per)
+    for u in await conn.fetch(
+            "SELECT platform, platform_id, name, display_name, aliases, access_level "
+            "FROM users WHERE access_level IN ('owner', 'family')"):
+        acc = (str(u.get("platform")), str(u.get("platform_id")))
+        if acc[0] == "cli":
+            # the local console account is named after the system user
+            # ("syne"), not a name anyone calls the owner by
+            continue
+        per = by_chat.get(acc)
+        if per is None and u.get("access_level") == "owner":
+            if owner is None:
+                owner = new()
+                people.append(owner)
+            per = owner
+        if per is None:
+            per = new()
+            people.append(per)
+        per["names"] |= _person_norms(_user_names(u))
+        per["accounts"].add(acc)
+    seen: dict = {}
+    for per in people:
+        per["keys"] = per["names"] | {t for n in per["names"] for t in n.split()
+                                      if len(t) >= 3 and t not in HONORIFICS}
+        for k in per["keys"]:
+            seen[k] = seen.get(k, 0) + 1
+    return people, {k for k, c in seen.items() if c > 1}
+
+
 async def person_groups(conn=None, fresh: bool = False) -> dict:
     """{name: all names of that person} for owner/family people (v1.23.32).
 
-    One person = one family.directory entry plus the owner/family user rows
-    linked to it by platform + chat_id (their name, display name, aliases);
-    a user row with no entry is a person of its own. Entries sharing a name
-    are one person ("Pak Riyo" on WhatsApp is "Riyo" of the directory).
+    People as in _people() (v1.23.36: no longer joined by a shared name; a
+    name held by two people belongs to neither, and is not their canon).
     Titles are dropped. Cached PERSON_GROUPS_TTL seconds; without a
     connection a failure gives {} (recall must not break)."""
     now = time.monotonic()
@@ -752,53 +835,17 @@ async def person_groups(conn=None, fresh: bool = False) -> dict:
         except Exception as e:
             logger.debug(f"KG person groups unavailable: {e}")
             return {}
-    d = _as_json(await conn.fetchval(
-        "SELECT value FROM config WHERE key = 'family.directory'"), [])
-    sets: list = []
-    canons: list = []
-    by_chat: dict = {}
-    for p in d if isinstance(d, list) else []:
-        if not isinstance(p, dict):
-            continue
-        n = p.get("names") or []
-        n = [n] if isinstance(n, str) else (n if isinstance(n, list) else [])
-        sets.append(_person_norms(n))
-        canons.append(next((x.strip() for x in n if isinstance(x, str)
-                            and strip_honorifics(normalize_name(x))), None))
-        if p.get("chat_id"):
-            by_chat[(str(p.get("platform") or "telegram"), str(p["chat_id"]))] = len(sets) - 1
-    for u in await conn.fetch(
-            "SELECT platform, platform_id, name, display_name, aliases FROM users "
-            "WHERE access_level IN ('owner', 'family')"):
-        names = [u["name"], u["display_name"]]
-        al = _as_json(u["aliases"], {})
-        if isinstance(al, dict):
-            names.append(al.get("default"))
-            if isinstance(al.get("groups"), dict):
-                names.extend(al["groups"].values())
-        i = by_chat.get((str(u["platform"]), str(u["platform_id"])))
-        if i is None:
-            sets.append(_person_norms(names))
-            canons.append(None)
-        else:
-            sets[i] |= _person_norms(names)
-    merged: list = []          # [names, canon, order]; the earliest canon wins
-    for order, (st, canon) in enumerate(zip(sets, canons)):
-        if not st:
-            continue
-        st = set(st)
-        hits = [m for m in merged if m[0] & st]
-        for m in hits:
-            st |= m[0]
-            merged.remove(m)
-        cands = sorted([(m[2], m[1]) for m in hits if m[1]] + ([(order, canon)] if canon else []))
-        merged.append([st, cands[0][1] if cands else None,
-                       min([order] + [m[2] for m in hits])])
+    people, amb = await _people(conn)
     # One PersonNames per person, shared by all their names.
     out: dict = {}
-    for st, canon, _o in merged:
+    for per in people:
+        st = per["names"] - amb
+        if not st:
+            continue
         f = PersonNames(st)
-        f.canon = canon
+        canon = per["canon"]
+        f.canon = canon if canon and person_norm(canon) not in amb else None
+        f.accounts = frozenset(per["accounts"])
         out.update((n, f) for n in f)
     _PG_CACHE["val"], _PG_CACHE["at"] = out, now
     return out
@@ -918,6 +965,18 @@ async def merge_titled_people(conn) -> dict:
     return {"merged": merged, "renamed": renamed}
 
 
+def group_of(chat_scope: Optional[str]) -> Optional[tuple]:
+    """'chat:telegram:-100' -> ('telegram', '-100'); a group reminder
+    'chat:telegram:scheduled:-100:12' -> ('telegram', '-100')."""
+    parts = (chat_scope or "").split(":", 2)
+    if len(parts) < 3 or parts[0] != "chat":
+        return None
+    cid = parts[2]
+    if cid.startswith("scheduled:"):
+        cid = cid[len("scheduled:"):].rsplit(":", 1)[0]
+    return parts[1], cid
+
+
 def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
     """Scope of an entity extracted from a chunk (v1.23.15).
 
@@ -932,60 +991,54 @@ def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Opt
         return None
     norm = strip_honorifics(normalize_name(name))
     toks = norm.split()
-    if norm in known or (toks and (toks[0] in known or toks[-1] in known)):
-        return None
-    return chat_scope
+    hit = next((c for c in [norm] + ([toks[0], toks[-1]] if toks else []) if c in known), None)
+    if hit is None:
+        return chat_scope
+    # v1.23.36 (review F): in a group the name is that person only when they
+    # are a member of the group; a colleague "Gamitra" elsewhere is not Agha.
+    owner_of = getattr(known, "owner_of", None)
+    if owner_of is None or hit not in owner_of:
+        return None         # the assistant's name (or no membership known)
+    members = getattr(known, "members", {}).get(group_of(chat_scope)) or frozenset()
+    return None if owner_of[hit] & members else chat_scope
 
 
-async def known_people(conn) -> frozenset:
-    """Normalised names of owner/family users, their aliases, the
-    family.directory names and the assistant's own name."""
-    names: set = set()
-    for r in await conn.fetch(
-            "SELECT name, display_name, aliases FROM users "
-            "WHERE access_level IN ('owner', 'family')"):
-        names.update([r["name"], r["display_name"]])
-        al = r["aliases"]
-        if isinstance(al, str):
-            try:
-                al = json.loads(al)
-            except ValueError:
-                al = {}
-        if isinstance(al, dict):
-            names.add(al.get("default"))
-            if isinstance(al.get("groups"), dict):
-                names.update(al["groups"].values())
-    # v1.23.16: one malformed entry no longer drops the whole directory,
-    # and "names" given as a string is one name, not a list of letters.
+async def known_people(conn) -> KnownPeople:
+    """Normalised names of owner/family people (family.directory names,
+    owner/family user names and aliases; titles dropped) and the assistant's
+    own name. Each word of a multi-word name too ("Riyogarta" alone is the
+    owner), v1.23.36: only when no other person has it, and a name of two
+    people belongs to neither. owner_of / members: see KnownPeople."""
+    people, amb = await _people(conn)
+    owner_of: dict = {}
+    for per in people:
+        for k in per["keys"] - amb:
+            owner_of[k] = frozenset(per["accounts"])
+    members: dict = {}
     try:
-        d = await get_config("family.directory", [])
-        if isinstance(d, str):
-            d = json.loads(d)
+        rows = await conn.fetch("SELECT platform, platform_group_id, settings FROM groups")
     except Exception as e:
-        logger.warning(f"KG extract: family.directory unreadable: {e}")
-        d = []
-    for p in d if isinstance(d, list) else []:
-        if not isinstance(p, dict):
-            continue
-        n = p.get("names") or []
-        names.update([n] if isinstance(n, str) else (n if isinstance(n, list) else []))
+        logger.debug(f"KG extract: group members unavailable: {e}")
+        rows = []
+    for g in rows:
+        st = _as_json(g.get("settings"), {})
+        m = st.get("members") if isinstance(st, dict) else None
+        if isinstance(m, dict):
+            pf = str(g.get("platform"))
+            members[(pf, str(g.get("platform_group_id")))] = frozenset((pf, str(k)) for k in m)
+    names = set(owner_of)
     try:
-        names.add(await conn.fetchval(
-            "SELECT value FROM identity WHERE key = 'name' AND active = true"))
+        me = strip_honorifics(normalize_name(await conn.fetchval(
+            "SELECT value FROM identity WHERE key = 'name' AND active = true") or ""))
+        if me:
+            names.add(me)
+            owner_of.pop(me, None)
     except Exception:
         pass
-    out: set = set()
-    for x in names:
-        if not isinstance(x, str):
-            continue
-        norm = strip_honorifics(normalize_name(x))
-        if not norm:
-            continue
-        out.add(norm)
-        # Each word of a multi-word name too: "Riyogarta" alone is the owner.
-        # A title is never a name word (v1.23.23): "Pak Riyo" adds "riyo".
-        out.update(t for t in norm.split() if len(t) >= 3 and t not in HONORIFICS)
-    return frozenset(out)
+    out = KnownPeople(names)
+    out.owner_of = owner_of
+    out.members = members
+    return out
 
 
 def _rel_pairs(subs: list, objs: list) -> list:

@@ -15,11 +15,12 @@ DIRECTORY = [
 ]
 USERS = [
     {"platform": "telegram", "platform_id": "3478983", "name": "Riyogarta",
-     "display_name": "Riyogarta Pratikto", "aliases": "{}"},
+     "display_name": "Riyogarta Pratikto", "aliases": "{}", "access_level": "owner"},
     {"platform": "whatsapp", "platform_id": "628111681624", "name": "Pak Riyo",
-     "display_name": "Pak Riyo", "aliases": "{}"},
+     "display_name": "Pak Riyo", "aliases": "{}", "access_level": "owner"},
     {"platform": "telegram", "platform_id": "1544010", "name": "Yuliazmi",
-     "display_name": "Yuliazmi", "aliases": json.dumps({"default": "Bu Yuli"})},
+     "display_name": "Yuliazmi", "aliases": json.dumps({"default": "Bu Yuli"}),
+     "access_level": "family"},
 ]
 
 

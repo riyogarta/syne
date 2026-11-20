@@ -21,7 +21,7 @@ async def test_canon_is_first_directory_name():
 async def test_user_without_entry_has_no_canon():
     class C(_Conn):
         async def fetch(self, q, *a):
-            return USERS + [{"platform": "cli", "platform_id": "cli:x", "name": "Budi",
+            return USERS + [{"platform": "discord", "platform_id": "77", "name": "Budi",
                              "display_name": "Budi", "aliases": "{}"}]
     g = await K.person_groups(C(), fresh=True)
     assert g["budi"].canon is None and g["riyo"].canon == "Riyo"
