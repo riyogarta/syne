@@ -549,6 +549,18 @@ async def resolve_entity(conn, name: str, etype: str, embed: Optional[Embedder],
                 "WHERE id = $1 AND NOT (lower($2) = ANY (SELECT lower(a) FROM unnest(aliases) a)) "
                 "AND lower(name) <> lower($2)", pid, name)
             return pid, "person"
+        canon = getattr(key, "canon", None) if key else None
+        if canon:
+            # v1.23.33: the first entity of a known person is named as in
+            # family.directory; the name used here becomes an alias.
+            eid = await conn.fetchval(
+                "INSERT INTO kg_entities (name, entity_type, norm_name, scope, aliases) "
+                "VALUES ($1, 'person', $2, NULL, CASE WHEN lower($1) = lower($3) "
+                "THEN '{}'::text[] ELSE ARRAY[$3] END) "
+                "ON CONFLICT (LOWER(name), entity_type, coalesce(scope, '')) "
+                "DO UPDATE SET updated_at = now() RETURNING id",
+                canon, person_norm(canon), name)
+            return eid, "person"
     row = await conn.fetchrow(
         "SELECT id FROM kg_entities WHERE norm_name = $1 AND entity_type <> ALL($2::text[]) "
         "AND entity_type = $3 AND scope IS NOT DISTINCT FROM $4 ORDER BY id LIMIT 1",
@@ -704,6 +716,13 @@ def _as_json(v, default):
     return default if v is None else v
 
 
+class PersonNames(frozenset):
+    """All names of one owner/family person. canon: the entity name, the
+    first name of their family.directory entry (v1.23.33); None when the
+    person has no entry."""
+    canon: Optional[str] = None
+
+
 def _person_norms(names) -> set:
     out = set()
     for x in names:
@@ -736,12 +755,16 @@ async def person_groups(conn=None, fresh: bool = False) -> dict:
     d = _as_json(await conn.fetchval(
         "SELECT value FROM config WHERE key = 'family.directory'"), [])
     sets: list = []
+    canons: list = []
     by_chat: dict = {}
     for p in d if isinstance(d, list) else []:
         if not isinstance(p, dict):
             continue
         n = p.get("names") or []
-        sets.append(_person_norms([n] if isinstance(n, str) else (n if isinstance(n, list) else [])))
+        n = [n] if isinstance(n, str) else (n if isinstance(n, list) else [])
+        sets.append(_person_norms(n))
+        canons.append(next((x.strip() for x in n if isinstance(x, str)
+                            and strip_honorifics(normalize_name(x))), None))
         if p.get("chat_id"):
             by_chat[(str(p.get("platform") or "telegram"), str(p["chat_id"]))] = len(sets) - 1
     for u in await conn.fetch(
@@ -756,19 +779,27 @@ async def person_groups(conn=None, fresh: bool = False) -> dict:
         i = by_chat.get((str(u["platform"]), str(u["platform_id"])))
         if i is None:
             sets.append(_person_norms(names))
+            canons.append(None)
         else:
             sets[i] |= _person_norms(names)
-    merged: list = []
-    for st in sets:
+    merged: list = []          # [names, canon, order]; the earliest canon wins
+    for order, (st, canon) in enumerate(zip(sets, canons)):
         if not st:
             continue
         st = set(st)
-        for m in [m for m in merged if m & st]:
-            st |= m
+        hits = [m for m in merged if m[0] & st]
+        for m in hits:
+            st |= m[0]
             merged.remove(m)
-        merged.append(st)
-    # One frozenset per person, shared by all their names.
-    out = {n: f for f in map(frozenset, merged) for n in f}
+        cands = sorted([(m[2], m[1]) for m in hits if m[1]] + ([(order, canon)] if canon else []))
+        merged.append([st, cands[0][1] if cands else None,
+                       min([order] + [m[2] for m in hits])])
+    # One PersonNames per person, shared by all their names.
+    out: dict = {}
+    for st, canon, _o in merged:
+        f = PersonNames(st)
+        f.canon = canon
+        out.update((n, f) for n in f)
     _PG_CACHE["val"], _PG_CACHE["at"] = out, now
     return out
 
@@ -825,6 +856,37 @@ async def merge_known_people(conn) -> dict:
             merged += 1
             logger.info(f"KG: person entity {r['id']} ({r['norm_name']}) merged into {keep}")
     return {"merged": merged, "people": people}
+
+
+async def name_known_people(conn) -> int:
+    """v1.23.33 (Riyo, option A): the entity of an owner/family person takes
+    the first name of their family.directory entry; the old name becomes an
+    alias. A shared person entity already holding that name is merged in
+    first. Idempotent. Returns the number renamed."""
+    groups = await person_groups(conn, fresh=True)
+    renamed = 0
+    for key in {id(v): v for v in groups.values()}.values():
+        canon = getattr(key, "canon", None)
+        if not canon:
+            continue
+        eid = await person_entity(conn, key)
+        if not eid:
+            continue
+        old = await conn.fetchval("SELECT name FROM kg_entities WHERE id = $1 FOR UPDATE", eid)
+        if old == canon:
+            continue
+        clash = await conn.fetchval(
+            "SELECT id FROM kg_entities WHERE lower(name) = lower($1) AND entity_type = 'person' "
+            "AND scope IS NULL AND id <> $2", canon, eid)
+        if clash:
+            await merge_entity(conn, clash, eid)
+        await conn.execute(
+            "UPDATE kg_entities SET name = $2, norm_name = $3, updated_at = now(), aliases = ARRAY("
+            "SELECT DISTINCT a FROM unnest(aliases || $4::text) a WHERE lower(a) <> lower($2)) "
+            "WHERE id = $1", eid, canon, person_norm(canon), old)
+        renamed += 1
+        logger.info(f"KG: person entity {eid} renamed {old!r} -> {canon!r}")
+    return renamed
 
 
 async def merge_titled_people(conn) -> dict:
@@ -1493,7 +1555,7 @@ async def prepare_embeddings(extracted: dict, embed: Optional[Embedder],
             scope = person_scope(name, e["type"], chat_scope, known)
             if e["type"] == "person" and scope is None and groups:
                 key = person_key(entity_norm(name, "person"), groups)
-                if key and await person_entity(conn, key):
+                if key and (getattr(key, "canon", None) or await person_entity(conn, key)):
                     continue
             hit = await conn.fetchval(
                 "SELECT 1 FROM kg_entities WHERE norm_name = $1 "

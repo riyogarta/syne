@@ -69,7 +69,7 @@ async def test_select_chunk_matches_other_names():
 
 
 def test_migration_65_registered():
-    assert M.MIGRATIONS[-1][0] == 65 and M.CURRENT_SCHEMA_VERSION == 65
+    assert (65, M._m65_kg_merge_known_people, "transactional") in M.MIGRATIONS
 
 
 _DB = os.environ.get("SYNE_TEST_DATABASE_URL")

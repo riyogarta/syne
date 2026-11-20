@@ -1756,6 +1756,19 @@ async def _m65_kg_merge_known_people(conn) -> None:
         logger.info(f"KG: {res['merged']} person entities merged into {res['people']} people")
 
 
+async def _m66_kg_name_known_people(conn) -> None:
+    """v1.23.33 (Riyo, 20 Nov 2026, option A). Idempotent.
+
+    The entity of an owner/family person is renamed to the first name of
+    their family.directory entry ("Riyogarta Pratikto" -> "Riyo", "Gamitra"
+    -> "Agha"); the old name becomes an alias. No DDL.
+    """
+    from ..memory.kg_extract import name_known_people
+    n = await name_known_people(conn)
+    if n:
+        logger.info(f"KG: {n} person entities renamed after family.directory")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1822,6 +1835,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (63, _m63_kg_usage_per_chunk, "transactional"),
     (64, _m64_kg_merge_titled_people, "transactional"),
     (65, _m65_kg_merge_known_people, "transactional"),
+    (66, _m66_kg_name_known_people, "transactional"),
 ]
 
 
