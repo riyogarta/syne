@@ -320,9 +320,12 @@ async def history_search_handler(
             "message only. Omit them to search the chats this person may see."
         )
 
+    # v1.23.20: no "embedding IS NOT NULL" here. A message without a vector
+    # (embed failed, or history vectors cleared by /embedding) is still found
+    # by its keywords (BM25 list) and in recency order; only the cosine list
+    # below needs a vector.
     conditions = [
         f"m.role = '{_LEVEL_ROLE[level]}'",
-        "m.embedding IS NOT NULL",
     ]
     if level == 2:
         # Tool-call shells carry no text; they are never embedded, but say so.
@@ -369,9 +372,12 @@ async def history_search_handler(
     where = " AND ".join(conditions)
 
     if sort_by == "recency":
-        order = "m.created_at DESC, (m.embedding <=> $1::vector) ASC"
+        # Rows without a vector sort last within the same timestamp.
+        order = "m.created_at DESC, (m.embedding <=> $1::vector) ASC NULLS LAST"
+        cos_where = where
     else:
         order = "(m.embedding <=> $1::vector) ASC, m.created_at DESC"
+        cos_where = where + " AND m.embedding IS NOT NULL"
 
     # Hybrid ranking for sort_by=similarity (KG-RAG stage 1): cosine list +
     # BM25 keyword list over the same filters, fused by reciprocal rank
@@ -405,7 +411,7 @@ async def history_search_handler(
             s.platform AS platform
         FROM messages m
         LEFT JOIN sessions s ON s.id = m.session_id
-        WHERE {where}
+        WHERE {cos_where}
         ORDER BY {order}
         LIMIT ${limit_param} OFFSET ${offset_param}
     """

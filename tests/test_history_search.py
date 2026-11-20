@@ -200,6 +200,64 @@ class TestHistorySearchShape:
         assert params[-2] == 20 and params[-1] == 0
 
 
+class TestRowsWithoutVector:
+    """v1.23.20: a message without a vector is still found by keywords and
+    in recency order; only the cosine list requires a vector."""
+
+    async def _sqls(self, sort_by="similarity", bm25=True):
+        from syne.memory import hybrid as HY
+        prov = MagicMock()
+        prov.embed = AsyncMock(return_value=MagicMock(vector=[0.1]))
+        H.set_embedding_provider(prov)
+        sqls = []
+
+        async def fetch(sql, *params):
+            sqls.append(sql)
+            return []
+
+        conn = AsyncMock()
+        conn.fetch = AsyncMock(side_effect=fetch)
+        conn.execute = AsyncMock()
+        conn.fetchval = AsyncMock(return_value=1)
+        ctx = AsyncMock()
+        ctx.__aenter__ = AsyncMock(return_value=conn)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+
+        async def settings():
+            s = {k: v[0] for k, v in HY.DEFAULTS.items()}
+            s["bm25.history_enabled"] = bm25
+            return s
+
+        bq = MagicMock()
+        bq.params = MagicMock(return_value=[["kopi"], [1.0], "'kopi'", 1.2, 0.75, 10.0])
+
+        async def terms(*a, **k):
+            return bq
+
+        with patch("syne.tools.history.get_connection", return_value=ctx), \
+                patch("syne.memory.hybrid.load_settings", side_effect=settings), \
+                patch("syne.memory.hybrid.query_terms", side_effect=terms):
+            await H.history_search_handler(_scope=OWNER_DM, query="kopi", sort_by=sort_by)
+        return [s for s in sqls if "FROM messages m" in s or "WITH" in s]
+
+    async def test_cosine_list_needs_a_vector(self):
+        sqls = await self._sqls()
+        cos = [s for s in sqls if "sc.bm25" not in s]
+        assert cos and "m.embedding IS NOT NULL" in cos[0]
+
+    async def test_bm25_list_searches_rows_without_vector(self):
+        sqls = await self._sqls()
+        bm = [s for s in sqls if "sc.bm25" in s]
+        assert bm, "the BM25 list must run"
+        assert "embedding IS NOT NULL" not in bm[0]
+        assert "m.tsv @@" in bm[0]
+
+    async def test_recency_lists_rows_without_vector(self):
+        sqls = await self._sqls(sort_by="recency")
+        assert sqls and "embedding IS NOT NULL" not in sqls[0]
+        assert "NULLS LAST" in sqls[0]
+
+
 class TestHistorySearchLevels:
 
     async def _run(self, **kw):
