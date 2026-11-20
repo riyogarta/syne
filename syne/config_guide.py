@@ -355,11 +355,10 @@ Active chat and embedding models. These reference keys in `provider.models` and
 `provider.embedding_models` registries.
 - **Change chat model when**: Owner wants different quality/cost tradeoff, or current model
   has issues (rate limits, downtime).
-- **Change embedding model when**: Switching embedding providers. **CRITICAL**: changing
-  embedding model requires re-embedding ALL memories. Same dimension: the owner runs
-  `syne memory reembed-memory --force` and `reembed-history --all`
-  (not automatic; the /embedding switch screen lists only the tables that still
-  hold vectors). Different dimension: refused while memory vectors of the old
+- **Change embedding model when**: Switching embedding providers. **CRITICAL**: existing
+  rows are NOT re-embedded (owner decision): old vectors stay, and a successful switch
+  records its date in `embedding.era_start`; a re-embed, if ever wanted, only takes
+  rows created before that date. Same dimension: switched as is. Different dimension: refused while memory vectors of the old
   dimension exist (empty columns are switched) — memories are never deleted, and
   vectors of different dimensions cannot be mixed. When only chat history holds
   them, /embedding offers "Clear history vectors and switch": messages are kept,

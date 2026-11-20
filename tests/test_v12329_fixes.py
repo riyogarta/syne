@@ -44,14 +44,14 @@ class _Conn:
 
 async def test_hint_same_dims_lists_tables_with_vectors():
     h = await D.reembed_hint(_Conn({"memory": 9, "messages": 5}), {"blocked": [], "relax": []})
-    assert D.REEMBED_CMD["memory"] in h and D.REEMBED_CMD["messages"] in h
+    assert "9 " in h and "5 " in h and "reembed" not in h
 
 
 async def test_hint_skips_empty_and_retyped_tables():
     assert await D.reembed_hint(_Conn({"memory": 0, "messages": 0}),
                                 {"blocked": [], "relax": ["memory", "messages"]}) == ""
     h = await D.reembed_hint(_Conn({"memory": 9, "messages": 0}), {"blocked": [], "relax": []})
-    assert D.REEMBED_CMD["memory"] in h and "reembed-history" not in h
+    assert "9 " in h and "reembed" not in h and D.ERA_KEY in h
 
 
 def test_texts_updated():

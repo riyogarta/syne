@@ -1114,11 +1114,15 @@ CHUNK_FAULT_STRIKES = 2
 
 def spends_attempt(kind: str, first: float, strikes: int, last_ok: float, now: float) -> bool:
     """Whether this "model unavailable" failure costs the chunk an attempt.
-    Credentials rejected ("auth") never do: no chunk is at fault."""
+    Credentials rejected ("auth") do not, unless the same chunk keeps
+    getting it while other chunks are answered (v1.23.30)."""
+    if kind in ("timeout", "auth") and last_ok > first and strikes >= CHUNK_FAULT_STRIKES:
+        # v1.23.30: an "auth" error on this chunk while the model answers
+        # others is not about the credentials (e.g. an error text that only
+        # mentions 401 / forbidden): the chunk is at fault.
+        return True
     if kind == "auth":
         return False
-    if kind == "timeout" and last_ok > first and strikes >= CHUNK_FAULT_STRIKES:
-        return True
     return strikes >= PROVIDER_DOWN_STRIKES and now - first >= PROVIDER_DOWN_GIVE_UP
 
 
@@ -1570,8 +1574,10 @@ async def run_worker(default_provider_getter: Callable[[], object],
                             res = _error_result(item, judge, f"model unavailable: {e}")
                             logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
                         else:
-                            if kind != "auth":
-                                suspects[this] = (first, strikes)
+                            # v1.23.30: auth failures too - the chunk goes
+                            # last, so an error that is really about the chunk
+                            # cannot stall the whole queue.
+                            suspects[this] = (first, strikes)
                             down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
                             if kind == "auth":
                                 msg = (f"KG extract: the extraction model rejects the credentials "

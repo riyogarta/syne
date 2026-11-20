@@ -5292,7 +5292,8 @@ Or just send me a message!"""
         """
         from ..llm.drivers import probe_embedding, get_model_from_list
         from ..db.connection import get_connection
-        from ..memory.embed_dims import apply_switch, SwitchRefused
+        from ..memory.embed_dims import apply_switch, SwitchRefused, ERA_KEY
+        from datetime import datetime, timezone
 
         # Get embedding registry
         models = await get_config("provider.embedding_models", [])
@@ -5324,6 +5325,8 @@ Or just send me a message!"""
                         "provider.embedding_model": embed_entry.get("model_id", ""),
                         "provider.embedding_dimensions": dims,
                         "provider.embedding_driver": embed_entry.get("driver", ""),
+                        # v1.23.30: era of the new model, in the same transaction
+                        ERA_KEY: datetime.now(timezone.utc).isoformat(),
                     }, clear_history=clear_history)
             except SwitchRefused as r:
                 await bot.send_message(chat_id=chat_id, text=r.html, parse_mode="HTML")

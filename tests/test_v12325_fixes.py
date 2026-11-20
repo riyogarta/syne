@@ -53,7 +53,7 @@ def test_timeout_blames_the_chunk_only_when_it_repeats_while_others_answer():
 def test_a_day_of_failures_still_gives_up_except_auth():
     day = K.PROVIDER_DOWN_GIVE_UP
     assert K.spends_attempt("down", 0.0, K.PROVIDER_DOWN_STRIKES, 0.0, day + 1)
-    assert not K.spends_attempt("auth", 0.0, 99, last_ok=50.0, now=day * 9)
+    assert not K.spends_attempt("auth", 0.0, 99, last_ok=0.0, now=day * 9)
 
 
 async def test_process_one_raises_auth_as_provider_down(monkeypatch):
@@ -84,5 +84,6 @@ def test_worker_pauses_on_auth_and_logs_error_once():
     src = inspect.getsource(K.run_worker)
     seg = src[src.index("except ProviderDown as e:"):src.index("except Exception as e:", src.index("except ProviderDown as e:"))]
     assert "spends_attempt(kind, first, strikes, last_ok, now)" in seg
-    assert 'if kind != "auth":' in seg and "logger.error(msg)" in seg
+    # v1.23.30: auth failures are tracked as suspects too
+    assert 'if kind != "auth":' not in seg and "logger.error(msg)" in seg
     assert "await _nap(down_wait)" in seg

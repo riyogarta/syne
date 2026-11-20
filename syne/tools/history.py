@@ -239,7 +239,9 @@ async def _log_search(scope: dict, query: str, level: int, sort_by: str, rows: l
                 str(scope.get("chat_id") or ""),
                 query, level, sort_by,
                 [int(r["id"]) for r in rows],
-                [float(r["similarity"] or 0.0) for r in rows],
+                # NULL, not 0.0, for a hit without a vector (v1.23.30):
+                # 0.0 would drag the threshold research down.
+                [None if r["similarity"] is None else float(r["similarity"]) for r in rows],
             )
             return int(log_id) if log_id is not None else None
     except Exception as e:
@@ -326,6 +328,9 @@ async def history_search_handler(
     # below needs a vector.
     conditions = [
         f"m.role = '{_LEVEL_ROLE[level]}'",
+        # v1.23.30: rows anonymised by delete_user have no vector; since
+        # v1.23.20 they showed up in recency order. Never a hit.
+        "NOT coalesce(m.metadata ? 'deleted_user', false)",
     ]
     if level == 2:
         # Tool-call shells carry no text; they are never embedded, but say so.
@@ -471,7 +476,7 @@ async def history_search_handler(
             "platform": r.get("platform") or "",
             "chat_id": r["chat_id"] or "",
             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
-            "similarity": round(float(r["similarity"] or 0.0), 4),
+            "similarity": None if r["similarity"] is None else round(float(r["similarity"]), 4),
         })
 
     payload = {
