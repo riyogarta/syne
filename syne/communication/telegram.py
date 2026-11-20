@@ -7391,14 +7391,14 @@ Or just send me a message!"""
                 InlineKeyboardButton(
                     "✅ Enable" if is_group else "✅ Unblock",
                     callback_data=f"wa:unblock:{jid}"),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
+                InlineKeyboardButton("↩️ Revoke access", callback_data=f"wa:delete_confirm:{jid}"),
             ])
         else:
             buttons.append([
                 InlineKeyboardButton(
                     "⛔ Disable" if is_group else "🚫 Block",
                     callback_data=f"wa:block:{jid}"),
-                InlineKeyboardButton("🗑 Delete", callback_data=f"wa:delete_confirm:{jid}"),
+                InlineKeyboardButton("↩️ Revoke access", callback_data=f"wa:delete_confirm:{jid}"),
             ])
         if is_group:
             buttons.append([InlineKeyboardButton(
@@ -7756,12 +7756,14 @@ Or just send me a message!"""
             name = (entry.get('name') if entry else jid) or jid
             buttons = [
                 [
-                    InlineKeyboardButton("✅ Yes, delete", callback_data=f"wa:delete_yes:{jid}"),
+                    InlineKeyboardButton("✅ Yes, revoke", callback_data=f"wa:delete_yes:{jid}"),
                     InlineKeyboardButton("❌ Cancel", callback_data=f"wa:view:{jid}"),
                 ],
             ]
             await query.edit_message_text(
-                f"🗑 Delete <b>{name}</b> ({jid})?\n\nThey can re-register by messaging with the trigger word.",
+                f"↩️ Revoke access of <b>{name}</b> ({jid})?\n\nThe allowlist entry is removed; "
+                "chat history and memories are kept. They can re-register by messaging "
+                "with the trigger word.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )
@@ -7773,13 +7775,13 @@ Or just send me a message!"""
                 # An unknown WhatsApp sender is auto-registered as a fresh,
                 # unblocked member, so dropping a blocked entry would silently
                 # unblock it. Keep the block.
-                await query.answer("⛔ Blocked — unblock first to delete", show_alert=True)
+                await query.answer("⛔ Blocked — unblock first to revoke", show_alert=True)
                 await self._wamembers_menu_main(query=query)
                 return
             removed = by_jid.pop(jid, None)
             await self._wa_save_allowlist(by_jid)
             name = (removed.get('name') if removed else jid) or jid
-            await query.answer(f"Deleted {name}")
+            await query.answer(f"Access revoked: {name}")
             await self._wamembers_menu_main(query=query)
 
         elif action == "leave_confirm" and len(parts) >= 3:
@@ -7798,7 +7800,7 @@ Or just send me a message!"""
             ]
             await query.edit_message_text(
                 f"🚪 Leave WhatsApp group <b>{name}</b>?\n\nI only leave the chat — "
-                "the allowlist entry stays. Delete it separately to forget the group.",
+                "the allowlist entry stays. Revoke its access separately to forget the group.",
                 parse_mode="HTML",
                 reply_markup=InlineKeyboardMarkup(buttons),
             )

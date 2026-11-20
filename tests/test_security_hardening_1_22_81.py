@@ -190,7 +190,7 @@ def test_delete_refuses_blocked_on_all_member_menus():
     from syne.communication import telegram as T
     src = inspect.getsource(T)
     assert src.count("User is blocked — unblock first to revoke") == 2  # telegram + discord (v1.23.40)
-    assert "Blocked — unblock first to delete" in src                  # whatsapp
+    assert "Blocked — unblock first to revoke" in src                  # whatsapp (v1.23.41)
 
 
 # ── WhatsApp photo size cap ──────────────────────────────────────────
