@@ -83,9 +83,12 @@ async def plan_switch(conn, new_dims) -> dict:
     """What a switch to new_dims needs. Read-only.
 
     blocked: [(table, stored dims, vectors)] - vectors of another dimension.
-    relax:   [table] - typed vector(N) of another N but holding no vector:
-             relax_columns() switches it (before v1.23.14 such a column
-             refused the switch even with no memory at all).
+    relax:   [table] - holding no vector, and not already vector(new_dims):
+             relax_columns() types it vector(new_dims). Before v1.23.14 a
+             vector(N) column refused the switch even with no memory at
+             all; before v1.23.22 an untyped `vector` column (fresh
+             install) was skipped, so a late write of the old provider
+             could still mix two dimensions in it.
     """
     out = {"blocked": [], "relax": []}
     if not new_dims:
@@ -95,7 +98,7 @@ async def plan_switch(conn, new_dims) -> dict:
         col, vec, n = await column_state(conn, t)
         if n and vec and int(vec) != nd:
             out["blocked"].append((t, int(vec), n))
-        elif col and col != nd:
+        elif not n and col != nd:
             out["relax"].append(t)
     return out
 
