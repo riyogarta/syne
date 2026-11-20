@@ -180,7 +180,8 @@ class SyneAgent:
             from .memory.kg_extract import run_worker as _kg_worker
             self._kg_extract_task = asyncio.create_task(_kg_worker(
                 lambda: self.conversations.provider if self.conversations else self.provider,
-                embed_provider=self.memory.provider if self.memory else None,
+                # A getter (v1.23.29): reload_provider() replaces self.memory.
+                embed_provider_getter=lambda: self.memory.provider if self.memory else None,
             ))
 
         logger.info("Syne agent started.")

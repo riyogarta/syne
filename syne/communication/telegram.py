@@ -4998,9 +4998,10 @@ Or just send me a message!"""
         text = (
             f"🧬 <b>Embedding</b> — {count} registered\n\n"
             f"⚠️ <b>Warning:</b> Switching to a model with a different vector "
-            f"dimension is refused while vectors of the old dimension are stored — memories are never "
-            f"deleted. Same-dimension switches keep them — run <code>syne memory reembed-memory "
-            f"--force</code> and <code>reembed-history --all</code> afterwards."
+            f"dimension is refused while memories hold vectors of the old dimension — memories "
+            f"are never deleted. When only chat history holds them, the switch offers to clear "
+            f"the history vectors (messages kept, findable by keyword). A same-dimension switch "
+            f"keeps the old vectors; the switch screen lists what to re-embed afterwards."
         )
         markup = InlineKeyboardMarkup(buttons)
 
@@ -5069,10 +5070,11 @@ Or just send me a message!"""
             # against the live test vector in _apply_embedding.
             from ..db.connection import get_connection
             from ..memory.embed_dims import (plan_switch, refusal_for_plan, switch_note,
-                                             history_only)
+                                             history_only, reembed_hint)
             new_dims = entry.get("dimensions")
             async with get_connection() as conn:
                 plan = await plan_switch(conn, new_dims)
+                hint = "" if plan["blocked"] else await reembed_hint(conn, plan)
             refusal = refusal_for_plan(plan, new_dims)
             if refusal:
                 rows = []
@@ -5090,10 +5092,8 @@ Or just send me a message!"""
             warn = (
                 f"Switch active embedding to <b>{entry.get('label', embed_key)}</b>?\n\n"
                 f"{switch_note(plan, new_dims)}\n"
-                f"The dimension is checked again with a live test before switching.\n"
-                f"Vectors from different models are not comparable — run "
-                f"<code>syne memory reembed-memory --force</code> and "
-                f"<code>syne memory reembed-history --all</code> afterwards so search keeps working."
+                f"The dimension is checked again with a live test before switching."
+                + (f"\n{hint}" if hint else "")
             )
             await query.edit_message_text(
                 warn,

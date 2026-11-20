@@ -228,4 +228,4 @@ def test_conversation_injects_kg_block():
 
 def test_version():
     import syne
-    assert syne.__version__ == "1.23.28"
+    assert syne.__version__ == "1.23.29"

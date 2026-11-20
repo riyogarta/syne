@@ -217,6 +217,30 @@ async def apply_switch(conn, new_dims, config: dict, clear_history: bool = False
     return out
 
 
+REEMBED_CMD = {"memory": "syne memory reembed-memory --force",
+               "messages": "syne memory reembed-history --all"}
+
+
+async def reembed_hint(conn, plan: dict) -> str:
+    """HTML hint for the switch screen (v1.23.29): the re-embed commands for
+    the tables that keep vectors of the OLD model after the switch. A table
+    that is retyped (empty) or blocked has nothing to re-embed; before, both
+    commands were always suggested."""
+    blocked = {b[0] for b in plan["blocked"]}
+    cmds = []
+    for t in TABLES:
+        if t in plan["relax"] or t in blocked:
+            continue
+        n = int(await conn.fetchval(
+            f"SELECT count(*) FROM {t} WHERE embedding IS NOT NULL") or 0)
+        if n:
+            cmds.append(f"<code>{REEMBED_CMD[t]}</code> ({n} {LABELS[t]})")
+    if not cmds:
+        return ""
+    return ("Stored vectors come from the old model and are not comparable with "
+            "the new one. Run afterwards so search keeps working: " + "; ".join(cmds) + ".")
+
+
 def switch_note(plan: dict, new_dims) -> str:
     if plan["relax"]:
         names = ", ".join(LABELS[t] for t in plan["relax"])

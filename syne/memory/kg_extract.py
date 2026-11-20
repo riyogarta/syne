@@ -1427,15 +1427,26 @@ async def drop_worker_lock(conn) -> None:
         pass
 
 
-async def run_worker(default_provider_getter: Callable[[], object], embed_provider=None) -> None:
+def make_embedder(embed_provider_getter: Optional[Callable[[], object]]):
+    """Embedder that asks `embed_provider_getter` for the provider on EVERY
+    call (v1.23.29). The worker used to keep the provider object it got at
+    start: after /embedding (reload_provider builds a new MemoryEngine) it
+    went on embedding entity names with the old model until restart."""
+    async def embed(text: str):
+        p = embed_provider_getter() if embed_provider_getter else None
+        if p is None:
+            return None
+        resp = await p.embed(text)
+        return getattr(resp, "vector", None) or None
+    return embed
+
+
+async def run_worker(default_provider_getter: Callable[[], object],
+                     embed_provider_getter: Optional[Callable[[], object]] = None) -> None:
     """Background loop. Never raises (except cancellation)."""
     from ..judge_model import build_judge
 
-    async def embed(text: str):
-        if embed_provider is None:
-            return None
-        resp = await embed_provider.embed(text)
-        return getattr(resp, "vector", None) or None
+    embed = make_embedder(embed_provider_getter)
 
     try:
         n = await backfill_norm_names()
