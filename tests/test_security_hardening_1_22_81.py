@@ -189,7 +189,7 @@ def test_reaction_handler_calls_gate():
 def test_delete_refuses_blocked_on_all_member_menus():
     from syne.communication import telegram as T
     src = inspect.getsource(T)
-    assert src.count("User is blocked — unblock first to delete") == 2  # telegram + discord
+    assert src.count("User is blocked — unblock first to revoke") == 2  # telegram + discord (v1.23.40)
     assert "Blocked — unblock first to delete" in src                  # whatsapp
 
 

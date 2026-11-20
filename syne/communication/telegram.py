@@ -1216,7 +1216,7 @@ class TelegramChannel:
             logger.error(f"Failed to clear pending flag for {platform_id}: {e}")
 
     async def _revoke_member(self, platform: str, platform_id: str) -> dict | None:
-        """Delete from a members menu: revoke access, keep everything else.
+        """Revoke from a members menu: revoke access, keep everything else.
 
         The users row, chat history and memories all stay. The user is set
         back to public with preferences.pending_approval = "revoked", which
@@ -8207,7 +8207,7 @@ Or just send me a message!"""
                 callback_data=f"dc:block:{eid}")])
         if not is_guild and access != "owner" and entry.get("exists", True):
             buttons.append([InlineKeyboardButton(
-                "🗑 Delete", callback_data=f"dc:delete_confirm:{eid}")])
+                "↩️ Revoke access", callback_data=f"dc:delete_confirm:{eid}")])
         if is_guild:
             buttons.append([InlineKeyboardButton(
                 "🚪 Leave server", callback_data=f"dc:leave_confirm:{eid}")])
@@ -8537,11 +8537,11 @@ Or just send me a message!"""
             entry = entries.get(eid) or {}
             name = entry.get("name") or eid
             buttons = [[
-                InlineKeyboardButton("✅ Yes, delete", callback_data=f"dc:delete_yes:{eid}"),
+                InlineKeyboardButton("✅ Yes, revoke", callback_data=f"dc:delete_yes:{eid}"),
                 InlineKeyboardButton("❌ Cancel", callback_data=f"dc:view:{eid}"),
             ]]
             await query.edit_message_text(
-                f"🗑 Delete <b>{name}</b> (<code>{eid}</code>)?\n\n"
+                f"↩️ Revoke access of <b>{name}</b> (<code>{eid}</code>)?\n\n"
                 "Access is revoked: their next DM is held until you approve "
                 "them again. Chat history and memories are kept.",
                 parse_mode="HTML",
@@ -8556,13 +8556,13 @@ Or just send me a message!"""
                 await self._discordmembers_menu_detail(query, eid)
                 return
             if entry.get("access_level") == "owner":
-                await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
+                await query.answer("🔒 Owner access cannot be revoked!", show_alert=True)
                 await self._discordmembers_menu_detail(query, eid)
                 return
             if entry.get("access_level") == "blocked":
-                # Delete resets access to public + pending approval, which
+                # Revoke resets access to public + pending approval, which
                 # would silently unblock a blocked user. Keep the block.
-                await query.answer("⛔ User is blocked — unblock first to delete", show_alert=True)
+                await query.answer("⛔ User is blocked — unblock first to revoke", show_alert=True)
                 await self._discordmembers_menu_detail(query, eid)
                 return
             revoked = await self._revoke_member("discord", eid)
@@ -8575,7 +8575,7 @@ Or just send me a message!"""
             dc = get_channel(CHANNEL_DISCORD)
             if dc is not None:
                 getattr(dc, "_pending_notified", set()).discard(f"dm:{eid}")
-            await query.answer("Deleted — must be approved again")
+            await query.answer("Access revoked — must be approved again")
             await self._discordmembers_menu_main(query=query)
 
         elif action == "leave_confirm" and eid:
@@ -8710,7 +8710,7 @@ Or just send me a message!"""
 
         users = await list_users(platform="telegram")
         blocked_count = sum(1 for u in users if u.get("access_level") == "blocked")
-        # Pending users (deleted via Delete, or new and not yet approved) are
+        # Pending users (revoked via Revoke, or new and not yet approved) are
         # not listed; they reappear once approved.
         active = [
             u for u in users
@@ -8896,7 +8896,7 @@ Or just send me a message!"""
         caller_id = str(query.from_user.id)
         action_row = []
         if not is_first_owner and access != "owner" and platform_id != caller_id:
-            action_row.append(InlineKeyboardButton("🗑 Delete", callback_data=f"mbr:delete:{platform_id}"))
+            action_row.append(InlineKeyboardButton("↩️ Revoke access", callback_data=f"mbr:delete:{platform_id}"))
         if action_row:
             buttons.append(action_row)
 
@@ -9014,30 +9014,30 @@ Or just send me a message!"""
 
             first_owner = await get_first_owner("telegram")
             if first_owner and first_owner.get("platform_id") == platform_id:
-                await query.answer("🔒 First owner cannot be deleted!", show_alert=True)
+                await query.answer("🔒 First owner access cannot be revoked!", show_alert=True)
                 return
             if platform_id == str(query.from_user.id):
-                await query.answer("⚠️ Can't delete yourself!", show_alert=True)
+                await query.answer("⚠️ Can't revoke yourself!", show_alert=True)
                 return
             target = await get_user("telegram", platform_id)
             if target and target.get("access_level") == "owner":
-                await query.answer("🔒 Owner cannot be deleted!", show_alert=True)
+                await query.answer("🔒 Owner access cannot be revoked!", show_alert=True)
                 return
             if target and target.get("access_level") == "blocked":
-                # Delete resets access to public + pending approval, which
+                # Revoke resets access to public + pending approval, which
                 # would silently unblock a blocked user. Keep the block.
-                await query.answer("⛔ User is blocked — unblock first to delete", show_alert=True)
+                await query.answer("⛔ User is blocked — unblock first to revoke", show_alert=True)
                 return
 
-            # Same as /wamembers Delete: access is revoked (they must be
+            # Revoke (not delete_user): access is revoked (they must be
             # approved again), chat history and memories are kept.
             revoked = await self._revoke_member("telegram", platform_id)
             if revoked:
                 if hasattr(self, '_pending_notified'):
                     self._pending_notified.discard(f"pending_notify:{platform_id}")
-                await query.answer("User deleted — must be approved again")
+                await query.answer("Access revoked — must be approved again")
             else:
-                await query.answer("Failed to delete user", show_alert=True)
+                await query.answer("Failed to revoke access", show_alert=True)
             await self._members_menu_main(query=query)
 
         elif action == "model_list" and len(parts) >= 3:

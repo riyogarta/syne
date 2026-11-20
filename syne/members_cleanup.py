@@ -2,7 +2,8 @@
 
 Runs once a day from the scheduler's maintenance pass. A member who has not
 DMed Syne for `members.idle_revoke_days` days (default 60, 0 disables) is
-handled exactly like the Delete button in the Telegram members menus:
+handled exactly like the Revoke access button in the Telegram members menus
+(not like manage_user delete / `syne user delete`, which erase DM history):
 
   * Telegram / Discord: access is revoked (back to public + pending approval,
     hidden from /telemembers and /dcmembers). Their next DM is held for the
@@ -233,7 +234,7 @@ async def _notify_owner(days: int, lines: list[str]) -> None:
     if bot is None or not owner:
         return
     text = (
-        f"🧹 <b>Idle members removed</b> (no DM for {days}+ days)\n\n"
+        f"🧹 <b>Idle members revoked</b> (no DM for {days}+ days)\n\n"
         + "\n".join(lines)
         + "\n\nChat history and memories are kept. Telegram/Discord users "
         "must be approved again; WhatsApp users re-register on their next "
