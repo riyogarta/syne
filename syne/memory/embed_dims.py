@@ -6,8 +6,15 @@ so a model whose dimension differs from the stored vectors is refused.
 """
 import html
 import json
+import logging
 import re
 from typing import Optional
+
+logger = logging.getLogger("syne.memory.embed_dims")
+
+# pgvector builds an HNSW index on a `vector` column of at most 2000
+# dimensions (v1.23.34, review A).
+HNSW_MAX_DIMS = 2000
 
 COLUMN_TYPE_SQL = (
     "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
@@ -150,10 +157,24 @@ async def clear_history_vectors(conn, new_dims) -> int:
         await conn.execute(
             f"ALTER TABLE messages ALTER COLUMN embedding TYPE vector({nd}) "
             f"USING embedding::vector({nd})")
-        await conn.execute(
-            f"CREATE INDEX {HNSW_INDEX['messages']} ON messages USING hnsw "
-            "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
+        await build_hnsw(conn, "messages", nd)
     return int(n.split()[-1]) if n else 0
+
+
+async def build_hnsw(conn, table: str, dims: int) -> bool:
+    """Create the HNSW index of an embedding column when pgvector can index
+    that dimension. Above HNSW_MAX_DIMS the column stays unindexed (search
+    still works, scanning the table). v1.23.34: building it anyway failed
+    the whole switch to qwen3-embedding:4b/8b. True when built."""
+    assert table in TABLES
+    if int(dims) > HNSW_MAX_DIMS:
+        logger.warning(f"{table}.embedding: {int(dims)} dimensions, above the HNSW limit "
+                       f"of {HNSW_MAX_DIMS}; left without an index")
+        return False
+    await conn.execute(
+        f"CREATE INDEX {HNSW_INDEX[table]} ON {table} USING hnsw "
+        "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
+    return True
 
 
 def clear_confirm_text(plan: dict, label) -> str:
@@ -248,8 +269,12 @@ async def reembed_hint(conn, plan: dict) -> str:
 def switch_note(plan: dict, new_dims) -> str:
     if plan["relax"]:
         names = ", ".join(LABELS[t] for t in plan["relax"])
-        return (f"New dimension ({int(new_dims)}): {names} hold no vectors yet and "
+        note = (f"New dimension ({int(new_dims)}): {names} hold no vectors yet and "
                 "will be switched to it. Memories are preserved.")
+        if int(new_dims) > HNSW_MAX_DIMS:
+            note += (f" Above {HNSW_MAX_DIMS} dimensions pgvector builds no HNSW index: "
+                     "search works but scans the whole table.")
+        return note
     if new_dims:
         return f"Same dimensions ({int(new_dims)}), memories will be preserved."
     return "Memories will be preserved."
@@ -282,8 +307,6 @@ async def relax_columns(conn, tables: list, new_dims) -> list:
             await conn.execute(
                 f"ALTER TABLE {t} ALTER COLUMN embedding TYPE vector({nd}) "
                 f"USING embedding::vector({nd})")
-            await conn.execute(
-                f"CREATE INDEX {HNSW_INDEX[t]} ON {t} USING hnsw "
-                "(embedding vector_cosine_ops) WITH (m = 24, ef_construction = 200)")
+            await build_hnsw(conn, t, nd)
             done.append(t)
     return done
