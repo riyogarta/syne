@@ -152,6 +152,9 @@ class Scheduler:
         """
         self._on_execute = on_task_execute
         self._running = False
+        # task_id -> (task row, time it ran): ran while /restore began, so
+        # not written yet (v1.23.27); recorded once the gate lifts.
+        self._unrecorded: dict = {}
         self._task: Optional[asyncio.Task] = None
     
     async def start(self):
@@ -310,13 +313,95 @@ class Scheduler:
             raise exc
         return True
 
+    async def _record_run(self, conn, task, now, base, sys_tz) -> None:
+        """Write a finished run: disable a 'once' task, or move next_run of a
+        recurring one (computed from `base`). last_run = `now`."""
+        task_id = task["id"]
+        task_name = task["name"]
+        schedule_type = task["schedule_type"]
+        schedule_value = task["schedule_value"]
+        end_date = task["end_date"]
+        # Update task based on type
+        if schedule_type == "once":
+            # Disable one-time tasks after execution (keep for audit trail)
+            await conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET enabled = false,
+                    last_run = $1,
+                    run_count = run_count + 1
+                WHERE id = $2
+                """,
+                now, task_id,
+            )
+        else:
+            # Calculate next run for interval/cron
+            cron_tz = sys_tz if schedule_type == "cron" else None
+            next_run = _calculate_next_run(schedule_type, schedule_value, base, tz=cron_tz)
+
+            if next_run:
+                # Check end_date: if next_run exceeds end_date, disable task
+                if end_date and next_run > end_date:
+                    logger.info(
+                        f"Task {task_id} ({task_name}) reached end_date "
+                        f"{end_date.isoformat()}, disabling"
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET enabled = false,
+                            last_run = $1,
+                            run_count = run_count + 1
+                        WHERE id = $2
+                        """,
+                        now, task_id,
+                    )
+                else:
+                    await conn.execute(
+                        """
+                        UPDATE scheduled_tasks
+                        SET last_run = $1,
+                            next_run = $2,
+                            run_count = run_count + 1
+                        WHERE id = $3
+                        """,
+                        now, next_run, task_id,
+                    )
+            else:
+                # Failed to calculate next run — disable
+                logger.error(f"Failed to calculate next run for task {task_id}, disabling")
+                await conn.execute(
+                    """
+                    UPDATE scheduled_tasks
+                    SET enabled = false,
+                        last_run = $1,
+                        run_count = run_count + 1
+                    WHERE id = $2
+                    """,
+                    now, task_id,
+                )
+
+
     async def _check_and_execute(self):
         """Check for due tasks and execute them."""
         from .db.connection import get_connection
-        
+        from . import maintenance as _maint
+
         now = datetime.now(timezone.utc)
-        
+
         async with get_connection() as conn:
+            if self._unrecorded:
+                # Ran just before a /restore that then failed: record the
+                # run now instead of running the task a second time.
+                tz = await _get_system_tz()
+                for tid, (row, ran_at) in list(self._unrecorded.items()):
+                    if _maint.active():
+                        return
+                    await self._record_run(conn, row, ran_at, now, tz)
+                    self._unrecorded.pop(tid, None)
+                    logger.info(f"Scheduled task {tid} ({row['name']}) ran before the restore "
+                                "began; run recorded, not repeated")
+
             # Get all due tasks
             due_tasks = await conn.fetch(
                 """
@@ -335,7 +420,6 @@ class Scheduler:
             grace = await get_config("scheduler.misfire_grace_seconds", 300)
             sys_tz = await _get_system_tz()
 
-            from . import maintenance as _maint
             for task in due_tasks:
                 if _maint.active():
                     break  # /restore started meanwhile: the rest waits
@@ -392,69 +476,13 @@ class Scheduler:
                         continue
                     if _maint.active():
                         # Ran, but /restore started meanwhile: no write to a
-                        # database being replaced (v1.23.17).
+                        # database being replaced (v1.23.17). Remembered, so
+                        # a failed restore does not run it twice (v1.23.27).
+                        self._unrecorded[task_id] = (task, now)
                         break
                     
-                    # Update task based on type
-                    if schedule_type == "once":
-                        # Disable one-time tasks after execution (keep for audit trail)
-                        await conn.execute(
-                            """
-                            UPDATE scheduled_tasks
-                            SET enabled = false,
-                                last_run = $1,
-                                run_count = run_count + 1
-                            WHERE id = $2
-                            """,
-                            now, task_id,
-                        )
-                    else:
-                        # Calculate next run for interval/cron
-                        cron_tz = sys_tz if schedule_type == "cron" else None
-                        next_run = _calculate_next_run(schedule_type, schedule_value, now, tz=cron_tz)
-                        
-                        if next_run:
-                            # Check end_date: if next_run exceeds end_date, disable task
-                            if end_date and next_run > end_date:
-                                logger.info(
-                                    f"Task {task_id} ({task_name}) reached end_date "
-                                    f"{end_date.isoformat()}, disabling"
-                                )
-                                await conn.execute(
-                                    """
-                                    UPDATE scheduled_tasks
-                                    SET enabled = false,
-                                        last_run = $1,
-                                        run_count = run_count + 1
-                                    WHERE id = $2
-                                    """,
-                                    now, task_id,
-                                )
-                            else:
-                                await conn.execute(
-                                    """
-                                    UPDATE scheduled_tasks
-                                    SET last_run = $1,
-                                        next_run = $2,
-                                        run_count = run_count + 1
-                                    WHERE id = $3
-                                    """,
-                                    now, next_run, task_id,
-                                )
-                        else:
-                            # Failed to calculate next run — disable
-                            logger.error(f"Failed to calculate next run for task {task_id}, disabling")
-                            await conn.execute(
-                                """
-                                UPDATE scheduled_tasks
-                                SET enabled = false,
-                                    last_run = $1,
-                                    run_count = run_count + 1
-                                WHERE id = $2
-                                """,
-                                now, task_id,
-                            )
-                
+                    await self._record_run(conn, task, now, now, sys_tz)
+
                 except Exception as e:
                     logger.error(f"Error executing task {task_id}: {e}", exc_info=True)
                     # Don't disable on error — will retry next interval
