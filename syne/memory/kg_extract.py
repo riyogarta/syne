@@ -593,6 +593,29 @@ def same_numbers(a: str, b: str) -> bool:
     return _NUM.findall(a or "") == _NUM.findall(b or "")
 
 
+# v1.23.23 (review v1.23.16-19 bug 5, Riyo #57775 option B): titles of
+# address are dropped before a name is compared and are never a name word.
+_HONORIFICS_RAW = (
+    "pak", "bapak", "bpk", "bp", "bu", "ibu", "mas", "mbak", "mba", "kak", "kakak",
+    "bang", "abang", "dik", "adik", "dek", "om", "tante", "mbah", "eyang", "oma",
+    "opa", "pakde", "bude", "budhe", "paklik", "bulik", "cak", "ning", "gus", "teh",
+    "akang", "kang", "aa", "uda", "uni", "koh", "cik", "ci", "sdr", "saudara",
+    "saudari", "tuan", "nyonya", "nona", "ustadz", "ustaz", "ustadzah", "ustazah",
+    "ust", "kyai", "kiai", "habib", "syaikh", "syekh", "sheikh", "haji", "hajjah",
+    "hj", "h", "dr", "drs", "prof", "ir", "mr", "mrs", "ms", "miss", "sir",
+)
+HONORIFICS = frozenset(t for h in _HONORIFICS_RAW for t in [normalize_name(h)] if t)
+
+
+def strip_honorifics(norm: str) -> str:
+    """Normalised name without leading titles: 'pak dr budi' -> 'budi'.
+    A name that is only a title gives ''."""
+    toks = (norm or "").split()
+    while toks and toks[0] in HONORIFICS:
+        toks.pop(0)
+    return " ".join(toks)
+
+
 def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Optional[str]:
     """Scope of an entity extracted from a chunk (v1.23.15).
 
@@ -605,7 +628,7 @@ def person_scope(name: str, etype: str, chat_scope: Optional[str], known) -> Opt
     """
     if etype != "person" or not chat_scope:
         return None
-    norm = normalize_name(name)
+    norm = strip_honorifics(normalize_name(name))
     toks = norm.split()
     if norm in known or (toks and (toks[0] in known or toks[-1] in known)):
         return None
@@ -653,12 +676,13 @@ async def known_people(conn) -> frozenset:
     for x in names:
         if not isinstance(x, str):
             continue
-        norm = normalize_name(x)
+        norm = strip_honorifics(normalize_name(x))
         if not norm:
             continue
         out.add(norm)
         # Each word of a multi-word name too: "Riyogarta" alone is the owner.
-        out.update(t for t in norm.split() if len(t) >= 3)
+        # A title is never a name word (v1.23.23): "Pak Riyo" adds "riyo".
+        out.update(t for t in norm.split() if len(t) >= 3 and t not in HONORIFICS)
     return frozenset(out)
 
 
