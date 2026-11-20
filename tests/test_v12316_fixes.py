@@ -57,7 +57,7 @@ async def _fast_sleep(_s):
 
 def test_outage_never_spends_attempts_while_model_is_down():
     src = inspect.getsource(K.run_worker)
-    assert "last_ok > first" in src and "PROVIDER_DOWN_GIVE_UP" in src
+    assert "spends_attempt(kind, first, strikes, last_ok, now)" in src
     assert "await _nap(down_wait)" in src
     assert "await asyncio.sleep(down_wait)" not in src
 

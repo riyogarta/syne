@@ -881,8 +881,9 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        if provider_down(e):
-            raise ProviderDown(f"{type(e).__name__}: {e}") from e
+        kind = down_kind(e)
+        if kind:
+            raise ProviderDown(f"{type(e).__name__}: {e}", kind) from e
         raise
     extracted = parse_extraction(raw, s)
     vecs = await prepare_embeddings(extracted, embed, item.get("chat_scope"),
@@ -1084,8 +1085,13 @@ async def maybe_prune(now: Optional[datetime] = None) -> Optional[dict]:
 
 
 class ProviderDown(Exception):
-    """The extraction model is unreachable (timeout, 429, 5xx, connection).
-    The chunk is kept: no log row, no attempt used (v1.23.13)."""
+    """The extraction model is unreachable (timeout, 429, 5xx, connection)
+    or rejects the credentials (v1.23.25). The chunk is kept: no log row, no
+    attempt used (v1.23.13). kind: "timeout", "down" or "auth"."""
+
+    def __init__(self, msg: str = "", kind: str = "down"):
+        super().__init__(msg)
+        self.kind = kind
 
 
 # Rounds the same chunk may hit ProviderDown before it counts as an attempt
@@ -1098,6 +1104,66 @@ PROVIDER_DOWN_MAX_WAIT = 1800
 # PROVIDER_DOWN_STRIKES failures spread over at least this long (a daily
 # quota resets within it). A plain outage never costs attempts.
 PROVIDER_DOWN_GIVE_UP = 24 * 3600
+# v1.23.25 (review v1.23.16-19 #7 partial): only a timeout points at the
+# chunk (too slow for the model), and only after it timed out this many
+# times while the model answered other chunks. A 429, 5xx or connection
+# error says nothing about the chunk - before, one answered chunk in a rate
+# limit (or an Ollama shared with chat) cost every failing chunk an attempt.
+CHUNK_FAULT_STRIKES = 2
+
+
+def spends_attempt(kind: str, first: float, strikes: int, last_ok: float, now: float) -> bool:
+    """Whether this "model unavailable" failure costs the chunk an attempt.
+    Credentials rejected ("auth") never do: no chunk is at fault."""
+    if kind == "auth":
+        return False
+    if kind == "timeout" and last_ok > first and strikes >= CHUNK_FAULT_STRIKES:
+        return True
+    return strikes >= PROVIDER_DOWN_STRIKES and now - first >= PROVIDER_DOWN_GIVE_UP
+
+
+_AUTH_TEXT = re.compile(
+    r"\b(401|403)\b|unauthori[sz]ed|forbidden|authentication_error|permission_error"
+    r"|invalid api key|invalid x-api-key|incorrect api key|api key not valid"
+    r"|token expired or invalid|auth error")
+
+
+def auth_failure(err: BaseException) -> bool:
+    """The provider rejects the credentials (401/403, expired OAuth)."""
+    from ..llm.provider import LLMAuthError
+    if isinstance(err, LLMAuthError):
+        return True
+    status = getattr(err, "status_code", None) or getattr(
+        getattr(err, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status in (401, 403)
+    return bool(_AUTH_TEXT.search(str(err).lower()))
+
+
+_TIMEOUT_TEXT = re.compile(r"readtimeout|writetimeout|timed out|timeout\b")
+
+
+def down_kind(err: BaseException) -> Optional[str]:
+    """"auth", "timeout", "down" (429 / 5xx / connection) or None (an error
+    of the chunk itself, which costs an attempt as before)."""
+    if auth_failure(err):
+        return "auth"
+    if not provider_down(err):
+        return None
+    try:
+        import httpx
+        if isinstance(err, (httpx.ReadTimeout, httpx.WriteTimeout)):
+            return "timeout"
+        if isinstance(err, httpx.TimeoutException):
+            return "down"       # connect / pool timeout: unreachable
+    except ImportError:
+        pass
+    if isinstance(err, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout"
+    text = str(err).lower()
+    if "connecttimeout" in text or "pooltimeout" in text:
+        return "down"
+    return "timeout" if _TIMEOUT_TEXT.search(text) else "down"
 
 
 def provider_down(err: BaseException) -> bool:
@@ -1385,6 +1451,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
     judge, judge_key = None, None
     # (type, id) -> (monotonic time of first "model unavailable", strikes)
     down_wait, suspects, last_ok = 0, {}, 0.0
+    auth_logged = False
     lock_conn, lock_idle_logged, limit_logged = None, False, False
     try:
         while True:
@@ -1483,19 +1550,31 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         now = time.monotonic()
                         first, strikes = suspects.get(this, (now, 0))
                         strikes += 1
-                        if last_ok > first or (strikes >= PROVIDER_DOWN_STRIKES
-                                               and now - first >= PROVIDER_DOWN_GIVE_UP):
-                            # The model is up for other chunks (or this has
-                            # failed for a day): this chunk costs an attempt
-                            # and waits its normal error backoff.
+                        kind = getattr(e, "kind", "down")
+                        if spends_attempt(kind, first, strikes, last_ok, now):
+                            # The chunk times out while the model answers
+                            # others (or it has failed for a day): it costs
+                            # an attempt and waits its normal error backoff.
                             suspects.pop(this, None)
                             res = _error_result(item, judge, f"model unavailable: {e}")
                             logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
                         else:
-                            suspects[this] = (first, strikes)
+                            if kind != "auth":
+                                suspects[this] = (first, strikes)
                             down_wait = min(max(60, down_wait * 2), PROVIDER_DOWN_MAX_WAIT)
-                            logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
-                                           f"chunks kept, trying again in {down_wait}s")
+                            if kind == "auth":
+                                msg = (f"KG extract: the extraction model rejects the credentials "
+                                       f"({str(e)[:200]}); extraction paused, no chunk loses an "
+                                       f"attempt. Fix the key or OAuth of kg.extract_model "
+                                       f"(or the default model). Trying again in {down_wait}s")
+                                if auth_logged:
+                                    logger.warning(msg)
+                                else:
+                                    logger.error(msg)
+                                    auth_logged = True
+                            else:
+                                logger.warning(f"KG extract: model unavailable ({str(e)[:200]}); "
+                                               f"chunks kept, trying again in {down_wait}s")
                             await _nap(down_wait)
                             break
                     except Exception as e:
@@ -1503,6 +1582,7 @@ async def run_worker(default_provider_getter: Callable[[], object], embed_provid
                         logger.warning(f"KG extract {item['type']} {item['id']} failed: {res['reason'][:200]}")
                     else:
                         down_wait = 0
+                        auth_logged = False
                         suspects.pop((item["type"], item["id"]), None)
                         if res.get("status") in ("done", "stale"):
                             last_ok = time.monotonic()
