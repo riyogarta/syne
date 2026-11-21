@@ -1,6 +1,6 @@
-"""v1.23.18: KG daily quota counts model calls (#6), wrong embedding merges
-across numbers are prevented and split (#10), chat history alone no longer
-blocks an embedding switch with no way out (#14)."""
+"""v1.23.18: wrong embedding merges across numbers are prevented and split
+(#10), chat history alone no longer blocks an embedding switch with no way
+out (#14). The #6 daily quota tests left with the limit in v1.23.43."""
 import inspect
 import os
 import uuid
@@ -12,30 +12,6 @@ from syne.memory import embed_dims as D
 
 _DB = os.environ.get("SYNE_TEST_DATABASE_URL")
 pg = pytest.mark.skipif(not _DB, reason="SYNE_TEST_DATABASE_URL not set")
-
-
-# ── #6 ────────────────────────────────────────────────────────────────────
-
-def test_negative_daily_limit_is_default_not_unlimited():
-    assert K._clamp("kg.extract_daily_limit", -1) == 300
-    assert K._clamp("kg.extract_daily_limit", 0) == 0
-    assert K._clamp("kg.extract_daily_limit", 50) == 50
-    # other keys keep the plain clamp
-    assert K._clamp("kg.extract_batch", -3) == 1
-
-
-def test_chunk_counted_before_the_model_is_called():
-    src = inspect.getsource(K.process_one)
-    assert src.index("await _count_chunk(item)") < src.index("raw = await judge(")
-
-
-def test_description_matches_behaviour():
-    desc = K.DEFAULTS["kg.extract_daily_limit"][1]
-    assert "chunks" in desc and "once" in desc and "stale" in desc and "negative" in desc
-    assert "calls" not in desc
-    sql = open(os.path.join(os.path.dirname(K.__file__), "..", "db", "schema.sql")).read()
-    assert desc in sql
-    assert "PRIMARY KEY (day, source_type, source_id)" in sql
 
 
 # ── #10 ───────────────────────────────────────────────────────────────────
@@ -87,71 +63,6 @@ async def _schema(c, vector=False):
     await c.execute(f"CREATE SCHEMA {s}; SET search_path TO {s}, public")
     return s
 
-
-@pg
-async def test_usage_counts_each_chunk_once(monkeypatch):
-    import asyncpg
-    from syne.db.migrations import KG_USAGE_CHUNK_DDL
-    c = await asyncpg.connect(_DB)
-    s = await _schema(c)
-
-    async def tz(*a, **k):
-        return "Asia/Jakarta"
-    monkeypatch.setattr(K, "get_config", tz)
-    try:
-        for stmt in KG_USAGE_CHUNK_DDL:
-            await c.execute(stmt)
-        assert await K.extracted_today(c) == 0
-        for _ in range(3):           # one chunk tried three times = 1 (#57773)
-            await K.count_chunk(c, "message", 5)
-        assert await K.extracted_today(c) == 1
-        await K.count_chunk(c, "memory", 5)
-        await K.count_chunk(c, "message", 6)
-        assert await K.extracted_today(c) == 3
-        # another day does not count; days past USAGE_KEEP_DAYS are dropped
-        await c.execute("INSERT INTO kg_extract_usage VALUES (current_date - 3, 'message', 1), "
-                        "(current_date - 30, 'message', 1)")
-        await K.count_chunk(c, "message", 6)
-        assert await K.extracted_today(c) == 3
-        assert await c.fetchval("SELECT count(*) FROM kg_extract_usage "
-                                "WHERE day < current_date - 7") == 0
-        assert await c.fetchval("SELECT count(*) FROM kg_extract_usage "
-                                "WHERE day = current_date - 3") == 1
-    finally:
-        await c.execute(f"DROP SCHEMA {s} CASCADE")
-        await c.close()
-
-
-@pg
-async def test_m63_reshapes_usage_table():
-    import asyncpg
-    from syne.db import migrations as M
-    from syne.db.migrations import KG_USAGE_DDL
-    c = await asyncpg.connect(_DB)
-    s = await _schema(c)
-    try:
-        await c.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value JSONB, description TEXT)")
-        await c.execute("INSERT INTO config VALUES ('kg.extract_daily_limit', '300', 'old')")
-        for stmt in KG_USAGE_DDL:          # the v1.23.18 shape (day, calls)
-            await c.execute(stmt)
-        await c.execute("INSERT INTO kg_extract_usage VALUES (current_date, 2)")
-        for _ in range(2):                 # idempotent
-            async with c.transaction():
-                await M._m63_kg_usage_per_chunk(c)
-            await c.execute("INSERT INTO kg_extract_usage VALUES (current_date, 'message', 9) "
-                            "ON CONFLICT DO NOTHING")
-        cols = [r["attname"] for r in await c.fetch(
-            "SELECT attname FROM pg_attribute WHERE attrelid = 'kg_extract_usage'::regclass "
-            "AND attnum > 0 AND NOT attisdropped ORDER BY attnum")]
-        assert cols == ["day", "source_type", "source_id"]
-        # the second run kept the rows of the new shape
-        assert await c.fetchval("SELECT count(*) FROM kg_extract_usage") == 1
-        assert await c.fetchval("SELECT description FROM config") == \
-            K.DEFAULTS["kg.extract_daily_limit"][1]
-        assert M.CURRENT_SCHEMA_VERSION >= 63
-    finally:
-        await c.execute(f"DROP SCHEMA {s} CASCADE")
-        await c.close()
 
 
 _KG = """

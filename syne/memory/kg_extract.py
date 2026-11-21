@@ -115,7 +115,6 @@ DEFAULTS: dict = {
     "kg.extract_interval": (30, "Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600."),
     "kg.extract_timeout": (120, "Seconds one KG extraction call may take. Clamped 10-600."),
     "kg.extract_max_attempts": (3, "Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10."),
-    "kg.extract_daily_limit": (300, "Most chunks sent to the KG extraction model per day (system.timezone). A chunk counts once a day however many attempts it takes, also when its result is discarded as stale; chunks skipped without a model call do not count; deleting messages or memories does not give the count back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000."),
     "kg.extract_skip_categories": ([], "Memory categories KG extraction skips, e.g. [\"alquran\"]."),
     "kg.extract_skip_scheduled": (True, "Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction."),
     "kg.extract_max_entities": (15, "Most entities kept from one chunk. Clamped 1-50."),
@@ -139,14 +138,12 @@ _CLAMPS = {
     "kg.extract_interval": (5, 3600),
     "kg.extract_timeout": (10, 600),
     "kg.extract_max_attempts": (1, 10),
-    "kg.extract_daily_limit": (0, 100000),
     "kg.extract_max_entities": (1, 50),
     "kg.extract_max_relations": (1, 50),
     "kg.resolve_min_similarity": (0.5, 1.0),
     "kg.resolve_min_trgm": (0.0, 1.0),
 }
 _FLOATS = {"kg.resolve_min_similarity", "kg.resolve_min_trgm"}
-_NEGATIVE_IS_DEFAULT = {"kg.extract_daily_limit"}
 
 
 def _clamp(key: str, v):
@@ -156,10 +153,6 @@ def _clamp(key: str, v):
     except (TypeError, ValueError):
         x = float(default)
     if math.isnan(x):
-        x = float(default)
-    if x < 0 and key in _NEGATIVE_IS_DEFAULT:
-        # v1.23.18: -1 was clamped to 0 = no limit; whoever wrote -1 to
-        # switch extraction off got unlimited extraction instead.
         x = float(default)
     lo, hi = _CLAMPS[key]
     x = max(lo, min(hi, x))
@@ -1481,12 +1474,11 @@ async def pending(conn, floors: dict, era: datetime, s: dict, extra: int = 0) ->
 MAX_SUSPECT_EXTRA = 50
 
 
-def order_batch(items: list, suspects, batch: int, room: Optional[int] = None) -> list:
+def order_batch(items: list, suspects, batch: int) -> list:
     """The chunks of one round (v1.23.35, review C): chunks that failed as
-    "model unavailable" (suspects) go last, THEN the batch and the daily room
-    are cut. Before, the cut came first, so suspects could fill the round."""
-    out = sorted(items, key=lambda it: (it["type"], it["id"]) in suspects)[:max(1, batch)]
-    return out if room is None else out[:max(0, room)]
+    "model unavailable" (suspects) go last, THEN the batch is cut. Before,
+    the cut came first, so suspects could fill the round."""
+    return sorted(items, key=lambda it: (it["type"], it["id"]) in suspects)[:max(1, batch)]
 
 
 async def previous_message(conn, session_id: int, message_id: int) -> str:
@@ -1537,7 +1529,6 @@ async def process_one(item: dict, judge, embed: Optional[Embedder], s: dict) -> 
         else:
             reason = "memory"
     prompt = build_prompt(text[: s["kg.extract_max_chars"]], speaker=speaker, context=context, s=s)
-    await _count_chunk(item)
     try:
         raw = await judge(prompt, float(s["kg.extract_timeout"]))
     except asyncio.CancelledError:
@@ -1994,57 +1985,6 @@ def _error_result(item: dict, judge, reason: str) -> dict:
             "session_id": item.get("session_id"), "model": getattr(judge, "label", "")}
 
 
-async def _system_tz() -> str:
-    tz = str(await get_config("system.timezone", "UTC") or "UTC")
-    try:
-        from zoneinfo import ZoneInfo
-        ZoneInfo(tz)
-    except Exception:
-        tz = "UTC"
-    return tz
-
-
-# Days of kg_extract_usage kept; older rows are dropped while counting.
-USAGE_KEEP_DAYS = 7
-
-
-async def extracted_today(conn) -> int:
-    """Chunks sent to the extraction model today (system.timezone).
-
-    Per chunk (Riyo, decision #57773): kg_extract_usage holds one row per
-    chunk per day, written before its model call (count_chunk), so a chunk
-    tried three times counts once. The table is separate from
-    kg_extract_log: deleting a message or memory does not give the count
-    back, and a stale result still counts (v1.23.19).
-    """
-    return int(await conn.fetchval(
-        "SELECT count(*) FROM kg_extract_usage WHERE day = (now() AT TIME ZONE $1)::date",
-        await _system_tz()) or 0)
-
-
-async def count_chunk(conn, source_type: str, source_id: int) -> None:
-    tz = await _system_tz()
-    await conn.execute(
-        "INSERT INTO kg_extract_usage (day, source_type, source_id) "
-        "VALUES ((now() AT TIME ZONE $1)::date, $2, $3) ON CONFLICT DO NOTHING",
-        tz, source_type, int(source_id))
-    await conn.execute(
-        "DELETE FROM kg_extract_usage WHERE day < (now() AT TIME ZONE $1)::date - $2::int",
-        tz, USAGE_KEEP_DAYS)
-
-
-async def _count_chunk(item: dict) -> None:
-    """count_chunk on its own connection. Never raises (except cancellation):
-    a failed count must not stop the extraction."""
-    try:
-        async with get_connection() as conn:
-            await count_chunk(conn, item["type"], item["id"])
-    except asyncio.CancelledError:
-        raise
-    except Exception as e:
-        logger.debug(f"KG extract: chunk not counted: {e}")
-
-
 # One KG worker per database (v1.23.15): a session advisory lock held on a
 # dedicated pool connection. A second process (syne cli, repair --fix, a
 # second service) stays idle instead of extracting the same chunks.
@@ -2154,7 +2094,7 @@ async def run_worker(default_provider_getter: Callable[[], object],
     # (type, id) -> (monotonic time of first "model unavailable", strikes)
     down_wait, suspects, last_ok = 0, {}, 0.0
     auth_logged = False
-    lock_conn, lock_idle_logged, limit_logged = None, False, False
+    lock_conn, lock_idle_logged = None, False
     try:
         while True:
             try:
@@ -2204,22 +2144,6 @@ async def run_worker(default_provider_getter: Callable[[], object],
                 if not items:
                     await asyncio.sleep(s["kg.extract_interval"])
                     continue
-                limit = s["kg.extract_daily_limit"]
-                room = None
-                if limit:
-                    async def _used():
-                        async with get_connection() as conn:
-                            return await extracted_today(conn)
-                    used = await gated(_used())
-                    if used >= limit:
-                        if not limit_logged:
-                            logger.warning(f"KG extract: daily limit reached ({used}/{limit} chunks, "
-                                           "kg.extract_daily_limit); waiting for the next day")
-                            limit_logged = True
-                        await asyncio.sleep(300)
-                        continue
-                    limit_logged = False
-                    room = limit - used
                 fp = await gated(judge_fingerprint(s["kg.extract_model"]))
                 key = judge_cache_key(s["kg.extract_model"], default_provider_getter(), fp)
                 if judge is None or judge_key != key:
@@ -2233,8 +2157,8 @@ async def run_worker(default_provider_getter: Callable[[], object],
                         continue
                 # Chunks that failed as "model unavailable" go last: if another
                 # chunk gets an answer first, the model is up. v1.23.35: sorted
-                # before the batch and the daily room are cut.
-                items = order_batch(items, suspects, s["kg.extract_batch"], room)
+                # before the batch is cut.
+                items = order_batch(items, suspects, s["kg.extract_batch"])
                 round_ok = False
                 for item in items:
                     if _maint.active():

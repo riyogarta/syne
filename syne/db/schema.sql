@@ -1372,16 +1372,6 @@ CREATE TABLE IF NOT EXISTS kg_extract_log (
     PRIMARY KEY (source_type, source_id)
 );
 
--- Chunks sent to the KG extraction model per day (system.timezone), the
--- base of kg.extract_daily_limit: one row per chunk per day, so attempts of
--- the same chunk count once (Riyo, decision #57773; v1.23.19, migration 63).
-CREATE TABLE IF NOT EXISTS kg_extract_usage (
-    day         DATE NOT NULL,
-    source_type VARCHAR(20) NOT NULL,
-    source_id   INT NOT NULL,
-    PRIMARY KEY (day, source_type, source_id)
-);
-
 INSERT INTO config (key, value, description) VALUES
     ('kg.extract_era_start',
      to_jsonb(to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"+00:00"')),
@@ -1399,7 +1389,6 @@ INSERT INTO config (key, value, description) VALUES
     ('kg.extract_interval', '30', 'Seconds the KG worker waits between rounds when nothing is pending. Clamped 5-3600.'),
     ('kg.extract_timeout', '120', 'Seconds one KG extraction call may take. Clamped 10-600.'),
     ('kg.extract_max_attempts', '3', 'Attempts per chunk before a failed KG extraction is given up (kg_extract_log status error). Clamped 1-10.'),
-    ('kg.extract_daily_limit', '300', 'Most chunks sent to the KG extraction model per day (system.timezone). A chunk counts once a day however many attempts it takes, also when its result is discarded as stale; chunks skipped without a model call do not count; deleting messages or memories does not give the count back. At the limit the worker waits for the next day. 0 = no limit; a negative value falls back to the default (300). Clamped 0-100000.'),
     ('kg.extract_skip_categories', '[]', 'Memory categories KG extraction skips, e.g. ["alquran"].'),
     ('kg.extract_skip_scheduled', 'true', 'Skip messages of reminder / scheduled-task sessions (scheduled:...) in KG extraction.'),
     ('kg.extract_max_entities', '15', 'Most entities kept from one chunk. Clamped 1-50.'),

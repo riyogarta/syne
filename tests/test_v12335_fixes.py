@@ -16,12 +16,6 @@ def test_suspects_go_last_before_the_cut():
     assert [x["id"] for x in got] == [4, 5, 6, 7, 8]
 
 
-def test_daily_room_applies_after_sorting():
-    items = [_it(i) for i in range(1, 7)]
-    sus = {("message", 1): 0, ("message", 2): 0}
-    assert [x["id"] for x in K.order_batch(items, sus, batch=5, room=2)] == [3, 4]
-
-
 def test_only_suspects_left_are_still_tried():
     items = [_it(1), _it(2)]
     sus = {("message", 1): 0, ("message", 2): 0}

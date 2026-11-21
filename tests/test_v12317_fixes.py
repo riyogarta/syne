@@ -71,11 +71,11 @@ async def test_gated_returns_result_and_raises_errors():
 def test_worker_gates_every_db_step():
     src = inspect.getsource(K.run_worker)
     for step in ("gated(maybe_prune())", "gated(load_settings())", "gated(_floors())",
-                 "gated(_queue())", "gated(_used())", "gated(write_log(item, res))"):
+                 "gated(_queue())", "gated(write_log(item, res))"):
         assert step in src, step
     assert "except GateClosed:" in src
     # no ungated connection left in the loop
-    assert src.count("async with get_connection() as conn:") == 3   # inside _floors/_queue/_used
+    assert src.count("async with get_connection() as conn:") == 2   # inside _floors/_queue
 
 
 # ── bug 4: scheduler ─────────────────────────────────────────────────────

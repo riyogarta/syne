@@ -68,10 +68,6 @@ async def test_process_one_raises_auth_as_provider_down(monkeypatch):
         async def __aexit__(self, *a):
             return False
     monkeypatch.setattr(K, "get_connection", lambda: _CM())
-
-    async def _noop(item):
-        return None
-    monkeypatch.setattr(K, "_count_chunk", _noop)
     monkeypatch.setattr(K, "build_prompt", lambda *a, **k: "p")
     item = {"type": "memory", "id": 1, "content": "Budi tinggal di Bandung", "category": "fact"}
     s = {"kg.extract_max_chars": 6000, "kg.extract_timeout": 5}

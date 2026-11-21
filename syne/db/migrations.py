@@ -1644,18 +1644,12 @@ async def _m60_kg_scope_daily_limit(conn) -> None:
 
     kg_entities.scope: a person named in a chat belongs to that chat, so
     namesakes in different chats stay apart; existing entities stay shared
-    (NULL). The name index becomes (name, type, scope). Seeds
-    kg.extract_daily_limit. schema.sql carries the same DDL.
+    (NULL). The name index becomes (name, type, scope). It also seeded
+    kg.extract_daily_limit, removed in v1.23.43 (migration 69).
+    schema.sql carries the same DDL.
     """
-    from ..memory.kg_extract import DEFAULTS
     for stmt in KG_SCOPE_DDL:
         await conn.execute(stmt)
-    value, desc = DEFAULTS["kg.extract_daily_limit"]
-    await conn.execute(
-        "INSERT INTO config (key, value, description) VALUES ($1, $2::jsonb, $3) "
-        "ON CONFLICT (key) DO NOTHING",
-        "kg.extract_daily_limit", json.dumps(value), desc,
-    )
 
 
 async def _m61_kg_entities_embedding_untyped(conn) -> None:
@@ -1677,56 +1671,25 @@ async def _m61_kg_entities_embedding_untyped(conn) -> None:
         await conn.execute("ALTER TABLE kg_entities ALTER COLUMN embedding TYPE vector")
 
 
-KG_USAGE_DDL = [
-    "CREATE TABLE IF NOT EXISTS kg_extract_usage ("
-    "day DATE PRIMARY KEY, calls INT NOT NULL DEFAULT 0)",
-]
-
-
 async def _m62_kg_usage_split_merges(conn) -> None:
     """v1.23.18 (Riyo, 19 Nov 2026). Idempotent.
 
-    kg_extract_usage: calls to the KG extraction model per day, the base of
-    kg.extract_daily_limit (its description is updated). Aliases an
-    embedding match added across different numbers are dropped; no chunk is
-    extracted again (#57758). schema.sql carries the same DDL.
+    Aliases an embedding match added across different numbers are
+    dropped; no chunk is extracted again (#57758). It also created the
+    daily-limit usage table, removed in v1.23.43 (migration 69).
     """
-    from ..memory.kg_extract import DEFAULTS, split_bad_merges
-    for stmt in KG_USAGE_DDL:
-        await conn.execute(stmt)
-    await conn.execute("UPDATE config SET description = $2 WHERE key = $1",
-                       "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
+    from ..memory.kg_extract import split_bad_merges
     res = await split_bad_merges(conn)
     if res["entities"]:
         logger.info(f"KG: dropped wrong aliases of {res['entities']} entities")
 
 
-KG_USAGE_CHUNK_DDL = [
-    "CREATE TABLE IF NOT EXISTS kg_extract_usage ("
-    "day DATE NOT NULL, source_type VARCHAR(20) NOT NULL, source_id INT NOT NULL, "
-    "PRIMARY KEY (day, source_type, source_id))",
-]
-
-
 async def _m63_kg_usage_per_chunk(conn) -> None:
-    """v1.23.19 (Riyo, decision #57773). Idempotent.
-
-    kg.extract_daily_limit counts chunks, not model calls: kg_extract_usage
-    becomes one row per chunk per day. The v1.23.18 shape (day, calls) is
-    dropped; its count of the current day cannot be mapped to chunks and
-    starts again from 0. The description is updated. schema.sql carries the
-    same DDL.
+    """v1.23.19. Reshaped the daily-limit usage table; the limit was
+    removed in v1.23.43 (migration 69). Kept as a no-op so the version
+    sequence stays intact.
     """
-    from ..memory.kg_extract import DEFAULTS
-    has_chunk = await conn.fetchval(
-        "SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('kg_extract_usage') "
-        "AND attname = 'source_id' AND NOT attisdropped")
-    if not has_chunk:
-        await conn.execute("DROP TABLE IF EXISTS kg_extract_usage")
-    for stmt in KG_USAGE_CHUNK_DDL:
-        await conn.execute(stmt)
-    await conn.execute("UPDATE config SET description = $2 WHERE key = $1",
-                       "kg.extract_daily_limit", DEFAULTS["kg.extract_daily_limit"][1])
+    return None
 
 
 async def _m64_kg_merge_titled_people(conn) -> None:
@@ -1866,6 +1829,17 @@ async def _m68_hnsw_dims_guard(conn) -> None:
         await conn.execute(stmt)
 
 
+async def _m69_drop_kg_daily_limit(conn) -> None:
+    """v1.23.43 (Riyo, 21 Nov 2026). Idempotent.
+
+    The KG daily extraction limit is removed: it held back reference
+    imports for days. Drops kg_extract_usage and the
+    kg.extract_daily_limit config.
+    """
+    await conn.execute("DROP TABLE IF EXISTS kg_extract_usage")
+    await conn.execute("DELETE FROM config WHERE key = 'kg.extract_daily_limit'")
+
+
 MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (1, _m1_messages_status, "transactional"),
     (2, _m2_drop_legacy_compaction_config, "transactional"),
@@ -1935,6 +1909,7 @@ MIGRATIONS: list[tuple[int, Callable[..., Awaitable[None]], str]] = [
     (66, _m66_kg_name_known_people, "transactional"),
     (67, _m67_kg_entity_accounts, "transactional"),
     (68, _m68_hnsw_dims_guard, "transactional"),
+    (69, _m69_drop_kg_daily_limit, "transactional"),
 ]
 
 
