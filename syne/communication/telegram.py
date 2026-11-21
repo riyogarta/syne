@@ -10924,6 +10924,20 @@ Or just send me a message!"""
             body_parts.append("[Voice message]")
         if has_video:
             body_parts.append("[Video]")
+        # Location / venue in replied message. Telegram cannot caption a
+        # location, so in groups the only way to ask about one is to reply
+        # to it with a mention -- without this the location is invisible.
+        if reply.venue:
+            v = reply.venue
+            body_parts.append(
+                f"[Location shared: {v.title}"
+                f"{f' — {v.address}' if v.address else ''}"
+                f" (lat: {v.location.latitude}, lng: {v.location.longitude})]"
+            )
+        elif reply.location:
+            body_parts.append(
+                f"[Location shared: lat: {reply.location.latitude}, lng: {reply.location.longitude}]"
+            )
         if reply_text.strip():
             body_parts.append(reply_text.strip())
         
