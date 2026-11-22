@@ -579,6 +579,8 @@ def memory_kg_build(categories, dry_run, prune):
             for (cat, why), n in plan.rejects.most_common():
                 r.add_row(cat, why, str(n), " | ".join(plan.reject_samples[(cat, why)][:3]))
             console.print(r)
+        if not dry_run:
+            console.print(f"Stale chunk entities removed: {plan.stale_removed}")
         if prune and not dry_run:
             console.print(f"Pruned orphan chunk entities: {pruned}")
         console.print("[yellow]Dry run: nothing written.[/yellow]" if dry_run

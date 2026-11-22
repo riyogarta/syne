@@ -16,6 +16,10 @@ Rules live in config (kg.ref_sources with each target's rules and aliases,
 kg.part_pattern, kg.max_mention_range), seeded by migration 43 from
 default_config(); the code defaults below apply only when a key is
 missing. Idempotent: re-running upserts.
+
+A chunk entity is named from the chunk's title plus its id. When a title
+changes, or a chunk loses every link, the next build deletes the chunk's
+old entity (its relations cascade) - v1.23.44, Riyo 22 Nov 2026.
 """
 
 from __future__ import annotations
@@ -105,6 +109,8 @@ class BuildPlan:
     reject_samples: dict = field(default_factory=lambda: defaultdict(list))
     per_predicate: Counter = field(default_factory=Counter)
     chunks: int = 0
+    chunk_ids: set = field(default_factory=set)    # memory ids of every chunk read
+    stale_removed: int = 0                         # set by write_plan
 
     def entity(self, name: str, etype: str, desc: str = "") -> tuple:
         key = (name.lower(), etype)
@@ -158,6 +164,7 @@ def plan_links(rows: list[dict], sources: dict, aliases: Optional[dict] = None,
         title = first_line(content)
         ck = plan.entity(chunk_entity_name(mid, title), CHUNK, f"memory:{mid}")
         plan.chunks += 1
+        plan.chunk_ids.add(mid)
 
         if cat in indexes:
             index = indexes[cat]
@@ -300,6 +307,34 @@ async def write_plan(conn, plan: BuildPlan) -> None:
                    ON CONFLICT DO NOTHING""",
                 [r["id"] for r in rows], [r["source_memory_id"] for r in rows],
             )
+
+    plan.stale_removed = await remove_stale_chunks(conn, plan)
+
+
+async def remove_stale_chunks(conn, plan: BuildPlan) -> int:
+    """Delete chunk entities of the chunks read that this plan no longer has.
+
+    Such an entity is left over when a chunk's title changed (the entity
+    name carries the title) or the chunk lost every link. Its relations
+    cascade. Only chunks this build read are touched.
+    """
+    if not plan.chunk_ids:
+        return 0
+    keep = [k[0] for k in plan.entities if k[1] == CHUNK]
+    res = await conn.execute(
+        """DELETE FROM kg_entities
+           WHERE entity_type = 'chunk'
+             AND description = ANY($1::text[])
+             AND LOWER(name) <> ALL($2::text[])""",
+        [f"memory:{i}" for i in sorted(plan.chunk_ids)], keep,
+    )
+    try:
+        n = int(res.split()[-1]) if isinstance(res, str) else 0
+    except (ValueError, IndexError):
+        n = 0
+    if n:
+        logger.info(f"kg-build: removed {n} stale chunk entities")
+    return n
 
 
 async def prune_orphan_chunks(conn) -> int:
