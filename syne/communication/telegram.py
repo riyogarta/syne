@@ -25,6 +25,7 @@ from telegram.ext import (
 
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
+from .turns import edit_marker
 from .registry import CHANNEL_TELEGRAM, register_channel, unregister_channel
 from .outbound import strip_server_paths, extract_media, extract_all_media, split_message, process_outbound
 from ..llm.provider import LLMRateLimitError, LLMAuthError, LLMBadRequestError, LLMEmptyResponseError
@@ -1544,11 +1545,19 @@ class TelegramChannel:
         album handler so the LLM sees the whole album in a single turn instead
         of one photo per turn (with the others silently dropped).
         """
+        # An edit (new caption, or the photo replaced) is processed as new
+        # input; the turn of the old version is cancelled further down.
+        edited = False
+        if update.edited_message is not None and update.message is None:
+            update = self._edited_as_message(update)
+            edited = True
         if not update.message:
             return
 
-        # Album / media-group fast path — buffer and flush together.
-        if update.message.media_group_id:
+        # Album / media-group fast path — buffer and flush together. An edit
+        # of one album photo is processed on its own: Telegram sends only
+        # the edited photo, the album is not re-delivered.
+        if update.message.media_group_id and not edited:
             await self._buffer_album_photo(update, context)
             return
 
@@ -1560,7 +1569,8 @@ class TelegramChannel:
         chat = update.effective_chat
         is_group = chat.type in ("group", "supergroup")
         message_id = update.message.message_id
-        if self._is_duplicate_inbound(chat.id, message_id):
+        _edit_key = self._edit_key(update.message) if edited else None
+        if self._is_duplicate_inbound(chat.id, message_id, _edit_key):
             logger.debug(f"Dropping duplicate inbound photo: chat={chat.id}, msg={message_id}")
             return
 
@@ -1586,6 +1596,14 @@ class TelegramChannel:
         logger.info(f"[{chat.type}] {user.first_name} ({user.id}) msg={message_id}: [photo] {caption[:100]}")
 
         # Reply context is now handled by InboundContext (build_user_context_prefix)
+
+        # Edit: stop the turn of the old version (after the group checks, so
+        # an edit not addressed to us cancels nothing). Track this turn for
+        # /cancel and later edits.
+        if edited and self._cancel_turn_for_edit(chat.id, message_id):
+            logger.info(f"Edited photo {message_id} in chat {chat.id}: cancelled the turn of its old version")
+        _me = asyncio.current_task()
+        self._active_tasks.setdefault(chat.id, {})[message_id] = _me
 
         # Keep typing indicator alive throughout photo processing
         async with _TypingIndicator(context.bot, chat.id):
@@ -1620,6 +1638,8 @@ class TelegramChannel:
                     user_text = f"[User sent a photo ({len(photo_bytes)} bytes), saved at: {save_path}]\n\n{caption}"
                 else:
                     user_text = f"[User sent a photo ({len(photo_bytes)} bytes), saved at: {save_path}]"
+                if edited:
+                    user_text = f"{edit_marker(message_id)}\n\n{user_text}"
                 inbound = await self._build_inbound(update, is_group)
                 from .inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
@@ -1657,6 +1677,9 @@ class TelegramChannel:
                         await self.send_reaction(chat.id, update.message.message_id, emoji)
                     await self._send_response_with_media(chat.id, response, context, reply_to_message_id=reply_to)
 
+            except asyncio.CancelledError:
+                logger.info(f"Photo turn cancelled for chat {chat.id}")
+                return
             except Exception as e:
                 logger.error(f"Error handling photo: {e}", exc_info=True)
                 _model = ""
@@ -1670,6 +1693,8 @@ class TelegramChannel:
                     e, model=_model,
                     access_level=await _sender_access_level(update.effective_user),
                 ))
+            finally:
+                self._drop_turn(chat.id, message_id, _me)
 
     # Album / media-group debounce window. After the last photo in a group
     # arrives we wait this long before flushing, on the assumption Telegram
@@ -2079,6 +2104,12 @@ class TelegramChannel:
 
     async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle document/file uploads — download, save to disk, pass path to LLM."""
+        # An edit (new caption, or the file replaced) is processed as new
+        # input; the turn of the old version is cancelled further down.
+        edited = False
+        if update.edited_message is not None and update.message is None:
+            update = self._edited_as_message(update)
+            edited = True
         if not update.message or not update.message.document:
             return
 
@@ -2091,7 +2122,8 @@ class TelegramChannel:
         chat = update.effective_chat
         is_group = chat.type in ("group", "supergroup")
         message_id = update.message.message_id
-        if self._is_duplicate_inbound(chat.id, message_id):
+        _edit_key = self._edit_key(update.message) if edited else None
+        if self._is_duplicate_inbound(chat.id, message_id, _edit_key):
             logger.debug(f"Dropping duplicate inbound document: chat={chat.id}, msg={message_id}")
             return
 
@@ -2123,6 +2155,11 @@ class TelegramChannel:
 
         # Extract reply/quote context
         # Reply context handled by InboundContext
+
+        if edited and self._cancel_turn_for_edit(chat.id, message_id):
+            logger.info(f"Edited document {message_id} in chat {chat.id}: cancelled the turn of its old version")
+        _me = asyncio.current_task()
+        self._active_tasks.setdefault(chat.id, {})[message_id] = _me
 
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -2191,6 +2228,8 @@ class TelegramChannel:
 
                 self._track_message(chat.id, update.message.message_id, f"[doc] {filename}")
 
+                if edited:
+                    user_text = f"{edit_marker(message_id)}\n\n{user_text}"
                 inbound = await self._build_inbound(update, is_group)
                 from .inbound import build_user_context_prefix
                 prefix = build_user_context_prefix(inbound)
@@ -2218,6 +2257,9 @@ class TelegramChannel:
                     if sent:
                         self._track_message(chat.id, sent.message_id, response[:50])
 
+            except asyncio.CancelledError:
+                logger.info(f"Document turn cancelled for chat {chat.id}")
+                return
             except Exception as e:
                 logger.error(f"Error handling document: {e}", exc_info=True)
                 _model = ""
@@ -2231,6 +2273,8 @@ class TelegramChannel:
                     e, model=_model,
                     access_level=await _sender_access_level(update.effective_user),
                 ))
+            finally:
+                self._drop_turn(chat.id, message_id, _me)
 
     async def _handle_location(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle location messages — reverse geocode and pass address to LLM."""

@@ -44,6 +44,7 @@ import discord
 
 from ..agent import SyneAgent
 from .tags import parse_reply_tag, parse_react_tags
+from .turns import TurnTracker, edit_marker
 from .outbound import (
     extract_all_media,
     process_outbound,
@@ -167,6 +168,9 @@ class DiscordChannel:
         # double-processed message means a double LLM call and a double reply.
         self._seen: set[int] = set()
         self._seen_order: list[int] = []
+        # Turns running or queued per channel, so an edit can cancel the
+        # turn of the message it replaces.
+        self._turns = TurnTracker()
         # Approval prompts already delivered to the owner, keyed "dm:<id>" /
         # "guild:<id>", so a stranger hammering the bot produces exactly one
         # Telegram notification instead of one per message. In-memory by
@@ -281,6 +285,15 @@ class DiscordChannel:
                     exc_info=True,
                 )
 
+        # Raw so an edit of an uncached (older) message arrives too.
+        @client.event
+        async def on_raw_message_edit(payload: discord.RawMessageUpdateEvent):
+            try:
+                await self._handle_edit(payload)
+            except Exception as e:
+                logger.error(f"Discord message edit failed: {type(e).__name__}: {e}",
+                             exc_info=True)
+
         # Raw events fire for uncached (old) messages too. Reactions are
         # in Intents.default() (non-privileged), see _build_intents.
         @client.event
@@ -299,6 +312,29 @@ class DiscordChannel:
                 logger.error(f"Discord reaction remove failed: {type(e).__name__}: {e}",
                              exc_info=True)
 
+    async def _handle_edit(self, payload: Any) -> None:
+        """An edited message is processed again as new input.
+
+        Discord also sends MESSAGE_UPDATE for things the user did not edit
+        (a link preview being added, a pin). Only an update with edited_at
+        set counts, and one whose text and attachments match the cached copy
+        is ignored.
+        """
+        message = getattr(payload, "message", None)
+        if message is None:
+            return
+        edited_at = getattr(message, "edited_at", None)
+        if edited_at is None:
+            return
+        cached = getattr(payload, "cached_message", None)
+        if cached is not None:
+            same_text = (cached.content or "") == (message.content or "")
+            same_atts = ([a.id for a in (cached.attachments or [])]
+                         == [a.id for a in (message.attachments or [])])
+            if same_text and same_atts:
+                return
+        await self._handle_message(message, edit_key=int(edited_at.timestamp() * 1000))
+
     def _is_duplicate(self, message_id: int) -> bool:
         """True if this message id was already processed (bounded memory)."""
         if message_id in self._seen:
@@ -309,15 +345,21 @@ class DiscordChannel:
             self._seen.discard(self._seen_order.pop(0))
         return False
 
-    async def _handle_message(self, message: discord.Message) -> None:
-        """Process one inbound Discord message."""
+    async def _handle_message(self, message: discord.Message,
+                              edit_key: Optional[int] = None) -> None:
+        """Process one inbound Discord message.
+
+        edit_key (the edit time in ms) is set for an edited message: the turn
+        of its old version is cancelled and the new version processed. Each
+        edit is processed once; a redelivered edit is a duplicate.
+        """
         # Never react to self or to any other bot — trivially avoids loops.
         if message.author.bot:
             return
         if self.client.user and message.author.id == self.client.user.id:
             return
 
-        if self._is_duplicate(message.id):
+        if self._is_duplicate(message.id if edit_key is None else (message.id, edit_key)):
             logger.debug("Dropping duplicate Discord message %s", message.id)
             return
 
@@ -382,6 +424,10 @@ class DiscordChannel:
             guild_name, message.author, message.author.id, text[:100],
         )
 
+        # Edit addressed to us: stop the turn of the old version.
+        if edit_key is not None and self._turns.cancel(message.channel.id, message.id):
+            logger.info("Discord edit of %s: cancelled the turn of its old version", message.id)
+
         # 👀 read receipt, matching Telegram and WhatsApp. Without the
         # MESSAGE_CONTENT intent Discord only delivers text when the bot
         # is addressed, so reaching this line already means it is for us.
@@ -398,7 +444,14 @@ class DiscordChannel:
             joined = "\n".join(notes)
             text = f"{joined}\n\n{text}" if text else joined
 
-        await self._dispatch(message, text, is_dm, media=media)
+        _me = self._turns.register(message.channel.id, message.id)
+        try:
+            await self._dispatch(message, text, is_dm, media=media,
+                                 edited=edit_key is not None)
+        except asyncio.CancelledError:
+            logger.info("Discord turn of %s cancelled (message edited)", message.id)
+        finally:
+            self._turns.drop(message.channel.id, message.id, _me)
 
     async def _handle_reaction(self, payload: Any, added: bool) -> None:
         """A reaction on one of Syne's replies is routed to the agent
@@ -1097,12 +1150,14 @@ class DiscordChannel:
     # ── Dispatch ─────────────────────────────────────────────
 
     async def _dispatch(self, message: discord.Message, text: str, is_dm: bool,
-                        media: Optional[dict] = None) -> None:
+                        media: Optional[dict] = None, edited: bool = False) -> None:
         """Hand the message to the agent and deliver the reply."""
         from .inbound import build_user_context_prefix
 
         inbound = await self._build_inbound(message, is_dm)
         original_text = text
+        if edited:
+            text = f"{edit_marker(message.id)}\n\n{text}"
         prefix = build_user_context_prefix(inbound)
         if prefix:
             text = f"{prefix}\n\n{text}"

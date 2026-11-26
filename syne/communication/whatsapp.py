@@ -93,8 +93,10 @@ from neonize.events import (
 from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 from neonize.utils.jid import build_jid
 from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import Message as WAMessage
+from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import ProtocolMessage as WAProtocolMessage
 
 from ..agent import SyneAgent
+from .turns import TurnTracker, edit_marker
 from ..db.models import (
     create_group,
     create_user,
@@ -367,6 +369,9 @@ class WhatsAppChannel:
         # double-processed message is a double LLM call and a double reply.
         self._seen: set[str] = set()
         self._seen_order: list[str] = []
+        # Turns running or queued per chat, so an edit can cancel the
+        # turn of the message it replaces.
+        self._turns = TurnTracker()
         # Ids of messages Syne sent (bounded), for reply-without-trigger.
         self._sent_ids: set[str] = set()
         self._sent_order: list[str] = []
@@ -825,6 +830,29 @@ class WhatsAppChannel:
         self._remember_id(msg_id)
         return False
 
+    @staticmethod
+    def _extract_edit(msg: Any) -> Optional[tuple]:
+        """(original message id, new Message, edit time in ms) for an edit.
+
+        WhatsApp sends an edit as a protocolMessage of type MESSAGE_EDIT: the
+        new content is in editedMessage, the id of the message it replaces in
+        key.ID. It can arrive wrapped in Message.editedMessage (a
+        FutureProofMessage) or already unwrapped by whatsmeow.
+        """
+        try:
+            if msg.HasField("editedMessage") and msg.editedMessage.HasField("message"):
+                msg = msg.editedMessage.message
+            if not msg.HasField("protocolMessage"):
+                return None
+            pm = msg.protocolMessage
+            if pm.type != WAProtocolMessage.MESSAGE_EDIT or not pm.HasField("editedMessage"):
+                return None
+            if not pm.key.ID:
+                return None
+            return pm.key.ID, pm.editedMessage, int(pm.timestampMS or 0)
+        except (ValueError, AttributeError):
+            return None
+
     def _remember_id(self, msg_id: str) -> None:
         """Add a message id to the bounded dedup set."""
         if not msg_id or msg_id in self._seen:
@@ -1233,6 +1261,23 @@ class WhatsAppChannel:
                 )
             return
 
+        # An edit is processed as new input: its new content replaces the
+        # event's message, and from here on msg_id is the edited message's
+        # own id (👀, turn tracking). The turn of the old version is
+        # cancelled once the trigger checks pass.
+        edited_of = ""
+        edit = self._extract_edit(ev.Message)
+        if edit is not None:
+            edited_of, new_msg, edit_ts = edit
+            patched = type(ev)()
+            patched.CopyFrom(ev)
+            patched.Message.CopyFrom(new_msg)
+            ev = patched
+            if self._is_duplicate(f"{edited_of}#edit:{edit_ts or msg_id}"):
+                logger.debug("Dropping duplicate WhatsApp edit of %s", edited_of)
+                return
+            msg_id = edited_of
+
         text, caption, media_kind = self._extract_content(ev)
         if not text and not caption and not media_kind:
             # Protocol-only payload — e.g. the sender-key distribution that
@@ -1244,7 +1289,7 @@ class WhatsAppChannel:
             # text look like a duplicate and silently drop it.
             return
 
-        if self._is_duplicate(msg_id):
+        if not edited_of and self._is_duplicate(msg_id):
             logger.debug("Dropping duplicate WhatsApp message %s", msg_id)
             return
 
@@ -1328,6 +1373,10 @@ class WhatsAppChannel:
 
         if from_me and (is_group or owner_in_dm) and self._from_me_braked(chat_jid):
             return
+
+        # Edit addressed to us: stop the turn of the old version.
+        if edited_of and self._turns.cancel(chat_jid, edited_of):
+            logger.info("[whatsapp] edit of %s: cancelled the turn of its old version", edited_of)
 
         # Members: blocked check + auto-register.
         by_jid = await self._load_members()
@@ -1521,6 +1570,10 @@ class WhatsAppChannel:
                 except Exception as e:
                     logger.error("[whatsapp] image download failed: %s", e)
 
+            if edited_of and not image_metadata:
+                text = (f"{text}\n\n" if text else "") + (
+                    "[Edited caption: the photo was not sent again with the edit, "
+                    "so it is not attached here]")
             if not image_metadata and not text:
                 logger.info("[whatsapp] image unavailable and no caption, skipping")
                 return
@@ -1602,6 +1655,8 @@ class WhatsAppChannel:
                 inbound.sender_access = (_u or {}).get("access_level", "public")
 
         original_text = text
+        if edited_of:
+            text = f"{edit_marker(edited_of)}\n\n{text}"
         prefix = build_user_context_prefix(inbound)
         if prefix:
             text = f"{prefix}\n\n{text}"
@@ -1632,6 +1687,7 @@ class WhatsAppChannel:
         # everywhere on WhatsApp (DM included), so anything reaching this
         # line was addressed to us by name — no extra check needed.
         await self._react(chat_jid, sender_jid, msg_id, "👀")
+        _me = self._turns.register(chat_jid, msg_id)
         presence = _ChatPresenceIndicator(self, chat_jid)
         await presence.start()
 
@@ -1654,6 +1710,9 @@ class WhatsAppChannel:
                 response = "LLM returned an empty response. Please try again."
 
             await self.send_response(chat_jid, response)
+        except asyncio.CancelledError:
+            logger.info("[whatsapp] turn of %s cancelled (message edited)", msg_id)
+            return
         except Exception as e:
             logger.error(
                 "Error handling WhatsApp message: %s: %s",
@@ -1679,6 +1738,7 @@ class WhatsAppChannel:
                 chat_jid, classify_error(e, model=_model, access_level=_access)
             )
         finally:
+            self._turns.drop(chat_jid, msg_id, _me)
             await presence.stop()
 
     # ── Outbound ─────────────────────────────────────────────
