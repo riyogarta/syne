@@ -1,7 +1,9 @@
 """Conversation manager — session handling, message history, context building."""
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta, timezone
+import functools
 import hashlib
 import json
 import logging
@@ -85,6 +87,44 @@ from .security import (
 )
 
 logger = logging.getLogger("syne.conversation")
+
+# Session lock (v1.23.47). A turn that finds the lock held keeps waiting while
+# the turn holding it shows activity: an LLM call or tool still running, or one
+# that finished less than _LOCK_IDLE_S ago. Only a holder idle for _LOCK_IDLE_S,
+# or with one call running longer than _LOCK_BUSY_MAX_S, is treated as stuck
+# and the lock is replaced.
+_LOCK_IDLE_S = 60.0
+_LOCK_BUSY_MAX_S = 900.0
+_LOCK_POLL_S = 1.0
+
+
+@contextlib.contextmanager
+def _lock_activity(conv):
+    """Count one LLM call or tool as in flight on conv (best effort)."""
+    try:
+        conv._inflight = int(getattr(conv, "_inflight", 0) or 0) + 1
+        conv._last_activity = _ts_time.monotonic()
+        marked = True
+    except Exception:
+        marked = False
+    try:
+        yield
+    finally:
+        if marked:
+            try:
+                conv._inflight = max(0, int(conv._inflight) - 1)
+                conv._last_activity = _ts_time.monotonic()
+            except Exception:
+                pass
+
+
+def _keeps_lock_alive(fn):
+    """Decorator: while the wrapped coroutine method runs it counts as activity."""
+    @functools.wraps(fn)
+    async def wrapper(self, *args, **kwargs):
+        with _lock_activity(self):
+            return await fn(self, *args, **kwargs)
+    return wrapper
 
 # Node-side tools — these execute on the remote node, not the server
 # Canonical definition is in gateway/protocol.py; import to avoid divergence.
@@ -225,6 +265,9 @@ class Conversation:
         self._message_cache: list[ChatMessage] = []
         self._processing: bool = False
         self._lock = asyncio.Lock()  # Prevent concurrent chat() on same session
+        # Lock activity, read by _acquire_turn_lock of a waiting turn
+        self._inflight: int = 0
+        self._last_activity: float = _ts_time.monotonic()
         self._last_saved_hash: str = ""  # Dedup consecutive save_message calls
         # History embed of this turn's user row, held back until recall has
         # embedded its query (save_message(defer_embed=True), started by
@@ -899,6 +942,7 @@ class Conversation:
                     "tokens": est[part], "budget": b,
                 })
 
+    @_keeps_lock_alive
     async def _llm_call(self, phase: str, **kwargs) -> ChatResponse:
         """provider.chat() plus per-call stats. Failures are not recorded."""
         _t = _ts_time.monotonic()
@@ -1500,6 +1544,7 @@ class Conversation:
         self._pending_consent_hash = ""
         self._pending_consent_at = 0.0
 
+    @_keeps_lock_alive
     async def _maybe_execute_pending_consent(
         self, user_message: str,
     ) -> Optional[str]:
@@ -1885,6 +1930,68 @@ class Conversation:
             )
         return True
 
+    def _busy(self):
+        """Context manager: one LLM call or tool in flight (see _LOCK_IDLE_S)."""
+        return _lock_activity(self)
+
+    def _lock_stuck(self) -> bool:
+        idle = _ts_time.monotonic() - float(getattr(self, "_last_activity", 0.0) or 0.0)
+        limit = _LOCK_BUSY_MAX_S if (getattr(self, "_inflight", 0) or 0) > 0 else _LOCK_IDLE_S
+        return idle >= limit
+
+    @staticmethod
+    def _drop_acquire(acq, lock) -> None:
+        """Abandon a pending lock.acquire(); release it if it already won."""
+        if acq.done():
+            if not acq.cancelled() and acq.exception() is None:
+                lock.release()
+        else:
+            acq.cancel()
+
+    async def _acquire_turn_lock(self) -> asyncio.Lock:
+        """Wait for the session lock in arrival order; return the lock acquired.
+
+        There is no fixed limit: the wait lasts as long as the turn holding
+        the lock shows activity (_lock_stuck). A stuck holder's lock is
+        replaced. The caller releases the returned lock, not self._lock,
+        which a later waiter may replace.
+        """
+        lock = self._lock
+        if lock.locked():
+            logger.warning(
+                f"Session {self.session_id}: lock is held, waiting while the current turn is active..."
+            )
+        while True:
+            acq = asyncio.ensure_future(lock.acquire())
+            try:
+                while True:
+                    done, _ = await asyncio.wait({acq}, timeout=_LOCK_POLL_S)
+                    if done:
+                        acq.result()
+                        self._last_activity = _ts_time.monotonic()
+                        return lock
+                    if self._lock is not lock or self._lock_stuck():
+                        break
+            except BaseException:
+                self._drop_acquire(acq, lock)
+                raise
+            self._drop_acquire(acq, lock)
+            if self._lock is lock:
+                logger.error(
+                    f"Session {self.session_id}: lock holder shows no LLM/tool activity "
+                    f"(idle {_LOCK_IDLE_S:.0f}s, or one call over {_LOCK_BUSY_MAX_S:.0f}s), "
+                    f"replacing with new lock"
+                )
+                new = asyncio.Lock()
+                await new.acquire()
+                self._lock = new
+                self._processing = False
+                self._inflight = 0
+                self._last_activity = _ts_time.monotonic()
+                return new
+            # Another waiter replaced a stuck lock: queue behind it on the new one.
+            lock = self._lock
+
     async def chat(self, user_message: str, message_metadata: Optional[dict] = None) -> str:
         """Process a user message and return agent response.
 
@@ -1892,21 +1999,10 @@ class Conversation:
             user_message: The user's text message
             message_metadata: Optional metadata (e.g. {"image": {"mime_type": "...", "base64": "..."}})
         """
-        # Wait for lock with timeout — prevents permanent queue if previous request hangs
-        locked = self._lock.locked()
-        if locked:
-            logger.warning(f"Session {self.session_id}: lock is held, waiting (up to 30s)...")
-        try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=30)
-        except asyncio.TimeoutError:
-            # Replace stuck lock with a fresh one — old lock is abandoned
-            logger.error(f"Session {self.session_id}: lock stuck for 30s, replacing with new lock")
-            self._lock = asyncio.Lock()
-            self._processing = False
-            await self._lock.acquire()
-        # Save reference to the lock we acquired — release THIS one, not self._lock
-        # (which may be replaced by another task during our execution)
-        _my_lock = self._lock
+        # Wait for the session lock (_acquire_turn_lock): turns run one at a
+        # time in arrival order. Release THIS lock at the end, not self._lock,
+        # which a later waiter may replace.
+        _my_lock = await self._acquire_turn_lock()
         logger.debug(f"Session {self.session_id}: lock acquired")
         try:
             # Reset per-turn state
@@ -2646,6 +2742,7 @@ class Conversation:
             return ToolResult(prompt or "", ok=True)
         return None
 
+    @_keeps_lock_alive
     async def _rule_check_and_maybe_regenerate(
         self,
         response: ChatResponse,
@@ -2873,6 +2970,7 @@ class Conversation:
             )
         return current
 
+    @_keeps_lock_alive
     async def _memory_guard_and_maybe_rewrite(
         self,
         response: ChatResponse,
@@ -3310,7 +3408,8 @@ class Conversation:
                 for _i, (name, args, tc_id, _) in enumerate(parsed_calls)
             ]
             _t_tools = _ts_time.monotonic()
-            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+            with self._busy():
+                raw_results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Wrap exceptions as ToolResult
             results = []
@@ -3329,7 +3428,8 @@ class Conversation:
                     name, args, tc_id, _ = parsed_calls[i]
                     logger.info(f"Retrying retryable tool '{name}' (error_type={result.error_type})")
                     try:
-                        retry_result = await _execute_single_tool(name, args, tc_id)
+                        with self._busy():
+                            retry_result = await _execute_single_tool(name, args, tc_id)
                         if isinstance(retry_result, ToolResult):
                             results[i] = retry_result
                         else:
@@ -3609,6 +3709,7 @@ class Conversation:
         return usage.apply_to(current)
 
 
+    @_keeps_lock_alive
     async def _ability_first_preprocess(
         self, user_message: str, metadata: dict
     ) -> tuple[str, Optional[dict]]:

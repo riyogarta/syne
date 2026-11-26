@@ -230,7 +230,9 @@ class TelegramChannel:
         # Remote node mode: {telegram_user_id: node_id} — messages routed to node
         self._remote_node: dict[int, str] = {}
         # Active processing tasks per chat_id — for /cancel support
-        self._active_tasks: dict[int, asyncio.Task] = {}
+        # {chat_id: {message_id: task}} in arrival order; one turn runs at a
+        # time per chat, the others wait behind it (/cancel, edited messages)
+        self._active_tasks: dict[int, dict[int, asyncio.Task]] = {}
         # Background xAI device-code polling tasks per user_id (/cancel aborts)
         self._xai_device_tasks: dict[int, asyncio.Task] = {}
         # True while /restore replaces the database (see _restore_gate)
@@ -838,7 +840,16 @@ class TelegramChannel:
     # ── Message handlers ─────────────────────────────────────
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming text messages."""
+        """Handle incoming text messages, including edits of a text message.
+
+        An edit is processed as new input. The turn still working on (or
+        queued with) the old version of that message is cancelled first;
+        other turns of the chat are not touched.
+        """
+        edited = False
+        if update.edited_message is not None and update.message is None:
+            update = self._edited_as_message(update)
+            edited = True
         if not update.message or not update.message.text:
             return
 
@@ -849,8 +860,9 @@ class TelegramChannel:
         message_id = update.message.message_id
         logger.debug(f"_handle_message entered: user={user.id}, chat={chat.id}, msg={message_id}, text={text[:50]}")
 
-        # Drop duplicate inbound updates
-        if self._is_duplicate_inbound(chat.id, message_id):
+        # Drop duplicate inbound updates (an edit is keyed by its edit_date)
+        _edit_key = self._edit_key(update.message) if edited else None
+        if self._is_duplicate_inbound(chat.id, message_id, _edit_key):
             logger.debug(f"Dropping duplicate inbound message: chat={chat.id}, msg={message_id}")
             return
 
@@ -935,6 +947,12 @@ class TelegramChannel:
             except Exception:
                 pass
 
+        # An edited message replaces its old version: stop the turn still
+        # working on (or queued with) the old text. Done only after the
+        # group/DM checks, so an edit that is not for us cancels nothing.
+        if edited and self._cancel_turn_for_edit(chat.id, message_id):
+            logger.info(f"Edited message {message_id} in chat {chat.id}: cancelled the turn of its old version")
+
         if not text:
             return
 
@@ -959,11 +977,17 @@ class TelegramChannel:
         # Prepend user context prefix to message (untrusted, per-message)
         original_text = text  # Keep original for memory evaluator
         user_prefix = build_user_context_prefix(inbound)
+        if edited:
+            text = (
+                f"[Edited message: this replaces the earlier version of message "
+                f"{message_id}. Answer this version.]\n\n{text}"
+            )
         if user_prefix:
             text = f"{user_prefix}\n\n{text}"
 
-        # Track this as an active task for /cancel support
-        self._active_tasks[chat.id] = asyncio.current_task()
+        # Track this turn for /cancel and edits (per chat, per message)
+        _me = asyncio.current_task()
+        self._active_tasks.setdefault(chat.id, {})[message_id] = _me
         # Keep typing indicator alive throughout the entire processing
         async with _TypingIndicator(context.bot, chat.id):
             try:
@@ -1111,7 +1135,7 @@ class TelegramChannel:
                     access_level=await _sender_access_level(update.effective_user),
                 ))
             finally:
-                self._active_tasks.pop(chat.id, None)
+                self._drop_turn(chat.id, message_id, _me)
 
     async def _process_group_message(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
@@ -2489,19 +2513,61 @@ class TelegramChannel:
             except Exception as e:
                 logger.error(f"Error handling reaction event: {e}", exc_info=True)
 
-    def _is_duplicate_inbound(self, chat_id: int, message_id: int) -> bool:
+    def _is_duplicate_inbound(self, chat_id: int, message_id: int,
+                              edit_key: Optional[int] = None) -> bool:
         """Return True if this inbound Telegram message_id was already processed for this chat.
 
         Telegram/webhook/bridge layers can retry delivering the same update.
         We keep a small sliding window per chat to drop duplicates safely.
+        An edit carries its edit_date as edit_key: each new edit is processed
+        once, a redelivered edit is dropped.
         """
         if chat_id not in self._seen_inbound:
             self._seen_inbound[chat_id] = deque(maxlen=200)
         seen = self._seen_inbound[chat_id]
-        if message_id in seen:
+        key = message_id if edit_key is None else (message_id, edit_key)
+        if key in seen:
             return True
-        seen.append(message_id)
+        seen.append(key)
         return False
+
+    @staticmethod
+    def _edit_key(message) -> Optional[int]:
+        """Identity of one edit of a message (its edit_date), or None."""
+        ed = getattr(message, "edit_date", None)
+        return int(ed.timestamp()) if ed else None
+
+    @staticmethod
+    def _edited_as_message(update: Update) -> Update:
+        """Re-wrap an edited_message update as a plain message update so the
+        normal text pipeline processes the new version."""
+        plain = Update(update_id=update.update_id, message=update.edited_message)
+        try:
+            plain.set_bot(update.get_bot())
+        except RuntimeError:
+            pass
+        return plain
+
+    def _cancel_turn_for_edit(self, chat_id: int, message_id: int) -> bool:
+        """Cancel the turn of message_id (running or still queued) because the
+        user edited that message. Other turns of the chat are left alone."""
+        turns = self._active_tasks.get(chat_id) or {}
+        task = turns.get(message_id)
+        if task is None or task.done() or task is asyncio.current_task():
+            return False
+        task.cancel()
+        turns.pop(message_id, None)
+        return True
+
+    def _drop_turn(self, chat_id: int, message_id: int, task) -> None:
+        """Forget a finished turn, unless a newer turn (an edit) took its slot."""
+        turns = self._active_tasks.get(chat_id)
+        if not turns:
+            return
+        if turns.get(message_id) is task:
+            turns.pop(message_id, None)
+        if not turns:
+            self._active_tasks.pop(chat_id, None)
 
     def _track_message(self, chat_id: int, message_id: int, preview: str):
         """Track a message ID for reaction context."""
@@ -5530,9 +5596,10 @@ Or just send me a message!"""
             # too, and turns already running are cancelled and awaited so
             # nothing writes into the database while it is replaced.
             await _maint.begin("restore")
-            for _t in list(getattr(self, "_active_tasks", {}).values()):
-                if _t is not asyncio.current_task() and not _t.done():
-                    _t.cancel()
+            for _turns in list(getattr(self, "_active_tasks", {}).values()):
+                for _t in list(_turns.values()):
+                    if _t is not asyncio.current_task() and not _t.done():
+                        _t.cancel()
             await query.edit_message_text(f"Restoring from {actual_filename}...")
             success, message = await asyncio.to_thread(run_restore, filepath)
         except Exception as e:
@@ -5955,12 +6022,16 @@ Or just send me a message!"""
         chat = update.effective_chat
         cancelled = False
 
-        # Cancel active processing task
-        task = self._active_tasks.get(chat.id)
-        if task and not task.done():
-            task.cancel()
-            self._active_tasks.pop(chat.id, None)
-            cancelled = True
+        # Cancel the running turn of this chat. Turns are kept in arrival order
+        # and run one at a time, so the oldest unfinished one is the running
+        # one; turns queued behind it keep waiting.
+        _turns = self._active_tasks.get(chat.id) or {}
+        for _mid, task in list(_turns.items()):
+            if not task.done():
+                task.cancel()
+                _turns.pop(_mid, None)
+                cancelled = True
+                break
 
         # Cancel auth flow
         if user.id in self._auth_state:
