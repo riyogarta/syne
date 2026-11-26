@@ -70,6 +70,35 @@ JS_MIN_CHARS = 800        # extracted text shorter than this looks "empty"
 JS_MIN_HTML = 20000       # ...while the raw HTML was at least this big
 JS_TIMEOUT_MS = 20000
 JS_SETTLE_MS = 2500       # let late XHR content land after DOMContentLoaded
+JS_CHALLENGE_MAX_MS = 60000   # how long to wait for an anti-bot challenge to clear
+JS_CHALLENGE_POLL_MS = 3000
+
+# ---- Anti-bot challenge pages -------------------------------------------
+# Some gates answer HTTP 200 with a long interstitial (Anubis proof-of-work,
+# Cloudflare "Just a moment"). Neither the 4xx trigger nor the short-text
+# trigger catches them, so the challenge text used to be returned as if it
+# were the page. They are recognised by their wording; the length cap keeps
+# a real article that merely mentions these phrases from matching.
+CHALLENGE_MAX_TEXT = 4000
+_CHALLENGE_MARKERS = (
+    "making sure you're not a bot",               # Anubis
+    "checking your browser before accessing",     # Cloudflare (legacy)
+    "just a moment...",                           # Cloudflare
+    "verify you are human",                       # Cloudflare Turnstile
+    "enable javascript and cookies to continue",  # Cloudflare
+)
+
+# Hide the most common automation tell. Headless Chromium otherwise exposes
+# navigator.webdriver=true, and Anubis answers that with "Access Denied".
+_STEALTH_JS = "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+
+
+def _looks_like_challenge(text):
+    """True when ``text`` is an anti-bot interstitial, not real content."""
+    if not text or len(text) > CHALLENGE_MAX_TEXT:
+        return False
+    low = text.lower().replace("\u2019", "'")
+    return any(m in low for m in _CHALLENGE_MARKERS)
 
 
 # Tail of an HTML tag, attribute-aware: runs of plain chars interleaved with
@@ -172,12 +201,17 @@ async def _render_with_playwright(url, max_bytes):
     html = ""
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(args=["--no-sandbox"])
+            browser = await p.chromium.launch(
+                args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+            )
             try:
-                page = await browser.new_page(
+                context = await browser.new_context(
                     user_agent=BROWSER_UA,
                     viewport={"width": 1366, "height": 900},
+                    locale="en-US",
                 )
+                await context.add_init_script(_STEALTH_JS)
+                page = await context.new_page()
 
                 async def _guard(route, request):
                     # Re-apply the SSRF/redirect guard to navigations.
@@ -197,6 +231,17 @@ async def _render_with_playwright(url, max_bytes):
                 )
                 await page.wait_for_timeout(JS_SETTLE_MS)
                 html = await page.content()
+                # A challenge page solves itself in JS and then reloads the
+                # real page (every hop still passes _guard). Poll until done.
+                waited = JS_SETTLE_MS
+                while (_looks_like_challenge(strip_html_tags(html))
+                       and waited < JS_CHALLENGE_MAX_MS):
+                    await page.wait_for_timeout(JS_CHALLENGE_POLL_MS)
+                    waited += JS_CHALLENGE_POLL_MS
+                    try:
+                        html = await page.content()
+                    except Exception:
+                        continue  # page is mid-navigation; try next poll
             finally:
                 await browser.close()
     except Exception as e:
@@ -286,7 +331,8 @@ async def fetch_url_handler(
                         # absences. A real browser often gets through.
                         if js_fallback and response.status_code in (401, 403, 405, 429):
                             rendered = await _render_with_playwright(current, max_bytes)
-                            if rendered and len(rendered) >= 200:
+                            if (rendered and len(rendered) >= 200
+                                    and not _looks_like_challenge(rendered)):
                                 return _wrap(current, rendered, max_chars, browser=True)
                         return f"Error: HTTP {response.status_code} {response.reason_phrase}"
 
@@ -322,12 +368,27 @@ async def fetch_url_handler(
             else:
                 text = body.strip()
 
+            # HTTP 200 anti-bot interstitial: go through the browser, and if
+            # it still cannot pass, say so instead of handing back the
+            # challenge text as if it were the page.
+            if _looks_like_challenge(text):
+                if js_fallback:
+                    rendered = await _render_with_playwright(current, max_bytes)
+                    if rendered and not _looks_like_challenge(rendered):
+                        return _wrap(current, rendered, max_chars, browser=True)
+                return (
+                    "Error: blocked by an anti-bot challenge page (e.g. Anubis/"
+                    "Cloudflare); the browser fallback could not pass it. The "
+                    "page content was NOT retrieved."
+                )
+
             # Silent failure: HTTP 200 with a big HTML shell but almost no
             # text means the content is injected by JavaScript. Re-fetch it
             # through a real browser.
             if js_fallback and len(text) < js_min_chars and len(body) >= JS_MIN_HTML:
                 rendered = await _render_with_playwright(current, max_bytes)
-                if rendered and len(rendered) > len(text):
+                if (rendered and len(rendered) > len(text)
+                        and not _looks_like_challenge(rendered)):
                     return _wrap(current, rendered, max_chars, browser=True)
 
             if len(text) > max_chars:
