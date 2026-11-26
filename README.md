@@ -820,7 +820,7 @@ syne config set <key> <value>        # Upsert (value auto-parsed: bool/int/JSON/
 syne config delete <key>             # Remove a key
 
 # Backup & Restore
-syne backup                          # Backup database
+syne backup                          # Backup database (bzip2 -9, .sql.bz2; older .sql.gz still restorable)
 syne restore                         # Restore from backup
 syne config backup                   # Snapshot config only (models, credentials, per-user model overrides)
 syne config restore [file]           # Restore a config snapshot — memories and chat history untouched (no file → list)

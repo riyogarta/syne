@@ -47,7 +47,7 @@ def _show_help():
             ("bm25 rebuild", "Recompute BM25 keyword statistics (repairs drift)"),
             ("db init", "Initialize database schema"),
             ("db reset", "Reset database (DROP ALL + re-init)"),
-            ("backup", "Backup database to .sql.gz file"),
+            ("backup", "Backup database to .sql.bz2 file"),
             ("restore", "Restore database from backup file"),
         ],
         "Remote Node": [
