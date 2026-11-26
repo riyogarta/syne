@@ -979,7 +979,7 @@ class TelegramChannel:
                 # Download media from replied message (photo/document) so LLM can see it
                 reply_media = await self._download_reply_media(update)
                 if reply_media:
-                    for key in ("image", "document"):
+                    for key in ("image", "document", "audio"):
                         if key in reply_media:
                             metadata[key] = reply_media[key]
                     reply_temps = reply_media.get("_temp_upload_paths", [])
@@ -992,6 +992,16 @@ class TelegramChannel:
                         rfname = reply_media["document"].get("filename", "file")
                         rpath = reply_media["document"].get("path", "")
                         text += f"\n\n[Attached: {rfname} from replied message, saved at: {rpath}]"
+                    if reply_media.get("transcription"):
+                        text += (
+                            "\n\n[Voice message transcription from replied message]: "
+                            f"{reply_media['transcription']}"
+                        )
+                    elif reply_media.get("audio_error"):
+                        text += (
+                            "\n\n[Voice message in replied message could not be "
+                            f"transcribed: {reply_media['audio_error']}]"
+                        )
 
                 # Browse mode: route to CLI-compatible session with cwd
                 browse_cwd = self._browse_cwd.get(user.id) if not is_group else None
@@ -11074,7 +11084,46 @@ Or just send me a message!"""
                         logger.info(f"Reply document downloaded: {save_path} ({len(file_bytes)} bytes)")
             except Exception as e:
                 logger.error(f"Error downloading reply document: {e}")
-        
+
+        # Voice note / audio file in replied message. Before this branch a
+        # reply to a voice note carried only the label "[Voice message]":
+        # _handle_voice transcribes voice sent directly, never a replied one.
+        elif reply.voice or reply.audio:
+            voice = reply.voice or reply.audio
+            try:
+                size = getattr(voice, "file_size", 0) or 0
+                if size > 20 * 1024 * 1024:  # Telegram bot download limit
+                    result["audio_error"] = "file is larger than 20 MB"
+                else:
+                    tg_file = await voice.get_file()
+                    audio_bytes = await tg_file.download_as_bytearray()
+                    if not audio_bytes:
+                        result["audio_error"] = "download returned 0 bytes"
+                    else:
+                        mime = getattr(voice, "mime_type", None) or "audio/ogg"
+                        fname = getattr(voice, "file_name", None) or (
+                            f"voice_{voice.file_unique_id}.ogg"
+                        )
+                        result["audio"] = {
+                            "base64": base64.b64encode(bytes(audio_bytes)).decode("utf-8"),
+                            "mime_type": mime,
+                            "filename": fname,
+                            "size": len(audio_bytes),
+                            "from_reply": True,
+                        }
+                        from ..tools.voice import transcribe_audio
+                        ok, out = await transcribe_audio(bytes(audio_bytes), fname)
+                        if ok and (out or "").strip():
+                            result["transcription"] = out.strip()
+                            logger.info(
+                                f"Reply voice transcribed: {len(audio_bytes)} bytes"
+                            )
+                        else:
+                            result["audio_error"] = (out or "empty transcription")[:200]
+            except Exception as e:
+                logger.error(f"Error handling reply voice: {e}")
+                result["audio_error"] = str(e)[:200]
+
         if result:
             result["_temp_upload_paths"] = temp_paths
         
