@@ -6,6 +6,11 @@ The entry decides the provider:
   driver openai_compat, api.openai.com  → OpenAI Image API
   driver openai_compat, together        → Together AI images
 API key comes from the entry's credential_key.
+
+Output size (v1.23.51): optional `size` preset, default "square" (1024x1024).
+Presets keep roughly 1 megapixel and use multiples of 8, as the Together
+image API asks. Only the Together path honours non-square presets for now;
+Vertex and OpenAI keep their square output and say so in the result.
 """
 
 import base64
@@ -18,13 +23,38 @@ from .base import Ability
 
 logger = logging.getLogger("syne.abilities.image_gen")
 
+DEFAULT_SIZE = "square"
+# name -> (width, height). Ratios: photo 2:3 / 3:2 (camera, standard print),
+# phone 3:4 / 4:3 (phone camera), instagram 4:5 / 5:4, story 768x1344 /
+# 1344x768 (Together docs' portrait/landscape example, close to 9:16).
+SIZE_PRESETS = {
+    "square": (1024, 1024),
+    "photo_portrait": (832, 1248),
+    "photo_landscape": (1248, 832),
+    "phone_portrait": (864, 1152),
+    "phone_landscape": (1152, 864),
+    "instagram_portrait": (896, 1120),
+    "instagram_landscape": (1120, 896),
+    "story_portrait": (768, 1344),
+    "story_landscape": (1344, 768),
+}
+
+
+def resolve_size(name) -> tuple[str, int, int]:
+    """Preset name -> (name, width, height); unknown or empty -> default."""
+    key = str(name or "").strip().lower()
+    if key not in SIZE_PRESETS:
+        key = DEFAULT_SIZE
+    w, h = SIZE_PRESETS[key]
+    return key, w, h
+
 
 class ImageGenAbility(Ability):
     """Generate images from text prompts using configurable providers."""
 
     name = "image_gen"
     description = "Generate images from text descriptions using AI"
-    version = "2.1"
+    version = "2.2"
     # 0o770 — owner + family rwx. Digits contain x → consent gate fires
     # (calls external API + spends money + writes new image file).
     permission = 0o770
@@ -37,6 +67,12 @@ class ImageGenAbility(Ability):
         style = params.get("style", "")
         if style:
             prompt = f"{prompt}, {style} style"
+
+        raw_size = params.get("size", "")
+        size_name, width, height = resolve_size(raw_size)
+        size_note = ""
+        if raw_size and str(raw_size).strip().lower() != size_name:
+            size_note = f" (unknown size '{raw_size}', used {size_name} {width}x{height})"
 
         config = context.get("config", {})
         if not config:
@@ -63,14 +99,20 @@ class ImageGenAbility(Ability):
                 region=entry.get("region", ""),
                 project_id=entry.get("project_id", ""),
             )
+            if size_name != DEFAULT_SIZE:
+                size_note = f" (size {size_name} not supported for this provider yet, made 1024x1024)"
         elif driver == "openai_compat" and "api.openai.com" in base_url:
             if not api_key:
                 return {"success": False, "error": "OpenAI API key not configured for this model in /models"}
             image_bytes = await self._gen_openai(prompt, api_key=api_key, model=model)
+            if size_name != DEFAULT_SIZE:
+                size_note = f" (size {size_name} not supported for this provider yet, made 1024x1024)"
         elif driver == "openai_compat" and "together" in base_url:
             if not api_key:
                 return {"success": False, "error": "Together AI API key not configured for this model in /models"}
-            image_bytes = await self._gen_together(prompt, api_key=api_key, model=model)
+            image_bytes = await self._gen_together(
+                prompt, api_key=api_key, model=model, width=width, height=height,
+            )
         else:
             return {"success": False, "error": f"Model '{entry.get('label', model_key)}' (driver {driver}) cannot generate images. Choose another in /imagegen."}
 
@@ -86,7 +128,7 @@ class ImageGenAbility(Ability):
 
         return {
             "success": True,
-            "result": f"Generated image for: {prompt}",
+            "result": f"Generated image for: {prompt}{size_note}",
             "media": filepath,
         }
 
@@ -194,7 +236,10 @@ class ImageGenAbility(Ability):
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    async def _gen_together(self, prompt: str, api_key: str, model: str) -> bytes | dict:
+    async def _gen_together(
+        self, prompt: str, api_key: str, model: str,
+        width: int = 1024, height: int = 1024,
+    ) -> bytes | dict:
         """Generate image via Together AI."""
         try:
             async with httpx.AsyncClient(timeout=60) as client:
@@ -205,8 +250,8 @@ class ImageGenAbility(Ability):
                         "model": model,
                         "prompt": prompt,
                         "n": 1,
-                        "width": 1024,
-                        "height": 1024,
+                        "width": width,
+                        "height": height,
                     },
                 )
 
@@ -328,6 +373,17 @@ class ImageGenAbility(Ability):
                             "enum": ["realistic", "artistic", "anime", "sketch", "photographic"],
                             "description": "Style of the generated image (optional)",
                         },
+                        "size": {
+                            "type": "string",
+                            "enum": list(SIZE_PRESETS),
+                            "description": (
+                                "Output size preset (optional, default square 1024x1024). "
+                                "Use only when the user asks for a shape: photo_* = 2:3/3:2 "
+                                "(plain 'portrait foto' -> photo_portrait 832x1248), "
+                                "phone_* = 3:4/4:3, instagram_* = 4:5/5:4, "
+                                "story_* = 768x1344/1344x768 (story, reels, wallpaper)."
+                            ),
+                        },
                     },
                     "required": ["prompt"],
                 },
@@ -339,7 +395,10 @@ class ImageGenAbility(Ability):
         if enabled and model_key:
             return (
                 f"- Status: **ready** (model: {model_key})\n"
-                "- Use: `image_gen(prompt='...')` to generate images"
+                "- Use: `image_gen(prompt='...')` to generate images\n"
+                "- Size: default square 1024x1024; on request pass `size=` "
+                "(photo_portrait 832x1248 for a plain 'portrait', photo_landscape, "
+                "phone_*, instagram_*, story_*). Non-square sizes work on Together models only."
             )
         return (
             "- Status: **not ready**\n"
