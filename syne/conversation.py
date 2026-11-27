@@ -229,6 +229,27 @@ _TRIM_KEEP_RATIO = 0.7
 CURRENT_CONVERSATION: contextvars.ContextVar = contextvars.ContextVar(
     "syne_current_conversation", default=None)
 
+CONSENT_APPROVED_PREFIX = "[Consent: the user pressed Yes on the confirmation button"
+
+
+def consent_approved_result(hash_hex: str, result: str) -> str:
+    """Tool result as stored in the transcript after a held call is approved.
+
+    The held row originally carried the Yes/No prompt. Transcript surgery
+    overwrites it with the real output; without a note the history shows the
+    tool succeeding with no confirmation at all, while the assistant's own
+    next message says it is waiting for Yes and the user's next message is a
+    bare "ya". The model then "corrects" itself with claims like "no button
+    needed approving". Keep the approval visible in the record.
+    """
+    tag = f" (consent {hash_hex})" if hash_hex else ""
+    return (
+        f"{CONSENT_APPROVED_PREFIX}{tag}; the action below ran after that "
+        f"approval. The user's following \"ya\" message is that button press.]\n"
+        f"{result}"
+    )
+
+
 class Conversation:
     """Manages a single conversation session."""
 
@@ -1751,7 +1772,8 @@ class Conversation:
         _patched = False
         try:
             _patched = await self._patch_held_tool_result(
-                pending_tool, pending_hash, result_str,
+                pending_tool, pending_hash,
+                consent_approved_result(pending_hash, result_str),
             )
         except Exception as e:
             logger.warning(f"Consent bypass: patch_held_tool_result failed: {e}")
