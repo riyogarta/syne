@@ -224,8 +224,3 @@ def test_conversation_injects_kg_block():
     assert "from .memory.kg_recall import recall_kg" in src
     assert "# Knowledge Graph (chat & memories)" in src
     assert src.index("_recall_kg(") < src.index("# Knowledge Graph (chat & memories)")
-
-
-def test_version():
-    import syne
-    assert syne.__version__ == "1.23.44"
